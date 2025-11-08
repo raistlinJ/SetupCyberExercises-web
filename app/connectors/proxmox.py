@@ -1,0 +1,649 @@
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+import requests
+import time
+import logging
+
+
+@dataclass
+class ProxmoxClient:
+    base_url: str
+    token: Optional[str] = None
+    verify: bool = True
+    username: Optional[str] = None
+    password: Optional[str] = None
+    _session: Optional[requests.Session] = None
+
+    def _ensure_session(self) -> requests.Session:
+        if self._session is not None:
+            return self._session
+        self._session = requests.Session()
+        self._session.verify = self.verify
+        if self.token:
+            self._session.headers.update({"Authorization": f"PVEAPIToken={self.token}"})
+            return self._session
+        # Use username/password login
+        if not (self.username and self.password):
+            raise RuntimeError("Missing Proxmox credentials")
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/ticket"
+        resp = self._session.post(url, data={"username": self.username, "password": self.password}, timeout=15)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox login failed {resp.status_code}: {resp.text}")
+        data = resp.json().get("data", {})
+        ticket = data.get("ticket")
+        csrf = data.get("CSRFPreventionToken") or data.get("csrfpreventiontoken")
+        if not ticket:
+            raise RuntimeError("Proxmox login did not return a ticket")
+        # Set cookie for subsequent requests
+        self._session.cookies.set("PVEAuthCookie", ticket)
+        # For POST/PUT/DELETE with ticket-based auth, Proxmox requires CSRFPreventionToken header
+        if csrf:
+            self._session.headers.update({"CSRFPreventionToken": csrf})
+        return self._session
+
+    def list_nodes(self) -> List[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes"
+        resp = s.get(url, timeout=15)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        return data.get("data", [])
+
+    def list_qemu_vms(self, node: str) -> List[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu"
+        resp = s.get(url, timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        return data.get("data", [])
+
+    def get_qemu_config(self, node: str, vmid: int) -> Dict[str, Any]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/config"
+        resp = s.get(url, timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        return data.get("data", {})
+
+    # --- Helpers for operations ---
+    def _wait_task(self, node: str, upid: str, timeout: float = 600.0, poll: float = 1.5) -> Dict[str, Any]:
+        s = self._ensure_session()
+        start = time.time()
+        while True:
+            url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/tasks/{requests.utils.quote(upid, safe='')}/status"
+            r = s.get(url, timeout=30)
+            if r.status_code >= 400:
+                raise RuntimeError(f"Proxmox task status error {r.status_code}: {r.text}")
+            st = r.json().get('data', {})
+            if st.get('status') == 'stopped':
+                exitstatus = st.get('exitstatus', '')
+                if exitstatus and exitstatus != 'OK':
+                    raise RuntimeError(f"Proxmox task failed: {exitstatus}")
+                return st
+            if time.time() - start > timeout:
+                raise RuntimeError("Proxmox task timed out")
+            time.sleep(poll)
+
+    def cluster_nextid(self) -> int:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/cluster/nextid"
+        r = s.get(url, timeout=15)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {r.status_code}: {r.text}")
+        data = r.json().get('data')
+        try:
+            return int(data)
+        except Exception:
+            raise RuntimeError(f"Invalid nextid data: {data}")
+
+    def clone_qemu(self, node: str, vmid: int, newid: int, name: str, storage: Optional[str] = None, full: bool = True, target: Optional[str] = None) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/clone"
+        payload: Dict[str, Any] = { 'newid': newid, 'name': name, 'full': 1 if full else 0 }
+        if storage: payload['storage'] = storage
+        if target: payload['target'] = target
+        r = s.post(url, data=payload, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox clone error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def set_qemu_nets(self, node: str, vmid: int, nets: List[str], delete_keys: Optional[List[str]] = None):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/config"
+        data: Dict[str, Any] = {}
+        if delete_keys:
+            data['delete'] = ','.join(delete_keys)
+        for i, spec in enumerate(nets):
+            data[f'net{i}'] = spec
+        r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox set net error {r.status_code}: {r.text}")
+        return r.json().get('data', '')
+
+    def set_qemu_options(self, node: str, vmid: int, options: Dict[str, Any]):
+        """Generic QEMU config setter (e.g., set 'pool' or other options)."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/config"
+        r = s.post(url, data=options or {}, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox set VM options error {r.status_code}: {r.text}")
+        return r.json().get('data', '')
+
+    def delete_qemu_options(self, node: str, vmid: int, keys: List[str]):
+        """Delete one or more QEMU config options via the 'delete' parameter."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/config"
+        data = { 'delete': ','.join(list(keys or [])) }
+        r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox delete VM options error {r.status_code}: {r.text}")
+        return r.json().get('data', '')
+
+    def create_bridge(self, node: str, iface: str, autostart: bool = True, ports: Optional[str] = None, comments: Optional[str] = None):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/network"
+        payload: Dict[str, Any] = { 'type': 'bridge', 'iface': iface }
+        if autostart:
+            payload['autostart'] = 1
+        # Proxmox API expects 'bridge_ports' (underscore). Only include when ports are specified.
+        if ports is not None:
+            payload['bridge_ports'] = ports
+        if comments:
+            payload['comments'] = comments
+        r = s.post(url, data=payload, timeout=30)
+        if r.status_code >= 400:
+            # If already exists, Proxmox may return 500; treat as non-fatal if message indicates exists
+            msg = r.text
+            if 'already exists' not in msg.lower() and 'exists' not in msg.lower():
+                raise RuntimeError(f"Proxmox create bridge error {r.status_code}: {r.text}")
+        return True
+
+    def list_network(self, node: str):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/network"
+        r = s.get(url, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox list network error {r.status_code}: {r.text}")
+        return r.json().get('data', [])
+
+    def reload_network(self, node: str):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/network"
+        r = s.put(url, timeout=30)
+        if r.status_code >= 400:
+            # Some Proxmox versions/roles return 501 for unsupported reload; treat as non-fatal
+            if r.status_code != 501:
+                raise RuntimeError(f"Proxmox network reload error {r.status_code}: {r.text}")
+        return True
+
+    def snapshot_qemu(self, node: str, vmid: int, snapname: str, description: Optional[str] = None) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/snapshot"
+        payload: Dict[str, Any] = { 'snapname': snapname }
+        if description: payload['description'] = description
+        r = s.post(url, data=payload, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox snapshot error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def delete_qemu(self, node: str, vmid: int, purge: bool = True, destroy_unreferenced_disks: bool = True) -> str:
+        """Delete (destroy) a QEMU VM. Returns UPID."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}"
+        params: Dict[str, Any] = {}
+        if purge:
+            params['purge'] = 1
+        if destroy_unreferenced_disks:
+            params['destroy-unreferenced-disks'] = 1
+        r = s.delete(url, params=params, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox delete VM error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def delete_bridge(self, node: str, iface: str) -> bool:
+        """Delete a Linux bridge interface on the node. Non-fatal if it doesn't exist."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/network/{requests.utils.quote(iface, safe='')}"
+        r = s.delete(url, timeout=30)
+        if r.status_code >= 400:
+            # treat not found as non-fatal; various messages are possible
+            msg = (r.text or '').lower()
+            if 'no such' in msg or 'does not exist' in msg or 'not found' in msg:
+                return False
+            raise RuntimeError(f"Proxmox delete bridge error {r.status_code}: {r.text}")
+        return True
+
+    # --- QEMU lifecycle and state actions ---
+    def _qemu_status_action(self, node: str, vmid: int, action: str, data: Optional[Dict[str, Any]] = None, timeout: int = 60) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/status/{action}"
+        r = s.post(url, data=(data or {}), timeout=timeout)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox {action} error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def start_qemu(self, node: str, vmid: int) -> str:
+        return self._qemu_status_action(node, vmid, 'start')
+
+    def stop_qemu(self, node: str, vmid: int) -> str:
+        return self._qemu_status_action(node, vmid, 'stop')
+
+    def shutdown_qemu(self, node: str, vmid: int, timeout: Optional[int] = None) -> str:
+        data = {}
+        if timeout is not None:
+            data['timeout'] = int(timeout)
+        return self._qemu_status_action(node, vmid, 'shutdown', data=data)
+
+    def reboot_qemu(self, node: str, vmid: int) -> str:
+        return self._qemu_status_action(node, vmid, 'reboot')
+
+    def reset_qemu(self, node: str, vmid: int) -> str:
+        return self._qemu_status_action(node, vmid, 'reset')
+
+    # pause removed from UI; keep method removed to discourage use
+
+    def resume_qemu(self, node: str, vmid: int) -> str:
+        return self._qemu_status_action(node, vmid, 'resume')
+
+    def suspend_qemu(self, node: str, vmid: int) -> str:
+        # Proxmox provides 'suspend' to RAM (requires guest agent); may not be supported everywhere
+        return self._qemu_status_action(node, vmid, 'suspend')
+
+    def restore_snapshot_qemu(self, node: str, vmid: int, snapname: str, start_after: bool = False) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/snapshot/{requests.utils.quote(snapname, safe='')}/rollback"
+        data: Dict[str, Any] = {}
+        if start_after:
+            data['start'] = 1
+        r = s.post(url, data=data, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox snapshot rollback error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def list_snapshots_qemu(self, node: str, vmid: int) -> List[Dict[str, Any]]:
+        """Return list of snapshots for a VM (name, snaptime, description, etc.)."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/snapshot"
+        r = s.get(url, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox list snapshots error {r.status_code}: {r.text}")
+        data = r.json().get('data', [])
+        # Normalize fields and ensure snaptime is int when possible
+        out: List[Dict[str, Any]] = []
+        for d in data:
+            try:
+                st = d.get('snaptime')
+                st = int(st) if st is not None else None
+            except Exception:
+                st = None
+            out.append({
+                'name': d.get('name'),
+                'snaptime': st,
+                'description': d.get('description')
+            })
+        return out
+
+    # --- QEMU Guest Agent helpers ---
+    def agent_exec(self, node: str, vmid: int, command: str, shell: bool = True, timeout: int = 300) -> Dict[str, Any]:
+        """Execute a command inside the guest via QEMU Guest Agent and wait for completion.
+        Returns dict with keys: exitcode, stdout, stderr.
+        """
+        s = self._ensure_session()
+        exec_url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/agent/exec"
+        status_url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/agent/exec-status"
+        # Use /bin/sh -lc to interpret the command when shell=True
+        if shell:
+            data = { 'command': '/bin/sh', 'args[0]': '-lc', 'args[1]': command }
+        else:
+            data = { 'command': command }
+        r = s.post(exec_url, data=data, timeout=10)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox guest agent exec error {r.status_code}: {r.text}")
+        pid = (r.json().get('data') or {}).get('pid')
+        if pid is None:
+            raise RuntimeError("agent exec: no pid returned (is guest agent running?)")
+        import time as _t
+        start = _t.time()
+        while True:
+            rs = s.get(status_url, params={ 'pid': pid }, timeout=10)
+            if rs.status_code >= 400:
+                raise RuntimeError(f"agent exec-status error {rs.status_code}: {rs.text}")
+            st = rs.json().get('data', {})
+            if st.get('exited'):
+                return {
+                    'exitcode': st.get('exitcode'),
+                    'stdout': st.get('out-data') or '',
+                    'stderr': st.get('err-data') or ''
+                }
+            if _t.time() - start > timeout:
+                raise RuntimeError("agent exec timed out")
+            _t.sleep(1)
+
+    # --- Users and Pools ---
+    def get_user(self, userid: str) -> Optional[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/users/{requests.utils.quote(userid, safe='')}"
+        r = s.get(url, timeout=15)
+        if r.status_code == 404:
+            return None
+        # Some Proxmox versions/extensions can return 400/500 for non-existent users on the single-user endpoint.
+        # Fall back to listing users and filtering when that happens.
+        if r.status_code in (400, 500):
+            url_list = f"{self.base_url.rstrip('/')}/api2/json/access/users"
+            rl = s.get(url_list, params={ 'full': 1 }, timeout=20)
+            if rl.status_code >= 400:
+                raise RuntimeError(f"Proxmox get user (fallback) error {rl.status_code}: {rl.text}")
+            try:
+                wanted = str(userid)
+                for u in (rl.json().get('data') or []):
+                    if (u or {}).get('userid') == wanted:
+                        return u
+            except Exception:
+                pass
+            return None
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox get user error {r.status_code}: {r.text}")
+        return r.json().get('data')
+
+    def create_user(self, userid: str, password: Optional[str] = None, enable: bool = True, expire: Optional[int] = None, comment: Optional[str] = None):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/users"
+        data: Dict[str, Any] = { 'userid': userid }
+        if password is not None:
+            data['password'] = password
+        if enable is not None:
+            data['enable'] = 1 if enable else 0
+        if expire is not None:
+            data['expire'] = int(expire)
+        if comment:
+            data['comment'] = comment
+        r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            # 409 conflict if exists
+            if r.status_code != 409:
+                raise RuntimeError(f"Proxmox create user error {r.status_code}: {r.text}")
+        return True
+
+    def delete_user(self, userid: str):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/users/{requests.utils.quote(userid, safe='')}"
+        r = s.delete(url, timeout=30)
+        if r.status_code >= 400 and r.status_code != 404:
+            raise RuntimeError(f"Proxmox delete user error {r.status_code}: {r.text}")
+        return True
+
+    def get_pool(self, poolid: str) -> Optional[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/pools/{requests.utils.quote(poolid, safe='')}"
+        r = s.get(url, timeout=15)
+        if r.status_code == 404:
+            return None
+        # Some versions may return 400/500 on non-existent pool; fall back to list and filter
+        if r.status_code in (400, 500):
+            url_list = f"{self.base_url.rstrip('/')}/api2/json/pools"
+            rl = s.get(url_list, timeout=20)
+            if rl.status_code >= 400:
+                raise RuntimeError(f"Proxmox get pool (fallback) error {rl.status_code}: {rl.text}")
+            try:
+                target = str(poolid)
+                for p in (rl.json().get('data') or []):
+                    if (p or {}).get('poolid') == target:
+                        return p
+            except Exception:
+                pass
+            return None
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox get pool error {r.status_code}: {r.text}")
+        return r.json().get('data')
+
+    def create_pool(self, poolid: str, comment: Optional[str] = None):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/pools"
+        data: Dict[str, Any] = { 'poolid': poolid }
+        if comment:
+            data['comment'] = comment
+        r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            if r.status_code != 409:
+                raise RuntimeError(f"Proxmox create pool error {r.status_code}: {r.text}")
+        return True
+
+    def delete_pool(self, poolid: str):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/pools/{requests.utils.quote(poolid, safe='')}"
+        r = s.delete(url, timeout=30)
+        if r.status_code >= 400 and r.status_code != 404:
+            raise RuntimeError(f"Proxmox delete pool error {r.status_code}: {r.text}")
+        return True
+
+    def list_pool_members(self, poolid: str) -> List[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/pools/{requests.utils.quote(poolid, safe='')}"
+        r = s.get(url, timeout=15)
+        if r.status_code == 404:
+            return []
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox get pool error {r.status_code}: {r.text}")
+        data = r.json().get('data') or {}
+        return list(data.get('members') or [])
+
+    def add_pool_member(self, poolid: str, vmid: int):
+        """Add a VM to a pool by PUT-ing to the pool resource with a 'vms' field.
+        If the VM is already in the pool, raise a clear error message rather than a generic HTTP error.
+        """
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/pools/{requests.utils.quote(poolid, safe='')}"
+        data = { 'vms': int(vmid) }
+        try:
+            logging.getLogger(__name__).debug(f"add_pool_member: PUT {url} data={data}")
+        except Exception:
+            pass
+        r = s.put(url, data=data, timeout=30)
+        try:
+            logging.getLogger(__name__).debug(f"add_pool_member: -> {r.status_code}")
+        except Exception:
+            pass
+        # Treat success and known duplicate statuses as success
+        if r.status_code < 400 or r.status_code == 409:
+            return True
+        # If the server returns an error, check if the VM is already a member and report clearly
+        try:
+            members = self.list_pool_members(poolid) or []
+            for m in members:
+                try:
+                    if str(m.get('type','')).lower() == 'qemu' and int(m.get('vmid')) == int(vmid):
+                        raise RuntimeError("VM already in pool")
+                except Exception:
+                    continue
+        except Exception:
+            # ignore membership-check errors and fall through to generic error below
+            pass
+        # Attempt to detect duplicate message hints in body
+        msg_low = (r.text or '').lower()
+        if any(k in msg_low for k in ('already', 'exists', 'duplicate')):
+            return True
+        raise RuntimeError(f"Proxmox add pool member error {r.status_code}: {r.text}")
+
+    def remove_pool_member(self, poolid: str, vmid: int):
+        """Remove a member from a pool using PUT on the pool resource with delete=1 and vmid.
+        Some servers may not support this (501)."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/pools/{requests.utils.quote(poolid, safe='')}"
+        params = { 'delete': int(1), 'vms': int(vmid) }
+        try:
+            logging.getLogger(__name__).debug(f"remove_pool_member: PUT {url} params={params}")
+        except Exception:
+            pass
+        r = s.put(url, params=params, timeout=30)
+        try:
+            logging.getLogger(__name__).debug(f"remove_pool_member: -> {r.status_code}")
+        except Exception:
+            pass
+        if r.status_code < 400 or r.status_code == 404:
+            return True
+        raise RuntimeError(f"Proxmox remove pool member error {r.status_code}: {r.text}")
+
+    def set_acl_user_pool(self, userid: str, poolid: str, roles: str = 'PVEVMUser', propagate: bool = True):
+        """Grant the given roles to a user on a pool path. Uses PUT per API spec (with POST fallback)."""
+        return self.set_acl(userid=userid, path=f"/pool/{poolid}", roles=roles, propagate=propagate)
+
+    def set_acl(self, userid: str, path: str, roles: str = 'PVEVMUser', propagate: bool = True):
+        """Generic ACL setter using PUT (per Proxmox API). Falls back to POST if PUT not accepted.
+        Parameters mirror pvesh set /access/acl.
+        """
+        import logging as _logging
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/acl"
+        norm_path = path if str(path).startswith('/') else f"/{path}"
+        data: Dict[str, Any] = {
+            'path': norm_path,
+            'users': userid,
+            'roles': roles,
+            'propagate': 1 if propagate else 0,
+        }
+        def _interpret(resp):
+            if resp.status_code < 400:
+                # Downgrade to debug unless explicit ACL_DEBUG enabled
+                if getattr(__import__('flask').current_app, 'config', {}).get('ACL_DEBUG'):
+                    _logging.getLogger(__name__).info(f"set_acl: success user={userid} path={norm_path} roles={roles} via {method}")
+                else:
+                    _logging.getLogger(__name__).debug(f"set_acl: success user={userid} path={norm_path} via {method}")
+                return True
+            msg_low = (resp.text or '').lower()
+            if resp.status_code == 400 and any(k in msg_low for k in ('already', 'exists', 'duplicate')):
+                if getattr(__import__('flask').current_app, 'config', {}).get('ACL_DEBUG'):
+                    _logging.getLogger(__name__).info(f"set_acl: duplicate treated success user={userid} path={norm_path} via {method}")
+                else:
+                    _logging.getLogger(__name__).debug(f"set_acl: duplicate treated success user={userid} path={norm_path} via {method}")
+                return True
+            if resp.status_code == 501:
+                raise RuntimeError(f"ACL endpoint returned 501 (possible permission/method issue) path={norm_path} body={resp.text}")
+            if resp.status_code == 403:
+                raise RuntimeError(f"ACL permission denied user={userid} path={norm_path} body={resp.text}")
+            raise RuntimeError(f"Proxmox set ACL error {resp.status_code} user={userid} path={norm_path}: {resp.text}")
+        # Try PUT first
+        method = 'PUT'
+        try:
+            _logging.getLogger(__name__).debug(f"set_acl: {method} {url} data={data}")
+        except Exception:
+            pass
+        r = s.put(url, data=data, timeout=30)
+        if r.status_code in (405, 500) and 'put' in (r.text or '').lower():  # fallback heuristic
+            method = 'POST'
+            try:
+                _logging.getLogger(__name__).debug(f"set_acl: fallback POST {url} data={data}")
+            except Exception:
+                pass
+            r = s.post(url, data=data, timeout=30)
+        return _interpret(r)
+
+    def delete_acl(self, userid: str, path: str, roles: str = 'PVEVMUser', propagate: bool = True):
+        """Delete/remove an ACL assignment (PUT delete=1; POST fallback)."""
+        import logging as _logging
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/acl"
+        norm_path = path if str(path).startswith('/') else f"/{path}"
+        data: Dict[str, Any] = {
+            'path': norm_path,
+            'users': userid,
+            'roles': roles,
+            'propagate': 1 if propagate else 0,
+            'delete': 1,
+        }
+        method = 'PUT'
+        try:
+            _logging.getLogger(__name__).debug(f"delete_acl: {method} {url} data={data}")
+        except Exception:
+            pass
+        r = s.put(url, data=data, timeout=30)
+        if r.status_code in (405, 500) and 'put' in (r.text or '').lower():
+            method = 'POST'
+            try:
+                _logging.getLogger(__name__).debug(f"delete_acl: fallback POST {url} data={data}")
+            except Exception:
+                pass
+            r = s.post(url, data=data, timeout=30)
+        if r.status_code < 400:
+            return True
+        msg_low = (r.text or '').lower()
+        if r.status_code == 400 and any(k in msg_low for k in ('no such', 'not found', 'does not exist', 'already')):
+            return True
+        if r.status_code == 501:
+            raise RuntimeError(f"ACL delete 501 (permission/method) path={norm_path} body={r.text}")
+        if r.status_code == 403:
+            raise RuntimeError(f"ACL delete permission denied path={norm_path} body={r.text}")
+        raise RuntimeError(f"Proxmox delete ACL error {r.status_code} path={norm_path}: {r.text}")
+
+    def delete_acl_user_pool(self, userid: str, poolid: str, roles: str = 'PVEVMUser', propagate: bool = True):
+        return self.delete_acl(userid, f"/pool/{poolid}", roles=roles, propagate=propagate)
+
+    def list_acls(self) -> List[Dict[str, Any]]:
+        """List all ACL entries."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/acl"
+        r = s.get(url, timeout=20)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox list ACLs error {r.status_code}: {r.text}")
+        return r.json().get('data', []) or []
+
+    def delete_all_acls_for_path(self, path: str):
+        """Delete all ACL entries (users and groups) for a given path using PUT delete=1 (POST fallback)."""
+        import logging as _logging
+        s = self._ensure_session()
+        norm_path = path if str(path).startswith('/') else f"/{path}"
+        try:
+            entries = self.list_acls()
+        except Exception:
+            return False
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/acl"
+        ok_any = False
+        for e in entries:
+            try:
+                if str(e.get('path') or '') != norm_path:
+                    continue
+                payload: Dict[str, Any] = {
+                    'path': norm_path,
+                    'roles': e.get('roleid') or 'PVEVMUser',
+                    'propagate': 1 if (e.get('propagate') in (1, True, '1', 'true')) else 0,
+                    'delete': 1,
+                }
+                t = (e.get('type') or '').lower()
+                ugid = e.get('ugid') or ''
+                if t == 'group':
+                    payload['groups'] = ugid
+                else:
+                    payload['users'] = ugid
+                method = 'PUT'
+                r = s.put(url, data=payload, timeout=30)
+                if r.status_code in (405, 500) and 'put' in (r.text or '').lower():
+                    method = 'POST'
+                    r = s.post(url, data=payload, timeout=30)
+                if r.status_code < 400:
+                    ok_any = True
+                else:
+                    msg_low = (r.text or '').lower()
+                    if r.status_code == 400 and any(k in msg_low for k in ('no such', 'not found', 'does not exist')):
+                        continue
+                    _logging.getLogger(__name__).warning(f"delete_all_acls_for_path: failed method={method} path={norm_path} entry={ugid} status={r.status_code}")
+            except Exception:
+                continue
+        return ok_any
+
+    def set_acl_user_vm(self, userid: str, vmid: int, roles: str = 'PVEVMUser', propagate: bool = True):
+        """Grant roles on a specific VM path as a fallback when pool ACLs are unsupported."""
+        # Attempt with canonical path; if fails with 501 retry alternative path variant
+        vm_path = f"/vms/{int(vmid)}"
+        try:
+            return self.set_acl(userid, vm_path, roles=roles, propagate=propagate)
+        except RuntimeError as e:
+            es = str(e)
+            if '501' in es and 'vms' in vm_path:
+                alt_path = f"vms/{int(vmid)}"  # no leading slash variant
+                try:
+                    return self.set_acl(userid, alt_path, roles=roles, propagate=propagate)
+                except Exception:
+                    raise
+            raise

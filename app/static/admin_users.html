@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AN3S — User Admin</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/css/shell.css" rel="stylesheet">
+  <link rel="icon" href="/static/favicon.ico">
+  <style>
+    #users-table td:last-child { white-space: nowrap; }
+    #users-table .btn-group .btn { padding-inline: .45rem; }
+  </style>
+  <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</head>
+<body>
+<header class="app-banner">
+  <div class="container-fluid d-flex align-items-center justify-content-between py-2">
+    <div class="d-flex align-items-center gap-2">
+      <span aria-hidden="true" class="banner-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="5" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="19" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="12" cy="19" r="3" stroke="white" stroke-width="1.5"/>
+          <line x1="7.5" y1="6.5" x2="16.5" y2="6.5" stroke="white" stroke-width="1.5"/>
+          <line x1="10.2" y1="9.2" x2="6.8" y2="16.2" stroke="white" stroke-width="1.5"/>
+          <line x1="13.8" y1="9.2" x2="17.2" y2="16.2" stroke="white" stroke-width="1.5"/>
+        </svg>
+      </span>
+      <span class="banner-title">User Administration</span>
+    </div>
+    <div class="d-flex align-items-center gap-3" id="banner-user-region" style="min-width:260px;justify-content:flex-end;">
+      <div id="banner-user-label" class="small text-white-50">User: <span id="banner-username" class="text-white">…</span></div>
+      <div class="dropdown">
+        <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Menu</button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><a class="dropdown-item" href="/">Main</a></li>
+          <li><a class="dropdown-item active" href="/static/admin_users.html">Users</a></li>
+          <li><hr class="dropdown-divider" /></li>
+          <li><button class="dropdown-item text-danger" id="banner-logout" type="button">Logout</button></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="banner-overlay" aria-hidden="true"></div>
+</header>
+<div class="container py-4">
+  <div id="default-pass-warning" class="alert alert-danger d-none" role="alert">
+    Default 'setupadmin' credentials in use. You must change this password immediately.
+    <button class="btn btn-sm btn-outline-light ms-2" id="btn-change-now">Change Now</button>
+  </div>
+  <div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+    <h5 class="mb-0">Users</h5>
+    <div class="d-flex align-items-center gap-2">
+      <button class="btn btn-sm btn-outline-primary" id="btn-refresh">Refresh</button>
+      <a class="btn btn-sm btn-outline-secondary" href="/">Back</a>
+    </div>
+  </div>
+  <div class="card mb-4">
+    <div class="card-body py-3">
+      <form id="create-form" class="row gy-2 gx-3 align-items-end">
+        <div class="col-12 col-md-3 d-flex flex-column justify-content-end">
+          <label class="form-label small mb-1" for="new-username">Username</label>
+          <input id="new-username" class="form-control form-control-sm" required placeholder="username" />
+        </div>
+        <div class="col-12 col-md-5 d-flex flex-column justify-content-end position-relative">
+          <label class="form-label small mb-1 mt-md-2" for="new-password">Password</label>
+          <div class="d-flex align-items-end gap-3 flex-wrap flex-md-nowrap">
+            <input id="new-password" type="password" class="form-control form-control-sm mt-md-1" required placeholder="password" autocomplete="new-password" style="max-width:220px;" />
+            <div class="form-check d-flex align-items-center align-self-end mb-0 ms-0 ms-md-1">
+              <input id="new-must-change" class="form-check-input" type="checkbox" />
+              <label class="form-check-label small ms-2" for="new-must-change">Must Change</label>
+            </div>
+            <span class="small text-muted password-strength ms-2 align-self-end" id="new-pass-strength"></span>
+          </div>
+          
+        </div>
+        <div class="col-6 col-md-2 d-flex flex-column justify-content-end">
+          <label class="form-label small mb-1" for="new-role">Role</label>
+          <select id="new-role" class="form-select form-select-sm">
+            <option value="">(none)</option>
+            <option value="admin">admin</option>
+          </select>
+        </div>
+        <div class="col-6 col-md-2 d-flex flex-column justify-content-end">
+          <label class="form-label small mb-1 invisible d-none d-md-block">Add</label>
+          <div class="d-flex justify-content-md-end">
+            <button class="btn btn-sm btn-success w-100 w-md-auto" type="submit" id="btn-add" style="min-width:90px;">Add</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div class="table-responsive mb-3">
+    <table class="table table-sm table-hover align-middle" id="users-table">
+      <thead class="table-light"><tr><th>User</th><th style="width:30%">Roles</th><th style="width:15%">Flags</th><th style="width:160px">Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2" id="pagination-bar" style="display:none;">
+    <div class="btn-group btn-group-sm" role="group">
+      <button class="btn btn-outline-secondary" id="pg-first" title="First">«</button>
+      <button class="btn btn-outline-secondary" id="pg-prev" title="Previous">‹</button>
+      <button class="btn btn-outline-secondary" id="pg-next" title="Next">›</button>
+      <button class="btn btn-outline-secondary" id="pg-last" title="Last">»</button>
+    </div>
+    <div class="d-flex align-items-center gap-2 small">
+      <span id="pg-info" class="text-muted"></span>
+      <select id="pg-size" class="form-select form-select-sm" style="width:auto;">
+        <option value="10">10</option>
+        <option value="25" selected>25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+    </div>
+  </div>
+  <div id="user-msg" class="small text-muted"></div>
+</div>
+
+<script src="/static/js/auth.js"></script>
+<script>
+// Banner user dropdown wiring
+document.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const d = await AUTH.me();
+    const user = d?.user; const nameEl=document.getElementById('banner-username');
+    if(nameEl) nameEl.textContent = user? user.username : 'anonymous';
+    const logoutBtn=document.getElementById('banner-logout');
+    if(logoutBtn){ logoutBtn.addEventListener('click', async ()=>{ await AUTH.logout(); location.href='/'; }); }
+  } catch {}
+});
+document.addEventListener('auth-changed', e=>{ const u=e.detail?.user; const nameEl=document.getElementById('banner-username'); if(nameEl) nameEl.textContent = u? u.username : 'anonymous'; });
+/* Simple helper */
+async function api(path, opts={}){
+  const r = await fetch(path, Object.assign({ headers:{'Content-Type':'application/json'} }, opts));
+  if(!r.ok) throw new Error(await r.text()||r.statusText);
+  return r.json();
+}
+function setMsg(t, cls){ const el=document.getElementById('user-msg'); if(el){ el.textContent=t||''; el.className='small '+(cls||'text-muted'); } }
+
+function rolesToList(str){ return (str||'').split(',').map(r=>r.trim()).filter(Boolean); }
+function listToRoles(list){ return (list||[]).join(', ');} 
+
+// Password strength evaluation (simple heuristic)
+function evalStrength(p){
+  if(!p) return {score:0,label:'',class:'text-muted'};
+  let s=0;
+  if(p.length>=8) s++;
+  if(p.length>=12) s++;
+  if(/[a-z]/.test(p)) s++;
+  if(/[A-Z]/.test(p)) s++;
+  if(/\d/.test(p)) s++;
+  if(/[^A-Za-z0-9]/.test(p)) s++;
+  if(p.length>=20) s++;
+  const labels=['Very Weak','Weak','Fair','Good','Strong','Very Strong','Excellent'];
+  const classes=['text-danger','text-danger','text-warning','text-info','text-success','text-success','text-success'];
+  return {score:s,label:labels[Math.min(s,labels.length-1)],class:classes[Math.min(s,classes.length-1)]};
+}
+function renderStrength(el, p){
+  const info = evalStrength(p);
+  el.innerHTML = p? `<span class="${info.class}">${info.label} (${info.score})</span>`: '';
+  return info.score;
+}
+
+let USER_CACHE = [];
+let PG_INDEX = 0; // zero-based
+let PG_SIZE = 25;
+function pageCount(){ return Math.max(1, Math.ceil(USER_CACHE.length / PG_SIZE)); }
+function currentSlice(){ const start=PG_INDEX*PG_SIZE; return USER_CACHE.slice(start, start+PG_SIZE); }
+function updatePaginationBar(){
+  const bar=document.getElementById('pagination-bar');
+  if(!bar) return;
+  if(USER_CACHE.length <= PG_SIZE){ bar.style.display='none'; return; }
+  bar.style.display='flex';
+  document.getElementById('pg-info').textContent = `Page ${PG_INDEX+1} / ${pageCount()} (${USER_CACHE.length} users)`;
+  document.getElementById('pg-prev').disabled = PG_INDEX===0;
+  document.getElementById('pg-first').disabled = PG_INDEX===0;
+  document.getElementById('pg-next').disabled = PG_INDEX >= pageCount()-1;
+  document.getElementById('pg-last').disabled = PG_INDEX >= pageCount()-1;
+}
+function renderUserTable(){
+  const tb = document.querySelector('#users-table tbody');
+  tb.innerHTML='';
+  currentSlice().forEach(u=>{
+    const tr=document.createElement('tr');
+    const flag = u.must_change ? '<span class="badge text-bg-warning" title="Must change password">must-change</span>' : '';
+    const rolesDisp = listToRoles(u.roles)||'<span class=\"text-muted\">—</span>';
+    tr.innerHTML = `<td><strong>${u.username}</strong></td>
+      <td><span class=\"small\">${rolesDisp}</span></td>
+      <td>${flag}</td>
+      <td><div class=\"btn-group btn-group-sm\" role=\"group\" aria-label=\"Actions for ${u.username}\"><button type=\"button\" class=\"btn btn-outline-secondary\" data-act=\"edit\">Edit</button><button type=\"button\" class=\"btn btn-outline-secondary\" data-act=\"pw\">Pwd</button><button type=\"button\" class=\"btn btn-outline-danger\" data-act=\"del\">Del</button></div></td>`;
+    tr.querySelector('[data-act="edit"]').addEventListener('click',()=>openEditModal(u));
+    tr.querySelector('[data-act="pw"]').addEventListener('click',()=>openPasswordModal(u));
+    tr.querySelector('[data-act="del"]').addEventListener('click',()=>deleteUser(u));
+    tb.appendChild(tr);
+  });
+  updatePaginationBar();
+}
+async function loadUsers(){
+  try {
+    setMsg('Loading users…');
+    const data = await api('/auth/users');
+    USER_CACHE = data.users||[];
+    PG_INDEX = 0;
+    renderUserTable();
+    setMsg(`${data.count||0} user(s).`);
+  } catch(e){ setMsg('Load failed: '+(e.message||e),'text-danger'); }
+}
+
+async function createUser(e){
+  e.preventDefault();
+  const uname = document.getElementById('new-username').value.trim();
+  const pwd = document.getElementById('new-password').value;
+  const roleVal = document.getElementById('new-role').value;
+  const roles = roleVal ? [roleVal] : [];
+  const mustChange = document.getElementById('new-must-change').checked;
+  if(!uname || !pwd){ setMsg('Username & password required','text-danger'); return; }
+  try {
+    await api('/auth/users', { method:'POST', body: JSON.stringify({ username: uname, password: pwd, roles, must_change: mustChange }) });
+    document.getElementById('create-form').reset();
+    loadUsers();
+    setMsg('User created','text-success');
+  } catch(e){ setMsg('Create failed: '+(e.message||e),'text-danger'); }
+}
+
+function ensureModals(){
+  if(document.getElementById('userEditModal')) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+  <div class="modal fade" id="userEditModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Edit User</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <div class="mb-2"><label class="form-label small">Username</label><input id="edit-username" class="form-control form-control-sm" disabled></div>
+          <div class="mb-2"><label class="form-label small">Role</label>
+            <select id="edit-role" class="form-select form-select-sm">
+              <option value="">(none)</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+          <div class="form-check mb-2">
+            <input id="edit-must-change" class="form-check-input" type="checkbox">
+            <label class="form-check-label small" for="edit-must-change">Must change password</label>
+          </div>
+          <div id="edit-msg" class="small text-muted"></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Close</button><button class="btn btn-primary" id="btn-edit-save">Save</button></div>
+      </div>
+    </div>
+  </div>
+  <div class="modal fade" id="passwordModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Change Password</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <div class="mb-2"><label class="form-label small">User</label><input id="pw-username" class="form-control form-control-sm" disabled></div>
+          <div class="mb-2"><label class="form-label small">New Password</label><input id="pw1" type="password" class="form-control form-control-sm" autocomplete="new-password"></div>
+          <div class="mb-2"><label class="form-label small">Confirm Password</label><input id="pw2" type="password" class="form-control form-control-sm" autocomplete="new-password"></div>
+          <div id="pw-msg" class="small text-muted"></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Close</button><button class="btn btn-primary" id="btn-pw-save">Update</button></div>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(wrap);
+}
+
+function bsModal(id){
+  const el = document.getElementById(id);
+  if(!el) return null;
+  if(!window.bootstrap || !window.bootstrap.Modal){
+    console.warn('Bootstrap JS not loaded yet for modal', id);
+    return null;
+  }
+  return window.bootstrap.Modal.getOrCreateInstance(el);
+}
+
+function openEditModal(user){
+  ensureModals();
+  document.getElementById('edit-username').value = user.username;
+  const roleSel = document.getElementById('edit-role');
+  const firstRole = (user.roles||[])[0] || '';
+  if(roleSel) roleSel.value = firstRole;
+  document.getElementById('edit-must-change').checked = !!user.must_change;
+  document.getElementById('edit-msg').textContent='';
+  const m = bsModal('userEditModal');
+  if(m) m.show();
+}
+
+function openPasswordModal(user){
+  ensureModals();
+  document.getElementById('pw-username').value = user.username;
+  document.getElementById('pw1').value='';
+  document.getElementById('pw2').value='';
+  document.getElementById('pw-msg').textContent='';
+  const m = bsModal('passwordModal');
+  if(m) m.show();
+}
+
+async function saveEdit(){
+  const uname = document.getElementById('edit-username').value;
+  const roleVal = document.getElementById('edit-role').value;
+  const roles = roleVal ? [roleVal] : [];
+  const mustChange = document.getElementById('edit-must-change').checked;
+  const msg = document.getElementById('edit-msg');
+  msg.textContent = 'Saving…';
+  try {
+    await api('/auth/users/'+encodeURIComponent(uname), { method:'PATCH', body: JSON.stringify({ roles, must_change: mustChange }) });
+    msg.textContent='Saved.'; msg.className='small text-success';
+    loadUsers();
+    const m = bsModal('userEditModal');
+    if(m) setTimeout(()=>m.hide(), 500);
+  } catch(e){ msg.textContent='Save failed: '+(e.message||e); msg.className='small text-danger'; }
+}
+
+async function savePassword(){
+  const uname = document.getElementById('pw-username').value;
+  const p1 = document.getElementById('pw1').value;
+  const p2 = document.getElementById('pw2').value;
+  const msg = document.getElementById('pw-msg');
+  if(!p1 || p1!==p2){ msg.textContent='Passwords do not match'; msg.className='small text-danger'; return; }
+  const strength = evalStrength(p1).score;
+  if(strength < 3){ msg.textContent='Password too weak'; msg.className='small text-danger'; return; }
+  msg.textContent='Updating…';
+  try {
+    await api('/auth/users/'+encodeURIComponent(uname), { method:'PATCH', body: JSON.stringify({ password: p1 }) });
+    msg.textContent='Updated.'; msg.className='small text-success';
+    loadUsers();
+    const m = bsModal('passwordModal');
+    if(m) setTimeout(()=>m.hide(), 600);
+  } catch(e){ msg.textContent='Update failed: '+(e.message||e); msg.className='small text-danger'; }
+}
+
+async function deleteUser(u){
+  if(!confirm('Delete user '+u.username+'?')) return;
+  try { await api('/auth/users/'+encodeURIComponent(u.username), { method:'DELETE' }); loadUsers(); setMsg('Deleted '+u.username,'text-success'); }
+  catch(e){ setMsg('Delete failed: '+(e.message||e),'text-danger'); }
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  try { const me = await AUTH.me(); if(!me || !me.user){ location.href='/'; return; } if(!(me.user.roles||[]).map(r=>r.toLowerCase()).includes('admin')){ alert('Admin required'); location.href='/'; return; } if(me.user.username==='setupadmin' && me.user.must_change){ const alertBox=document.getElementById('default-pass-warning'); alertBox.classList.remove('d-none'); document.getElementById('btn-change-now').addEventListener('click', ()=>{ openPasswordModal({username:'setupadmin'}); }); }
+  } catch { location.href='/'; }
+  document.getElementById('btn-refresh').addEventListener('click', loadUsers);
+  document.getElementById('create-form').addEventListener('submit', createUser);
+  // Live password strength (create form)
+  const newPass = document.getElementById('new-password');
+  const newPassStrength = document.getElementById('new-pass-strength');
+  newPass.addEventListener('input', ()=>{
+    const score = renderStrength(newPassStrength, newPass.value);
+    const btn = document.getElementById('btn-add');
+    if(btn) btn.disabled = score < 3; // require minimum strength
+  });
+  // Password modal strength watchers
+  document.addEventListener('click', (e)=>{
+    if(e.target && e.target.getAttribute('data-act')==='pw'){
+      setTimeout(()=>{
+        const pw1=document.getElementById('pw1');
+        const pwMsg=document.getElementById('pw-msg');
+        if(pw1){
+          pw1.addEventListener('input', ()=>{
+            const score = evalStrength(pw1.value).score;
+            pwMsg.textContent = pw1.value? `Strength: ${evalStrength(pw1.value).label}`:'';
+            pwMsg.className = 'small ' + evalStrength(pw1.value).class;
+          }, { once:false });
+        }
+      }, 150);
+    }
+  });
+  // Pagination controls
+  document.getElementById('pg-size').addEventListener('change', (e)=>{ PG_SIZE=parseInt(e.target.value)||25; PG_INDEX=0; renderUserTable(); });
+  document.getElementById('pg-first').addEventListener('click', ()=>{ PG_INDEX=0; renderUserTable(); });
+  document.getElementById('pg-prev').addEventListener('click', ()=>{ if(PG_INDEX>0){ PG_INDEX--; renderUserTable(); }});
+  document.getElementById('pg-next').addEventListener('click', ()=>{ if(PG_INDEX<pageCount()-1){ PG_INDEX++; renderUserTable(); }});
+  document.getElementById('pg-last').addEventListener('click', ()=>{ PG_INDEX=pageCount()-1; renderUserTable(); });
+  ensureModals();
+  document.getElementById('btn-edit-save').addEventListener('click', saveEdit);
+  document.getElementById('btn-pw-save').addEventListener('click', savePassword);
+  loadUsers();
+});
+</script>
+</body>
+</html>

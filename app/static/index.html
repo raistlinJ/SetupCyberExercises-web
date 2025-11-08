@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AN3S — Configuration</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/css/shell.css" rel="stylesheet">
+  <link rel="icon" href="/static/favicon.ico">
+  <style>
+    /* Make each project section fill the viewport height only when expanded */
+    .project-card.expanded { min-height: 100vh; }
+    /* Constrain materials section size and enable scrolling */
+    .materials-scroll { max-height: 260px; overflow: auto; }
+  /* Small chevron rotation helper for dropdown-style toggles */
+  .chevron { display: inline-block; transition: transform .15s ease; width: 1rem; text-align: center; }
+  .chevron.rotate { transform: rotate(90deg); }
+  /* VM block separation */
+  .vm-header { border-bottom: 1px solid rgba(0,0,0,.075); padding-bottom: .25rem; margin-bottom: .25rem; }
+  </style>
+</head>
+<body>
+<header class="app-banner">
+  <div class="container-fluid d-flex align-items-center justify-content-between py-2">
+    <div class="d-flex align-items-center gap-2">
+      <span aria-hidden="true" class="banner-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="5" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="19" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="12" cy="19" r="3" stroke="white" stroke-width="1.5"/>
+          <line x1="7.5" y1="6.5" x2="16.5" y2="6.5" stroke="white" stroke-width="1.5"/>
+          <line x1="10.2" y1="9.2" x2="6.8" y2="16.2" stroke="white" stroke-width="1.5"/>
+          <line x1="13.8" y1="9.2" x2="17.2" y2="16.2" stroke="white" stroke-width="1.5"/>
+        </svg>
+      </span>
+  <span class="banner-title">Acosta Network Scenario Setup System (AN3S)</span>
+    </div>
+    <div class="d-flex align-items-center gap-3" id="banner-user-region" style="min-width:260px;justify-content:flex-end;">
+      <div id="banner-user-label" class="small text-white-50">User: <span id="banner-username" class="text-white">…</span></div>
+      <div class="dropdown">
+        <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Menu</button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><a class="dropdown-item" href="#" data-act="open-settings">Settings</a></li>
+          <li><a class="dropdown-item" href="/static/admin_users.html" data-act="open-users">Users</a></li>
+          <li><hr class="dropdown-divider" /></li>
+          <li><button class="dropdown-item text-danger" id="banner-logout" type="button">Logout</button></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="banner-overlay" aria-hidden="true"></div>
+</header>
+<div class="container-fluid shell-container">
+  <div class="row g-0">
+    <aside class="col-12 col-md-3 col-lg-2 shell-sidebar bg-light d-flex flex-column">
+      <div class="p-2 border-bottom d-flex gap-2">
+        <input id="proj-name" class="form-control form-control-sm" placeholder="New project name" title="Project name" />
+        <button class="btn btn-sm btn-primary" onclick="createProject()" title="Create project">Add</button>
+      </div>
+      <div class="p-2 border-bottom">
+        <label class="btn btn-outline-secondary btn-sm mb-0 w-100" title="Import a project ZIP">
+          Import Project <input type="file" id="import-file" accept=".zip" hidden onchange="importProject()" />
+        </label>
+      </div>
+      <div id="sidebar-projects" class="flex-grow-1"></div>
+    </aside>
+    <main class="col-12 col-md-9 col-lg-10 shell-content p-3">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <ul class="nav nav-pills flex-nowrap">
+          <li class="nav-item">
+            <a class="nav-link active" aria-current="page" data-shell-link href="/">Configuration</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" data-shell-link href="/static/vm_manager.html">VM Manager</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" data-shell-link href="/static/exports.html">Exports</a>
+          </li>
+        </ul>
+  <div></div>
+      </div>
+      <div id="projects" class="d-flex flex-column gap-4"></div>
+      <div class="mt-4 text-center text-muted">
+        <small>Configure projects, virtual machines, and materials.</small>
+      </div>
+    </main>
+  </div>
+ </div>
+<!-- Export Options Modal -->
+<div class="modal fade" id="exportOptionsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Export Options</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2 d-flex gap-2">
+          <button id="exp-sel-all" class="btn btn-sm btn-outline-secondary">Select All</button>
+          <button id="exp-sel-none" class="btn btn-sm btn-outline-secondary">Select None</button>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="exp-cfg" checked disabled>
+          <label class="form-check-label" for="exp-cfg">Configuration (always included)</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="exp-creds" checked>
+          <label class="form-check-label" for="exp-creds">Credentials</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="exp-vms" checked>
+          <label class="form-check-label" for="exp-vms">VMs</label>
+        </div>
+        <div id="exp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
+          Exporting VMs can take a long time. This runs on the remote host, downloads disk files, and compresses them.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+  <button id="exp-download" type="button" class="btn btn-primary">Export</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  // Banner user & dropdown wiring
+  document.addEventListener('DOMContentLoaded', async () => {
+    try {
+      const d = await AUTH.me();
+      const user = d?.user;
+      const nameEl = document.getElementById('banner-username');
+      if (nameEl) nameEl.textContent = user? user.username : 'anonymous';
+      if (document.getElementById('banner-logout')){
+        document.getElementById('banner-logout').addEventListener('click', async () => {
+          await AUTH.logout();
+          location.href = '/';
+        });
+      }
+    } catch {}
+  });
+  document.addEventListener('auth-changed', (e)=>{
+    const u = e.detail?.user;
+    const nameEl = document.getElementById('banner-username');
+    if(nameEl) nameEl.textContent = u? u.username : 'anonymous';
+  });
+</script>
+<!-- Export Progress Modal -->
+<div class="modal fade" id="exportProgressModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Export in Progress</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2">
+          <div class="progress">
+            <div id="exp-prog-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+          </div>
+        </div>
+        <div id="exp-status" class="small text-muted mb-2">Starting…</div>
+        <div class="border rounded p-2" style="max-height: 260px; overflow:auto; background: #fafafa;">
+          <pre id="exp-log" class="mb-0 small" style="white-space: pre-wrap; word-break: break-word;">Waiting…</pre>
+        </div>
+      </div>
+      <div class="modal-footer d-flex justify-content-between align-items-center">
+        <div class="text-muted small text-truncate me-2" id="exp-path-note"></div>
+        <div class="d-flex gap-2">
+          <a id="exp-download-final" class="btn btn-primary disabled" role="button" aria-disabled="true" href="#">Download ZIP</a>
+          <button id="exp-open-folder" type="button" class="btn btn-outline-secondary" disabled>Open Folder</button>
+          <button type="button" id="exp-close-btn" class="btn btn-secondary">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Import Options Modal -->
+<div class="modal fade" id="importOptionsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Import Options</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2 d-flex gap-2">
+          <button id="imp-sel-all" class="btn btn-sm btn-outline-secondary">Select All</button>
+          <button id="imp-sel-none" class="btn btn-sm btn-outline-secondary">Select None</button>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="imp-cfg" checked disabled>
+          <label class="form-check-label" for="imp-cfg">Configuration (always included)</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="imp-creds" checked>
+          <label class="form-check-label" for="imp-creds">Credentials</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="imp-vms" checked>
+          <label class="form-check-label" for="imp-vms">VMs</label>
+        </div>
+        <div id="imp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
+          Importing VMs can be very time-consuming. This runs on the remote host, downloads disk files, and compresses them.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button id="imp-continue" type="button" class="btn btn-primary">Continue</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Add from Server Modal -->
+<div class="modal fade" id="addFromServerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Add VMs from Proxmox Templates</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-2 mb-2">
+          <div class="col-md-6">
+            <label class="form-label">Proxmox URL</label>
+            <input id="afs-url" class="form-control form-control-sm" placeholder="https://proxmox.example.com" />
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">API Port</label>
+            <input id="afs-port" type="number" class="form-control form-control-sm" placeholder="8006" />
+          </div>
+          <div class="col-md-3 d-flex align-items-end">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="afs-verify" checked>
+              <label class="form-check-label" for="afs-verify">Verify SSL</label>
+            </div>
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Username</label>
+            <input id="afs-username" class="form-control form-control-sm" placeholder="E.g., root@pam" />
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Password</label>
+            <input id="afs-password" type="password" class="form-control form-control-sm" />
+          </div>
+          <div class="col-md-2 d-flex align-items-end">
+            <button id="afs-fetch" class="btn btn-sm btn-primary w-100">Fetch</button>
+          </div>
+        </div>
+        <div id="afs-filter-group" class="mb-2" style="display:none;">
+          <label for="afs-filter" class="form-label small mb-1">Filter</label>
+          <input id="afs-filter" class="form-control form-control-sm" placeholder="Filter templates by name or VMID" />
+        </div>
+        <div class="border rounded" style="max-height: 300px; overflow:auto; display:none;" id="afs-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button id="afs-add" class="btn btn-success" disabled>Add Selected</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Proxmox Login Modal (session-only, used before VM export) -->
+<div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Proxmox Login</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form id="prox-login-form" class="modal-body" autocomplete="off" onsubmit="return false;">
+        <div class="mb-2">
+          <label class="form-label" title="Base URL to your Proxmox node or cluster">Proxmox URL</label>
+          <input id="prox-url" class="form-control" placeholder="https://proxmox.example.com" title="https://host or host (scheme auto-added)" />
+        </div>
+        <div class="row g-2 mb-2">
+          <div class="col">
+            <label class="form-label" title="Proxmox API port (default 8006)">API Port</label>
+            <input id="prox-api-port" type="number" class="form-control" placeholder="8006" title="Proxmox API port" />
+          </div>
+          <div class="col">
+            <label class="form-label" title="SSH port">SSH Port</label>
+            <input id="prox-ssh-port" type="number" class="form-control" placeholder="22" title="SSH port" />
+          </div>
+        </div>
+        <div class="mb-2">
+          <label class="form-label" title="Proxmox username (realm included)">Username</label>
+          <input id="prox-username" class="form-control" placeholder="E.g., root@pam" title="E.g., root@pam" />
+        </div>
+        <div class="mb-2">
+          <label class="form-label" title="Proxmox password (not persisted)">Password</label>
+          <input id="prox-password" type="password" class="form-control" title="Stored only in this session" />
+        </div>
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" id="prox-verify-ssl" checked>
+          <label class="form-check-label" for="prox-verify-ssl" title="When enabled, the app will verify HTTPS certificates when connecting to the Proxmox API">Verify SSL certificates</label>
+        </div>
+      </form>
+      <div class="modal-footer">
+        <div id="prox-login-feedback" class="me-auto small"></div>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" id="btn-prox-save" class="btn btn-primary" onclick="exportProxLoginSave()">Save & Continue</button>
+      </div>
+    </div>
+  </div>
+ </div>
+<!-- Settings modal injected via creds.js -->
+<script src="/static/js/creds.js"></script>
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/shell.js"></script>
+<script src="/static/js/app.js?v=20250829-1"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', async () => {
+    await shell.initShell('config');
+  // (Removed inline auth badge bubble; banner now shows user globally)
+    // Keep selection in sync: when a project is picked in sidebar, scroll to it and expand
+    document.addEventListener('project-selected', (e) => {
+      try {
+        const pid = e.detail;
+        if (!pid) return;
+  // Re-render to show only this project
+  if (typeof loadProjects === 'function') loadProjects();
+      } catch {}
+    });
+    // Wire export modal controls
+    try {
+      const allBtn = document.getElementById('exp-sel-all');
+      const noneBtn = document.getElementById('exp-sel-none');
+      const c = document.getElementById('exp-creds');
+      const v = document.getElementById('exp-vms');
+      if (allBtn && noneBtn && c && v) {
+        allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; });
+        noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; });
+      }
+    } catch {}
+    // Wire import modal controls
+    try {
+      const allBtn = document.getElementById('imp-sel-all');
+      const noneBtn = document.getElementById('imp-sel-none');
+      const c = document.getElementById('imp-creds');
+      const v = document.getElementById('imp-vms');
+      const warn = document.getElementById('imp-vms-warning');
+      if (allBtn && noneBtn && c && v) {
+        allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (warn) warn.style.display = 'block'; });
+        noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (warn) warn.style.display = 'none'; });
+        v.addEventListener('change', () => { if (warn) warn.style.display = v.checked ? 'block' : 'none'; });
+      }
+    } catch {}
+  });
+ </script>
+ <!-- Toast container for validation messages -->
+ <div class="toast-container position-fixed top-0 end-0 p-3" id="toastContainer" style="z-index: 1080"></div>
+ </body>
+</html>

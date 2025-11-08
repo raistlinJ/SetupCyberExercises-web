@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Malware Comms - Part 2</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="shortcut icon" href="/themes/core-beta/static/img/favicon.ico?d=1f8b8ee2" type="image/x-icon">
+
+  
+
+  
+    <link rel="stylesheet" href="/themes/core-beta/static/assets/main.e9ec7884.css">
+  
+
+  
+
+  <script  src="/themes/core-beta/static/assets/color_mode_switcher.52334129.js"></script>
+
+  <script type="text/javascript">
+      window.init = {
+          'urlRoot': "",
+          'csrfNonce': "19ca432acc48d0e6c97433e9fca00fab0b3cb1455ac815386d8c96003a7deec9",
+          'userMode': "teams",
+          'userId': 0,
+          'userName': null,
+          'userEmail': null,
+          'teamId': null,
+          'teamName': null,
+          'start': null,
+          'end': null,
+          'themeSettings': {"challenge_category_order": "function compare(a, b) {\r\n  if (a \u003c b) {\r\n    return -1;\r\n  }\r\n  if (a \u003e b) {\r\n    return 1;\r\n  }\r\n  return 0;\r\n}", "challenge_order": "function compare(a, b) {\r\n  if (a \u003c b) {\r\n    return -1;\r\n  }\r\n  if (a \u003e b) {\r\n    return 1;\r\n  }\r\n  return 0;\r\n}", "challenge_window_size": "sm", "use_builtin_code_highlighter": true},
+          'eventSounds': [
+            "/themes/core/static/sounds/notification.webm",
+            "/themes/core/static/sounds/notification.mp3",
+          ],
+      }
+  </script>
+
+  <style id="theme-color">
+:root {--theme-color: #0080c0;}
+.navbar{background-color: var(--theme-color) !important;}
+.jumbotron{background-color: var(--theme-color) !important;}
+</style>
+
+</head>
+<body>
+<nav class="navbar navbar-expand-md navbar-dark bg-dark fixed-top">
+  <div class="container">
+    <a href="/" class="navbar-brand">
+      
+        <img
+            class="img-responsive ctf_logo"
+            src="/files/33fd51413e3558eee24a218e861c00a4/theme.png"
+            alt="Malware Comms - Part 2"
+            height="25"
+        >
+      
+    </a>
+
+    <button
+        class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#base-navbars"
+        aria-controls="base-navbars" aria-expanded="false" aria-label="Toggle navigation"
+    >
+      <span class="navbar-toggler-icon"></span>
+    </button>
+
+    <div class="collapse navbar-collapse" id="base-navbars">
+      <ul class="navbar-nav me-auto">
+        
+          <li class="nav-item">
+            <a class="nav-link" href="/exercise" >
+              Exercise VM
+            </a>
+          </li>
+        
+
+        
+          <li class="nav-item">
+            <a class="nav-link" href="/users">
+              Users
+            </a>
+          </li>
+
+          
+            <li class="nav-item">
+              <a class="nav-link" href="/teams">
+                Teams
+              </a>
+            </li>
+          
+        
+
+        
+          <li class="nav-item">
+            <a class="nav-link" href="/scoreboard">
+              Scoreboard
+            </a>
+          </li>
+        
+
+        <li class="nav-item">
+          <a class="nav-link" href="/challenges">
+            Challenges
+          </a>
+        </li>
+      </ul>
+
+      <hr class="d-sm-flex d-md-flex d-lg-none">
+
+      <ul class="navbar-nav ms-md-auto d-block d-sm-flex d-md-flex">
+        
+
+          
+
+          <li class="nav-item">
+            <a class="nav-link" href="/login">
+              <span data-bs-toggle="tooltip" data-bs-placement="bottom" title="Login">
+                <i class="fas fa-sign-in-alt d-none d-md-inline d-lg-none"></i>
+              </span>
+              <span class="d-sm-inline d-md-none d-lg-inline">
+                <i class="fas fa-sign-in-alt pe-1"></i>
+                Login
+              </span>
+            </a>
+          </li>
+        
+
+        <li class="nav-item dropdown">
+          <button class="nav-link dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="fas fa-language d-none d-md-inline"></i>
+            <span class="d-sm-inline d-md-none">
+              <i class="fas fa-language pe-1"></i>
+              Change language
+            </span>
+          </button>
+          <form x-data="LanguageForm">
+            <ul class="dropdown-menu dropdown-menu-end">
+              
+              <li>
+                  <span class="dropdown-item " @click="set" value="en">
+                    English
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="de">
+                    Deutsch
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="pl">
+                    Polski
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="es">
+                    Español
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="ar">
+                    اَلْعَرَبِيَّةُ
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="zh_CN">
+                    简体中文
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="zh_TW">
+                    繁體中文
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="fr">
+                    Français
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="ko">
+                    한국어
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="ru">
+                    русский язык
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="pt_BR">
+                    Português do Brasil
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="sk">
+                    Slovenský jazyk
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="ja">
+                    日本語
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="it">
+                    Italiano
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="vi">
+                    tiếng Việt
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="ca">
+                    Català
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="el">
+                    Ελληνικά
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="fi">
+                    Suomi
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="ro">
+                    Română
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="sl">
+                    Slovenščina
+                  </span>
+              </li>
+              <li>
+                  <span class="dropdown-item " @click="set" value="sv">
+                    Svenska
+                  </span>
+              </li>
+            </ul>
+          </form>
+        </li>
+
+        <li class="nav-item">
+          <button class="nav-link theme-switch" type="button">
+            <span data-bs-toggle="tooltip" data-bs-placement="bottom" title="Toggle theme">
+              <i class="fas fa-sun d-none d-md-inline"></i>
+            </span>
+            <span class="d-sm-inline d-md-none">
+              <i class="fas fa-sun pe-1"></i>
+              Toggle theme
+            </span>
+          </button>
+        </li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<main role="main">
+  
+  <div class="jumbotron">
+    <div class="container">
+      <h1>
+        Login
+      </h1>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="row">
+      <div class="col-md-8 col offset-md-2 col-lg-6 offset-lg-3">
+        <div>
+  
+
+  
+</div>
+
+        
+
+        
+          <form method="post" accept-charset="utf-8">
+            <div class="mb-3">
+              <b><label class="form-label" for="name">User Name or Email</label></b>
+              <input autocomplete="username email" autofocus class="form-control" id="name" name="name" required type="text" value="">
+            </div>
+
+            <div class="mb-3">
+              <b><label class="form-label" for="password">Password</label></b>
+              <input autocomplete="current-password" class="form-control" id="password" name="password" required type="password" value="">
+            </div>
+
+            <div class="row pt-3">
+              <div class="col-6 col-md-8">
+                <a class="align-middle" href="/reset_password">
+                  Forgot your password?
+                </a>
+              </div>
+
+              <div class="col-6 col-md-4">
+                <input class="btn btn-block btn-primary w-100" id="_submit" name="_submit" type="submit" value="Submit">
+              </div>
+            </div>
+
+            <input id="nonce" name="nonce" type="hidden" value="19ca432acc48d0e6c97433e9fca00fab0b3cb1455ac815386d8c96003a7deec9">
+          </form>
+        
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<footer class="footer">
+  <div class="container text-center">
+    <a href="https://ctfd.io" class="text-secondary">
+      <small class="text-muted">
+        Powered by CTFd
+      </small>
+    </a>
+  </div>
+</footer>
+
+<div x-data>
+  <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
+    <div x-ref="toast" class="toast hide" role="alert" aria-live="assertive" aria-atomic="true">
+      <div class="toast-header">
+        <strong class="me-auto" x-text="$store.toast.title"></strong>
+        <small>just now</small>
+        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+      </div>
+      <div class="toast-body" x-html="$store.toast.html">
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<div x-data>
+  <div class="modal fade" x-ref="modal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" x-text="$store.modal.title"></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p x-html="$store.modal.html"></p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Got it!</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+  <script type="module"  src="/themes/core-beta/static/assets/index.8a9f494f.js"></script><script type="module"  src="/themes/core-beta/static/assets/page.811c80a2.js"></script>
+
+
+
+
+
+</body>
+</html>

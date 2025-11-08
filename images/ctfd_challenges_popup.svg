@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <rect width="100%" height="100%" fill="#f5f7fa"/>
+  <rect x="20" y="20" width="1160" height="660" rx="12" ry="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="40" y="70" font-family="Arial, Helvetica, sans-serif" font-size="28" fill="#0f172a">CTFd Challenges Popup (Placeholder)</text>
+  <text x="40" y="115" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="#334155">What to capture:</text>
+  <text x="60" y="140" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="#475569">• The popup with the toolbar (Filter, Hide hidden, bulk buttons, Download)</text>
+  <text x="60" y="165" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="#475569">• The table showing columns including Visible, Solves, Points, Teams, Users</text>
+  <text x="60" y="190" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="#475569">• Sorting indicators on a header</text>
+  <rect x="40" y="220" width="1120" height="400" rx="8" ry="8" fill="#eef2f7" stroke="#cbd5e1"/>
+  <text x="60" y="250" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#475569">Tip: Replace this with a real screenshot (same name, .png or .svg).</text>
+</svg>

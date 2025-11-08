@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AN3S — CTFd Challenges</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="/static/css/shell.css" rel="stylesheet">
+  <link rel="icon" href="/static/favicon.ico">
+  <style>
+    .solve-badges .badge { margin: 2px; }
+    details > summary { cursor: pointer; }
+    /* Smooth progress bar width changes to reduce visual jumping */
+    .progress .progress-bar { transition: width 0.35s ease; }
+    .exp-toggle { font-size: 0.65rem; letter-spacing:0.05em; margin-left:4px; cursor:pointer; user-select:none; }
+    .exp-toggle.disabled { opacity:0.4; pointer-events:none; }
+    /* Make switch groups and small controls wrap nicely on small viewports */
+    @media (max-width: 576px) {
+      .form-check.form-switch { min-width: 160px; }
+      .btn-group.btn-group-sm { flex-wrap: wrap; }
+      .input-group.input-group-sm { width: 100% !important; }
+    }
+  </style>
+  </head>
+<body>
+<header class="app-banner">
+  <div class="container-fluid d-flex align-items-center justify-content-between py-2">
+    <div class="d-flex align-items-center gap-2">
+      <span aria-hidden="true" class="banner-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="5" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="19" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="12" cy="19" r="3" stroke="white" stroke-width="1.5"/>
+          <line x1="7.5" y1="6.5" x2="16.5" y2="6.5" stroke="white" stroke-width="1.5"/>
+          <line x1="10.2" y1="9.2" x2="6.8" y2="16.2" stroke="white" stroke-width="1.5"/>
+          <line x1="13.8" y1="9.2" x2="17.2" y2="16.2" stroke="white" stroke-width="1.5"/>
+        </svg>
+      </span>
+      <span class="banner-title">Acosta Network Scenario Setup System (AN3S)</span>
+    </div>
+    <div class="d-flex align-items-center gap-3" id="banner-user-region" style="min-width:260px;justify-content:flex-end;">
+      <div id="banner-user-label" class="small text-white-50">User: <span id="banner-username" class="text-white">…</span></div>
+      <div class="dropdown">
+        <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Menu</button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><a class="dropdown-item" href="/" data-act="open-settings">Settings</a></li>
+          <li><a class="dropdown-item" href="/static/admin_users.html">Users</a></li>
+          <li><hr class="dropdown-divider" /></li>
+          <li><button class="dropdown-item text-danger" id="banner-logout" type="button">Logout</button></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="banner-overlay" aria-hidden="true"></div>
+</header>
+<div class="container-fluid shell-container">
+  <div class="row g-0">
+    <main class="col-12 shell-content p-3">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <h5 class="m-0">CTFd Challenges</h5>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <div class="btn-group btn-group-sm" role="group" aria-label="Projects selection">
+            <button id="btn-projects" class="btn btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#projectsModal" title="Choose one or more projects">Projects <span id="projects-count" class="badge bg-secondary ms-1">1</span></button>
+          </div>
+          <div class="input-group input-group-sm" style="width:260px; max-width:100%;">
+            <span class="input-group-text">Filter</span>
+            <input id="filter-text" type="text" class="form-control" placeholder="Name, category, team/user" />
+            <button class="btn btn-outline-secondary" type="button" id="filter-clear" title="Clear filter">Clear</button>
+          </div>
+          <div class="form-check form-switch ms-2" title="Use regular expression for filter" data-bs-toggle="tooltip" data-bs-placement="bottom">
+            <input class="form-check-input" type="checkbox" id="toggle-filter-regex">
+            <label class="form-check-label small" for="toggle-filter-regex">Regex</label>
+          </div>
+          <div class="form-check form-switch ms-2" title="Beware: drastically increases fetch time" data-bs-toggle="tooltip" data-bs-placement="bottom">
+            <input class="form-check-input" type="checkbox" id="toggle-detailed-solves">
+            <label class="form-check-label small" for="toggle-detailed-solves">Detailed Solves</label>
+          </div>
+          <div class="form-check form-switch ms-2">
+            <input class="form-check-input" type="checkbox" id="toggle-hide-hidden">
+            <label class="form-check-label small" for="toggle-hide-hidden">Include Hidden</label>
+          </div>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Visibility actions">
+            <button id="btn-set-visible" class="btn btn-outline-success" disabled>Set Visible</button>
+            <button id="btn-set-hidden" class="btn btn-outline-warning" disabled>Set Hidden</button>
+          </div>
+          <button id="btn-refresh" class="btn btn-sm btn-outline-secondary" disabled>Refresh</button>
+          <div class="input-group input-group-sm" style="width:200px; max-width:100%;">
+            <span class="input-group-text">Auto</span>
+            <select id="auto-interval" class="form-select">
+              <option value="0">Off</option>
+              <option value="15">15s</option>
+              <option value="30">30s</option>
+              <option value="60">60s</option>
+              <option value="300">5m</option>
+            </select>
+          </div>
+          <div class="btn-group btn-group-sm">
+            <button id="chals-cols-btn" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">Columns</button>
+            <ul class="dropdown-menu p-2 small" id="chals-cols-menu" style="min-width: 220px;">
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-project">
+                <label class="form-check-label" for="chals-col-project">Project</label>
+              </li>
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-name" checked>
+                <label class="form-check-label" for="chals-col-name">Challenge Name</label>
+              </li>
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-category" checked>
+                <label class="form-check-label" for="chals-col-category">Category</label>
+              </li>
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-solves" checked>
+                <label class="form-check-label" for="chals-col-solves">Solves</label>
+              </li>
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-points" checked>
+                <label class="form-check-label" for="chals-col-points">Points</label>
+              </li>
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-visible" checked>
+                <label class="form-check-label" for="chals-col-visible">Visible</label>
+              </li>
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-teams" checked>
+                <label class="form-check-label" for="chals-col-teams">Teams</label>
+              </li>
+              <li class="form-check">
+                <input class="form-check-input" type="checkbox" id="chals-col-users" checked>
+                <label class="form-check-label" for="chals-col-users">Users</label>
+              </li>
+            </ul>
+          </div>
+          <button id="btn-download" class="btn btn-sm btn-outline-secondary" disabled>Download Data</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <div id="proj-errors" class="alert alert-warning d-none small" role="alert"></div>
+          <div id="progress" class="progress mb-2 d-none" aria-hidden="true">
+            <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%">Loading…</div>
+          </div>
+          <div id="table-wrap" class="table-responsive"></div>
+        </div>
+      </div>
+      <!-- Toasts -->
+      <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 1080">
+        <div id="toast-wrap" class="toast-container"></div>
+      </div>
+    </main>
+  </div>
+ </div>
+<!-- Projects Modal -->
+<div class="modal fade" id="projectsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Select Projects</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+          <div class="input-group input-group-sm" style="max-width: 320px;">
+            <span class="input-group-text">Filter</span>
+            <input id="projects-filter" type="text" class="form-control" placeholder="Search by name or tag">
+            <button class="btn btn-outline-secondary" type="button" id="projects-filter-clear">Clear</button>
+          </div>
+          <div class="btn-group btn-group-sm">
+            <button id="projects-select-current" class="btn btn-outline-secondary" type="button">Current</button>
+            <button id="projects-select-all" class="btn btn-outline-secondary" type="button">All</button>
+            <button id="projects-clear" class="btn btn-outline-secondary" type="button">Clear</button>
+          </div>
+        </div>
+        <div id="projects-list" class="list-group" style="max-height: 50vh; overflow: auto;"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button id="projects-apply" type="button" class="btn btn-primary">Apply</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CTFd Login Modal (API Token per Project) -->
+<div class="modal fade" id="ctfdLoginModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">CTFd Login — API Token</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted">Enter an Admin/Teacher API token for each project missing credentials. Projects without a configured CTFd URL must be fixed in the CTFd Manager or project settings.</p>
+        <div id="ctfdLoginList" class="vstack gap-3"></div>
+        <div class="form-check mb-2 mt-2">
+          <input class="form-check-input" type="checkbox" id="chals-save-creds">
+          <label class="form-check-label" for="chals-save-creds" title="If enabled, tokens you enter here will be stored in localStorage instead of only this session.">Save credentials (local browser)</label>
+        </div>
+        <small class="text-muted">If unchecked, tokens are session-only (sessionStorage + ephemeral cookie for popups). When checked, they persist in localStorage on this device only.</small>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button id="ctfdLoginSave" type="button" class="btn btn-primary">Save Tokens</button>
+      </div>
+    </div>
+  </div>
+  </div>
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/shell.js"></script>
+<script src="/static/js/creds.js"></script>
+<script src="/static/js/app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/ctfd_challenges.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', async () => {
+    try {
+      const d = await AUTH.me();
+      const user = d?.user; const nameEl=document.getElementById('banner-username');
+      if(nameEl) nameEl.textContent = user? user.username : 'anonymous';
+      const logoutBtn=document.getElementById('banner-logout');
+      if(logoutBtn){ logoutBtn.addEventListener('click', async ()=>{ await AUTH.logout(); location.href='/'; }); }
+    } catch {}
+  });
+  document.addEventListener('auth-changed', e=>{ const u=e.detail?.user; const nameEl=document.getElementById('banner-username'); if(nameEl) nameEl.textContent = u? u.username : 'anonymous'; });
+</script>
+</body>
+</html>

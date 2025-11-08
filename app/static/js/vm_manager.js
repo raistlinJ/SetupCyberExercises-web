@@ -1,0 +1,2850 @@
+// Backward compatibility shim: open Dock to queue mode
+window.showRemoteQueuePanel = function() {
+  // Backward compatibility: open dock in queue mode
+  try { if (window.ConsoleDock && ConsoleDock.setMode) { ConsoleDock.setMode('queue'); ConsoleDock.setOpen(true); return; } } catch {}
+  try { if (window.shell && shell.logInfo) shell.logInfo('Queue view is now inside the Dock. Use the ▾ menu next to Dock button.'); } catch {}
+};
+window.hideRemoteQueuePanel = function() { /* no-op; legacy */ };
+
+// Project/global data
+let PROJ = null;
+let ALL_PROJECTS = [];
+let SELECTED_PIDS = [];
+let FILTER_TEXT = '';
+let FILTER_IS_REGEX = false;
+let SELECTED_ROWS = new Set();
+let SORT_STATE = { key: 'index', dir: 'asc' };
+let SHOW_PASSWORDS = false;
+let VM_AUTO_REFRESH_ACTIVE = false;
+let ACTION_IN_FLIGHT = false;
+let CURRENT_ACTION = null;
+let ACTION_RUN_ID = 0;
+let FIX_CREDS_IN_PROGRESS = false;
+
+// Column visibility per project
+let VM_COLS = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true };
+function vmColsKey(pid){ return `toolhub.vm.mgr.cols.${pid}`; }
+function readVmCols(pid){ try { const base = { project:false,name:true,cred:true,status:true,state:true,id:true,node:true,template:true,nets:true }; const raw = JSON.parse(sessionStorage.getItem(vmColsKey(pid))||'{}')||{}; return { ...base, ...raw }; } catch { return { project:false,name:true,cred:true,status:true,state:true,id:true,node:true,template:true,nets:true }; } }
+function writeVmCols(pid,obj){ try { sessionStorage.setItem(vmColsKey(pid), JSON.stringify(obj||{})); } catch {} }
+
+// Lightweight HTTP helper (fallback if global http() not provided on this page)
+var http = (typeof window !== 'undefined' && typeof window.http === 'function')
+  ? window.http
+  : (window.http = async function http(method, url, body) {
+      const opts = { method, headers: {}, credentials: 'same-origin' };
+      if (body instanceof FormData) {
+        opts.body = body;
+      } else if (body !== undefined) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      try {
+        (window.shell && shell.logDebug) ? shell.logDebug(`[HTTP] ${method} ${url}`) : null;
+      } catch {}
+      const res = await fetch(url, opts);
+      if (!res.ok) {
+        let msg = res.statusText;
+        try { msg = (await res.text()) || msg; } catch {}
+        throw new Error(msg || `HTTP ${res.status}`);
+      }
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) return res.json();
+      return res.text();
+    });
+
+function normalizeProject(p){
+  if (!p || typeof p !== 'object') return null;
+  const copy = { ...p };
+  copy.id = String(copy.id ?? '').trim();
+  copy.instances = Number(copy.instances ?? 0) || 0;
+  copy.tag = String(copy.tag ?? '');
+  copy.vms = Array.isArray(copy.vms) ? copy.vms : [];
+  copy.credentials = Array.isArray(copy.credentials) ? copy.credentials : [];
+  copy.instance_statuses = Array.isArray(copy.instance_statuses) ? copy.instance_statuses : [];
+  copy.associated_projects = canonicalPidList(copy.associated_projects);
+  return copy;
+}
+function normalizeProjects(list){
+  return (Array.isArray(list) ? list : [])
+    .map(p => normalizeProject(p))
+    .filter(Boolean)
+    .filter(p => p.id);
+}
+
+function canonicalPid(value){ return String(value ?? '').trim(); }
+function canonicalPidList(list){
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(list) ? list : []).forEach(item => {
+    const pid = canonicalPid(item);
+    if (!pid || seen.has(pid)) return;
+    seen.add(pid);
+    out.push(pid);
+  });
+  return out;
+}
+
+// Selected projects persistence (multi-view)
+// Legacy global selection (for migration only)
+const VM_SELECTED_KEY = 'toolhub.vm.mgr.selectedPids.v1';
+function readVmSelected(){
+  try {
+    const v = JSON.parse(sessionStorage.getItem(VM_SELECTED_KEY)||'[]');
+    return canonicalPidList(Array.isArray(v)? v: []);
+  } catch {
+    return [];
+  }
+}
+function writeVmSelected(arr){
+  try { sessionStorage.setItem(VM_SELECTED_KEY, JSON.stringify(canonicalPidList(arr))); } catch {}
+}
+// New: per-project associations map basePid -> [associatedPid,...]
+const VM_ASSOC_MAP_KEY = 'toolhub.vm.mgr.assocMap.v1';
+function vmReadAssocMap(){ try { const raw = sessionStorage.getItem(VM_ASSOC_MAP_KEY); const obj = raw? JSON.parse(raw): {}; return (obj && typeof obj==='object')? obj: {}; } catch { return {}; } }
+function vmWriteAssocMap(obj){ try { sessionStorage.setItem(VM_ASSOC_MAP_KEY, JSON.stringify(obj||{})); } catch {} }
+function vmReadAssoc(basePid){
+  try {
+    const pid = canonicalPid(basePid);
+    if (!pid) return [];
+    const map = vmReadAssocMap();
+    const arr = Array.isArray(map[pid]) ? map[pid] : [];
+    return canonicalPidList(arr);
+  } catch {
+    return [];
+  }
+}
+function vmWriteAssoc(basePid, list){
+  try {
+    const pid = canonicalPid(basePid);
+    if (!pid) return;
+    const arr = canonicalPidList(list).filter(x => x !== pid);
+    const map = vmReadAssocMap();
+    map[pid] = arr;
+    vmWriteAssocMap(map);
+  } catch {}
+}
+function vmMigrateSelectedToAssoc(basePid){
+  try {
+    const pid = canonicalPid(basePid);
+    if (!pid) return;
+    const legacy = readVmSelected();
+    if (!Array.isArray(legacy) || !legacy.length) return;
+    const assoc = canonicalPidList(legacy).filter(x => x !== pid);
+    const map = vmReadAssocMap();
+    if (!Array.isArray(map[pid]) || (map[pid]||[]).length===0) {
+      map[pid] = assoc;
+      vmWriteAssocMap(map);
+    }
+    try { sessionStorage.removeItem(VM_SELECTED_KEY); } catch {}
+  } catch {}
+}
+
+// Proxmox session creds and connection meta
+function proxCredKey(pid){ return `toolhub.vm.mgr.proxCred.${pid}`; }
+function proxMetaKey(pid){ return `toolhub.vm.mgr.proxMeta.${pid}`; }
+function readProxCreds(pid){ try { return JSON.parse(sessionStorage.getItem(proxCredKey(pid))||'{}')||{}; } catch { return {}; } }
+function writeProxCreds(pid,obj){ try { sessionStorage.setItem(proxCredKey(pid), JSON.stringify(obj||{})); } catch {} }
+
+// Utility helpers for conn/meta
+function readProxMeta(pid){ try { return JSON.parse(sessionStorage.getItem(proxMetaKey(pid))||'{}'); } catch { return {}; } }
+function writeProxMeta(pid, obj){ try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj||{})); } catch {} }
+function clearProxSession(pid){ try { sessionStorage.removeItem(proxCredKey(pid)); sessionStorage.removeItem(proxMetaKey(pid)); } catch {} }
+
+// Normalize Proxmox URL to guarantee a scheme for consistent comparisons
+function normalizeUrl(s){ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
+function currentConnSnapshot(proj) {
+  return {
+    url: normalizeUrl(proj?.proxmox_url || ''),
+    apiPort: Number(proj?.proxmox_api_port ?? 8006) || 8006,
+    sshPort: Number(proj?.proxmox_ssh_port ?? 22) || 22,
+  };
+}
+function sameConn(a,b){ return (a.url||'') === (b.url||'') && Number(a.apiPort||0) === Number(b.apiPort||0) && Number(a.sshPort||0) === Number(b.sshPort||0); }
+
+function enforceRefreshDisabledOnConnChange() {
+  if (!PROJ) return;
+  const snap = currentConnSnapshot(PROJ);
+  const meta = readProxMeta(PROJ.id);
+  if (!sameConn(snap, meta)) {
+    // Invalidate session creds and meta; disable Refresh
+    clearProxSession(PROJ.id);
+    updateRefreshState();
+  }
+}
+
+// Wire up column toggles for VM table
+function wireVmCols(){
+  try {
+    const ids = ['project','name','cred','status','state','id','node','template','nets'];
+    ids.forEach(id => {
+      const el = document.getElementById(`vm-col-${id}`);
+      if (!el) return;
+      if (!el._toolhubBound) {
+        el.addEventListener('change', ()=>{
+          const pid = PROJ ? PROJ.id : (getCurrentPid()||'');
+          VM_COLS[id] = !!el.checked;
+          if (pid) writeVmCols(pid, VM_COLS);
+          try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__||[]); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
+        });
+        el._toolhubBound = true;
+      }
+      el.checked = !!VM_COLS[id];
+    });
+  } catch {}
+}
+
+// ARIA helpers and sort icons for table headers
+function ariaSort(key) {
+  if (SORT_STATE.key !== key) return 'none';
+  return SORT_STATE.dir === 'asc' ? 'ascending' : 'descending';
+}
+function sortIcon(key) {
+  if (SORT_STATE.key !== key) return '';
+  const cls = SORT_STATE.dir === 'asc' ? 'bi-caret-up-fill' : 'bi-caret-down-fill';
+  return ' <i class="bi '+cls+'"></i>';
+}
+
+// Map raw Proxmox VM power states to canonical labels, badge classes, and sort weight
+function mapProxmoxPowerState(raw) {
+  const s = String(raw || '').toLowerCase();
+  // Canonical buckets with sort weights (lower comes first when ascending)
+  // Order: running (0) -> starting (1) -> paused/suspended (2) -> stopped (3) -> stopping (4) -> error (5) -> unknown (6)
+  const mk = (label, cls, weight) => ({ label, cls, weight });
+  if (!s) return mk('—', 'bg-secondary', 6);
+  if (['running', 'ok'].includes(s)) return mk('running', 'bg-success', 0);
+  if (['starting', 'prelaunch', 'booting', 'launching'].includes(s)) return mk('starting', 'bg-info text-dark', 1);
+  // 'paused' (Proxmox pause) no longer exposed via UI; keep as suspended-like if encountered
+  if (['paused', 'pause'].includes(s)) return mk('suspended', 'bg-warning text-dark', 2);
+  if (['suspended', 'suspend'].includes(s)) return mk('suspended', 'bg-warning text-dark', 2);
+  if (['stopped', 'down', 'shutoff', 'off', 'halted'].includes(s)) return mk('stopped', 'bg-secondary', 3);
+  if (['stopping', 'shutdown', 'shutting down'].includes(s)) return mk('stopping', 'bg-info text-dark', 4);
+  if (['resetting', 'rebooting', 'reboot'].includes(s)) return mk('rebooting', 'bg-info text-dark', 1);
+  if (['error', 'failed', 'failure', 'crashed', 'internal-error'].includes(s)) return mk('error', 'bg-danger', 5);
+  // Default: show raw string but style as secondary
+  return mk(s, 'bg-secondary', 6);
+}
+
+async function vmLoadProject() {
+  const inputEl = document.getElementById('vm-proj-id');
+  const pid = canonicalPid(inputEl ? inputEl.value : '');
+  if (!pid) { alert('Enter a Project ID'); return; }
+  try {
+    const data = await http('GET', '/api/projects');
+    const list = normalizeProjects(data.projects);
+    ALL_PROJECTS = list;
+    const proj = list.find(p => p.id === pid);
+    if (!proj) {
+      document.getElementById('vm-info').textContent = 'Project not found.';
+      PROJ = null;
+      renderVmTable(null);
+      return;
+    }
+    PROJ = proj;
+    document.getElementById('vm-info').textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
+    try { VM_COLS = readVmCols(PROJ.id); const ids=['name','cred','status','state','id','node','template','nets']; ids.forEach(id=>{ const el=document.getElementById(`vm-col-${id}`); if(el) el.checked = !!VM_COLS[id]; }); } catch {}
+    renderVmTable(proj);
+  updateRefreshState();
+  } catch (e) {
+    alert('Error loading projects: ' + e.message);
+  }
+}
+
+async function vmLoadProjectById(pid) {
+  const id = canonicalPid(pid);
+  if (!id) throw new Error('Missing project id');
+  const data = await http('GET', '/api/projects');
+  const list = normalizeProjects(data.projects);
+  ALL_PROJECTS = list;
+  const proj = list.find(p => p.id === id);
+  const info = document.getElementById('vm-info');
+  if (!proj) { if (info) info.textContent = 'Project not found.'; PROJ = null; renderVmTable(null); return; }
+  PROJ = proj;
+  if (info) info.textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
+  try { VM_COLS = readVmCols(PROJ.id); const ids=['name','cred','status','state','id','node','template','nets']; ids.forEach(id=>{ const el=document.getElementById(`vm-col-${id}`); if(el) el.checked = !!VM_COLS[id]; }); } catch {}
+  renderVmTable(proj);
+  updateRefreshState();
+  enforceRefreshDisabledOnConnChange();
+}
+
+// ---------- Multi-project support ----------
+function getCurrentPid(){ try { return canonicalPid((window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : ''); } catch { return ''; } }
+async function ensureAllProjects(){
+  if (ALL_PROJECTS && ALL_PROJECTS.length) return;
+  try {
+    const d = await http('GET','/api/projects');
+    ALL_PROJECTS = normalizeProjects(d.projects);
+  } catch {
+    ALL_PROJECTS = [];
+  }
+}
+function updateProjectsBadge(){ try { const b=document.getElementById('projects-count'); if(!b) return; const n = (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1) ? SELECTED_PIDS.length : 1; b.textContent=String(n); b.className = 'badge '+(n>1?'bg-primary':'bg-secondary'); } catch {} }
+function renderProjectsList(filter){
+  const host=document.getElementById('projects-list'); if(!host) return;
+  const f=(filter||'').toLowerCase();
+  const cur=String(getCurrentPid()||'');
+  const assoc = cur ? vmReadAssoc(cur) : [];
+  const sel=new Set([...(assoc||[]), ...(cur?[cur]:[])]);
+  const items=(ALL_PROJECTS||[]).filter(p=>!f||String(p.name||'').toLowerCase().includes(f)||String(p.tag||'').toLowerCase().includes(f));
+  host.innerHTML = items.map(p=>{
+  const pid=canonicalPid(p.id);
+    const isCur = cur && pid===cur;
+    const on = sel.has(pid)?'checked':'';
+    const dis = isCur?'disabled':'';
+    const tip = isCur?'title="Current project (always selected)"':'';
+    return `<label class="list-group-item d-flex align-items-center gap-2"><input type="checkbox" class="form-check-input" data-pid="${pid}" ${on} ${dis} ${tip} /><div class="flex-grow-1"><div><strong>${escHtml(p.name)}</strong></div><div class="small text-muted">${escHtml(p.tag||'')}</div></div><span class="badge bg-secondary" title="Instances">${Number(p.instances||0)}</span></label>`;
+  }).join('');
+}
+async function setupProjectsSelector(){
+  await ensureAllProjects();
+  // Migrate legacy selection to per-project associations for current base
+  try { const cur = String(getCurrentPid()||''); if (cur) vmMigrateSelectedToAssoc(cur); } catch {}
+  try {
+    const cur = getCurrentPid();
+    let assoc = cur ? vmReadAssoc(cur) : [];
+    // Prefer backend-provided associations when available
+    try {
+  const proj = (ALL_PROJECTS||[]).find(p => canonicalPid(p.id)===cur);
+      const backend = Array.isArray(proj?.associated_projects) ? proj.associated_projects.map(String) : [];
+      if (backend && backend.length) { vmWriteAssoc(cur, backend); assoc = backend.slice(); }
+    } catch {}
+    SELECTED_PIDS = canonicalPidList((cur && assoc.length) ? [cur, ...assoc] : []);
+  } catch {}
+  updateProjectsBadge();
+  const filter=document.getElementById('projects-filter');
+  const clearBtn=document.getElementById('projects-filter-clear');
+  const selCur=document.getElementById('projects-select-current');
+  const selAll=document.getElementById('projects-select-all');
+  const clr=document.getElementById('projects-clear');
+  const apply=document.getElementById('projects-apply');
+  renderProjectsList(filter?filter.value:'');
+  try {
+    const errEl=document.getElementById('projects-error');
+    if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; }
+  } catch {}
+  if (filter) filter.addEventListener('input', ()=>{
+    renderProjectsList(filter.value||'');
+    try {
+  const errEl=document.getElementById('projects-error');
+  if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; }
+    } catch {}
+  });
+  if (clearBtn) clearBtn.addEventListener('click', ()=>{
+    if (filter){ filter.value=''; renderProjectsList(''); }
+    try {
+      const errEl=document.getElementById('projects-error');
+      if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; }
+    } catch {}
+  });
+  if (selCur) selCur.addEventListener('click', ()=>{
+    const pid=getCurrentPid(); SELECTED_PIDS = canonicalPidList(pid? [pid]: []); renderProjectsList(filter?filter.value:'');
+    try { const errEl=document.getElementById('projects-error'); if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; } } catch {}
+  });
+  if (selAll) selAll.addEventListener('click', ()=>{
+  const cur=getCurrentPid(); const list=(ALL_PROJECTS||[]).map(p=> canonicalPid(p.id)); if (cur && !list.includes(cur)) list.push(cur); SELECTED_PIDS = canonicalPidList(list); renderProjectsList(filter?filter.value:'');
+    try { const errEl=document.getElementById('projects-error'); if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; } } catch {}
+  });
+  if (clr) clr.addEventListener('click', ()=>{
+    const cur=getCurrentPid(); SELECTED_PIDS = canonicalPidList(cur? [cur] : []); renderProjectsList(filter?filter.value:'');
+    try { const errEl=document.getElementById('projects-error'); if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; } } catch {}
+  });
+  if (apply) apply.addEventListener('click', ()=>{
+    try {
+      const previousSelection = Array.isArray(SELECTED_PIDS) ? SELECTED_PIDS.slice() : [];
+      const errEl=document.getElementById('projects-error');
+      if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; }
+      const host=document.getElementById('projects-list');
+      const boxes = host? Array.from(host.querySelectorAll('input[type="checkbox"][data-pid]')) : [];
+    const cur=getCurrentPid();
+    let ids = boxes.filter(b=>b.checked).map(b=> canonicalPid(b.getAttribute('data-pid'))).filter(Boolean);
+    if (cur && !ids.includes(cur)) ids.push(cur);
+  const tagMap = new Map();
+  const projectsById = new Map((ALL_PROJECTS||[]).map(p => [canonicalPid(p.id), p]));
+      const allIdsForCheck = ids.slice();
+      const conflicts = [];
+      for (const pidRaw of allIdsForCheck) {
+        const pid = canonicalPid(pidRaw);
+        if (!pid) continue;
+        const proj = projectsById.get(pid);
+        if (!proj) continue;
+        const tagRaw = (proj && typeof proj.tag === 'string') ? proj.tag.trim() : '';
+        const tagKey = tagRaw.toLowerCase();
+        if (!tagMap.has(tagKey)) tagMap.set(tagKey, []);
+        tagMap.get(tagKey).push(proj);
+      }
+      for (const [tagKey, list] of tagMap.entries()) {
+        if (!tagKey) {
+          if (list.length > 1) conflicts.push({ tag: '(blank)', projects: list });
+        } else if (list.length > 1) {
+          const anyTag = list[0] && typeof list[0].tag === 'string' ? list[0].tag.trim() : tagKey;
+          conflicts.push({ tag: anyTag || '(blank)', projects: list });
+        }
+      }
+      if (conflicts.length) {
+        const names = conflicts.map(group => {
+          const projNames = group.projects.map(p => p ? p.name : '').filter(Boolean).map(escHtml);
+          return `${projNames.join(', ')} — tag "${escHtml(group.tag)}"`;
+        });
+        if (errEl) {
+          errEl.innerHTML = `<strong>Cannot enter multi-project mode.</strong> Projects must have unique tags.<br>${names.map(n => `<div>${n}</div>`).join('')}`;
+          errEl.classList.remove('d-none');
+          errEl.setAttribute('aria-hidden','false');
+        } else {
+          alert('Cannot select projects with duplicate tags.');
+        }
+  SELECTED_PIDS = canonicalPidList(previousSelection);
+        updateProjectsBadge();
+        updateRefreshState();
+        return;
+      }
+      // Persist per-base associations (exclude current)
+  const assoc = canonicalPidList((ids||[]).filter(x => x !== cur));
+      if (cur) vmWriteAssoc(cur, assoc);
+      // Persist to backend (best-effort)
+      try { if (cur) { http('PATCH', `/api/projects/${encodeURIComponent(cur)}`, { associated_projects: assoc }).catch(()=>{}); } } catch {}
+      // Update runtime selection
+  SELECTED_PIDS = canonicalPidList((cur && assoc.length>0) ? [cur, ...assoc] : [cur].filter(Boolean));
+      updateProjectsBadge();
+      // Force Project column ON when entering multi-mode
+      try {
+        const multi = Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1;
+        if (multi) { VM_COLS.project = true; const chk=document.getElementById('vm-col-project'); if (chk) chk.checked = true; if (PROJ) writeVmCols(PROJ.id, VM_COLS); }
+      } catch {}
+      try { const el = document.getElementById('projectsModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el); m.hide(); } } catch {}
+      try { refreshVmView(); } catch {}
+    } catch {}
+  });
+  const host = document.getElementById('projects-list');
+  if (host) host.addEventListener('change', (e)=>{
+    const cb = e.target && e.target.matches && e.target.matches('input[type="checkbox"][data-pid]') ? e.target : null;
+    if(!cb) return; if (cb.disabled) return;
+    try {
+      const errEl=document.getElementById('projects-error');
+      if (errEl) { errEl.classList.add('d-none'); errEl.setAttribute('aria-hidden','true'); errEl.textContent=''; }
+    } catch {}
+    const pid=canonicalPid(cb.getAttribute('data-pid'));
+    const set=new Set(canonicalPidList(SELECTED_PIDS));
+    if (cb.checked) set.add(pid); else set.delete(pid);
+    const cur=getCurrentPid(); if (cur) set.add(cur);
+    SELECTED_PIDS = canonicalPidList(Array.from(set));
+  });
+}
+function vmIsMulti(){ return Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1; }
+function getActivePids(){ if (vmIsMulti()) return canonicalPidList(SELECTED_PIDS.slice()); const cur=getCurrentPid(); return cur? [cur]: []; }
+function vmClearFilter(){ try { const el=document.getElementById('vm-filter'); if (el) el.value=''; FILTER_TEXT=''; } catch {} try { if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__||[]); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); } }
+
+async function refreshVmView(){
+  await ensureAllProjects();
+  // Capture the active project IDs at the start to prevent race conditions
+  const startPids = getActivePids();
+  const pids = startPids.slice();
+  if (pids.length <= 1) { const id = pids[0]; if (!id) return; await vmLoadProjectById(id); return; }
+  const byId = {}; (ALL_PROJECTS||[]).forEach(p=> { const key = canonicalPid(p.id); if (key) byId[key] = p; });
+  const ok = []; const skipped = [];
+  for (const pid of pids) {
+  const key = canonicalPid(pid);
+  const proj = byId[key]; if (!proj) continue;
+    const tokenOk = !!(proj && typeof proj.proxmox_api_token === 'string' && proj.proxmox_api_token.trim());
+    const sess = readProxCreds(pid)||{}; const sessOk = !!(sess.username && sess.password);
+    if (tokenOk || sessOk) ok.push(pid); else skipped.push(pid);
+  }
+  const note = document.getElementById('vm-skipped-note');
+  if (note) {
+    if (skipped.length) {
+      const items = skipped.map(id=>{
+        const keyId = canonicalPid(id);
+        const p = byId[keyId]; const name = escHtml(p?.name || keyId);
+        return `<li class="mb-1">`+
+               `<span class="badge bg-light text-dark me-2">${name}</span>`+
+               `<button class="btn btn-sm btn-outline-primary" onclick="openProxLoginForPid('${keyId.replace(/['"\\]/g,'\\$&')}')">Fix Creds</button>`+
+               `</li>`;
+      }).join('');
+      // Persist the skipped IDs on the note element so other handlers (Fix All) can access them
+      try { note.dataset.skipped = JSON.stringify(skipped); } catch {}
+      // Render the alert with per-project Fix Creds and a Fix All action
+      note.innerHTML = `<div class="alert alert-warning py-2 px-3 small">`+
+                       `<div class="mb-1">Some projects were skipped due to missing Proxmox credentials or API token:</div>`+
+                       `<ul class="mb-2">${items}</ul>`+
+                       `<div class="d-flex gap-2">`+
+                       `<button class="btn btn-sm btn-primary" onclick="fixAllCredsFromNote()">Fix All Creds</button>`+
+                       `<button class="btn btn-sm btn-outline-secondary" onclick="vmRefresh()">Refresh</button>`+
+                       `</div>`+
+                       `</div>`;
+      // Auto-open the first skipped project's login once per session (with user-friendly prompt)
+      try {
+        const AUTO_KEY = 'toolhub.vm.mgr.autoOpenFixCreds.v1';
+        if (!sessionStorage.getItem(AUTO_KEY) && skipped.length > 0) {
+          sessionStorage.setItem(AUTO_KEY, '1');
+          // Show a more user-friendly prompt instead of auto-opening
+          const firstKey = canonicalPid(skipped[0]);
+          const firstProj = byId[firstKey];
+          const projName = firstProj?.name || firstKey;
+          
+          // Add a dismissible helper banner
+          const helperBanner = document.createElement('div');
+          helperBanner.className = 'alert alert-info alert-dismissible fade show py-2 px-3 small mt-2';
+          helperBanner.innerHTML = `
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            <div class="mb-1"><strong>👋 Need help getting started?</strong></div>
+            <div class="mb-2">Click "Fix All Creds" above to quickly configure credentials for all projects, or click individual "Fix Creds" buttons for each project.</div>
+            <div>
+              <button class="btn btn-sm btn-outline-primary" onclick="fixAllCredsFromNote(); this.closest('.alert').remove();">
+                Configure All Now
+              </button>
+            </div>
+          `;
+          
+          // Insert after the warning note
+          if (note.parentNode) {
+            note.parentNode.insertBefore(helperBanner, note.nextSibling);
+          }
+        }
+      } catch {}
+    } else { note.innerHTML = ''; }
+  }
+  // Show progress bar and start timing
+  const refreshStartTime = performance.now();
+  try {
+    const prog=document.getElementById('vm-progress');
+    if (prog) {
+      prog.classList.remove('d-none');
+      prog.removeAttribute('aria-hidden');
+      const bar=document.getElementById('vm-progress-bar');
+      if (bar){
+        const label = VM_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Refreshing…';
+        bar.textContent = label;
+        bar.style.width='100%';
+        bar.setAttribute('aria-valuenow','100');
+      }
+    }
+  } catch {}
+  const rows = [];
+  try { const d = await http('GET','/api/projects'); ALL_PROJECTS = normalizeProjects(d.projects) || ALL_PROJECTS; } catch {}
+  const mapById = {}; (ALL_PROJECTS||[]).forEach(p=> { const key = canonicalPid(p.id); if (key) mapById[key] = p; });
+  for (const pid of ok) {
+  const key = canonicalPid(pid);
+  const p = mapById[key]; if (!p) continue;
+    await new Promise((resolve) => {
+      queueRemoteAction(`Refresh VMs for project ${p.name||pid}`, async () => {
+        try {
+          const sess = readProxCreds(pid) || {};
+          const body = { username: sess.username||undefined, password: sess.password||undefined, baseUrl: p.proxmox_url||undefined, apiPort: p.proxmox_api_port||undefined, verifySSL: p.proxmox_verify_ssl !== false };
+          const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
+          const statuses = resp.instance_statuses || [];
+          const statusMap = new Map(statuses.map(s=> [Number(s.index||0), s]));
+          const hasAnyStatus = statuses.length>0;
+          const inst = Number(p.instances||0); const tag = String(p.tag||'').trim(); const vms = p.vms||[]; const creds = p.credentials||[];
+          for (let i=1;i<=inst;i++){
+            const suffix = `${tag}${i}`; const cred = creds[i-1]||{}; const uname=(cred.username??'').trim(); const pword=cred.password??''; const st = statusMap.get(i)||{}; const details = Array.isArray(st.vm_details)? st.vm_details : []; const detailMap = new Map(details.map(d=> [String(d.name||''), d]));
+            for (const v of vms){ const vmName = `${v.name}${suffix}`; const d2 = detailMap.get(vmName)||null; const rowStatus = hasAnyStatus ? (d2 ? 'created':'missing') : 'n/a'; rows.push({ pid, project:p.name, index:i, vmName, uname, pword, status: rowStatus, detail:d2, instStatus: st }); }
+          }
+        } catch (e) { try { (window.shell && shell.logWarn)? shell.logWarn(`Refresh skipped for ${p?.name||pid}: ${e?.message||e}`) : console.warn('Refresh skipped', pid, e); } catch {} }
+        resolve();
+      });
+    });
+  }
+  // Also show config-only rows for skipped projects so the table isn't empty and Project column can be sorted/seen
+  try {
+    for (const pid of skipped) {
+  const key = canonicalPid(pid);
+  const p = mapById[key]; if (!p) continue;
+      const inst = Number(p.instances||0); const tag = String(p.tag||'').trim(); const vms = p.vms||[]; const creds = p.credentials||[];
+      for (let i=1;i<=inst;i++){
+        const suffix = `${tag}${i}`; const cred = creds[i-1]||{}; const uname=(cred.username??'').trim(); const pword=cred.password??'';
+  for (const v of vms){ const vmName = `${v.name}${suffix}`; rows.push({ pid, project:p.name, index:i, vmName, uname, pword, status: 'n/a', detail:null, instStatus: null }); }
+      }
+    }
+  } catch {}
+  // Only update the UI if we're still viewing the same set of projects
+  const currentPids = getActivePids();
+  const sameSelection = startPids.length === currentPids.length && startPids.every(pid => currentPids.includes(pid));
+  
+  if (sameSelection) {
+    window.__MERGED_ROWS__ = rows;
+    try {
+      const projCount = new Set(rows.map(r => canonicalPid(r.pid))).size;
+      const vmCount = rows.length;
+      (window.shell && shell.logDebug) ? shell.logDebug(`VM Manager: rendering ${vmCount} row(s) across ${projCount} project(s).`) : console.debug('VM Manager rows:', vmCount, 'projects:', projCount);
+    } catch {}
+    renderMergedVmTable(rows);
+  } else {
+    try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: completed but project selection changed, discarding results') : console.log('VM Refresh: project selection changed, discarding'); } catch {}
+  }
+  
+  // Log refresh time for performance monitoring
+  const refreshEndTime = performance.now();
+  const refreshDuration = Math.round(refreshEndTime - refreshStartTime);
+  try {
+    if (window.shell && shell.logInfo) {
+      shell.logInfo(`VM Refresh completed in ${refreshDuration}ms`);
+    } else {
+      console.log(`VM Refresh completed in ${refreshDuration}ms`);
+    }
+  } catch {}
+  
+  try { const prog=document.getElementById('vm-progress'); if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden','true'); } } catch {}
+}
+
+function renderMergedVmTable(rows){
+  const host = document.getElementById('vm-table'); if (!host) return;
+  const f = (FILTER_TEXT||'').toLowerCase().trim();
+  const allRows = Array.isArray(rows) ? rows : [];
+  if (!allRows.length) {
+    host.innerHTML = '<div class="alert alert-info mb-0">No VM definitions are available for the selected projects. Configure VMs on the Configuration page or adjust the project selection.</div>';
+    return;
+  }
+  let filtered = allRows;
+  if (f) {
+    if (FILTER_IS_REGEX) {
+      let re = null; try { re = new RegExp(FILTER_TEXT, 'i'); } catch { re = null; }
+      const errEl = document.getElementById('vm-filter-error'); if (re) { if (errEl) errEl.classList.add('d-none'); filtered = allRows.filter(r => { const d=r.detail||{}; const parts=[r.project, r.vmName, r.uname, String(r.status||''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.node) parts.push(String(d.node)); if (d.vmid!==undefined&&d.vmid!==null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id!==undefined&&d.template_id!==null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); const hay=parts.join(' | '); return re.test(hay); }); } else { if (errEl) errEl.classList.remove('d-none'); filtered = []; }
+    } else {
+      const errEl = document.getElementById('vm-filter-error'); if (errEl) errEl.classList.add('d-none');
+      filtered = allRows.filter(r=>{ const d=r.detail||{}; const parts=[r.project, r.vmName, r.uname, String(r.status||''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.node) parts.push(String(d.node)); if (d.vmid!==undefined&&d.vmid!==null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id!==undefined&&d.template_id!==null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); return parts.join(' ').toLowerCase().includes(f); });
+    }
+  }
+  if (!filtered.length) {
+    const reason = f ? 'No VMs match the current filter.' : 'No VM entries were returned for the selected projects.';
+    host.innerHTML = `<div class="alert alert-warning mb-0">${reason}</div>`;
+    return;
+  }
+  // Row/group comparator based on current sort
+  const compare = (a,b)=>{ const dir = SORT_STATE.dir==='desc'?-1:1; const key=SORT_STATE.key; let va,vb; if (key==='index'){ va=a.index; vb=b.index; } else if (key==='project'){ va=(a.project||'').toLowerCase(); vb=(b.project||'').toLowerCase(); } else if (key==='name'){ va=(a.vmName||'').toLowerCase(); vb=(b.vmName||'').toLowerCase(); } else if (key==='cred'){ va=(a.uname||'').toLowerCase(); vb=(b.uname||'').toLowerCase(); } else if (key==='status'){ va=(a.status||'').toLowerCase(); vb=(b.status||'').toLowerCase(); } else if (key==='state'){ va = mapProxmoxPowerState(a.detail&&a.detail.state).weight; vb = mapProxmoxPowerState(b.detail&&b.detail.state).weight; } else if (key==='id'){ va = a.detail&&a.detail.vmid!=null? Number(a.detail.vmid): Number.POSITIVE_INFINITY; vb = b.detail&&b.detail.vmid!=null? Number(b.detail.vmid): Number.POSITIVE_INFINITY; } else if (key==='node'){ va = String(a.detail&&a.detail.node||'').toLowerCase(); vb = String(b.detail&&b.detail.node||'').toLowerCase(); } else if (key==='template'){ const tnA = a.detail&&a.detail.template_name? String(a.detail.template_name):''; const tiA = a.detail&&a.detail.template_id!=null? ('#'+a.detail.template_id):''; const tA=(tnA||tiA).toLowerCase(); const tnB = b.detail&&b.detail.template_name? String(b.detail.template_name):''; const tiB = b.detail&&b.detail.template_id!=null? ('#'+b.detail.template_id):''; const tB=(tnB||tiB).toLowerCase(); va=tA; vb=tB; } else { va=a.index; vb=b.index; } if (va<vb) return -1*dir; if (va>vb) return 1*dir; const nA=(a.vmName||'').toLowerCase(); const nB=(b.vmName||'').toLowerCase(); if (nA<nB) return -1; if (nA>nB) return 1; return 0; };
+  // Group rows by (pid,index) so we can rowspan the credentials once per instance
+  const groups = new Map();
+  for (const r of filtered) {
+    const gk = `${r.pid}|${r.index}`;
+    if (!groups.has(gk)) groups.set(gk, []);
+    groups.get(gk).push(r);
+  }
+  // Sort within each group
+  for (const arr of groups.values()) arr.sort(compare);
+  // Determine group order: by index when sorting by index; otherwise by the compare() of each group's first row
+  const groupKeys = Array.from(groups.keys()).sort((ka,kb)=>{
+    const [pa, ia] = [ka.split('|')[0], Number(ka.split('|')[1])];
+    const [pb, ib] = [kb.split('|')[0], Number(kb.split('|')[1])];
+    if (SORT_STATE.key==='index') return SORT_STATE.dir==='desc' ? (ib-ia) : (ia-ib);
+    // project sort: stable by project, then index
+    if (SORT_STATE.key==='project'){
+      const a0 = (groups.get(ka)||[])[0]; const b0 = (groups.get(kb)||[])[0];
+      if (a0 && b0){ const pA=(a0.project||'').toLowerCase(); const pB=(b0.project||'').toLowerCase(); if (pA<pB) return SORT_STATE.dir==='desc'?1:-1; if (pA>pB) return SORT_STATE.dir==='desc'?-1:1; return ia-ib; }
+      return ia-ib;
+    }
+    const aTop = (groups.get(ka)||[])[0];
+    const bTop = (groups.get(kb)||[])[0];
+    if (aTop && bTop) return compare(aTop,bTop);
+    if (aTop) return -1;
+    if (bTop) return 1;
+    return 0;
+  });
+  // Build header
+  const allSelected = (SELECTED_ROWS.size>0 && filtered.length>0 && filtered.every(r=> SELECTED_ROWS.has(`${r.pid}|${r.index}|${r.vmName}`)));
+  let html = '<table class="table table-sm align-middle"><thead><tr>'+
+             '<th style="width:2.5rem"><input type="checkbox" id="chk-all" '+(allSelected?'checked':'')+' /></th>'+
+             (VM_COLS.project? '<th role="button" aria-sort="'+ariaSort('project')+'" onclick="vmSortBy(\'project\')">Project'+sortIcon('project')+'</th>' : '')+
+             (VM_COLS.name? '<th role="button" aria-sort="'+ariaSort('name')+'" onclick="vmSortBy(\'name\')">Generated VM Names'+sortIcon('name')+'</th>':'')+
+             (VM_COLS.cred? '<th aria-sort="'+ariaSort('cred')+'">'+
+               '<div class="d-flex align-items-center gap-2">'+
+                 '<span role="button" onclick="vmSortBy(\'cred\')">Credentials'+sortIcon('cred')+'</span>'+
+                 '<button type="button" id="btn-toggle-passwords" class="btn btn-sm btn-link p-0" title="Show/Hide passwords" aria-label="Show/Hide passwords">'+
+                   '<span class="bi" id="icon-eye">&#128065;&#xFE0E; </span>'+
+                 '</button>'+
+               '</div>'+
+             '</th>':'')+
+             (VM_COLS.status? '<th role="button" aria-sort="'+ariaSort('status')+'" onclick="vmSortBy(\'status\')">Status'+sortIcon('status')+'</th>':'')+
+             (VM_COLS.state? '<th role="button" aria-sort="'+ariaSort('state')+'" onclick="vmSortBy(\'state\')">State'+sortIcon('state')+'</th>':'')+
+             (VM_COLS.id? '<th role="button" aria-sort="'+ariaSort('id')+'" onclick="vmSortBy(\'id\')">ID'+sortIcon('id')+'</th>':'')+
+             (VM_COLS.node? '<th role="button" aria-sort="'+ariaSort('node')+'" onclick="vmSortBy(\'node\')">Node Name'+sortIcon('node')+'</th>':'')+
+             (VM_COLS.template? '<th role="button" aria-sort="'+ariaSort('template')+'" onclick="vmSortBy(\'template\')">TemplateName/ID'+sortIcon('template')+'</th>':'')+
+             (VM_COLS.nets? '<th>Adaptors</th>':'')+
+             '</tr></thead><tbody>';
+  // Render groups with a single credentials cell per group
+  for (const gk of groupKeys){
+    const arr = groups.get(gk) || [];
+    const rowspan = arr.length || 1;
+    let first = true;
+    for (const r of arr){
+      const d = r.detail||{};
+      const masked = r.pword ? '•'.repeat(Math.min(r.pword.length,12)) : '—';
+      const credText = (r.uname||r.pword) ? `${escHtml(r.uname||'—')} / ${SHOW_PASSWORDS? escHtml(r.pword||'—') : masked}` : 'n/a';
+      let credExtras = '';
+      try {
+        const instStatus = r.instStatus || {};
+        const mgr = instStatus.managers || {};
+        const poolsStatus = String(mgr.pools || '').toLowerCase();
+        const total = Number(mgr.pools_member_total || 0);
+        const count = Number(mgr.pools_member_count || 0);
+        const tipCount = (total || count) ? ` (${count}/${total} in pool)` : '';
+        if (poolsStatus === 'missing') {
+          credExtras = ` <i class="bi bi-people-fill text-white" style="-webkit-text-stroke: 0.5px #6c757d; text-shadow: 0 0 1px #6c757d;" title="No Proxmox pool"></i>`;
+        } else if (poolsStatus === 'ready' || poolsStatus === 'ok' || poolsStatus === 'created') {
+          const memberState = String(mgr.pools_member_state || '').toLowerCase();
+          if (memberState === 'all') {
+            credExtras = ` <i class="bi bi-people-fill text-success" title="Pool exists; all VMs are members${tipCount}"></i>`;
+          } else if (memberState === 'partial') {
+            credExtras = ` <i class="bi bi-people-fill text-warning" title="Pool exists; not all VMs are members${tipCount}"></i>`;
+          } else if (memberState === 'error') {
+            credExtras = ` <i class="bi bi-people-fill text-secondary" title="Pool exists; membership unknown"></i>`;
+          } else {
+            credExtras = ` <i class="bi bi-people-fill text-secondary" title="Pool exists; membership status unknown"></i>`;
+          }
+        } else if (poolsStatus === 'error') {
+          credExtras = ' <i class="bi bi-people text-danger" title="Pool status error"></i>';
+        } else {
+          credExtras = ' <i class="bi bi-people text-secondary" title="Pool state unknown"></i>';
+        }
+      } catch {}
+      const stateHtml = (()=>{ const m = mapProxmoxPowerState(d && d.state); if (!m || m.label==='—') return '<span class=\"text-muted\">—</span>'; return `<span class=\"badge ${m.cls}\">${escHtml(m.label)}</span>`; })();
+      const idHtml = d&&d.vmid!=null? `#${d.vmid}` : '—';
+      const nodeHtml = d&&d.node? escHtml(d.node) : '—';
+      const templateHtml = (()=>{ const tid = d&&d.template_id!=null? `#${d.template_id}`:''; const tn = d&&d.template_name? escHtml(d.template_name):''; const both = [tn, tid].filter(Boolean).join(' '); return both || '—'; })();
+      let adaptorsCell='—'; const nets = Array.isArray(d?.nets)? d.nets: []; if (nets.length){ const ddId = `dd-nets-${r.pid}-${r.index}-${encodeURIComponent(r.vmName)}`; const items = `<li><span class=\"dropdown-item-text small\">${nets.map(escHtml).join(', ')}</span></li>`; adaptorsCell = `<div class=\"dropdown\"><button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" id=\"${ddId}\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">View</button><ul class=\"dropdown-menu\" aria-labelledby=\"${ddId}\">${items}</ul></div>`; }
+      const key=`${r.pid}|${r.index}|${r.vmName}`; const checked = SELECTED_ROWS.has(key)?'checked':'';
+      html += `<tr>`+
+        `<td><input type=\"checkbox\" class=\"row-chk\" data-key=\"${escHtml(key)}\" ${checked} /></td>`+
+        (VM_COLS.project? `<td><span class=\"badge bg-light text-dark\">${escHtml(r.project)}</span></td>` : '')+
+        (VM_COLS.name? `<td>${escHtml(r.vmName)}</td>`:'')+
+        (VM_COLS.cred? (first ? `<td class="font-monospace" rowspan="${rowspan}">`+
+          `<div class="d-flex align-items-center">`+
+            `<div class="flex-grow-1">${credText}</div>`+
+            `<div class="ms-2">${credExtras}</div>`+
+          `</div>`+
+        `</td>` : '') : '')+
+        (VM_COLS.status? `<td>${badgeForStatus('vm', r.status)}</td>`:'')+
+        (VM_COLS.state? `<td>${stateHtml}</td>`:'')+
+        (VM_COLS.id? `<td>${idHtml}</td>`:'')+
+        (VM_COLS.node? `<td>${nodeHtml}</td>`:'')+
+        (VM_COLS.template? `<td>${templateHtml}</td>`:'')+
+        (VM_COLS.nets? `<td>${adaptorsCell}</td>`:'')+
+        `</tr>`;
+      first = false;
+    }
+  }
+  html += '</tbody></table>';
+  host.innerHTML = html;
+  // Wire header checkbox and row checkboxes
+  try {
+    const all = host.querySelector('#chk-all');
+    if (all) all.addEventListener('change', (e)=>{
+      if (e.target.checked) { SELECTED_ROWS = new Set(filtered.map(r=> `${r.pid}|${r.index}|${r.vmName}`)); }
+      else { SELECTED_ROWS.clear(); }
+      renderMergedVmTable(rows);
+      updateRefreshState();
+    });
+    // Eye toggle
+    const eye = host.querySelector('#btn-toggle-passwords');
+    if (eye) eye.addEventListener('click', ()=>{ SHOW_PASSWORDS = !SHOW_PASSWORDS; renderMergedVmTable(rows); });
+    host.querySelectorAll('.row-chk').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const key = String(e.target.getAttribute('data-key'));
+        if (e.target.checked) SELECTED_ROWS.add(key); else SELECTED_ROWS.delete(key);
+        updateRefreshState();
+      });
+    });
+  } catch {}
+}
+
+// Sidebar: create a new project from VM Manager page
+async function createProjectSidebar() {
+  try {
+    const input = document.getElementById('proj-name');
+    const name = (input && input.value ? input.value.trim() : '');
+    if (!name) { alert('Enter a project name.'); return; }
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`VM: creating project "${name}"…`) : console.log('VM: creating project', name); } catch {}
+    const res = await http('POST', '/api/projects', { name });
+    if (input) input.value = '';
+    const pid = (res && (res.id || res.pid)) ? (res.id || res.pid) : '';
+    if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid);
+    // Redirect to configuration page so it loads the new project
+    try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch {}
+    try { if (pid) location.href = '/'; else location.href = '/'; } catch {}
+    try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM: project created') : console.log('VM: project created'); } catch {}
+  } catch (e) {
+    alert('Failed to create project: ' + (e && e.message ? e.message : 'Unknown error'));
+    try { (window.shell && shell.logError) ? shell.logError('VM: create project failed: ' + (e && e.message ? e.message : e)) : console.error('VM: create project failed:', e); } catch {}
+  }
+}
+
+// Sidebar: import a project ZIP from VM Manager page
+async function importProjectSidebar() {
+  const input = document.getElementById('import-file');
+  if (!input || !input.files || !input.files[0]) return;
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  try {
+    await runQueued(`Import project: ${input.files[0].name}`, async () => {
+      try { (window.shell && shell.logInfo) ? shell.logInfo(`VM: importing project from ${input.files[0].name}`) : console.log('VM: importing project from', input.files[0].name); } catch {}
+      const resp = await http('POST', '/api/projects/import', fd);
+      input.value = '';
+      const importedId = (resp && resp.id) || (resp && resp.imported && resp.imported[0] && resp.imported[0].id) || '';
+      if (importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
+      try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('vm'); } catch {}
+      try { if (importedId) await vmLoadProjectById(importedId); } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM: project imported') : console.log('VM: project imported'); } catch {}
+    }, { projectId: getCurrentPid() });
+  } catch (e) {
+    alert('Error importing project: ' + (e && e.message ? e.message : 'Unknown error'));
+    try { (window.shell && shell.logError) ? shell.logError('VM: import project failed: ' + (e && e.message ? e.message : e)) : console.error('VM: import project failed:', e); } catch {}
+  }
+}
+
+// VM Manager: open import options modal before importing
+function openImportOptionsVM() {
+  const input = document.getElementById('import-file');
+  if (!input || !input.files || !input.files[0]) return;
+  const modalEl = document.getElementById('importOptionsVM');
+  if (!modalEl || !window.bootstrap) { return importProjectSidebar(); }
+  try {
+    const c = document.getElementById('impvm-creds');
+    const v = document.getElementById('impvm-vms');
+    const warn = document.getElementById('impvm-vms-warning');
+    if (c) c.checked = true;
+    if (v) v.checked = true;
+    if (warn) warn.style.display = v && v.checked ? 'block' : 'none';
+  } catch {}
+  const m = new bootstrap.Modal(modalEl);
+  m.show();
+  const btn = document.getElementById('impvm-continue');
+  if (btn) {
+    btn.onclick = async () => {
+      const includeCreds = !!document.getElementById('impvm-creds')?.checked;
+      const includeVms = !!document.getElementById('impvm-vms')?.checked;
+      if (includeVms) {
+        const proceed = confirm('Importing VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
+        if (!proceed) return;
+      }
+      try { m.hide(); } catch {}
+      // Pass flags via global FormData appending in importProjectSidebar
+      await importProjectSidebarWithFlags({ includeCreds, includeVms });
+    };
+  }
+}
+// Helper: append flags on import
+async function importProjectSidebarWithFlags(opts) {
+  const input = document.getElementById('import-file');
+    document.addEventListener('project-selected', ()=>{ try { const sel = document.getElementById('vm-auto-interval'); if (sel) sel.value = String(readAuto()||0); apply(); } catch {} });
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  if (opts && typeof opts.includeCreds === 'boolean') fd.append('includeCreds', String(opts.includeCreds));
+  if (opts && typeof opts.includeVms === 'boolean') fd.append('includeVms', String(opts.includeVms));
+  try {
+    await runQueued(`Import project: ${input.files[0].name}`, async () => {
+      try { (window.shell && shell.logInfo) ? shell.logInfo(`VM: importing project from ${input.files[0].name}`) : console.log('VM: importing project from', input.files[0].name); } catch {}
+      const resp = await http('POST', '/api/projects/import', fd);
+      input.value = '';
+      const importedId = (resp && resp.id) || (resp && resp.imported && resp.imported[0] && resp.imported[0].id) || '';
+      if (importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
+      try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('vm'); } catch {}
+      try { if (importedId) await vmLoadProjectById(importedId); } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM: project imported') : console.log('VM: project imported'); } catch {}
+    }, { projectId: getCurrentPid() });
+  } catch (e) {
+    alert('Error importing project: ' + (e && e.message ? e.message : 'Unknown error'));
+    try { (window.shell && shell.logError) ? shell.logError('VM: import project failed: ' + (e && e.message ? e.message : e)) : console.error('VM: import project failed:', e); } catch {}
+  }
+}
+
+async function vmRefresh() {
+  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1) { try { await refreshVmView(); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
+  if (!PROJ) { alert('Load a project first.'); return; }
+  const label = `Refresh VMs for project ${PROJ?.name || PROJ?.id || ''}`.trim();
+  await runQueued(label, async () => {
+    // Capture the project ID at the start to prevent race conditions when switching projects
+    const refreshPid = PROJ.id;
+    try {
+      try { shell.beginActionContext('VM Refresh'); } catch {}
+      try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: starting…') : console.log('VM Refresh: starting…'); } catch {}
+      // Show progress bar
+      try {
+        const prog = document.getElementById('vm-progress');
+        if (prog) {
+          prog.classList.remove('d-none');
+          prog.removeAttribute('aria-hidden');
+          const bar = document.getElementById('vm-progress-bar');
+          if (bar) {
+            const label = VM_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Refreshing…';
+            bar.textContent = label;
+            bar.style.width = '100%';
+            bar.setAttribute('aria-valuenow','100');
+          }
+        }
+      } catch {}
+      try { shell.step('Progress bar shown'); } catch {}
+      const sess = readProxCreds(refreshPid) || {};
+      const body = { 
+        username: sess.username || undefined, 
+        password: sess.password || undefined, 
+        baseUrl: PROJ.proxmox_url || undefined, 
+        apiPort: PROJ.proxmox_api_port || undefined, 
+        verifySSL: PROJ.proxmox_verify_ssl !== false 
+      };
+      try { shell.step('Prepared refresh body'); } catch {}
+      const resp = await http('POST', `/api/projects/${refreshPid}/instances/refresh/vm`, body);
+      try { shell.step('HTTP response received'); } catch {}
+      // Only update if we're still viewing the same project
+      if (PROJ && PROJ.id === refreshPid) {
+        PROJ.instance_statuses = resp.instance_statuses || [];
+        try {
+          const total = Array.isArray(PROJ.instance_statuses) ? PROJ.instance_statuses.length : 0;
+          (window.shell && shell.logInfo) ? shell.logInfo(`VM Refresh: received ${total} instance status entr${total===1?'y':'ies'}`) : console.log('VM Refresh entries:', total);
+        } catch {}
+        try { shell.step('Statuses stored & logged'); } catch {}
+        renderVmTable(PROJ);
+      } else {
+        try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: completed but project changed, discarding results') : console.log('VM Refresh: project changed, discarding'); } catch {}
+      }
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM Refresh: done') : console.log('VM Refresh: done'); } catch {}
+      try { shell.endActionContext(true); } catch {}
+    } catch (e) {
+      alert('Refresh failed: ' + e.message);
+      try { (window.shell && shell.logError) ? shell.logError('VM Refresh failed: ' + e.message) : console.error('VM Refresh failed:', e); } catch {}
+      try { shell.endActionContext(false); } catch {}
+    } finally {
+      // Hide progress bar
+      try {
+        const prog = document.getElementById('vm-progress');
+        if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden', 'true'); }
+      } catch {}
+    }
+  }, { projectId: PROJ?.id });
+}
+
+// Emit detailed action results to bottom console dock
+function emitActionLogs(actionName, resp) {
+  try {
+    const name = String(actionName || 'Action');
+  const created = Array.isArray(resp?.created) ? resp.created : [];
+    const deleted = Array.isArray(resp?.deleted) ? resp.deleted : [];
+    const skipped = Array.isArray(resp?.skipped) ? resp.skipped : [];
+    const errors = Array.isArray(resp?.errors) ? resp.errors : [];
+    const amb = Array.isArray(resp?.ambiguous) ? resp.ambiguous : [];
+    const started = Array.isArray(resp?.started) ? resp.started : [];
+    const resumed = Array.isArray(resp?.resumed) ? resp.resumed : [];
+    const suspended = Array.isArray(resp?.suspended) ? resp.suspended : [];
+    const poweredOff = Array.isArray(resp?.powered_off) ? resp.powered_off : [];
+    const snapshotted = Array.isArray(resp?.snapshotted) ? resp.snapshotted : [];
+    const restored = Array.isArray(resp?.restored) ? resp.restored : [];
+    const createdUsers = Array.isArray(resp?.created_users) ? resp.created_users : [];
+    const createdPools = Array.isArray(resp?.created_pools) ? resp.created_pools : [];
+    const addedMembers = Array.isArray(resp?.added_members) ? resp.added_members : [];
+    const deletedUsers = Array.isArray(resp?.deleted_users) ? resp.deleted_users : [];
+    const deletedPools = Array.isArray(resp?.deleted_pools) ? resp.deleted_pools : [];
+    const notices = Array.isArray(resp?.notices) ? resp.notices : [];
+    if (created.length) created.forEach(i => {
+      try { shell.logSuccess(`${name}: created ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''} ${i?.node?`on ${i.node}`:''}`); } catch {}
+      try {
+        const dbg = Array.isArray(i?.debug) ? i.debug : [];
+        dbg.forEach(d => { try { shell.logDebug(`${name}: ${d}`); } catch {} });
+      } catch {}
+    });
+    if (deleted.length) deleted.forEach(i => { try { shell.logSuccess(`${name}: deleted ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''} ${i?.node?`on ${i.node}`:''}`); } catch {} });
+    if (started.length) started.forEach(i => { try { shell.logSuccess(`${name}: started ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''}`); } catch {} });
+    if (resumed.length) resumed.forEach(i => { try { shell.logSuccess(`${name}: resumed ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''}`); } catch {} });
+    if (suspended.length) suspended.forEach(i => { try { shell.logSuccess(`${name}: suspended ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''}`); } catch {} });
+    if (poweredOff.length) poweredOff.forEach(i => { try { shell.logSuccess(`${name}: powered off ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''}`); } catch {} });
+    if (snapshotted.length) snapshotted.forEach(i => { try { shell.logSuccess(`${name}: snapshot ${i?.name || ''} ${i?.snapname?`(${i.snapname})`:''} ${i?.vmid?`#${i.vmid}`:''}`); } catch {} });
+    if (restored.length) restored.forEach(i => { try { shell.logSuccess(`${name}: restored ${i?.name || ''} ${i?.snapname?`(${i.snapname})`:''} ${i?.started?'(started)':''}`); } catch {} });
+    if (createdUsers.length) createdUsers.forEach(i => { try { shell.logSuccess(`${name}: user created ${i?.userid || ''}`); } catch {} });
+    if (createdPools.length) createdPools.forEach(i => { try { shell.logSuccess(`${name}: pool created ${i?.pool || ''}${i?.index?` (instance ${i.index})`:''}`); } catch {} });
+    if (addedMembers.length) addedMembers.forEach(i => {
+      try { shell.logSuccess(`${name}: pool member added ${i?.pool || ''} — ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''}${i?.via?` [${i.via}]`:''}`); } catch {}
+      try {
+        const dbg = Array.isArray(i?.debug) ? i.debug : [];
+        dbg.forEach(d => { try { shell.logDebug(`${name}: ${d}`); } catch {} });
+      } catch {}
+    });
+    if (deletedUsers.length) deletedUsers.forEach(i => { try { shell.logSuccess(`${name}: user deleted ${i?.userid || ''}`); } catch {} });
+    if (deletedPools.length) deletedPools.forEach(i => { try { shell.logSuccess(`${name}: pool deleted ${i?.pool || ''}${i?.index?` (instance ${i.index})`:''}`); } catch {} });
+    if (notices.length) notices.forEach(n => { try { shell.logWarn(`${name}: notice — ${n?.reason || n}`); } catch {} });
+    if (skipped.length) skipped.forEach(s => { try { shell.logWarn(`${name}: skipped — ${s?.name || s?.index || ''} ${s?.reason?('('+s.reason+')'):''}`); } catch {} });
+    if (errors.length) errors.forEach(e => { try { shell.logError(`${name}: error — ${e?.name || e?.node || ''} ${e?.reason || ''}`); } catch {} });
+    if (amb.length) amb.forEach(a => { try { shell.logWarn(`${name}: ambiguous — ${a?.name || ''} (${(a?.candidates||[]).length} candidates)`); } catch {} });
+  } catch {}
+}
+
+function renderVmTable(proj) {
+  const host = document.getElementById('vm-table');
+  if (!proj) { host.innerHTML = ''; return; }
+  const inst = Number(proj.instances || 0);
+  const tag = String(proj.tag || '').trim();
+  const vms = proj.vms || [];
+  const statuses = proj.instance_statuses || [];
+  const creds = proj.credentials || [];
+  const statusMap = new Map(statuses.map(s => [Number(s.index||0), s]));
+  const hasAnyStatus = Array.isArray(statuses) && statuses.length > 0;
+  // Build rows
+  const rows = [];
+  for (let i = 1; i <= inst; i++) {
+    const suffix = `${tag}${i}`;
+    const cred = creds[i-1] || {};
+    const uname = (cred.username ?? '').trim();
+    const pword = cred.password ?? '';
+    const st = statusMap.get(i) || {};
+    const details = Array.isArray(st.vm_details) ? st.vm_details : [];
+    const detailMap = new Map(details.map(d => [String(d.name||''), d]));
+    for (const v of vms) {
+      const vmName = `${v.name}${suffix}`;
+      const d = detailMap.get(vmName) || null;
+      const key = `${i}|${vmName}`;
+      // Before first refresh, default to N/A; afterwards, show created/missing
+      const rowStatus = hasAnyStatus ? (d ? 'created' : 'missing') : 'n/a';
+      rows.push({ key, index: i, vmName, uname, pword, status: rowStatus, detail: d });
+    }
+  }
+  // Apply filter
+  const f = (FILTER_TEXT || '').toLowerCase().trim();
+  let filtered = rows;
+  if (f) {
+    if (FILTER_IS_REGEX) {
+      let re = null;
+      try { re = new RegExp(FILTER_TEXT, 'i'); } catch { re = null; }
+      const errEl = document.getElementById('vm-filter-error');
+      if (re) {
+        if (errEl) errEl.classList.add('d-none');
+        filtered = rows.filter(r => {
+          const d = r.detail || {};
+          const parts = [r.vmName, r.uname, String(r.status||''), String(r.index)];
+          if (d.state) parts.push(String(d.state));
+          if (d.node) parts.push(String(d.node));
+          if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid));
+          if (d.template_name) parts.push(String(d.template_name));
+          if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id));
+          if (Array.isArray(d.nets)) parts.push(d.nets.join(' '));
+          const hay = parts.join(' | ');
+          return re.test(hay);
+        });
+      } else {
+        // invalid regex; show nothing and display inline error
+        if (errEl) errEl.classList.remove('d-none');
+        filtered = [];
+      }
+    } else {
+      const errEl = document.getElementById('vm-filter-error');
+      if (errEl) errEl.classList.add('d-none');
+      filtered = rows.filter(r => {
+        const nameHit = (r.vmName.toLowerCase().includes(f));
+        const userHit = (r.uname.toLowerCase().includes(f));
+        const statusHit = (String(r.status||'').toLowerCase().includes(f));
+        const indexHit = String(r.index).includes(f);
+        const d = r.detail || {};
+        const parts = [];
+        if (d.state) parts.push(String(d.state));
+        if (d.node) parts.push(String(d.node));
+        if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid));
+        if (d.template_name) parts.push(String(d.template_name));
+        if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id));
+        if (Array.isArray(d.nets)) parts.push(d.nets.join(' '));
+        const detailsText = parts.join(' ').toLowerCase();
+        const detailsHit = detailsText.includes(f);
+        return nameHit || userHit || statusHit || indexHit || detailsHit;
+      });
+    }
+  }
+  // Sort rows (we'll sort within instance groups so credentials can be row-spanned once per instance)
+  const compareRows = (a,b) => {
+    const dir = SORT_STATE.dir === 'desc' ? -1 : 1;
+    const key = SORT_STATE.key;
+    let va, vb;
+    if (key === 'index') { va = a.index; vb = b.index; }
+    else if (key === 'name') { va = (a.vmName||'').toLowerCase(); vb = (b.vmName||'').toLowerCase(); }
+    else if (key === 'cred') { va = a.uname.toLowerCase(); vb = b.uname.toLowerCase(); }
+  else if (key === 'status') { va = (a.status||'').toLowerCase(); vb = (b.status||'').toLowerCase(); }
+    else if (key === 'state') {
+      const ma = mapProxmoxPowerState(a.detail && a.detail.state);
+      const mb = mapProxmoxPowerState(b.detail && b.detail.state);
+      va = ma.weight; vb = mb.weight;
+    }
+    else if (key === 'id') {
+      const ia = (a.detail && a.detail.vmid !== undefined && a.detail.vmid !== null) ? Number(a.detail.vmid) : Number.POSITIVE_INFINITY;
+      const ib = (b.detail && b.detail.vmid !== undefined && b.detail.vmid !== null) ? Number(b.detail.vmid) : Number.POSITIVE_INFINITY;
+      va = ia; vb = ib;
+    }
+    else if (key === 'node') {
+      const na = String((a.detail && a.detail.node) || '').toLowerCase();
+      const nb = String((b.detail && b.detail.node) || '').toLowerCase();
+      va = na; vb = nb;
+    }
+    else if (key === 'template') {
+      const tnA = (a.detail && a.detail.template_name) ? String(a.detail.template_name) : '';
+      const tiA = (a.detail && a.detail.template_id !== undefined && a.detail.template_id !== null) ? ('#'+a.detail.template_id) : '';
+      const tA = (tnA || tiA).toLowerCase();
+      const tnB = (b.detail && b.detail.template_name) ? String(b.detail.template_name) : '';
+      const tiB = (b.detail && b.detail.template_id !== undefined && b.detail.template_id !== null) ? ('#'+b.detail.template_id) : '';
+      const tB = (tnB || tiB).toLowerCase();
+      va = tA; vb = tB;
+    }
+    else { va = a.index; vb = b.index; }
+    if (va < vb) return -1*dir;
+    if (va > vb) return 1*dir;
+    // tie-breaker by vm name then id
+    const nA = (a.vmName||'').toLowerCase();
+    const nB = (b.vmName||'').toLowerCase();
+    if (nA < nB) return -1;
+    if (nA > nB) return 1;
+    return 0;
+  };
+  // Group rows by instance index
+  const groups = new Map();
+  for (const r of filtered) {
+    if (!groups.has(r.index)) groups.set(r.index, []);
+    groups.get(r.index).push(r);
+  }
+  // Sort rows within each instance group
+  for (const [idx, arr] of groups.entries()) {
+    arr.sort(compareRows);
+  }
+  // Determine instance order: when sorting by a column other than index, order groups by the first row in each group
+  const instanceOrder = Array.from(groups.keys()).sort((ia, ib) => {
+    if (SORT_STATE.key === 'index') return (SORT_STATE.dir === 'desc' ? ib - ia : ia - ib);
+    const aArr = groups.get(ia) || [];
+    const bArr = groups.get(ib) || [];
+    const aTop = aArr[0];
+    const bTop = bArr[0];
+    if (aTop && bTop) return compareRows(aTop, bTop);
+    if (aTop) return -1;
+    if (bTop) return 1;
+    return 0;
+  });
+  // Render table with conditional columns
+  let html = '<table class="table table-sm align-middle"><thead><tr>'+
+             '<th style="width:2.5rem"><input type="checkbox" id="chk-all" '+(SELECTED_ROWS.size===filtered.length&&filtered.length>0?'checked':'')+' /></th>';
+  if (VM_COLS.name) html += '<th role="button" aria-sort="'+ariaSort('name')+'" onclick="vmSortBy(\'name\')">Generated VM Names'+sortIcon('name')+'</th>';
+  if (VM_COLS.cred) html += '<th aria-sort="'+ariaSort('cred')+'">'+
+               '<div class="d-flex align-items-center gap-2">'+
+                 '<span role="button" onclick="vmSortBy(\'cred\')">Credentials'+sortIcon('cred')+'</span>'+
+                 '<button type="button" id="btn-toggle-passwords" class="btn btn-sm btn-link p-0" title="Show/Hide passwords" aria-label="Show/Hide passwords">'+
+                   '<span class="bi" id="icon-eye">'+
+                     (SHOW_PASSWORDS ? '&#128065;&#xFE0E; ' : '&#128065;&#xFE0E; ')+'\n'+
+                   '</span>'+
+                 '</button>'+
+               '</div>'+
+             '</th>';
+  if (VM_COLS.status) html += '<th role="button" aria-sort="'+ariaSort('status')+'" onclick="vmSortBy(\'status\')">Status'+sortIcon('status')+'</th>';
+  if (VM_COLS.state) html += '<th role="button" aria-sort="'+ariaSort('state')+'" onclick="vmSortBy(\'state\')">State'+sortIcon('state')+'</th>';
+  if (VM_COLS.id) html += '<th role="button" aria-sort="'+ariaSort('id')+'" onclick="vmSortBy(\'id\')">ID'+sortIcon('id')+'</th>';
+  if (VM_COLS.node) html += '<th role="button" aria-sort="'+ariaSort('node')+'" onclick="vmSortBy(\'node\')">Node Name'+sortIcon('node')+'</th>';
+  if (VM_COLS.template) html += '<th role="button" aria-sort="'+ariaSort('template')+'" onclick="vmSortBy(\'template\')">TemplateName/ID'+sortIcon('template')+'</th>';
+  if (VM_COLS.nets) html += '<th>Adaptors</th>';
+  html += '</tr></thead><tbody>';
+  for (const idx of instanceOrder) {
+    const group = groups.get(idx) || [];
+    const rowspan = group.length;
+    let first = true;
+    for (const r of group) {
+    const masked = r.pword ? '•'.repeat(Math.min(r.pword.length, 12)) : '—';
+    const credText = (r.uname || r.pword) ? `${escHtml(r.uname || '—')} / ${SHOW_PASSWORDS ? escHtml(r.pword || '—') : masked}` : 'n/a';
+  const checked = SELECTED_ROWS.has(r.key) ? 'checked' : '';
+    const d = r.detail || {};
+    const stateHtml = (() => {
+      const m = mapProxmoxPowerState(d && d.state);
+      if (!m || m.label === '—') return '<span class="text-muted">—</span>';
+      return `<span class="badge ${m.cls}">${escHtml(m.label)}</span>`;
+    })();
+  const idHtml = (d && d.vmid !== undefined && d.vmid !== null) ? `#${d.vmid}` : '—';
+    const nodeHtml = d && d.node ? escHtml(d.node) : '—';
+    const templateHtml = (() => {
+      const tid = (d && d.template_id !== undefined && d.template_id !== null) ? `#${d.template_id}` : '';
+      const tn = (d && d.template_name) ? escHtml(d.template_name) : '';
+      const both = [tn, tid].filter(Boolean).join(' ');
+      return both || '—';
+    })();
+    // Adaptors dropdown (single VM)
+    let adaptorsCell = '—';
+    const nets = Array.isArray(d?.nets) ? d.nets : [];
+    if (nets.length) {
+      const ddId = `dd-nets-${r.index}-${encodeURIComponent(r.vmName)}`;
+      const items = `<li><span class="dropdown-item-text small">${nets.map(escHtml).join(', ')}</span></li>`;
+      adaptorsCell = `<div class="dropdown">`+
+                     `<button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" id="${ddId}" data-bs-toggle="dropdown" aria-expanded="false">View</button>`+
+                     `<ul class="dropdown-menu" aria-labelledby="${ddId}">${items}</ul>`+
+                     `</div>`;
+    }
+    // Credentials cell extras: Proxmox pool icon colored by status
+    let credExtras = '';
+    try {
+      const instStatus = statusMap.get(r.index) || {};
+      const mgr = instStatus.managers || {};
+      const poolsStatus = String(mgr.pools || '').toLowerCase();
+      const total = Number(mgr.pools_member_total || 0);
+      const count = Number(mgr.pools_member_count || 0);
+      const tipCount = (total || count) ? ` (${count}/${total} in pool)` : '';
+      // Color rules:
+      // - white: pool missing (no pool)
+      // - yellow: pool exists but not all configured VMs are members
+      // - green: pool exists and all configured VMs are members
+      if (poolsStatus === 'missing') {
+        credExtras = ` <i class="bi bi-people-fill text-white" style="-webkit-text-stroke: 0.5px #6c757d; text-shadow: 0 0 1px #6c757d;" title="No Proxmox pool"></i>`;
+      } else if (poolsStatus === 'ready' || poolsStatus === 'ok' || poolsStatus === 'created') {
+        const memberState = String(mgr.pools_member_state || '').toLowerCase();
+        if (memberState === 'all') {
+          credExtras = ` <i class="bi bi-people-fill text-success" title="Pool exists; all VMs are members${tipCount}"></i>`;
+        } else if (memberState === 'partial') {
+          credExtras = ` <i class="bi bi-people-fill text-warning" title="Pool exists; not all VMs are members${tipCount}"></i>`;
+        } else if (memberState === 'error') {
+          credExtras = ` <i class="bi bi-people-fill text-secondary" title="Pool exists; membership unknown"></i>`;
+        } else {
+          credExtras = ` <i class="bi bi-people-fill text-secondary" title="Pool exists; membership status unknown"></i>`;
+        }
+      } else if (poolsStatus === 'error') {
+        credExtras = ' <i class="bi bi-people text-danger" title="Pool status error"></i>';
+      } else {
+        credExtras = ' <i class="bi bi-people text-secondary" title="Pool state unknown"></i>';
+      }
+    } catch {}
+  html += `<tr>`+
+      `<td><input type="checkbox" class="row-chk" data-key="${escHtml(r.key)}" ${checked} /></td>`+
+              (VM_COLS.name ? `<td>${escHtml(r.vmName)}</td>` : '')+
+              (VM_COLS.cred ? (first ? `<td class=\"font-monospace\" rowspan=\"${rowspan}\">`+
+                `<div class=\"d-flex align-items-center\">`+
+                  `<div class=\"flex-grow-1\">${credText}</div>`+
+                  `<div class=\"ms-2\">${credExtras}</div>`+
+                `</div>`+
+              `</td>` : '') : '')+
+              (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}</td>` : '')+
+              (VM_COLS.state ? `<td>${stateHtml}</td>` : '')+
+              (VM_COLS.id ? `<td>${idHtml}</td>` : '')+
+              (VM_COLS.node ? `<td>${nodeHtml}</td>` : '')+
+              (VM_COLS.template ? `<td>${templateHtml}</td>` : '')+
+              (VM_COLS.nets ? `<td>${adaptorsCell}</td>` : '')+
+              `</tr>`;
+      first = false;
+    }
+  }
+  html += '</tbody></table>';
+  host.innerHTML = html;
+  // Wire row checkboxes and header checkbox
+  const all = host.querySelector('#chk-all');
+  if (all) all.addEventListener('change', (e) => {
+  if (e.target.checked) { SELECTED_ROWS = new Set(filtered.map(r=>r.key)); }
+    else { SELECTED_ROWS.clear(); }
+    renderVmTable(PROJ);
+    updateRefreshState();
+  });
+  // Wire eye icon toggle
+  const eye = host.querySelector('#btn-toggle-passwords');
+  if (eye) eye.addEventListener('click', ()=>{ SHOW_PASSWORDS = !SHOW_PASSWORDS; renderVmTable(PROJ); });
+  host.querySelectorAll('.row-chk').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      const key = String(e.target.getAttribute('data-key'));
+      if (e.target.checked) SELECTED_ROWS.add(key); else SELECTED_ROWS.delete(key);
+      updateRefreshState();
+    });
+  });
+}
+
+// Sorting handler
+function vmSortBy(key){
+  if (SORT_STATE.key === key) {
+    SORT_STATE.dir = SORT_STATE.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    SORT_STATE.key = key;
+    SORT_STATE.dir = 'asc';
+  }
+  try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__||[]); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
+}
+
+function badgeForStatus(name, value) {
+  const label = { vm: 'VM' }[name] || name;
+  const v = String(value || '').toLowerCase();
+  const cls = v === 'ready' || v === 'ok' || v === 'created' ? 'bg-success' : (v === 'error' ? 'bg-danger' : (v === 'pending' ? 'bg-warning text-dark' : (v === 'missing' ? 'bg-secondary' : 'bg-secondary')));
+  const text = v ? v : 'n/a';
+  return `<span class="badge ${cls}">${label}: ${escHtml(text)}</span>`;
+}
+
+function escHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+
+// Autofill if URL query contains ?id=
+window.addEventListener('DOMContentLoaded', () => {
+  const u = new URL(window.location.href);
+  const id = u.searchParams.get('id');
+  if (id) {
+    const input = document.getElementById('vm-proj-id');
+    if (input) { input.value = id; vmLoadProject(); }
+    else { vmLoadProjectById(id).catch(()=>{}); }
+  }
+  // Initialize tooltip for disabled Refresh button
+  try {
+    if (window.bootstrap) {
+      const wrap = document.getElementById('refresh-wrapper');
+      if (wrap) new bootstrap.Tooltip(wrap);
+    }
+  } catch {}
+  // Ensure modal is a direct child of body to avoid stacking issues
+  try {
+    const modalEl = document.getElementById('proxLoginModal');
+    if (modalEl && modalEl.parentElement !== document.body) {
+      document.body.appendChild(modalEl);
+    }
+    // Also ensure Projects modal is appended to body to prevent gray-backdrop-without-modal issue
+    const projEl = document.getElementById('projectsModal');
+    if (projEl && projEl.parentElement !== document.body) {
+      document.body.appendChild(projEl);
+    }
+    const tmplEl = document.getElementById('tmplResolveModal');
+    if (tmplEl && tmplEl.parentElement !== document.body) {
+      document.body.appendChild(tmplEl);
+    }
+    const summaryEl = document.getElementById('actionSummaryModal');
+    if (summaryEl && summaryEl.parentElement !== document.body) {
+      document.body.appendChild(summaryEl);
+    }
+    const progEl = document.getElementById('actionProgressModal');
+    if (progEl && progEl.parentElement !== document.body) {
+      document.body.appendChild(progEl);
+    }
+  } catch {}
+  // Initialize tooltips in actions bar
+  try {
+    if (window.bootstrap) {
+      document.querySelectorAll('#vm-actions-bar [data-bs-toggle="tooltip"]').forEach(el => {
+        try { new bootstrap.Tooltip(el); } catch {}
+      });
+    }
+  } catch {}
+  // Enable Enter-to-save on Proxmox login modal when all fields are filled
+  const wireProxEnterSubmit = () => {
+    try {
+      const modalEl = document.getElementById('proxLoginModal');
+      if (!modalEl || modalEl._enterBound) return;
+      modalEl.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        // Only trigger from inputs/selects inside the modal
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+        if (tag !== 'INPUT' && tag !== 'SELECT') return;
+        const url = document.getElementById('prox-url')?.value?.trim();
+        const api = document.getElementById('prox-api-port')?.value?.trim();
+        const ssh = document.getElementById('prox-ssh-port')?.value?.trim();
+        const user = document.getElementById('prox-username')?.value?.trim();
+        const pass = document.getElementById('prox-password')?.value ?? '';
+        const allFilled = !!(url && user && pass && api && ssh);
+        const saveBtn = document.getElementById('btn-prox-save');
+        if (allFilled && !(saveBtn && saveBtn.disabled)) {
+          e.preventDefault();
+          e.stopPropagation();
+          try { saveProxCredsFromModal(); } catch {}
+        }
+      });
+      modalEl._enterBound = true;
+    } catch {}
+  };
+  // Wire immediately and after a short delay (modal may be moved into body)
+  wireProxEnterSubmit();
+  setTimeout(wireProxEnterSubmit, 300);
+  // Prefill login modal when clicking the login button
+  const loginBtn = document.getElementById('btn-prox-login');
+  if (loginBtn) loginBtn.addEventListener('click', () => {
+    prefillProxLoginModal();
+    try {
+      const modalEl = document.getElementById('proxLoginModal');
+      if (modalEl && window.bootstrap) {
+        const inst = (bootstrap.Modal.getOrCreateInstance ? bootstrap.Modal.getOrCreateInstance(modalEl) : new bootstrap.Modal(modalEl));
+        inst.show();
+      }
+    } catch {}
+  });
+  updateRefreshState();
+  // If modal inputs are modified, immediately invalidate session creds and disable Refresh
+  const wireConnInputInvalidation = () => {
+    const u = document.getElementById('prox-url');
+    const a = document.getElementById('prox-api-port');
+    const s = document.getElementById('prox-ssh-port');
+  const v = document.getElementById('prox-verify-ssl');
+  const handler = () => { if (PROJ) { clearProxSession(PROJ.id); updateRefreshState(); } };
+  [u,a,s].forEach(el => { if (el && !el._toolhubBound) { el.addEventListener('input', handler); el._toolhubBound = true; } });
+  if (v && !v._toolhubBound) { v.addEventListener('change', handler); v._toolhubBound = true; }
+  };
+  // Try wiring now and again after a tick (modal might be moved to body)
+  wireConnInputInvalidation();
+  setTimeout(wireConnInputInvalidation, 300);
+  // Toggle show passwords
+  // Removed page-level toggle; handled by eye icon in header
+  // Select/Deselect all buttons
+  // Removed Select All / Deselect All page buttons
+  // Filter input
+  const filter = document.getElementById('vm-filter');
+  if (filter) filter.addEventListener('input', (e)=>{ FILTER_TEXT = e.target.value || ''; try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__||[]); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); } });
+  const filterRegex = document.getElementById('vm-filter-regex');
+  if (filterRegex) filterRegex.addEventListener('change', (e) => {
+    FILTER_IS_REGEX = !!e.target.checked;
+    const errEl = document.getElementById('vm-filter-error');
+    if (!FILTER_IS_REGEX && errEl) errEl.classList.add('d-none');
+  try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__||[]); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
+  });
+  // Sidebar: allow pressing Enter in the project name field to create a project
+  try {
+    const nameInput = document.getElementById('proj-name');
+    if (nameInput && !nameInput._toolhubEnterBound) {
+      nameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          try { createProjectSidebar(); } catch {}
+        }
+      });
+      nameInput._toolhubEnterBound = true;
+    }
+  } catch {}
+  // Cross-page: if Configuration page changes URL/ports, disable Refresh here
+  window.addEventListener('proxmox-conn-changed', (e) => {
+    try {
+      const pid = e?.detail?.pid;
+      if (!PROJ || !pid || pid !== PROJ.id) return;
+      clearProxSession(PROJ.id);
+      updateRefreshState();
+    } catch {}
+  });
+
+  // Auto-refresh wiring (per project)
+  // Wire column chooser
+  wireVmCols();
+  // Reflect saved columns on project select
+  document.addEventListener('project-selected', (e)=>{ try { const pid = e.detail||''; if (!pid) return; VM_COLS = readVmCols(pid); const ids=['name','cred','status','state','id','node','template','nets']; ids.forEach(id=>{ const el=document.getElementById(`vm-col-${id}`); if(el) el.checked = !!VM_COLS[id]; }); } catch {} });
+  (function(){
+    let timer = null;
+    function key(){ try { return `toolhub.vm.mgr.auto.${PROJ?PROJ.id:'none'}`; } catch { return 'toolhub.vm.mgr.auto.none'; } }
+    function readAuto(){ try { const v = sessionStorage.getItem(key()); return parseInt(v||'0',10)||0; } catch { return 0; } }
+    function writeAuto(v){ try { sessionStorage.setItem(key(), String(v||0)); } catch {} }
+    function setAutoBadge(state){
+      try {
+        const badge = document.getElementById('vm-auto-badge');
+        if (!badge) return;
+        if (state === 'off') { badge.textContent = 'Off'; badge.className = 'badge bg-secondary align-self-center ms-1'; return; }
+        if (state === 'auth') { badge.textContent = 'Auth'; badge.className = 'badge bg-warning text-dark align-self-center ms-1'; return; }
+        if (state === 'busy') { badge.textContent = 'Busy'; badge.className = 'badge bg-info text-dark align-self-center ms-1'; return; }
+        if (state === 'on') { badge.textContent = 'On'; badge.className = 'badge bg-success align-self-center ms-1'; return; }
+      } catch {}
+    }
+    function busy(){
+      try { const prog = document.getElementById('vm-progress'); return prog && !prog.classList.contains('d-none'); } catch { return false; }
+    }
+    function apply(){
+      if (timer) { clearInterval(timer); timer = null; }
+      const sel = document.getElementById('vm-auto-interval');
+      const interval = parseInt(sel?.value||'0',10)||0;
+      writeAuto(interval);
+      // Immediately reflect badge state
+      if (interval <= 0) { setAutoBadge('off'); return; }
+      if (!PROJ) { setAutoBadge('off'); return; }
+      if (!hasAuth()) { setAutoBadge('auth'); /* keep timer updating badge so it flips after login */ }
+      else if (busy()) { setAutoBadge('busy'); }
+      else { setAutoBadge('on'); }
+      if (interval>0) {
+        timer = setInterval(()=>{ try {
+          if (!PROJ) { setAutoBadge('off'); return; }
+          if (!hasAuth()) { setAutoBadge('auth'); return; }
+          if (busy()) { setAutoBadge('busy'); return; }
+          setAutoBadge('on');
+          VM_AUTO_REFRESH_ACTIVE = true;
+          let task;
+          try {
+            task = vmRefresh();
+          } catch (err) {
+            VM_AUTO_REFRESH_ACTIVE = false;
+            throw err;
+          }
+          Promise.resolve(task).catch(()=>{}).finally(()=>{ VM_AUTO_REFRESH_ACTIVE = false; });
+        } catch {} }, interval*1000);
+      }
+    }
+    // Update when project changes and on initial load
+    document.addEventListener('project-selected', ()=>{ try { const sel = document.getElementById('vm-auto-interval'); if (sel) sel.value = String(readAuto()||0); apply(); } catch {} });
+    try {
+      const sel = document.getElementById('vm-auto-interval');
+      if (sel) { sel.value = String(readAuto()||0); sel.addEventListener('change', apply); }
+      apply();
+    } catch {}
+  })();
+});
+
+// Initialize Projects selector and merged view behavior
+document.addEventListener('DOMContentLoaded', async () => {
+  try { await ensureAllProjects(); } catch {}
+  try { await setupProjectsSelector(); } catch {}
+  // Adopt CTFd Manager selection if present and VM Manager not already multi
+  try {
+    const raw = sessionStorage.getItem('toolhub.ctfd.mgr.selectedPids.v1');
+    const mgrSel = raw ? JSON.parse(raw) : null;
+    const isMgrMulti = Array.isArray(mgrSel) && mgrSel.length>1;
+    const isVmMulti = Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1;
+    if (isMgrMulti && !isVmMulti) {
+      const known = new Set((ALL_PROJECTS||[]).map(p=> canonicalPid(p.id)));
+      const set = new Set();
+      for (const pid of mgrSel) {
+        const s = canonicalPid(pid);
+        if (s && known.has(s)) set.add(s);
+      }
+      const cur = getCurrentPid();
+      if (cur) set.add(cur);
+  SELECTED_PIDS = canonicalPidList(Array.from(set));
+  writeVmSelected(SELECTED_PIDS);
+      // Persist per-base associations derived from CTFd selection (exclude current)
+      try {
+        const assoc = canonicalPidList(Array.from(set).filter(x => x !== cur));
+        if (cur) {
+          vmWriteAssoc(cur, assoc);
+          http('PATCH', `/api/projects/${encodeURIComponent(cur)}`, { associated_projects: assoc }).catch(()=>{});
+        }
+      } catch {}
+      updateProjectsBadge();
+      // Force Project column ON when entering multi-mode
+      try { VM_COLS.project = true; if (PROJ) writeVmCols(PROJ.id, VM_COLS); const el=document.getElementById('vm-col-project'); if (el) el.checked = true; } catch {}
+    }
+  } catch {}
+  // If multi, keep merged view when sidebar switches current project
+  document.addEventListener('project-selected', (e) => {
+    try {
+      const pid = e.detail || '';
+      if (pid) {
+        // Re-derive selection from per-project associations for new base project
+        try { vmMigrateSelectedToAssoc(pid); } catch {}
+        try {
+            let assoc = vmReadAssoc(pid);
+            // Prefer backend value when available
+            try { const proj = (ALL_PROJECTS||[]).find(p => canonicalPid(p.id)===canonicalPid(pid)); const backend = Array.isArray(proj?.associated_projects)? proj.associated_projects.map(String): []; if (backend && backend.length) { vmWriteAssoc(pid, backend); assoc = backend.slice(); } } catch {}
+          const baseList = (assoc && assoc.length) ? [pid, ...assoc] : [pid];
+          SELECTED_PIDS = canonicalPidList(baseList);
+          updateProjectsBadge();
+        } catch {}
+      }
+      if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1) { e.stopImmediatePropagation(); refreshVmView(); }
+    } catch {}
+  }, true);
+  try { await refreshVmView(); } catch {}
+});
+
+function prefillProxLoginModal() {
+  if (!PROJ) return;
+  const sess = readProxCreds(PROJ.id) || {};
+  const u = document.getElementById('prox-username');
+  const p = document.getElementById('prox-password');
+  const url = document.getElementById('prox-url');
+  const api = document.getElementById('prox-api-port');
+  const ssh = document.getElementById('prox-ssh-port');
+  const vssl = document.getElementById('prox-verify-ssl');
+  if (u) u.value = sess.username || '';
+  if (p) p.value = sess.password || '';
+  if (url) url.value = PROJ.proxmox_url || '';
+  if (api) api.value = PROJ.proxmox_api_port ?? 8006;
+  if (ssh) ssh.value = PROJ.proxmox_ssh_port ?? 22;
+  if (vssl) vssl.checked = (PROJ.proxmox_verify_ssl !== false);
+  // If persistent creds exist in localStorage and session creds missing, adopt them
+  try {
+    const raw = localStorage.getItem(`toolhub.prox.persist.${PROJ.id}`);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (u && !u.value && obj.username) u.value = obj.username;
+      if (p && !p.value && obj.password) p.value = obj.password;
+      const saveBox = document.getElementById('prox-save-creds');
+      if (saveBox) saveBox.checked = true;
+    } else {
+      const saveBox = document.getElementById('prox-save-creds');
+      if (saveBox) saveBox.checked = false;
+    }
+  } catch {}
+}
+
+// Open Proxmox login modal for a specific project id (used by Fix Creds buttons)
+function openProxLoginForPid(pid, options = {}){
+  return new Promise(async (resolve, reject) => {
+    try {
+      await ensureAllProjects();
+  const proj = (ALL_PROJECTS||[]).find(p => canonicalPid(p.id)===canonicalPid(pid));
+      if (!proj) { 
+        const msg = `Project ${pid} not found`;
+        if (options.showErrors !== false) {
+          try { (window.shell && shell.logWarn) ? shell.logWarn(msg) : console.warn(msg); } catch {}
+        }
+        resolve({ success: false, skipped: true, reason: 'not_found' }); 
+        return; 
+      }
+      
+      const prev = PROJ;
+      PROJ = proj;
+      
+      // Update modal title to show which project we're configuring
+      try {
+        const modalTitle = document.getElementById('proxLoginModalLabel');
+        if (modalTitle) {
+          modalTitle.textContent = `Proxmox Login — ${proj.name}`;
+        }
+      } catch {}
+      
+      prefillProxLoginModal();
+      
+      const modalEl = document.getElementById('proxLoginModal');
+      if (!modalEl || !window.bootstrap) {
+        PROJ = prev;
+        resolve({ success: false, skipped: true, reason: 'modal_not_available' });
+        return;
+      }
+      
+      // Track whether credentials were successfully saved
+      let credsSaved = false;
+      const originalSaveHandler = window.saveProxCredsFromModal;
+      
+      // Temporarily wrap the save handler to track success
+      window.saveProxCredsFromModal = async function() {
+        const result = await originalSaveHandler();
+        // Check if credentials were actually saved (session storage has them)
+        const sess = readProxCreds(proj.id) || {};
+        if (sess.username && sess.password) {
+          credsSaved = true;
+        }
+        return result;
+      };
+      
+      const inst = (bootstrap.Modal.getOrCreateInstance ? bootstrap.Modal.getOrCreateInstance(modalEl) : new bootstrap.Modal(modalEl));
+      
+      const cleanup = () => {
+        try { 
+          PROJ = prev;
+          window.saveProxCredsFromModal = originalSaveHandler;
+          // Reset modal title
+          const modalTitle = document.getElementById('proxLoginModalLabel');
+          if (modalTitle) modalTitle.textContent = 'Proxmox Login';
+          // Clear any leftover feedback
+          const feedback = document.getElementById('prox-login-feedback');
+          if (feedback) {
+            feedback.textContent = '';
+            feedback.className = 'me-auto small text-muted';
+          }
+        } catch {}
+      };
+      
+      const onHidden = () => { 
+        cleanup();
+        try { modalEl.removeEventListener('hidden.bs.modal', onHidden); } catch {}
+        resolve({ success: credsSaved, skipped: !credsSaved, projectId: pid, projectName: proj.name });
+      };
+      
+      // Ensure any existing modal instances are properly hidden first
+      try {
+        const existingInstance = bootstrap.Modal.getInstance(modalEl);
+        if (existingInstance) {
+          existingInstance.hide();
+          // Wait a bit for the hide animation
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+      } catch {}
+      
+      modalEl.addEventListener('hidden.bs.modal', onHidden, { once: true });
+      inst.show();
+    } catch (e) {
+      try { (window.shell && shell.logError) ? shell.logError(`Failed to open login for project ${pid}: ${e.message}`) : console.error('openProxLoginForPid error:', e); } catch {}
+      resolve({ success: false, skipped: true, reason: 'error', error: e.message });
+    }
+  });
+}
+
+// Walk through all skipped pids in the note and open login sequentially
+async function fixAllCredsFromNote(){
+  // Prevent concurrent runs
+  if (FIX_CREDS_IN_PROGRESS) {
+    try { (window.shell && shell.logWarn) ? shell.logWarn('Credential setup already in progress') : console.warn('Already in progress'); } catch {}
+    return;
+  }
+  
+  try {
+    FIX_CREDS_IN_PROGRESS = true;
+    
+    const note = document.getElementById('vm-skipped-note');
+    if (!note) return;
+    
+    let arr = [];
+    try { arr = JSON.parse(note.dataset.skipped||'[]'); } catch { arr = []; }
+    if (!Array.isArray(arr) || arr.length===0) return;
+    
+    // Show progress feedback with cancel option
+    const originalHtml = note.innerHTML;
+    const total = arr.length;
+    let completed = 0;
+    let successful = 0;
+    let cancelled = false;
+    
+    const updateProgress = (current, status, showCancel = true) => {
+      note.innerHTML = `<div class="alert alert-info py-2 px-3 small">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <strong>Setting up credentials...</strong>
+          ${showCancel ? '<button class="btn btn-sm btn-outline-secondary" onclick="window.CANCEL_FIX_CREDS=true">Cancel</button>' : ''}
+        </div>
+        <div class="progress mb-2" style="height: 20px;">
+          <div class="progress-bar ${cancelled ? 'bg-warning' : ''}" role="progressbar" style="width: ${(current/total)*100}%" 
+               aria-valuenow="${current}" aria-valuemin="0" aria-valuemax="${total}">
+            ${current} of ${total}
+          </div>
+        </div>
+        <div class="text-muted small">${status || ''}</div>
+      </div>`;
+    };
+    
+    updateProgress(0, 'Starting...');
+    window.CANCEL_FIX_CREDS = false;
+    
+    const results = [];
+    
+    for (let i = 0; i < arr.length; i++) {
+      // Check for cancellation
+      if (window.CANCEL_FIX_CREDS) {
+        cancelled = true;
+        try { (window.shell && shell.logInfo) ? shell.logInfo('Credential setup cancelled by user') : console.log('Cancelled'); } catch {}
+        break;
+      }
+      
+      const pid = String(arr[i]);
+  const proj = (ALL_PROJECTS||[]).find(p => canonicalPid(p.id)===pid);
+      const projName = proj?.name || pid;
+      
+      updateProgress(i, `Configuring: ${projName}`, true);
+      
+      try { 
+        const result = await openProxLoginForPid(pid, { showErrors: false });
+        results.push(result);
+        
+        if (result.success) {
+          successful++;
+          try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Credentials saved for ${projName}`) : console.log(`Creds saved for ${projName}`); } catch {}
+        } else if (!result.skipped) {
+          try { (window.shell && shell.logWarn) ? shell.logWarn(`Skipped ${projName}`) : console.warn(`Skipped ${projName}`); } catch {}
+        }
+      } catch (e) {
+        results.push({ success: false, skipped: true, error: e.message, projectId: pid });
+        try { (window.shell && shell.logError) ? shell.logError(`Error for ${projName}: ${e.message}`) : console.error(`Error for ${projName}:`, e); } catch {}
+      }
+      
+      completed++;
+      updateProgress(completed, completed < total ? `Completed: ${projName}` : 'Finishing...', false);
+    }
+    
+    window.CANCEL_FIX_CREDS = false;
+    
+    // Show final summary
+    const skippedCount = results.filter(r => r.skipped).length;
+    let summaryClass, summaryTitle;
+    
+    if (cancelled) {
+      summaryClass = 'alert-warning';
+      summaryTitle = 'Credential Setup Cancelled';
+    } else if (successful === total) {
+      summaryClass = 'alert-success';
+      summaryTitle = 'Credential Setup Complete';
+    } else if (successful > 0) {
+      summaryClass = 'alert-warning';
+      summaryTitle = 'Credential Setup Partially Complete';
+    } else {
+      summaryClass = 'alert-danger';
+      summaryTitle = 'Credential Setup Failed';
+    }
+    
+    note.innerHTML = `<div class="alert ${summaryClass} py-2 px-3 small">
+      <div class="mb-1"><strong>${summaryTitle}</strong></div>
+      <div>✓ ${successful} of ${completed} project(s) configured successfully</div>
+      ${cancelled ? `<div class="text-muted mt-1">Cancelled after ${completed} of ${total} projects</div>` : ''}
+      ${skippedCount > 0 && !cancelled ? `<div class="text-muted mt-1">${skippedCount} project(s) skipped or cancelled</div>` : ''}
+      ${cancelled && (total - completed) > 0 ? `<div class="text-muted mt-1">${total - completed} project(s) not processed</div>` : ''}
+      <div class="mt-2">
+        ${successful > 0 ? '<button class="btn btn-sm btn-primary" onclick="refreshVmView()">Refresh Now</button>' : ''}
+        ${cancelled && (total - completed) > 0 ? '<button class="btn btn-sm btn-outline-primary" onclick="fixAllCredsFromNote()">Resume Setup</button>' : ''}
+        <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('vm-skipped-note').innerHTML=''">Dismiss</button>
+      </div>
+    </div>`;
+    
+    // Auto-refresh if any were successful and not cancelled
+    if (successful > 0 && !cancelled) {
+      setTimeout(() => {
+        try { refreshVmView(); } catch {}
+      }, 500);
+    }
+    
+  } catch (e) {
+    try { (window.shell && shell.logError) ? shell.logError(`Fix all creds failed: ${e.message}`) : console.error('Fix all creds failed:', e); } catch {}
+    try {
+      const note = document.getElementById('vm-skipped-note');
+      if (note) {
+        note.innerHTML = `<div class="alert alert-danger py-2 px-3 small">
+          <strong>Error:</strong> ${e.message}
+          <button class="btn btn-sm btn-outline-secondary ms-2" onclick="document.getElementById('vm-skipped-note').innerHTML=''">Dismiss</button>
+        </div>`;
+      }
+    } catch {}
+  } finally {
+    FIX_CREDS_IN_PROGRESS = false;
+    window.CANCEL_FIX_CREDS = false;
+  }
+}
+
+async function saveProxCredsFromModal() {
+  if (!PROJ) { 
+    alert('Select a project first.'); 
+    return Promise.reject(new Error('No project selected'));
+  }
+  
+  const u = document.getElementById('prox-username')?.value?.trim() || '';
+  const p = document.getElementById('prox-password')?.value || '';
+  let url = document.getElementById('prox-url')?.value?.trim() || '';
+  const api = Number(document.getElementById('prox-api-port')?.value || PROJ.proxmox_api_port || 8006);
+  const ssh = Number(document.getElementById('prox-ssh-port')?.value || PROJ.proxmox_ssh_port || 22);
+  const verifySSL = !!document.getElementById('prox-verify-ssl')?.checked;
+  
+  // Normalize URL to include scheme if user omitted it
+  const ensureScheme = (s) => { if (!s) return ''; return (/^https?:\/\//i.test(s) ? s : `https://${s}`); };
+  if (url) url = ensureScheme(url);
+  let effectiveUrl = url || (PROJ.proxmox_url ? ensureScheme(PROJ.proxmox_url) : '');
+  
+  // Basic front-end validation to avoid backend 400s
+  const feedback = document.getElementById('prox-login-feedback');
+  const saveBtn = document.getElementById('btn-prox-save');
+  
+  if (!effectiveUrl) {
+    if (feedback) { 
+      feedback.textContent = 'Please enter a valid Proxmox URL (e.g., https://host or host).'; 
+      feedback.className = 'me-auto small text-danger'; 
+    }
+    try { sessionStorage.removeItem(proxCredKey(PROJ.id)); } catch {}
+    updateRefreshState();
+    return Promise.reject(new Error('Invalid URL'));
+  }
+  
+  if (!u || !p) {
+    if (feedback) { 
+      feedback.textContent = 'Please provide both username and password.'; 
+      feedback.className = 'me-auto small text-danger'; 
+    }
+    try { sessionStorage.removeItem(proxCredKey(PROJ.id)); } catch {}
+    updateRefreshState();
+    return Promise.reject(new Error('Missing credentials'));
+  }
+  // Optimistically save credentials
+  writeProxCreds(PROJ.id, { username: u, password: p });
+  
+  try {
+    const saveBox = document.getElementById('prox-save-creds');
+    if (saveBox && saveBox.checked) {
+      // Store in localStorage for persistence across sessions (still client-only)
+      localStorage.setItem(`toolhub.prox.persist.${PROJ.id}`, JSON.stringify({ username: u, password: p }));
+    } else {
+      localStorage.removeItem(`toolhub.prox.persist.${PROJ.id}`);
+    }
+  } catch {}
+  
+  // Show connecting feedback and attempt a lightweight call
+  if (feedback) { feedback.textContent = 'Connecting...'; feedback.className = 'me-auto small text-muted'; }
+  try { (window.shell && shell.logInfo) ? shell.logInfo('Proxmox login: connecting…') : console.log('Proxmox login: connecting…'); } catch {}
+  if (saveBtn) saveBtn.disabled = true;
+  
+  // Return a promise that resolves when verification completes
+  return (async () => {
+    try {
+      // Sync config first so Configuration reflects any changes to URL/ports
+      await http('PATCH', `/api/projects/${PROJ.id}`, {
+        proxmox_url: effectiveUrl,
+        proxmox_api_port: api,
+        proxmox_ssh_port: ssh,
+        proxmox_verify_ssl: verifySSL,
+      });
+      // Update local PROJ so subsequent calls use the updated values
+      PROJ.proxmox_url = effectiveUrl;
+      PROJ.proxmox_api_port = api;
+      PROJ.proxmox_ssh_port = ssh;
+      PROJ.proxmox_verify_ssl = verifySSL;
+      // Verify both API and SSH connectivity before declaring success (queued)
+      const verifyBody = { baseUrl: effectiveUrl, apiPort: api, sshPort: ssh, verifySSL, username: u, password: p };
+      let verify;
+      try {
+  await runQueued(`Verify Proxmox login for ${PROJ?.name || PROJ?.id || ''}`, async () => {
+          verify = await http('POST', `/api/projects/${PROJ.id}/proxmox/verify`, verifyBody);
+  }, { projectId: PROJ?.id });
+      } catch (e) {
+        verify = { ok: false, proxmox_ok: false, ssh_ok: false, proxmox_error: e?.message || 'verify failed' };
+      }
+      if (verify && verify.ok) {
+        if (feedback) { feedback.textContent = 'Login verified. Refreshing states…'; feedback.className = 'me-auto small text-success'; }
+        try { (window.shell && shell.logSuccess) ? shell.logSuccess('Proxmox login verified (API + SSH)') : console.log('Proxmox login verified'); } catch {}
+        // Store connection snapshot meta to detect future changes
+        writeProxMeta(PROJ.id, { url: effectiveUrl, apiPort: api, sshPort: ssh });
+        updateRefreshState();
+        try { (window.shell && shell.logInfo) ? shell.logInfo('Auto-refresh after login…') : console.log('Auto-refresh after login…'); } catch {}
+        await vmRefresh();
+      } else {
+        const apiOk = !!(verify && verify.proxmox_ok);
+        const sshOk = !!(verify && verify.ssh_ok);
+        const apiErr = (verify && verify.proxmox_error) ? String(verify.proxmox_error) : '';
+        const sshErr = (verify && verify.ssh_error) ? String(verify.ssh_error) : '';
+        const hint = ' Please double-check your URL, username, password, and that no firewall or NAT is blocking access.';
+        let msg = 'Login could not be verified.';
+        if (!apiOk && !sshOk) msg = 'Neither Proxmox API nor SSH could be reached.';
+        else if (!apiOk) msg = 'Proxmox API could not be reached.';
+        else if (!sshOk) msg = 'SSH could not be reached.';
+        const details = [apiErr, sshErr].filter(Boolean).join(' | ');
+        if (feedback) { feedback.textContent = msg + (details? ' ' + details : '') + hint; feedback.className = 'me-auto small text-danger'; }
+        try { (window.shell && shell.logWarn) ? shell.logWarn(`Proxmox verify failed: ${msg} ${details}`) : console.warn('Proxmox verify failed:', msg, details); } catch {}
+        // Clear session creds on failure so Refresh stays disabled
+        try { sessionStorage.removeItem(proxCredKey(PROJ.id)); } catch {}
+        updateRefreshState();
+        if (saveBtn) saveBtn.disabled = false;
+        return;
+      }
+      // Hide modal after refresh completes
+      try {
+        const modalEl = document.getElementById('proxLoginModal');
+        if (modalEl && window.bootstrap && window.bootstrap.Modal) window.bootstrap.Modal.getInstance(modalEl)?.hide();
+      } catch {}
+      if (feedback) { feedback.textContent = ''; }
+      if (saveBtn) saveBtn.disabled = false;
+      return { success: true, verified: true };
+    } catch (e) {
+      if (feedback) { 
+        feedback.textContent = 'Login failed: ' + (e && e.message ? e.message : 'Unknown error') + ' Please double-check that no firewall or NAT is blocking access.'; 
+        feedback.className = 'me-auto small text-danger'; 
+      }
+      if (saveBtn) saveBtn.disabled = false;
+      // Disable Refresh on failure and clear session creds
+      try { sessionStorage.removeItem(proxCredKey(PROJ.id)); } catch {}
+      updateRefreshState();
+      try { (window.shell && shell.logError) ? shell.logError('Proxmox login failed: ' + (e && e.message ? e.message : 'Unknown error')) : console.error('Proxmox login failed:', e); } catch {}
+      return Promise.reject(e);
+    }
+  })();
+}
+
+function hasSessionCreds() {
+  if (!PROJ) return false;
+  const s = readProxCreds(PROJ.id) || {};
+  return !!(s.username && s.password);
+}
+
+// True when we can authenticate: either session username/password or a saved API token on the project
+function hasAuth() {
+  if (!PROJ) return false;
+  if (hasSessionCreds()) return true;
+  try {
+    const pid = PROJ.id;
+    const cache = (window.PROJ_CACHE && window.PROJ_CACHE[pid]) ? window.PROJ_CACHE[pid] : PROJ;
+    return !!(cache && typeof cache.proxmox_api_token === 'string' && cache.proxmox_api_token.trim().length > 0);
+  } catch {
+    return false;
+  }
+}
+
+function updateRefreshState() {
+  const btn = document.getElementById('btn-refresh');
+  const wrap = document.getElementById('refresh-wrapper');
+  // In multi mode, consider auth across selected project(s)
+  const loggedIn = (vmIsMulti && vmIsMulti()) ? hasAuthForAllSelected() : hasAuth();
+  if (btn) btn.disabled = (vmIsMulti && vmIsMulti()) ? true : !loggedIn;
+  const refreshEnabled = !!(btn && !btn.disabled);
+  // Toggle config-only notice
+  try {
+    const note = document.getElementById('vm-config-only-alert');
+    if (note) {
+      if (vmIsMulti && vmIsMulti()) { note.classList.add('d-none'); note.setAttribute('aria-hidden','true'); }
+      else if (loggedIn) { note.classList.add('d-none'); note.setAttribute('aria-hidden','true'); }
+      else { note.classList.remove('d-none'); note.removeAttribute('aria-hidden'); }
+    }
+  } catch {}
+  // Enable/disable Actions toolbar groups depending on selection and login state
+  try {
+    const anySelected = SELECTED_ROWS && SELECTED_ROWS.size > 0;
+    const disable = !(loggedIn && anySelected);
+  ['act-startup','act-stop','act-state','act-control','act-users'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = disable;
+    });
+  } catch {}
+  // Manage tooltip enable/disable
+  try {
+    if (wrap && window.bootstrap) {
+      const tip = bootstrap.Tooltip.getInstance(wrap) || new bootstrap.Tooltip(wrap);
+      if (refreshEnabled) {
+        try { tip.hide(); } catch {}
+        tip.disable();
+        ['title','data-bs-original-title','aria-label'].forEach(attr => wrap.removeAttribute(attr));
+        wrap.removeAttribute('tabindex');
+      } else {
+        tip.enable();
+        wrap.setAttribute('tabindex','0');
+        wrap.setAttribute('title','Please log in to Proxmox first.');
+        wrap.setAttribute('data-bs-original-title','Please log in to Proxmox first.');
+      }
+    }
+    // Ensure Users group tooltip is initialized
+    const ug = document.getElementById('users-group');
+    if (ug && window.bootstrap) {
+      bootstrap.Tooltip.getInstance(ug) || new bootstrap.Tooltip(ug);
+    }
+  } catch {}
+}
+
+// Helpers: per-project auth checks in multi-mode
+function hasAuthForPid(pid){
+  try {
+    const sess = readProxCreds(pid)||{}; if (sess.username && sess.password) return true;
+  const p = (ALL_PROJECTS||[]).find(pp => canonicalPid(pp.id)===canonicalPid(pid));
+    return !!(p && typeof p.proxmox_api_token === 'string' && p.proxmox_api_token.trim());
+  } catch { return false; }
+}
+function parseKeyMulti(key){
+  const parts = String(key||'').split('|');
+  if (parts.length===3) return { pid: parts[0], index: Number(parts[1]), name: parts[2] };
+  if (parts.length===2) return { pid: PROJ?PROJ.id:'', index: Number(parts[0]), name: parts[1] };
+  return { pid: '', index: NaN, name: '' };
+}
+function hasAuthForAllSelected(){
+  try {
+    if (!SELECTED_ROWS || SELECTED_ROWS.size===0) return false;
+    const pids = new Set();
+    SELECTED_ROWS.forEach(k => { const o = parseKeyMulti(k); if (o.pid) pids.add(String(o.pid)); });
+    if (pids.size===0) return false;
+    for (const pid of pids){ if (!hasAuthForPid(pid)) return false; }
+    return true;
+  } catch { return false; }
+}
+
+// Dispatch VM actions (queued wrapper)
+async function vmAction(action) {
+  const multi = (vmIsMulti && vmIsMulti());
+  const selCount = Array.isArray(SELECTED_ROWS) ? SELECTED_ROWS.size : (SELECTED_ROWS ? SELECTED_ROWS.size : 0);
+  const label = multi ? `Multi ${action}` : `${String(action).replace(/_/g,' ')} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
+  await runQueued(label, async () => { await vmActionExec(action); }, { projectId: PROJ?.id });
+}
+
+// Original implementation moved to vmActionExec
+async function vmActionExec(action) {
+  if (vmIsMulti && vmIsMulti()) { return vmActionMultiExec(action); }
+  if (!PROJ) { alert('Select a project first.'); return; }
+  if (!hasAuth()) { alert('Please log in to Proxmox (or configure an API token) to run actions.'); return; }
+  const selected = Array.from(SELECTED_ROWS || []);
+  if (!selected.length) { alert('Select at least one VM row.'); return; }
+  // Build targets; for 'create' we must use the base VM name from Configuration (without tag/index suffix)
+  let targets = selected.map(k => { const [idx, name] = String(k).split('|'); return { index: Number(idx), name }; });
+  const sess = readProxCreds(PROJ.id) || {};
+  // Show top progress bar for any action
+  let topProg = null;
+  try { topProg = document.getElementById('vm-progress'); if (topProg) { topProg.classList.remove('d-none'); topProg.removeAttribute('aria-hidden'); const bar = document.getElementById('vm-progress-bar'); if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow','100'); } } } catch {}
+  // Progress modal setup
+  const actionModalEl = document.getElementById('actionProgressModal');
+  const actionModal = (window.bootstrap && window.bootstrap.Modal) ? bootstrap.Modal.getOrCreateInstance(actionModalEl) : null;
+  const apTitle = document.getElementById('action-progress-title');
+  const apBar = document.getElementById('action-progress-bar');
+  const apText = document.getElementById('action-progress-text');
+  const apCancel = null; // cancel button removed
+  const setAp = (pct, text, detail) => {
+    if (apBar) {
+      apBar.style.width = `${pct|0}%`;
+      apBar.setAttribute('aria-valuenow', String(pct|0));
+      if (text) apBar.textContent = text;
+    }
+    if (apText && (detail || text)) {
+      apText.textContent = detail || text || '';
+    }
+  };
+  const prettyAction = action.split('_').map(part => part ? part.charAt(0).toUpperCase()+part.slice(1) : '').join(' ').trim() || action;
+  if (apTitle) apTitle.textContent = `${prettyAction} in progress`;
+  setAp(5, 'Preparing…', 'Gathering selection…');
+  ACTION_IN_FLIGHT = true;
+  CURRENT_ACTION = action;
+  ACTION_RUN_ID += 1;
+  updateRefreshState();
+  try { actionModal && actionModal.show(); } catch {}
+  try {
+    if (action === 'create') {
+      // Convert generated names back to base config names
+  const tag = String(PROJ?.tag || '').trim();
+      const baseNames = new Set((PROJ?.vms || []).map(v => v.name));
+      targets = targets.map(t => {
+        const idxStr = String(t.index);
+        const suffix = `${tag}${idxStr}`;
+        const full = String(t.name || '');
+        let base = full;
+        if (suffix && full.endsWith(suffix)) base = full.slice(0, full.length - suffix.length);
+        // If suffix stripping didn't yield a known base, try mapping by config expansion
+        if (!baseNames.has(base)) {
+          for (const v of (PROJ?.vms || [])) {
+            if (String(v.name || '') + suffix === full) { base = String(v.name || ''); break; }
+          }
+        }
+        return { index: t.index, name: base };
+      });
+    // Show progress bar and increment as we go (best effort)
+  const setProg = (pct, text, detail) => setAp(pct, text, detail);
+  setProg(10, 'Preparing…', 'Preparing targets…');
+      // Filter out rows already created based on current table state
+      try {
+        const statuses = PROJ.instance_statuses || [];
+        const byIndex = new Map(statuses.map(s => [Number(s.index||0), s]));
+        const before = targets.length;
+        targets = targets.filter(t => {
+          const st = byIndex.get(Number(t.index)||0) || {};
+          const fullName = String(t.name||'') + tag + String(t.index);
+          const details = Array.isArray(st.vm_details) ? st.vm_details : [];
+          return !details.some(d => d && d.name === fullName);
+        });
+        if (before > targets.length) {
+          alert('Some selected VM(s) already exist and will be skipped.');
+        }
+      } catch {}
+      const total = targets.length;
+      let createdCount = 0;
+      let skippedCount = 0;
+      // Batch once to server (server orchestrates each target), handle ambiguous response by prompting
+      const makeRequest = async () => {
+        try { shell.step('Submitting create batch'); } catch {}
+        const r = await http('POST', `/api/projects/${PROJ.id}/instances/actions/create`, {
+          username: sess.username || undefined,
+          password: sess.password || undefined,
+          baseUrl: PROJ.proxmox_url || undefined,
+          apiPort: PROJ.proxmox_api_port || undefined,
+          verifySSL: PROJ.proxmox_verify_ssl !== false,
+          targets,
+        });
+        try { shell.step('Create batch response received'); } catch {}
+        return r;
+      };
+      // Preflight: resolve ALL ambiguities before cloning begins (loop until none remain)
+      try {
+        // Hide the progress modal while prompting to avoid stacking/order issues
+        try { actionModal && actionModal.hide(); } catch {}
+        let guard = 0;
+        for (;;) {
+          if (guard++ > 5) break; // safety cap
+          setProg(20, 'Checking templates…', 'Scanning for ambiguous template names…');
+          try { shell.step('Preflight request'); } catch {}
+          const pre = await http('POST', `/api/projects/${PROJ.id}/instances/actions/create-preflight`, {
+            username: sess.username || undefined,
+            password: sess.password || undefined,
+            baseUrl: PROJ.proxmox_url || undefined,
+            apiPort: PROJ.proxmox_api_port || undefined,
+            verifySSL: PROJ.proxmox_verify_ssl !== false,
+            targets,
+          });
+          try { shell.step('Preflight response'); } catch {}
+          const amb0 = Array.isArray(pre?.ambiguous) ? pre.ambiguous : [];
+          if (!amb0.length) break;
+          // Group by base and union candidates
+          const group0 = new Map();
+          for (const entry of amb0) {
+            const baseName = String(entry?.name || '');
+            const list = Array.isArray(entry?.candidates) ? entry.candidates : [];
+            if (!group0.has(baseName)) group0.set(baseName, new Map());
+            const seen = group0.get(baseName);
+            for (const c of list) {
+              const vmid = (c && (c.vmid ?? c.id));
+              if (vmid === undefined || vmid === null || vmid === '') continue;
+              const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || '';
+              const key = `${vmid}@@${node}`;
+              if (!seen.has(key)) seen.set(key, { vmid, node });
+            }
+          }
+          for (const [baseName, map] of group0.entries()) {
+            await showTemplateResolveDialog(baseName, Array.from(map.values()));
+          }
+          // Loop and re-check until no ambiguous remain
+        }
+        // Re-show progress modal now that resolutions are done
+        try { actionModal && actionModal.show(); } catch {}
+      } catch (e) {
+        // Non-fatal: proceed; server-side early check will still prevent cloning if ambiguities remain
+        try { actionModal && actionModal.show(); } catch {}
+      }
+      let lastResp = null;
+      try {
+  if (apCancel) apCancel.disabled = false;
+  setProg(35, 'Cloning…', `Cloning ${targets.length} template(s)…`);
+  const resp = await makeRequest();
+        lastResp = resp;
+        createdCount = Array.isArray(resp.created) ? resp.created.length : 0;
+        skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
+        // Handle ambiguous entries if present: prompt once per base template (deduplicated) and retry once
+        const amb = Array.isArray(resp.ambiguous) ? resp.ambiguous : [];
+  if (amb.length > 0) {
+          // Group by baseName and union candidates
+          const group = new Map();
+          for (const entry of amb) {
+            const baseName = String(entry?.name || '');
+            const list = Array.isArray(entry?.candidates) ? entry.candidates : [];
+            if (!group.has(baseName)) group.set(baseName, new Map());
+            const seen = group.get(baseName);
+            for (const c of list) {
+              const vmid = (c && (c.vmid ?? c.id))
+              ;
+              if (vmid === undefined || vmid === null || vmid === '') continue;
+              const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || '';
+              // key by vmid+node to avoid duplicates
+              const key = `${vmid}@@${node}`;
+              if (!seen.has(key)) seen.set(key, { vmid, node });
+            }
+          }
+          // Show one dialog per base
+          for (const [baseName, map] of group.entries()) {
+            await showTemplateResolveDialog(baseName, Array.from(map.values()));
+          }
+          // Retry once after resolving all ambiguities
+          // Re-show progress modal now that resolutions are done
+          try {
+            const progEl = document.getElementById('actionProgressModal');
+            if (progEl && window.bootstrap) {
+              const pm = bootstrap.Modal.getOrCreateInstance(progEl);
+              pm.show();
+            }
+          } catch {}
+          const resp2 = await makeRequest();
+          lastResp = resp2 || resp;
+          createdCount = Array.isArray(lastResp.created) ? lastResp.created.length : createdCount;
+          skippedCount = Array.isArray(lastResp.skipped) ? lastResp.skipped.length : skippedCount;
+        }
+  setProg(90, `Finalizing…`, 'Applying network and taking snapshots…');
+      } catch (e) {
+        // Unexpected error: surface and abort create handler
+        throw e;
+      }
+  setProg(100, 'Done', `Created ${createdCount}/${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+  try { showActionSummary('Create', lastResp || {}); } catch {}
+  try { emitActionLogs('Create', lastResp || {}); } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Create: ${createdCount} VM(s)`) : console.log('Create done'); } catch {}
+  try { shell.endActionContext(true); } catch {}
+      return;
+    }
+    if (action === 'users_create' || action === 'users_delete') {
+      try { shell.beginActionContext(action === 'users_create' ? 'Users Create' : 'Users Delete'); } catch {}
+      const setProg = (pct, text, detail) => setAp(pct, text, detail);
+      setProg(10, 'Preparing…', `${action==='users_create'?'Creating':'Deleting'} user/pool…`);
+      const sess = readProxCreds(PROJ.id) || {};
+      // Reuse precomputed targets from the current selection
+  try { shell.step('Submitting user action'); } catch {}
+  const resp = await http('POST', `/api/projects/${PROJ.id}/instances/actions/${action}`, {
+        username: sess.username || undefined,
+        password: sess.password || undefined,
+        baseUrl: PROJ.proxmox_url || undefined,
+        apiPort: PROJ.proxmox_api_port || undefined,
+        verifySSL: PROJ.proxmox_verify_ssl !== false,
+        targets,
+      });
+  try { shell.step('User action response'); } catch {}
+      setProg(100, 'Done', `${action==='users_create'?'Created/updated':'Deleted'} user/pool`);
+      try { showActionSummary(action === 'users_create' ? 'Users Create' : 'Users Delete', resp || {}); } catch {}
+  try { emitActionLogs(action === 'users_create' ? 'Users Create' : 'Users Delete', resp || {}); } catch {}
+  try { shell.endActionContext(true); } catch {}
+      return;
+    }
+    if (action === 'start' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
+      try { shell.beginActionContext(action.charAt(0).toUpperCase()+action.slice(1)); } catch {}
+      try { (window.shell && shell.logInfo) ? shell.logInfo(`Action: ${action} on ${targets.length} target(s)`) : console.log('Action', action, 'on', targets); } catch {}
+      const setProg = (pct, text, detail) => setAp(pct, text, detail);
+  const verbMap = {
+        start: ['Starting…', 'Starting', 'Started'],
+        suspend: ['Suspending…', 'Suspending', 'Suspended'],
+        poweroff: ['Powering off…', 'Powering off', 'Powered off'],
+        snapshot: ['Snapshotting…', 'Taking snapshot(s)', 'Snapshot(s) taken'],
+        restore: ['Restoring…', 'Restoring snapshot(s)', 'Restored'],
+        run_startup_cmds: ['Running…', 'Running startup commands', 'Ran startup cmds'],
+        run_stored_cmds: ['Running…', 'Running stored commands', 'Ran stored cmds']
+      };
+      const [shortStart, longStart, pastTense] = verbMap[action] || ['Working…','Working','Done'];
+      setProg(10, 'Preparing…', `${longStart} for ${targets.length} VM(s)…`);
+      if (apCancel) apCancel.disabled = false;
+      // No snapshot/restore prompt: handled server-side (timestamp name; restore latest)
+      const path = `/api/projects/${PROJ.id}/instances/actions/${action}`;
+  try { shell.step('Submitting action'); } catch {}
+  let resp = await http('POST', path, {
+        username: sess.username || undefined,
+        password: sess.password || undefined,
+        baseUrl: PROJ.proxmox_url || undefined,
+        apiPort: PROJ.proxmox_api_port || undefined,
+        verifySSL: PROJ.proxmox_verify_ssl !== false,
+        targets,
+      });
+  try { shell.step('Action response'); } catch {}
+      // Special handling: if snapshot failed for some VMs, ask user if they want to retry just those
+      if (action === 'snapshot') {
+        try {
+          const errs = Array.isArray(resp.errors) ? resp.errors : [];
+          const failed = errs
+            .filter(e => String(e?.reason || '').toLowerCase().includes('snapshot failed'))
+            .map(e => ({ index: Number(e?.index), name: String(e?.name || '') }))
+            .filter(t => Number.isFinite(t.index) && t.name);
+          // Deduplicate by index|name
+          const seen = new Set();
+          const failedUnique = failed.filter(t => { const k = `${t.index}|${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
+          if (failedUnique.length > 0) {
+            // Inform and ask
+            const retry = window.confirm(`Snapshots failed on ${failedUnique.length} VM(s). The node/storage may have been busy. Try again now?`);
+            if (retry) {
+              // Keep modal visible and update progress
+              setProg(55, 'Retrying…', `Retrying snapshots on ${failedUnique.length} VM(s)…`);
+              const resp2 = await http('POST', path, {
+                username: sess.username || undefined,
+                password: sess.password || undefined,
+                baseUrl: PROJ.proxmox_url || undefined,
+                apiPort: PROJ.proxmox_api_port || undefined,
+                verifySSL: PROJ.proxmox_verify_ssl !== false,
+                targets: failedUnique,
+              });
+              // Merge results: add successes, keep only remaining errors
+              const succ2 = Array.isArray(resp2.snapshotted) ? resp2.snapshotted : [];
+              const succKeys = new Set(succ2.map(i => `${Number(i?.index)}|${String(i?.name || '')}`));
+              const origErrors = Array.isArray(resp.errors) ? resp.errors : [];
+              const filteredErrors = origErrors.filter(e => {
+                const key = `${Number(e?.index)}|${String(e?.name || '')}`;
+                const isSnapFail = String(e?.reason || '').toLowerCase().includes('snapshot failed');
+                return !(isSnapFail && succKeys.has(key));
+              });
+              resp = {
+                ...resp,
+                snapshotted: [ ...(resp.snapshotted || []), ...succ2 ],
+                skipped: [ ...(resp.skipped || []), ...(resp2.skipped || []) ],
+                errors: [ ...filteredErrors, ...(resp2.errors || []) ],
+              };
+            }
+          }
+        } catch {}
+      }
+      // Determine counts based on action response keys
+  const keyMap = { start: 'started', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran' };
+      const k = keyMap[action];
+      let doneArr = Array.isArray(resp[k]) ? resp[k] : [];
+      // If start action returned resumed array, include it in counts and tweak wording
+      if (action === 'start' && Array.isArray(resp.resumed) && resp.resumed.length) {
+        const total = targets.length;
+        const skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
+        const startedCount = doneArr.length;
+        const resumedCount = resp.resumed.length;
+  setProg(100, 'Done', `Started ${startedCount}, resumed ${resumedCount} / ${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+        try { showActionSummary('Start', resp || {}); } catch {}
+  try { emitActionLogs('Start', resp || {}); } catch {}
+        try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Start/Resume: ${startedCount+resumedCount} VM(s)`) : console.log('Start done'); } catch {}
+  try { shell.endActionContext(true); } catch {}
+  return;
+      }
+      const skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
+      const total = targets.length;
+  setProg(100, 'Done', `${pastTense} ${doneArr.length}/${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+      try { showActionSummary(action.charAt(0).toUpperCase()+action.slice(1), resp || {}); } catch {}
+  try { emitActionLogs(action.charAt(0).toUpperCase()+action.slice(1), resp || {}); } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`${action}: ${doneArr.length} VM(s)`) : console.log(action, 'done'); } catch {}
+  try { shell.endActionContext(true); } catch {}
+  return;
+    }
+  if (action === 'delete') {
+  try { shell.beginActionContext('Instances Delete'); } catch {}
+      try { (window.shell && shell.logInfo) ? shell.logInfo(`Action: delete on ${targets.length} target(s)`) : console.log('Action delete on', targets); } catch {}
+      // Normalize names to base and then compute generated names for pre-check
+      const tag = String(PROJ?.tag || '').trim();
+      const baseNames = new Set((PROJ?.vms || []).map(v => v.name));
+      const toSend = targets.map(t => {
+        const idxStr = String(t.index);
+        const suffix = `${tag}${idxStr}`;
+        const full = String(t.name || '');
+        let base = full;
+        if (suffix && full.endsWith(suffix)) base = full.slice(0, full.length - suffix.length);
+        if (!baseNames.has(base)) {
+          for (const v of (PROJ?.vms || [])) {
+            if (String(v.name || '') + suffix === full) { base = String(v.name || ''); break; }
+          }
+        }
+        return { index: t.index, name: base };
+      });
+  // Use the same progress bar area as Create
+  const setProg = (pct, text, detail) => setAp(pct, text, detail);
+  setProg(10, 'Preparing…', 'Preparing delete…');
+      // Client-side filter: only keep those that currently exist
+      try {
+        const statuses = PROJ.instance_statuses || [];
+        const byIndex = new Map(statuses.map(s => [Number(s.index||0), s]));
+        const before = toSend.length;
+        const exist = toSend.filter(t => {
+          const st = byIndex.get(Number(t.index)||0) || {};
+          const fullName = String(t.name||'') + tag + String(t.index);
+          const details = Array.isArray(st.vm_details) ? st.vm_details : [];
+          return details.some(d => d && d.name === fullName);
+        });
+        if (exist.length !== before) {
+          alert('Some selected VM(s) do not exist and will be skipped.');
+        }
+        targets = exist;
+      } catch {}
+      const total = targets.length;
+      let deletedCount = 0;
+      let skippedCount = 0;
+      if (total === 0) {
+        alert('No existing VMs found among the selection.');
+        return;
+      }
+  if (apCancel) apCancel.disabled = false;
+  setProg(25, 'Deleting…', `Deleting ${targets.length} VM(s)…`);
+  try { shell.step('Submitting delete'); } catch {}
+  const resp = await http('POST', `/api/projects/${PROJ.id}/instances/actions/delete`, {
+        username: sess.username || undefined,
+        password: sess.password || undefined,
+        baseUrl: PROJ.proxmox_url || undefined,
+        apiPort: PROJ.proxmox_api_port || undefined,
+        verifySSL: PROJ.proxmox_verify_ssl !== false,
+        targets,
+      });
+  try { shell.step('Delete response'); } catch {}
+  deletedCount = Array.isArray(resp.deleted) ? resp.deleted.length : 0;
+  skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
+  setProg(100, 'Done', `Deleted ${deletedCount}/${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+  try { showActionSummary('Delete', resp || {}); } catch {}
+  try { emitActionLogs('Delete', resp || {}); } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Delete: ${deletedCount} VM(s)`) : console.log('Delete done'); } catch {}
+  try { shell.endActionContext(true); } catch {}
+  return;
+    }
+    alert('Action not implemented yet: ' + action);
+  } catch (e) {
+    alert('Action failed: ' + e.message);
+    try { (window.shell && shell.logError) ? shell.logError('Action failed: ' + e.message) : console.error('Action failed:', e); } catch {}
+    try { shell.endActionContext(false); } catch {}
+  } finally {
+    // Mark action as completed before any UI callbacks may fire
+    ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
+    // Proactively hide/suppress any lingering template resolve modal/backdrops
+    try {
+      const modalEl = document.getElementById('tmplResolveModal');
+      if (modalEl && modalEl.classList.contains('show') && window.bootstrap && window.bootstrap.Modal) {
+        const inst = bootstrap.Modal.getOrCreateInstance(modalEl);
+        inst.hide();
+      }
+      // Clear stray backdrops if any
+      document.querySelectorAll('.modal-backdrop').forEach(el => { try { el.remove(); } catch {} });
+    } catch {}
+    // Hide top progress bar and progress modal promptly
+    try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
+    try { actionModal && actionModal.hide(); } catch {}
+    // Always refresh after any action (even on failure) but do not block UI while pending
+    try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+  }
+}
+
+// Multi-project action orchestrator (queued wrapper)
+async function vmActionMulti(action){
+  const selCount = Array.isArray(SELECTED_ROWS) ? SELECTED_ROWS.size : (SELECTED_ROWS ? SELECTED_ROWS.size : 0);
+  const label = `Multi ${action} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
+  await runQueued(label, async () => { await vmActionMultiExec(action); });
+}
+
+// Original implementation moved to vmActionMultiExec
+async function vmActionMultiExec(action){
+  try { shell.beginActionContext(`Multi ${action}`); } catch {}
+  const selected = Array.from(SELECTED_ROWS||[]);
+  if (!selected.length) { alert('Select at least one VM row.'); return; }
+  // Group selections by project id
+  const byPid = new Map();
+  for (const k of selected){ const o = parseKeyMulti(k); if (!o.pid || !Number.isFinite(o.index) || !o.name) continue; if (!byPid.has(o.pid)) byPid.set(o.pid, []); byPid.get(o.pid).push({ index: o.index, name: o.name }); }
+  if (byPid.size===0) { alert('No valid selections.'); return; }
+  // Validate auth for all involved projects
+  for (const pid of byPid.keys()) { if (!hasAuthForPid(pid)) { alert('Some selected projects are missing Proxmox credentials or token. Fix credentials and try again.'); return; } }
+  // Progress modal
+  const actionModalEl = document.getElementById('actionProgressModal');
+  const actionModal = (window.bootstrap && window.bootstrap.Modal) ? bootstrap.Modal.getOrCreateInstance(actionModalEl) : null;
+  const apTitle = document.getElementById('action-progress-title');
+  const apBar = document.getElementById('action-progress-bar');
+  const apText = document.getElementById('action-progress-text');
+  const setAp = (pct, text, detail) => { if (apBar) { apBar.style.width = `${pct|0}%`; apBar.setAttribute('aria-valuenow', String(pct|0)); if (text) apBar.textContent = text; } if (apText && (detail || text)) apText.textContent = detail || text || ''; };
+  if (apTitle) apTitle.textContent = `Multi ${action}`;
+  try { actionModal && actionModal.show(); } catch {}
+  ACTION_IN_FLIGHT = true; CURRENT_ACTION = action; ACTION_RUN_ID += 1; updateRefreshState();
+  // Aggregate results across projects
+  const agg = {};
+  const addArr = (key, arr, project) => {
+    if (!Array.isArray(arr) || arr.length===0) return;
+    if (!Array.isArray(agg[key])) agg[key] = [];
+    for (const it of arr){ const clone = (it && typeof it==='object') ? { ...it } : { name: String(it||'') };
+      if (clone && clone.name) clone.name = `[${project}] ${clone.name}`;
+      if (clone && !clone.project) clone.project = project;
+      agg[key].push(clone);
+    }
+  };
+  const pids = Array.from(byPid.keys());
+  const totalProjects = pids.length;
+  let doneProjects = 0;
+  const topProg = document.getElementById('vm-progress');
+  try { if (topProg) { topProg.classList.remove('d-none'); topProg.removeAttribute('aria-hidden'); const bar = document.getElementById('vm-progress-bar'); if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow','100'); } } } catch {}
+  try { (window.shell && shell.logInfo) ? shell.logInfo(`Multi action ${action} across ${totalProjects} project(s)`) : console.log('Multi action', action); } catch {}
+  // Fetch latest projects list to ensure data
+  try { const d = await http('GET','/api/projects'); ALL_PROJECTS = d.projects || ALL_PROJECTS; } catch {}
+  const byId = {}; (ALL_PROJECTS||[]).forEach(p=> { const key = canonicalPid(p.id); if (key) byId[key] = p; });
+  // Iterate projects sequentially to keep UI manageable
+  for (const pid of pids){
+  const key = canonicalPid(pid);
+  const proj = byId[key]; if (!proj) continue;
+    const projName = String(proj.name||pid);
+    doneProjects++;
+    const pct = Math.round((doneProjects-1) / totalProjects * 100);
+    setAp(Math.max(5,pct), 'Working…', `Project ${doneProjects}/${totalProjects}: ${projName}`);
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`${action}: ${projName}`) : console.log(action, projName); } catch {}
+    const sess = readProxCreds(pid) || {};
+    const baseBody = { username: sess.username || undefined, password: sess.password || undefined, baseUrl: proj.proxmox_url || undefined, apiPort: proj.proxmox_api_port || undefined, verifySSL: proj.proxmox_verify_ssl !== false };
+    let targets = (byPid.get(pid) || []).map(t => ({ index: Number(t.index), name: String(t.name) }));
+    // For create/delete: convert to base names per project config
+    const tag = String(proj.tag||'').trim();
+    const baseNames = new Set((proj.vms||[]).map(v=> String(v.name)));
+    const toBase = (t) => {
+      const idxStr = String(t.index);
+      const suffix = `${tag}${idxStr}`;
+      const full = String(t.name||'');
+      let base = full;
+      if (suffix && full.endsWith(suffix)) base = full.slice(0, full.length - suffix.length);
+      if (!baseNames.has(base)) {
+        for (const v of (proj.vms||[])) {
+          if (String(v.name||'') + suffix === full) { base = String(v.name||''); break; }
+        }
+      }
+      return { index: t.index, name: base };
+    };
+    // Pre-checks for create/delete using merged rows detail when available
+  const canonicalPidValue = canonicalPid(pid);
+  const selectedRowsForPid = (window.__MERGED_ROWS__||[]).filter(r => canonicalPid(r.pid)===canonicalPidValue);
+    const detailMapByIndex = new Map();
+    try {
+      for (const r of selectedRowsForPid){ const key = `${r.index}|${r.vmName}`; detailMapByIndex.set(key, r.detail||null); }
+    } catch {}
+    const makeReq = async (path, body) => http('POST', `/api/projects/${encodeURIComponent(pid)}${path}`, body);
+    try {
+      if (action === 'create') {
+        // Convert to base and client-side skip those already existing
+        let t = targets.map(toBase);
+        if (t.length===0) continue;
+        // Preflight ambiguous templates per project
+        try {
+          // Temporarily switch PROJ for resolution dialog save
+          const prev = PROJ; PROJ = proj;
+          let guard = 0;
+          for (;;) {
+            if (guard++ > 5) break;
+            setAp(Math.max(10,pct), 'Checking templates…', `Resolving templates in ${projName}…`);
+            const pre = await makeReq('/instances/actions/create-preflight', { ...baseBody, targets: t });
+            const amb0 = Array.isArray(pre?.ambiguous) ? pre.ambiguous : [];
+            if (!amb0.length) break;
+            const group0 = new Map();
+            for (const entry of amb0) {
+              const baseName = String(entry?.name || '');
+              const list = Array.isArray(entry?.candidates) ? entry.candidates : [];
+              if (!group0.has(baseName)) group0.set(baseName, new Map());
+              const seen = group0.get(baseName);
+              for (const c of list) { const vmid = (c && (c.vmid ?? c.id)); if (vmid===undefined||vmid===null||vmid==='') continue; const node=(c && (c.node ?? c.nodename ?? c.nodeName))||''; const key=`${vmid}@@${node}`; if (!seen.has(key)) seen.set(key,{vmid,node}); }
+            }
+            for (const [baseName, map] of group0.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values())); }
+          }
+          PROJ = prev;
+        } catch {}
+        setAp(Math.max(35,pct), 'Cloning…', `Cloning in ${projName}…`);
+        const resp = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
+        // Retry once if ambiguous reported
+        const amb = Array.isArray(resp.ambiguous) ? resp.ambiguous : [];
+        if (amb.length){
+          try { const prev = PROJ; PROJ = proj; const group = new Map(); for (const entry of amb){ const baseName=String(entry?.name||''); const list=Array.isArray(entry?.candidates)?entry.candidates:[]; if (!group.has(baseName)) group.set(baseName,new Map()); const seen=group.get(baseName); for (const c of list){ const vmid=(c && (c.vmid ?? c.id)); if (vmid===undefined||vmid===null||vmid==='') continue; const node=(c && (c.node ?? c.nodename ?? c.nodeName))||''; const k=`${vmid}@@${node}`; if (!seen.has(k)) seen.set(k,{vmid,node}); } } for (const [baseName,map] of group.entries()){ await showTemplateResolveDialog(baseName, Array.from(map.values())); } PROJ = prev; } catch {}
+          const resp2 = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
+          // Prefer second
+          ['created','skipped','errors','ambiguous','restored','snapshotted','notices','started','resumed','suspended','powered_off','created_users','created_pools','added_members','deleted_users','deleted_pools','network_applied_nodes','network_apply_errors','ran'].forEach(k=> addArr(k, resp2[k], projName));
+        } else {
+          ['created','skipped','errors','ambiguous','restored','snapshotted','notices','started','resumed','suspended','powered_off','created_users','created_pools','added_members','deleted_users','deleted_pools','network_applied_nodes','network_apply_errors','ran'].forEach(k=> addArr(k, resp[k], projName));
+        }
+        continue;
+      }
+      if (action === 'users_create' || action === 'users_delete') {
+        setAp(Math.max(20,pct), 'Working…', `${action==='users_create'?'Creating':'Deleting'} users in ${projName}…`);
+        const resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
+        ['created_users','created_pools','added_members','deleted_users','deleted_pools','skipped','errors','notices'].forEach(k=> addArr(k, resp[k], projName));
+        continue;
+      }
+      if (action === 'start' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
+        setAp(Math.max(20,pct), 'Working…', `${action} in ${projName}…`);
+        let resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
+        if (action === 'snapshot') {
+          try {
+            const errs = Array.isArray(resp.errors) ? resp.errors : [];
+            const failed = errs.filter(e => String(e?.reason||'').toLowerCase().includes('snapshot failed')).map(e => ({ index: Number(e?.index), name: String(e?.name||'') })).filter(t => Number.isFinite(t.index) && t.name);
+            const seen = new Set(); const failedUnique = failed.filter(t=>{ const k=`${t.index}|${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
+            if (failedUnique.length>0) {
+              const retry = window.confirm(`Snapshots failed on ${failedUnique.length} VM(s) in ${projName}. Try again now?`);
+              if (retry) {
+                const resp2 = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets: failedUnique });
+                // Merge
+                const succ2 = Array.isArray(resp2.snapshotted) ? resp2.snapshotted : [];
+                const succKeys = new Set(succ2.map(i => `${Number(i?.index)}|${String(i?.name || '')}`));
+                const origErrors = Array.isArray(resp.errors) ? resp.errors : [];
+                const filteredErrors = origErrors.filter(e => {
+                  const key = `${Number(e?.index)}|${String(e?.name || '')}`;
+                  const isSnapFail = String(e?.reason || '').toLowerCase().includes('snapshot failed');
+                  return !(isSnapFail && succKeys.has(key));
+                });
+                resp = { ...resp, snapshotted: [ ...(resp.snapshotted || []), ...succ2 ], skipped: [ ...(resp.skipped || []), ...(resp2.skipped || []) ], errors: [ ...filteredErrors, ...(resp2.errors || []) ] };
+              }
+            }
+          } catch {}
+        }
+        ['started','resumed','suspended','powered_off','snapshotted','restored','skipped','errors','notices','ran'].forEach(k=> addArr(k, resp[k], projName));
+        continue;
+      }
+      if (action === 'delete') {
+        let t = targets.map(toBase);
+        if (t.length===0) continue;
+        setAp(Math.max(20,pct), 'Deleting…', `Deleting in ${projName}…`);
+        const resp = await makeReq('/instances/actions/delete', { ...baseBody, targets: t });
+        ['deleted','skipped','errors','notices'].forEach(k=> addArr(k, resp[k], projName));
+        continue;
+      }
+      alert('Action not implemented yet: ' + action);
+      return;
+    } catch (e) {
+      try { (window.shell && shell.logError) ? shell.logError(`${action} failed in ${projName}: ${e?.message||e}`) : console.error(action,'failed in',projName,e); } catch {}
+      addArr('errors', [{ name: projName, reason: e?.message||String(e) }], projName);
+    }
+  }
+  // Show summary
+  try { showActionSummary(action.charAt(0).toUpperCase()+action.slice(1), agg); } catch {}
+  try { emitActionLogs(action.charAt(0).toUpperCase()+action.slice(1), agg); } catch {}
+  try { shell.endActionContext(true); } catch {}
+  // Cleanup
+  ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
+  try { const prog=document.getElementById('vm-progress'); if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden','true'); } } catch {}
+  try { actionModal && actionModal.hide(); } catch {}
+  try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+}
+
+async function vmCancelActions() {
+  if (!PROJ) return;
+  await runQueued('Cancel remote actions', async () => {
+    try {
+      try { shell.beginActionContext('Cancel Job'); } catch {}
+      await http('POST', `/api/projects/${PROJ.id}/instances/actions/cancel`, {});
+      try { shell.step('Cancel request acknowledged'); } catch {}
+      try { shell.endActionContext(true); } catch {}
+      const bar = document.getElementById('vm-create-progress-bar');
+      if (bar) bar.textContent = 'Cancelling…';
+    } catch (e) {
+      // noop
+      try { shell.endActionContext(false); } catch {}
+    }
+  }, { projectId: PROJ?.id });
+}
+
+// Show modal to resolve ambiguous template base name to a specific VMID and persist to configuration
+async function showTemplateResolveDialog(baseName, candidates) {
+  return new Promise((resolve, reject) => {
+    try {
+  // Only show during an active Create run; otherwise resolve immediately to avoid stray dialogs
+  if (!(ACTION_IN_FLIGHT && CURRENT_ACTION === 'create')) { resolve(); return; }
+  const body = document.getElementById('tmpl-resolve-body');
+      const saveBtn = document.getElementById('tmpl-resolve-save');
+      if (!body || !saveBtn) { resolve(); return; }
+      // Normalize candidates to a consistent array of { vmid:number|string, node:string }
+      const toArray = (val) => Array.isArray(val) ? val : (val && typeof val === 'object' ? Object.values(val) : []);
+      const norm = toArray(candidates).map(c => {
+        try {
+          const vmid = (c && (c.vmid ?? c.id ?? (c.data && c.data.vmid)))
+            ;
+          const node = (c && (c.node ?? c.nodename ?? c.nodeName ?? c.host ?? c.hostname)) || '';
+          if (vmid === undefined || vmid === null || vmid === '') return null;
+          return { vmid: vmid, node: String(node || '') };
+        } catch { return null; }
+      }).filter(Boolean);
+      const list = (norm.length ? norm : []).map(c => {
+        const id = String(c.vmid);
+        const node = c.node || '';
+        return `<div class="form-check">
+          <input class="form-check-input" type="radio" name="tmpl-vmid" id="tmpl-${id}" value="${id}">
+      <label class="form-check-label" for="tmpl-${id}">#${escHtml(id)} on ${escHtml(node)}</label>
+        </div>`;
+      }).join('') || '<div class="text-muted">No candidates.</div>';
+    body.innerHTML = `<div class="mb-2">Multiple templates named <strong>${escHtml(baseName)}</strong> were found. Select the VM ID to use:</div>${list}`;
+      const modalEl = document.getElementById('tmplResolveModal');
+      if (modalEl && modalEl.parentElement !== document.body) {
+        document.body.appendChild(modalEl);
+      }
+      const bs = window.bootstrap && window.bootstrap.Modal ? bootstrap.Modal.getOrCreateInstance(modalEl) : null;
+      // Hide action progress modal to avoid overlap and only show resolve after it's fully hidden
+      let prevModal = null;
+      let showResolve = () => {
+        // Guard again in case the call was queued and action finished meanwhile
+        if (!(ACTION_IN_FLIGHT && CURRENT_ACTION === 'create')) { try { resolve(); } catch {}; return; }
+        try {
+          // Safety: clear any lingering backdrops before showing resolve
+          document.querySelectorAll('.modal-backdrop').forEach(el => { try { el.remove(); } catch {} });
+        } catch {}
+        try {
+          // Ensure modal is top-most above any previous modal
+          try { modalEl.style.zIndex = '1065'; } catch {}
+          bs && bs.show();
+          // After show, boost the latest backdrop just below the modal
+          setTimeout(() => {
+            try {
+              const backs = Array.from(document.querySelectorAll('.modal-backdrop'));
+              if (backs.length) backs[backs.length - 1].style.zIndex = '1060';
+              // Focus modal for accessibility/visibility
+              modalEl.focus && modalEl.focus();
+            } catch {}
+          }, 0);
+        } catch {}
+      };
+      try {
+        const progEl = document.getElementById('actionProgressModal');
+        if (progEl && window.bootstrap) {
+          prevModal = bootstrap.Modal.getInstance(progEl) || bootstrap.Modal.getOrCreateInstance(progEl);
+          if (prevModal) {
+            // If visible, wait for hidden event before showing resolve modal; fallback timer too
+            const doShow = () => {
+              // Guard prior to showing in case action already ended
+              if (!(ACTION_IN_FLIGHT && CURRENT_ACTION === 'create')) { try { progEl.removeEventListener('hidden.bs.modal', doShow); } catch {}; try { resolve(); } catch {}; return; }
+              showResolve();
+              try { progEl.removeEventListener('hidden.bs.modal', doShow); } catch {}
+            };
+            const isShown = !!progEl.classList.contains('show');
+            let fallbackTimer = null;
+            try {
+              progEl.addEventListener('hidden.bs.modal', doShow, { once: true });
+              // Fallback in case the hidden event doesn’t fire (or it’s already hidden)
+              fallbackTimer = setTimeout(() => { doShow(); }, isShown ? 500 : 0);
+            } catch {
+              // As a last resort, show immediately
+              showResolve();
+            }
+            // Only hide if actually shown; otherwise show immediately and clear fallback
+            if (isShown) {
+              prevModal.hide();
+            } else {
+              if (fallbackTimer) { try { clearTimeout(fallbackTimer); } catch {} }
+              showResolve();
+            }
+          } else {
+            showResolve();
+          }
+        } else {
+          showResolve();
+        }
+      } catch { showResolve(); }
+  const cleanup = () => {
+        try { saveBtn.removeEventListener('click', onSave); } catch {}
+        try { modalEl.removeEventListener('hidden.bs.modal', onHidden); } catch {}
+      };
+      const onHidden = () => {
+        cleanup();
+        resolve();
+      };
+      const onSave = async () => {
+        try {
+          // Guard: if action ended, just close and resolve
+          if (!(ACTION_IN_FLIGHT && CURRENT_ACTION === 'create')) { bs && bs.hide(); cleanup(); resolve(); return; }
+          const chosen = (modalEl.querySelector('input[name="tmpl-vmid"]:checked') || {}).value;
+          if (!chosen) { alert('Please select a VM ID.'); return; }
+          const vm = (PROJ.vms || []).find(v => String(v.name).toLowerCase() === String(baseName).toLowerCase());
+          if (!vm) { bs && bs.hide(); resolve(); return; }
+          await http('PATCH', `/api/projects/${PROJ.id}/vms/${encodeURIComponent(vm.name)}`, { vmid: Number(chosen) });
+          vm.vmid = Number(chosen);
+          bs && bs.hide();
+          cleanup();
+          resolve();
+        } catch (err) {
+          alert('Failed to save VM ID: ' + (err && err.message ? err.message : err));
+          cleanup();
+          reject(err);
+        }
+      };
+      saveBtn.addEventListener('click', onSave);
+      if (modalEl && window.bootstrap) {
+        modalEl.addEventListener('hidden.bs.modal', onHidden, { once: true });
+      }
+  // Showing is handled after hiding the progress modal above
+    } catch (e) {
+      resolve();
+    }
+  });
+}
+
+function showActionSummary(actionName, resp) {
+  try {
+    const title = document.getElementById('action-summary-title');
+    const body = document.getElementById('action-summary-body');
+    if (!body) return;
+    if (title) title.textContent = `${actionName} Results`;
+  const created = Array.isArray(resp.created) ? resp.created : [];
+    const deleted = Array.isArray(resp.deleted) ? resp.deleted : [];
+    const skipped = Array.isArray(resp.skipped) ? resp.skipped : [];
+  const allErrors = Array.isArray(resp.errors) ? resp.errors : [];
+  const notices = Array.isArray(resp.notices) ? resp.notices : [];
+  // Exclude ACL-related items from popup
+  const isAcl = (s) => String(s || '').toLowerCase().includes('acl');
+  const errors = allErrors.filter(e => !isAcl(e?.reason));
+  const visibleNotices = notices.filter(n => !isAcl(n?.reason || n));
+    const amb = Array.isArray(resp.ambiguous) ? resp.ambiguous : [];
+  const appliedNodes = Array.isArray(resp.network_applied_nodes) ? resp.network_applied_nodes : [];
+  const applyErrors = Array.isArray(resp.network_apply_errors) ? resp.network_apply_errors : [];
+  const ran = Array.isArray(resp.ran) ? resp.ran : [];
+  // Users / Pools
+  const createdUsers = Array.isArray(resp.created_users) ? resp.created_users : [];
+  const createdPools = Array.isArray(resp.created_pools) ? resp.created_pools : [];
+  const addedMembers = Array.isArray(resp.added_members) ? resp.added_members : [];
+  const deletedUsers = Array.isArray(resp.deleted_users) ? resp.deleted_users : [];
+  const deletedPools = Array.isArray(resp.deleted_pools) ? resp.deleted_pools : [];
+
+    const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+    const list = (items, fmt) => items && items.length ? `<ul class="small">${items.map(fmt).join('')}</ul>` : '<div class="text-muted small">None</div>';
+
+    const sections = [];
+  if (created.length) sections.push(`<h6>Created</h6>${list(created, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  if (deleted.length) sections.push(`<h6>Deleted</h6>${list(deleted, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  const started = Array.isArray(resp.started) ? resp.started : [];
+  const resumed = Array.isArray(resp.resumed) ? resp.resumed : [];
+  const suspended = Array.isArray(resp.suspended) ? resp.suspended : [];
+  const poweredOff = Array.isArray(resp.powered_off) ? resp.powered_off : [];
+  const snapshotted = Array.isArray(resp.snapshotted) ? resp.snapshotted : [];
+  const restored = Array.isArray(resp.restored) ? resp.restored : [];
+  if (started.length) sections.push(`<h6>Started</h6>${list(started, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  if (resumed.length) sections.push(`<h6>Resumed</h6>${list(resumed, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  if (suspended.length) sections.push(`<h6>Suspended</h6>${list(suspended, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  if (poweredOff.length) sections.push(`<h6>Powered Off</h6>${list(poweredOff, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  if (snapshotted.length) sections.push(`<h6>Snapshots</h6>${list(snapshotted, i => `<li>${esc(i.name)} — ${esc(i.snapname||'snapshot')} ${i.vmid?`(#${esc(i.vmid)})`:''}</li>`)}`);
+  if (restored.length) sections.push(`<h6>Restored</h6>${list(restored, i => `<li>${esc(i.name)} — ${esc(i.snapname||'snapshot')} ${i.started? '(started)': ''}</li>`)}`);
+  // Users / Pools sections
+  if (createdUsers.length) sections.push(`<h6>Users Created</h6>${list(createdUsers, i => `<li>${esc(i.userid||'')}</li>`)}`);
+  if (createdPools.length) sections.push(`<h6>Pools Created</h6>${list(createdPools, i => `<li>${esc(i.pool||'')} ${i.index?`(instance ${esc(i.index)})`:''}</li>`)}`);
+  if (addedMembers.length) sections.push(`<h6>Pool Members Added</h6>${list(addedMembers, i => `<li>${esc(i.pool||'')} — ${esc(i.name||'')} ${i.vmid?`(#${esc(i.vmid)})`:''}</li>`)}`);
+  if (deletedUsers.length) sections.push(`<h6>Users Deleted</h6>${list(deletedUsers, i => `<li>${esc(i.userid||'')}</li>`)}`);
+  if (deletedPools.length) sections.push(`<h6>Pools Deleted</h6>${list(deletedPools, i => `<li>${esc(i.pool||'')} ${i.index?`(instance ${esc(i.index)})`:''}</li>`)}`);
+    sections.push(`<h6>Skipped</h6>${list(skipped, s => `<li>${esc(s.name||s.index||'')} — ${esc(s.reason||'')}</li>`)}`);
+    if (amb.length) sections.push(`<h6>Ambiguous</h6>${list(amb, a => `<li>${esc(a.name)} — candidates: ${(a.candidates||[]).map(c=>`#${esc(c.vmid)} on ${esc(c.node||'')}`).join(', ')}</li>`)}`);
+  if (visibleNotices.length) sections.push(`<h6 class="text-warning">Warnings</h6>${list(visibleNotices, w => `<li>${esc(w.name||w.node||'')} — ${esc(w.reason||w)}</li>`)}`);
+  if (errors.length) sections.push(`<h6 class="text-danger">Errors</h6>${list(errors, e => `<li>${esc(e.name||e.node||'')} — ${esc(e.reason||'')}</li>`)}`);
+  if (ran.length) sections.push(`<h6>Commands Run</h6>${list(ran, i => {
+    const cmds = Array.isArray(i.cmds) ? i.cmds : [];
+    const cmdList = cmds.length ? `<ul class="small">${cmds.map(c => `<li><code>${esc(c.cmd||'')}</code> — exit ${c.exitcode===null?'?':String(c.exitcode)}${(c.out_tail||c.err_tail)?`<pre class=\"mt-1 mb-2 small bg-light p-2 overflow-auto\" style=\"max-height:8rem\">${esc(c.out_tail||c.err_tail||'')}</pre>`:''}</li>`).join('')}</ul>` : '<div class="text-muted small">No commands</div>';
+    return `<li>${esc(i.name)} — ${i.count||0} cmd(s)${cmds.length?':':''}${cmdList}</li>`;
+  }).join('')}`);
+  if (resp.notice && typeof resp.notice === 'string') {
+    sections.unshift(`<div class="alert alert-warning py-1 small">${esc(resp.notice)}</div>`);
+  }
+  if (appliedNodes.length || applyErrors.length) {
+      if (appliedNodes.length) sections.push(`<h6>Network Apply</h6><div class="small">Applied on node(s): ${appliedNodes.map(esc).join(', ')}</div>`);
+      if (applyErrors.length) sections.push(`<h6 class="text-danger">Network Apply Errors</h6>${list(applyErrors, e => `<li>${esc(e.node||'')} — ${esc(e.reason||'')}</li>`)}`);
+    }
+
+    const summaryCounts = [
+      created.length ? `${created.length} created` : null,
+      deleted.length ? `${deleted.length} deleted` : null,
+  started.length ? `${started.length} started` : null,
+  resumed.length ? `${resumed.length} resumed` : null,
+      suspended.length ? `${suspended.length} suspended` : null,
+      poweredOff.length ? `${poweredOff.length} powered off` : null,
+      snapshotted.length ? `${snapshotted.length} snapshotted` : null,
+      restored.length ? `${restored.length} restored` : null,
+      skipped.length ? `${skipped.length} skipped` : null,
+  errors.length ? `${errors.length} errors` : null,
+  ran.length ? `${ran.length} hosts with cmds` : null,
+      createdUsers.length ? `${createdUsers.length} user(s)` : null,
+      createdPools.length ? `${createdPools.length} pool(s)` : null,
+      addedMembers.length ? `${addedMembers.length} member(s)` : null,
+      deletedUsers.length ? `${deletedUsers.length} user(s) deleted` : null,
+      deletedPools.length ? `${deletedPools.length} pool(s) deleted` : null,
+      appliedNodes.length ? `network applied on ${appliedNodes.length} node(s)` : null,
+      applyErrors.length ? `${applyErrors.length} network apply errors` : null
+    ].filter(Boolean).join(' · ');
+
+    body.innerHTML = `<div class="mb-2 text-muted">${esc(summaryCounts || 'No changes')}</div>${sections.join('\n') || '<div class="text-muted small">No results to display.</div>'}`;
+    const modalEl = document.getElementById('actionSummaryModal');
+    if (modalEl && window.bootstrap) {
+      const bs = bootstrap.Modal.getOrCreateInstance(modalEl);
+      bs.show();
+    }
+  } catch (e) {
+    // Fall back silently if the modal can't be shown
+    try { console.warn('Failed to show action summary', e); } catch {}
+  }
+}

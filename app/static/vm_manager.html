@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AN3S — VM Manager</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="/static/css/shell.css" rel="stylesheet">
+  <link rel="icon" href="/static/favicon.ico">
+</head>
+<body>
+<header class="app-banner">
+  <div class="container-fluid d-flex align-items-center justify-content-between py-2">
+    <div class="d-flex align-items-center gap-2">
+      <span aria-hidden="true" class="banner-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="5" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="19" cy="5" r="3" stroke="white" stroke-width="1.5"/>
+          <circle cx="12" cy="19" r="3" stroke="white" stroke-width="1.5"/>
+          <line x1="7.5" y1="6.5" x2="16.5" y2="6.5" stroke="white" stroke-width="1.5"/>
+          <line x1="10.2" y1="9.2" x2="6.8" y2="16.2" stroke="white" stroke-width="1.5"/>
+          <line x1="13.8" y1="9.2" x2="17.2" y2="16.2" stroke="white" stroke-width="1.5"/>
+        </svg>
+      </span>
+  <span class="banner-title">Acosta Network Scenario Setup System (AN3S)</span>
+    </div>
+    <div class="d-flex align-items-center gap-3" id="banner-user-region" style="min-width:260px;justify-content:flex-end;">
+      <div id="banner-user-label" class="small text-white-50">User: <span id="banner-username" class="text-white">…</span></div>
+      <div class="dropdown">
+        <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Menu</button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><a class="dropdown-item" href="#" data-act="open-settings">Settings</a></li>
+          <li><a class="dropdown-item" href="/static/admin_users.html">Users</a></li>
+          <li><hr class="dropdown-divider" /></li>
+          <li><button class="dropdown-item text-danger" id="banner-logout" type="button">Logout</button></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="banner-overlay" aria-hidden="true"></div>
+</header>
+<div class="container-fluid shell-container">
+  <div class="row g-0">
+    <aside class="col-12 col-md-3 col-lg-2 shell-sidebar bg-light d-flex flex-column">
+      <div class="p-2 border-bottom d-flex gap-2">
+        <input id="proj-name" class="form-control form-control-sm" placeholder="New project name" title="Project name" />
+        <button class="btn btn-sm btn-primary" onclick="createProjectSidebar()" title="Create project">Add</button>
+      </div>
+      <div class="p-2 border-bottom">
+        <label class="btn btn-outline-secondary btn-sm mb-0 w-100" title="Import a project ZIP">
+          Import Project <input type="file" id="import-file" accept=".zip" hidden onchange="openImportOptionsVM()" />
+        </label>
+      </div>
+      <div id="sidebar-projects" class="flex-grow-1"></div>
+    </aside>
+    <main class="col-12 col-md-9 col-lg-10 shell-content p-3">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <ul class="nav nav-pills flex-nowrap">
+          <li class="nav-item">
+            <a class="nav-link" data-shell-link href="/">Configuration</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link active" aria-current="page" data-shell-link href="/static/vm_manager.html">VM Manager</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" data-shell-link href="/static/exports.html">Exports</a>
+          </li>
+        </ul>
+        <div class="d-flex align-items-center gap-2">
+          <div class="btn-group btn-group-sm" role="group" aria-label="Projects selection">
+            <button id="btn-projects" class="btn btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#projectsModal" title="Choose one or more projects">Projects <span id="projects-count" class="badge bg-secondary ms-1">1</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <div id="vm-progress" class="progress mb-2 d-none" aria-hidden="true">
+            <div id="vm-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100">Refreshing…</div>
+          </div>
+          <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+            <div class="input-group input-group-sm" style="max-width: 460px;">
+              <span class="input-group-text">Filter</span>
+              <input id="vm-filter" type="text" class="form-control" placeholder="Text or RegExp (when enabled)" title="Filter rows by text; enable Regex for advanced matching" />
+              <span class="input-group-text">
+                <input id="vm-filter-regex" class="form-check-input mt-0" type="checkbox" title="Treat filter as JavaScript RegExp (case-insensitive)" aria-label="Regex" />
+                <span class="ms-1">Regex</span>
+              </span>
+              <button class="btn btn-outline-secondary" type="button" title="Clear filter" onclick="vmClearFilter()">Clear</button>
+            </div>
+            <span id="vm-filter-error" class="text-danger small d-none">Invalid regular expression</span>
+            <div class="d-flex align-items-center gap-2">
+              <button id="btn-prox-login" class="btn btn-sm btn-outline-primary" title="Set Proxmox URL/ports and session credentials">Update Proxmox Creds</button>
+              <span id="refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="left" title="Please log in to Proxmox first.">
+                <button id="btn-refresh" class="btn btn-sm btn-outline-secondary" onclick="vmRefresh()" disabled>Refresh States</button>
+              </span>
+              <div class="input-group input-group-sm" style="width: 200px;">
+                <span class="input-group-text">Auto</span>
+                <select id="vm-auto-interval" class="form-select" title="Automatically refresh at an interval (requires Proxmox auth)">
+                  <option value="0">Off</option>
+                  <option value="15">15s</option>
+                  <option value="30">30s</option>
+                  <option value="60">60s</option>
+                  <option value="300">5m</option>
+                </select>
+              </div>
+              <span id="vm-auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
+              <div class="btn-group btn-group-sm ms-2">
+                <button id="vm-cols-btn" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">Columns</button>
+                <ul class="dropdown-menu p-2 small" id="vm-cols-menu" style="min-width: 240px;">
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-project" checked>
+                    <label class="form-check-label" for="vm-col-project">Project</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-name" checked>
+                    <label class="form-check-label" for="vm-col-name">Generated VM Names</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-cred" checked>
+                    <label class="form-check-label" for="vm-col-cred">Credentials</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-status" checked>
+                    <label class="form-check-label" for="vm-col-status">Status</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-state" checked>
+                    <label class="form-check-label" for="vm-col-state">State</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-id" checked>
+                    <label class="form-check-label" for="vm-col-id">ID</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-node" checked>
+                    <label class="form-check-label" for="vm-col-node">Node Name</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-template" checked>
+                    <label class="form-check-label" for="vm-col-template">TemplateName/ID</label>
+                  </li>
+                  <li class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vm-col-nets" checked>
+                    <label class="form-check-label" for="vm-col-nets">Adaptors</label>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <!-- Actions toolbar -->
+          <div class="d-flex flex-wrap gap-2 mb-3" id="vm-actions-bar">
+            <!-- Startup group -->
+            <div class="btn-group btn-group-sm">
+              <button id="act-startup" type="button" class="btn btn-outline-success dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled>Startup</button>
+              <ul class="dropdown-menu">
+                <li><button class="dropdown-item" type="button" onclick="vmAction('create')">Create</button></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('start')">Start</button></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('restore')">Restore</button></li>
+              </ul>
+            </div>
+            <!-- Stop group -->
+            <div class="btn-group btn-group-sm">
+              <button id="act-stop" type="button" class="btn btn-outline-danger dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled title="Suspend, power off, or delete selected VMs">Stop</button>
+              <ul class="dropdown-menu">
+                <li><button class="dropdown-item" type="button" onclick="vmAction('suspend')">Suspend</button></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('poweroff')">Power Off</button></li>
+                <li><hr class="dropdown-divider"/></li>
+                <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('delete')">Delete</button></li>
+              </ul>
+            </div>
+            <!-- State group -->
+            <div class="btn-group btn-group-sm">
+              <button id="act-state" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled title="Take snapshots of selected VMs">State</button>
+              <ul class="dropdown-menu">
+                <li><button class="dropdown-item" type="button" onclick="vmAction('snapshot')">Snapshot</button></li>
+              </ul>
+            </div>
+            <!-- Control group -->
+            <div class="btn-group btn-group-sm">
+              <button id="act-control" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled title="Run startup or stored commands on selected VMs">Control</button>
+              <ul class="dropdown-menu">
+                <li><button class="dropdown-item" type="button" onclick="vmAction('run_startup_cmds')">Run Startup Cmds</button></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('run_stored_cmds')">Run Stored Cmds</button></li>
+              </ul>
+            </div>
+            <!-- Users group -->
+            <div class="btn-group btn-group-sm" id="users-group" data-bs-toggle="tooltip" data-bs-placement="top" title="Creates a Proxmox user and pool for the credential username, and adds selected VMs as pool members.">
+              <button id="act-users" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled>Users</button>
+              <ul class="dropdown-menu">
+                <li><button class="dropdown-item" type="button" onclick="vmAction('users_create')">Create</button></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('users_delete')">Delete</button></li>
+              </ul>
+            </div>
+            <div class="btn-group btn-group-sm ms-auto">
+              <button id="act-cancel" type="button" class="btn btn-outline-warning" onclick="vmCancelActions()" disabled>Cancel</button>
+            </div>
+          </div>
+          <div id="vm-config-only-alert" class="alert alert-info py-2 px-3 small mb-3" role="alert">
+            Showing project configuration only. VM states and metrics will appear as <code>n/a</code> until you log in to Proxmox and press <em>Refresh States</em>.
+          </div>
+          <div class="d-flex justify-content-end align-items-center mb-2">
+            <div class="text-muted small">Click column headers to sort</div>
+          </div>
+          <div id="vm-skipped-note" class="mb-2"></div>
+          <div id="vm-info" class="mb-3 text-muted small">Select a project from the left. Instances overview is shown below.</div>
+          <div id="vm-table" class="table-responsive"></div>
+          <!-- Progress moved to modal -->
+        </div>
+      </div>
+    </main>
+  </div>
+ </div>
+<!-- Action Results Modal -->
+<div class="modal fade" id="actionSummaryModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 id="action-summary-title" class="modal-title">Action Results</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div id="action-summary-body" class="modal-body">
+        <!-- Filled dynamically -->
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Import Options Modal (VM Manager) -->
+<div class="modal fade" id="importOptionsVM" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Import Options</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2 d-flex gap-2">
+          <button id="impvm-sel-all" class="btn btn-sm btn-outline-secondary">Select All</button>
+          <button id="impvm-sel-none" class="btn btn-sm btn-outline-secondary">Select None</button>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="impvm-cfg" checked disabled>
+          <label class="form-check-label" for="impvm-cfg">Configuration (always included)</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="impvm-creds" checked>
+          <label class="form-check-label" for="impvm-creds">Credentials</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="impvm-vms" checked>
+          <label class="form-check-label" for="impvm-vms">VMs</label>
+        </div>
+        <div id="impvm-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
+          Importing VMs can be very time-consuming. This runs on the remote host, downloads disk files, and compresses them.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button id="impvm-continue" type="button" class="btn btn-primary">Continue</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Settings modal injected via creds.js -->
+<script src="/static/js/creds.js"></script>
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/shell.js"></script>
+<script src="/static/js/app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/vm_manager.js"></script>
+<!-- Proxmox Login Modal (session-only, top-level) -->
+<div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Proxmox Login</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form id="prox-login-form" class="modal-body" autocomplete="off" onsubmit="return false;">
+        <div class="mb-3">
+          <label class="form-label" title="Base URL to your Proxmox node or cluster">Proxmox URL</label>
+          <input id="prox-url" class="form-control" placeholder="https://proxmox.example.com" title="https://host or host (scheme auto-added)" />
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-md-6">
+            <label class="form-label" title="Proxmox API port (default 8006)">API Port</label>
+            <input id="prox-api-port" type="number" class="form-control" placeholder="8006" title="Proxmox API port" />
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" title="SSH port used for guest commands">SSH Port</label>
+            <input id="prox-ssh-port" type="number" class="form-control" placeholder="22" title="SSH port" />
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" title="Proxmox username (realm included)">Username</label>
+          <input id="prox-username" class="form-control" placeholder="E.g., root@pam" title="E.g., root@pam" />
+        </div>
+        <div class="mb-3">
+          <label class="form-label" title="Proxmox password (not persisted)">Password</label>
+          <div class="input-group">
+            <input id="prox-password" type="password" class="form-control" title="Stored only in this session" />
+            <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" data-target="prox-password" title="Show">&#x1F576;&#xFE0E;</button>
+          </div>
+        </div>
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="prox-verify-ssl" checked>
+          <label class="form-check-label" for="prox-verify-ssl" title="When enabled, the app will verify HTTPS certificates when connecting to the Proxmox API">Verify SSL certificates</label>
+        </div>
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="prox-save-creds">
+          <label class="form-check-label" for="prox-save-creds" title="If enabled, credentials will be stored in localStorage instead of just this session.">Save credentials (local browser)</label>
+        </div>
+        <small class="text-muted">If unchecked, credentials live only in sessionStorage and clear on tab close. When checked, they're stored in localStorage on this device only (never sent to the server).</small>
+      </form>
+      <div class="modal-footer">
+        <div id="prox-login-feedback" class="me-auto small"></div>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" id="btn-prox-save" class="btn btn-primary" onclick="saveProxCredsFromModal()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Projects Modal (top-level) -->
+<div class="modal fade" id="projectsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Select Projects</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="input-group mb-2">
+          <input id="projects-filter" type="text" class="form-control" placeholder="Search by name or tag">
+          <button class="btn btn-outline-secondary" type="button" id="projects-filter-clear">Clear</button>
+        </div>
+        <div class="btn-group btn-group-sm mb-2" role="group">
+          <button id="projects-select-current" class="btn btn-outline-secondary" type="button">Current</button>
+          <button id="projects-select-all" class="btn btn-outline-secondary" type="button">All</button>
+          <button id="projects-clear" class="btn btn-outline-secondary" type="button">Clear</button>
+        </div>
+        <div id="projects-list" class="list-group" style="max-height: 50vh; overflow: auto;"></div>
+        <div id="projects-error" class="alert alert-danger small mt-3 d-none" role="alert" aria-hidden="true"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="projects-apply" type="button" class="btn btn-primary">Apply</button>
+      </div>
+    </div>
+  </div>
+  </div>
+<!-- Action Progress Modal -->
+<div class="modal fade" id="actionProgressModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 id="action-progress-title" class="modal-title">Working…</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="action-progress-text" class="small mb-2" aria-live="polite"></div>
+        <div class="progress">
+          <div id="action-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">Starting…</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Ambiguous Template Resolution Modal -->
+<div class="modal fade" id="tmplResolveModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Select Template VM ID</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="tmpl-resolve-body" class="mb-2"></div>
+        <div class="text-muted small">Choose which VMID to use for this base template name. Your selection will be saved to the project configuration.</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" id="tmpl-resolve-save" class="btn btn-primary">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  document.addEventListener('DOMContentLoaded', async () => {
+    await shell.initShell('vm');
+    try { if (typeof prepareSettingsModal === 'function') prepareSettingsModal(); } catch {}
+    const s = typeof readSettings === 'function' ? readSettings() : {};
+    const defCfg = document.getElementById('def-cfg');
+    const defVm = document.getElementById('def-vm');
+    const defMat = document.getElementById('def-mat');
+    if (defCfg) defCfg.checked = !!s.defaultCfgExpanded;
+    if (defVm) defVm.checked = !!s.defaultVmExpanded;
+    if (defMat) defMat.checked = !!s.defaultMatExpanded;
+    // Apply current selection
+    const apply = async (pid) => { if (!pid) return; try { await vmLoadProjectById(pid); } catch {} };
+    document.addEventListener('project-selected', (e) => apply(e.detail));
+    apply(shell.getCurrentProjectId());
+    // Wire Import Options modal
+    try {
+      const allBtn = document.getElementById('impvm-sel-all');
+      const noneBtn = document.getElementById('impvm-sel-none');
+      const c = document.getElementById('impvm-creds');
+      const v = document.getElementById('impvm-vms');
+      const warn = document.getElementById('impvm-vms-warning');
+      if (allBtn && noneBtn && c && v) {
+        allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (warn) warn.style.display = 'block'; });
+        noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (warn) warn.style.display = 'none'; });
+        v.addEventListener('change', () => { if (warn) warn.style.display = v.checked ? 'block' : 'none'; });
+      }
+    } catch {}
+  });
+</script>
+ </div>
+<!-- Snapshot/Restore modal removed: snapshot auto-named, restore uses latest -->
+<script>
+  document.addEventListener('DOMContentLoaded', async () => {
+    await shell.initShell('vm');
+    const apply = async (pid) => {
+      if (!pid) return;
+      const input = document.getElementById('vm-proj-id');
+      if (input) input.value = pid;
+      try { await vmLoadProjectById(pid); } catch {}
+    };
+    document.addEventListener('project-selected', (e) => apply(e.detail));
+    apply(shell.getCurrentProjectId());
+  });
+</script>
+<script>
+  // Banner user dropdown wiring
+  document.addEventListener('DOMContentLoaded', async () => {
+    try {
+      const d = await AUTH.me();
+      const user = d?.user; const nameEl=document.getElementById('banner-username');
+      if(nameEl) nameEl.textContent = user? user.username : 'anonymous';
+      const logoutBtn=document.getElementById('banner-logout');
+      if(logoutBtn){ logoutBtn.addEventListener('click', async ()=>{ await AUTH.logout(); location.href='/'; }); }
+    } catch {}
+  });
+  document.addEventListener('auth-changed', e=>{ const u=e.detail?.user; const nameEl=document.getElementById('banner-username'); if(nameEl) nameEl.textContent = u? u.username : 'anonymous'; });
+</script>
+</body>
+</html>
