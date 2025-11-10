@@ -4176,6 +4176,7 @@ def ctfd_users_create(pid: str):
     creds = [c for c in (proj.credentials or []) if (not only or c.get('username') in only)]
     if not creds: return jsonify({"created":0, "updated":0, "skipped":0})
     client = _ctfd_client_from_req(proj)
+
     # Preflight: ensure current identity has permission to manage users
     try:
         # Admin or teacher roles typically required; some setups use 'admin'
@@ -4277,6 +4278,221 @@ def ctfd_users_check(pid: str):
             continue
     # Build client (supports token or session login)
     client = _ctfd_client_from_req(proj)
+
+    def _pick_id(source, keys):
+        if not isinstance(source, dict):
+            return None
+        for key in keys:
+            if key in source and source[key] is not None:
+                val = source[key]
+                try:
+                    return int(val)
+                except Exception:
+                    try:
+                        return int(str(val))
+                    except Exception:
+                        continue
+        return None
+
+    def _pick_str(source, keys):
+        if isinstance(source, dict):
+            for key in keys:
+                val = source.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        elif isinstance(source, str) and source.strip():
+            return source.strip()
+        return ''
+
+    def _normalize_category(label):
+        txt = str(label or '').strip()
+        return txt if txt else 'Uncategorized'
+
+    def _extract_ts(record):
+        ts_iso = None
+        ts_epoch = None
+        for key in ('date', 'solved_date', 'created', 'submitted', 'timestamp', 'time'):
+            value = record.get(key)
+            if value in (None, ''):
+                continue
+            if isinstance(value, (int, float)):
+                ts_epoch = float(value)
+                try:
+                    ts_iso = datetime.utcfromtimestamp(ts_epoch).isoformat() + 'Z'
+                except Exception:
+                    ts_iso = str(value)
+                break
+            if isinstance(value, str) and value.strip():
+                ts_iso = value.strip()
+                dt = _parse_iso_datetime(ts_iso)
+                if dt:
+                    try:
+                        ts_epoch = dt.timestamp()
+                    except Exception:
+                        ts_epoch = None
+                else:
+                    try:
+                        ts_epoch = float(value)
+                    except Exception:
+                        ts_epoch = None
+                break
+        return ts_epoch, ts_iso
+
+    def _is_earlier(candidate, existing):
+        if not existing:
+            return True
+        new_ts = candidate.get('timestamp_epoch')
+        old_ts = existing.get('timestamp_epoch')
+        if new_ts is not None and old_ts is not None:
+            if new_ts < old_ts:
+                return True
+            if new_ts > old_ts:
+                return False
+        elif new_ts is not None:
+            return True
+        elif old_ts is not None:
+            return False
+        new_label = candidate.get('timestamp') or ''
+        old_label = existing.get('timestamp') or ''
+        if new_label and old_label and new_label != old_label:
+            return new_label < old_label
+        new_name = candidate.get('user') or candidate.get('team') or ''
+        old_name = existing.get('user') or existing.get('team') or ''
+        if new_name and old_name and new_name != old_name:
+            return new_name < old_name
+        return False
+
+    def _resolve_identity(record):
+        account = record.get('account') if isinstance(record.get('account'), dict) else {}
+        team_obj = record.get('team') if isinstance(record.get('team'), dict) else {}
+        try:
+            account_type = (account.get('type') or account.get('account_type') or record.get('account_type') or record.get('type') or '').lower()
+        except Exception:
+            account_type = ''
+        user_id = _pick_id(record, ('user_id', 'userId'))
+        if user_id is None:
+            user_id = _pick_id(account, ('id', 'user_id', 'userId'))
+        if user_id is None and isinstance(record.get('user'), dict):
+            user_id = _pick_id(record.get('user'), ('id', 'user_id', 'userId'))
+        team_id = _pick_id(record, ('team_id', 'teamId'))
+        if team_id is None and isinstance(team_obj, dict):
+            team_id = _pick_id(team_obj, ('id', 'team_id', 'teamId'))
+        if team_id is None and account_type == 'team':
+            team_id = _pick_id(account, ('id', 'team_id', 'teamId', 'account_id', 'accountId'))
+        if team_id is None and isinstance(account, dict):
+            team_id = _pick_id(account, ('team_id', 'teamId'))
+        user_name = _pick_str(record, ('user', 'username', 'user_name', 'account_name'))
+        if not user_name:
+            user_name = _pick_str(account, ('name', 'username', 'display_name'))
+        if not user_name and isinstance(record.get('user'), dict):
+            user_name = _pick_str(record.get('user'), ('name', 'username', 'display_name'))
+        team_name = _pick_str(record, ('team_name', 'team', 'group'))
+        if not team_name and isinstance(team_obj, dict):
+            team_name = _pick_str(team_obj, ('name', 'team', 'display_name'))
+        if not team_name and account_type == 'team':
+            team_name = _pick_str(account, ('name', 'team', 'display_name'))
+        if not team_name and isinstance(record.get('team'), str):
+            team_name = record.get('team').strip()
+        kind = 'team' if (account_type == 'team' or (team_id is not None and user_id is None)) else 'user'
+        return {
+            'kind': kind,
+            'user_id': user_id,
+            'user_name': user_name,
+            'team_id': team_id,
+            'team_name': team_name,
+        }
+
+    def _build_category_firsts():
+        result = {
+            'user': [],
+            'team': [],
+            'errors': [],
+            'generated_at': datetime.utcnow().isoformat() + 'Z'
+        }
+        best_user = {}
+        best_team = {}
+        try:
+            challenges = client.list_challenges_all()
+        except Exception as exc:
+            result['errors'].append(f'challenges: {exc}')
+            challenges = []
+        if not isinstance(challenges, list):
+            challenges = []
+        for chall in challenges:
+            if not isinstance(chall, dict):
+                continue
+            try:
+                cid = int(chall.get('id'))
+            except Exception:
+                cid = None
+            if cid is None:
+                continue
+            category_label = _normalize_category(chall.get('category') or chall.get('topic'))
+            challenge_name = _pick_str(chall, ('name', 'title')) or f'Challenge {cid}'
+            try:
+                solves = client.list_challenge_solves(cid)
+            except Exception as exc:
+                result['errors'].append(f'solves[{cid}]: {exc}')
+                solves = []
+            if not isinstance(solves, list):
+                continue
+            for solve in solves:
+                if not isinstance(solve, dict):
+                    continue
+                ts_epoch, ts_iso = _extract_ts(solve)
+                identity = _resolve_identity(solve)
+                if identity['kind'] != 'team' and identity['user_id'] and not identity['user_name']:
+                    try:
+                        fetched_user = client.get_user_name(identity['user_id'])
+                        if fetched_user:
+                            identity['user_name'] = fetched_user
+                    except Exception:
+                        pass
+                if identity['team_id'] and not identity['team_name']:
+                    try:
+                        fetched_team = client.get_team_name(identity['team_id'])
+                        if fetched_team:
+                            identity['team_name'] = fetched_team
+                    except Exception:
+                        pass
+                category_key = category_label.lower()
+                common_entry = {
+                    'category': category_label,
+                    'category_key': category_key,
+                    'challenge': challenge_name,
+                    'challenge_id': cid,
+                    'timestamp': ts_iso,
+                    'timestamp_epoch': ts_epoch,
+                    'team': identity['team_name'] or None,
+                    'team_id': identity['team_id'],
+                }
+                if identity['kind'] != 'team' and identity['user_name']:
+                    user_entry = {**common_entry, 'user': identity['user_name'], 'user_id': identity['user_id']}
+                    prev_user = best_user.get(category_key)
+                    if _is_earlier(user_entry, prev_user):
+                        best_user[category_key] = user_entry
+                if identity['team_name']:
+                    team_entry = {**common_entry, 'team': identity['team_name'], 'team_id': identity['team_id']}
+                    prev_team = best_team.get(category_key)
+                    if _is_earlier(team_entry, prev_team):
+                        best_team[category_key] = team_entry
+
+        def _finalize(source_map, target_key):
+            items = []
+            for entry in source_map.values():
+                copy = dict(entry)
+                copy.pop('category_key', None)
+                items.append(copy)
+            items.sort(key=lambda e: (
+                e.get('timestamp_epoch') if e.get('timestamp_epoch') is not None else float('inf'),
+                str(e.get('category') or '')
+            ))
+            result[target_key] = items
+
+        _finalize(best_user, 'user')
+        _finalize(best_team, 'team')
+        return result
+
     out = []
     for uname in targets:
         exists = False
@@ -4529,11 +4745,25 @@ def ctfd_users_check(pid: str):
             'team_last_solve_time': team_last_solve_time,
             'team_last_solve_challenge': team_last_solve_challenge,
         })
-    return jsonify({
+    category_payload = None
+    if not only:
+        try:
+            category_payload = _build_category_firsts()
+        except Exception as exc:
+            category_payload = {
+                'user': [],
+                'team': [],
+                'errors': [f'category_firsts: {exc}'],
+                'generated_at': datetime.utcnow().isoformat() + 'Z'
+            }
+    response_payload = {
         'users': out,
         'using_token': bool(client.token),
         'logs': getattr(client, 'logs', []),
-    })
+    }
+    if category_payload is not None:
+        response_payload['category_firsts'] = category_payload
+    return jsonify(response_payload)
 
 
 @api_bp.post('/projects/<pid>/ctfd/upload')

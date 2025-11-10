@@ -50,11 +50,14 @@ const SETTINGS_AUDIO_FIELDS = {
     inputId: 'settings-audio-ctfd-user',
     previewId: 'settings-audio-ctfd-user-preview',
     clearId: 'settings-audio-ctfd-user-clear',
+    listId: 'settings-audio-ctfd-user-list',
     labelId: 'settings-audio-ctfd-user-label',
     toggleId: 'settings-audio-ctfd-user-toggle',
     speakToggleId: 'settings-audio-ctfd-user-speak',
     speakLabelId: 'settings-audio-ctfd-user-speak-label',
-    speakTemplateId: 'settings-audio-ctfd-user-speak-template',
+    templateInputId: 'settings-audio-ctfd-user-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-user-speak-template-add',
+    templateListId: 'settings-audio-ctfd-user-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-user-speak-help',
     placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{project}}, {{project_clause}}, {{first_team}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
@@ -67,11 +70,14 @@ const SETTINGS_AUDIO_FIELDS = {
     inputId: 'settings-audio-ctfd-team',
     previewId: 'settings-audio-ctfd-team-preview',
     clearId: 'settings-audio-ctfd-team-clear',
+    listId: 'settings-audio-ctfd-team-list',
     labelId: 'settings-audio-ctfd-team-label',
     toggleId: 'settings-audio-ctfd-team-toggle',
     speakToggleId: 'settings-audio-ctfd-team-speak',
     speakLabelId: 'settings-audio-ctfd-team-speak-label',
-    speakTemplateId: 'settings-audio-ctfd-team-speak-template',
+    templateInputId: 'settings-audio-ctfd-team-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-team-speak-template-add',
+    templateListId: 'settings-audio-ctfd-team-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-team-speak-help',
     placeholderHint: '{{audio}}, {{first_team}}, {{second_team}}, {{third_team}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
@@ -84,11 +90,14 @@ const SETTINGS_AUDIO_FIELDS = {
     inputId: 'settings-audio-ctfd-score',
     previewId: 'settings-audio-ctfd-score-preview',
     clearId: 'settings-audio-ctfd-score-clear',
+    listId: 'settings-audio-ctfd-score-list',
     labelId: 'settings-audio-ctfd-score-label',
     toggleId: 'settings-audio-ctfd-score-toggle',
     speakToggleId: 'settings-audio-ctfd-score-speak',
     speakLabelId: 'settings-audio-ctfd-score-speak-label',
-    speakTemplateId: 'settings-audio-ctfd-score-speak-template',
+    templateInputId: 'settings-audio-ctfd-score-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-score-speak-template-add',
+    templateListId: 'settings-audio-ctfd-score-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-score-speak-help',
     placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{points}}, {{points_clause}}, {{project}}, {{project_clause}}, {{first_team}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
@@ -101,11 +110,14 @@ const SETTINGS_AUDIO_FIELDS = {
     inputId: 'settings-audio-ctfd-countdown',
     previewId: 'settings-audio-ctfd-countdown-preview',
     clearId: 'settings-audio-ctfd-countdown-clear',
+    listId: 'settings-audio-ctfd-countdown-list',
     labelId: 'settings-audio-ctfd-countdown-label',
     toggleId: 'settings-audio-ctfd-countdown-toggle',
     speakToggleId: 'settings-audio-ctfd-countdown-speak',
     speakLabelId: 'settings-audio-ctfd-countdown-speak-label',
-    speakTemplateId: 'settings-audio-ctfd-countdown-speak-template',
+    templateInputId: 'settings-audio-ctfd-countdown-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-countdown-speak-template-add',
+    templateListId: 'settings-audio-ctfd-countdown-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-countdown-speak-help',
     placeholderHint: '{{audio}}, {{reason}}, {{reason_clause}}, {{countdown_seconds}}, {{project}}, {{project_clause}}, {{first_team}}, {{second_team}}, {{third_team}}',
     defaultEnabled: false,
@@ -113,6 +125,77 @@ const SETTINGS_AUDIO_FIELDS = {
     defaultSpeakTemplate: '{{audio}} Countdown complete{{reason_clause}}.',
     legacyDefaultSpeakBefore: '',
     legacyDefaultSpeakAfter: 'Countdown complete{{reason_clause}}.'
+  },
+  ctfdPeriodic: {
+    inputId: 'settings-audio-ctfd-periodic',
+    previewId: 'settings-audio-ctfd-periodic-preview',
+    clearId: 'settings-audio-ctfd-periodic-clear',
+    listId: 'settings-audio-ctfd-periodic-list',
+    labelId: 'settings-audio-ctfd-periodic-label',
+    toggleId: 'settings-audio-ctfd-periodic-toggle',
+    speakToggleId: 'settings-audio-ctfd-periodic-speak',
+    speakLabelId: 'settings-audio-ctfd-periodic-speak-label',
+    templateInputId: 'settings-audio-ctfd-periodic-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-periodic-speak-template-add',
+    templateListId: 'settings-audio-ctfd-periodic-speak-template-list',
+    speakHelpId: 'settings-audio-ctfd-periodic-speak-help',
+    placeholderHint: '{{audio}}, {{interval_minutes}}, {{project}}, {{project_clause}}',
+    numericFields: [
+      {
+        key: 'intervalMinutes',
+        inputId: 'settings-audio-ctfd-periodic-interval',
+        defaultValue: 30,
+        min: 1,
+        max: 1440,
+        step: 1,
+        contextKey: 'interval_minutes'
+      }
+    ],
+    defaultEnabled: false,
+    defaultSpeak: true,
+    defaultSpeakTemplate: '{{audio}} Periodic update{{project_clause}}. Next check in {{interval_minutes}} minutes.',
+    legacyDefaultSpeakBefore: '',
+    legacyDefaultSpeakAfter: 'Periodic update{{project_clause}}. Next check in {{interval_minutes}} minutes.'
+  },
+  ctfdFirstCategoryUser: {
+    inputId: 'settings-audio-ctfd-cat-user',
+    previewId: 'settings-audio-ctfd-cat-user-preview',
+    clearId: 'settings-audio-ctfd-cat-user-clear',
+    listId: 'settings-audio-ctfd-cat-user-list',
+    labelId: 'settings-audio-ctfd-cat-user-label',
+    toggleId: 'settings-audio-ctfd-cat-user-toggle',
+    speakToggleId: 'settings-audio-ctfd-cat-user-speak',
+    speakLabelId: 'settings-audio-ctfd-cat-user-speak-label',
+    templateInputId: 'settings-audio-ctfd-cat-user-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-cat-user-speak-template-add',
+    templateListId: 'settings-audio-ctfd-cat-user-speak-template-list',
+    speakHelpId: 'settings-audio-ctfd-cat-user-speak-help',
+    placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{leader}}, {{user_first}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
+    defaultEnabled: true,
+    defaultSpeak: true,
+    defaultSpeakTemplate: '{{audio}} {{leader}} just solved the first challenge in {{category}}{{project_clause}}.',
+    legacyDefaultSpeakBefore: '',
+    legacyDefaultSpeakAfter: '{{leader}} just solved the first challenge in {{category}}{{project_clause}}.'
+  },
+  ctfdFirstCategoryTeam: {
+    inputId: 'settings-audio-ctfd-cat-team',
+    previewId: 'settings-audio-ctfd-cat-team-preview',
+    clearId: 'settings-audio-ctfd-cat-team-clear',
+    listId: 'settings-audio-ctfd-cat-team-list',
+    labelId: 'settings-audio-ctfd-cat-team-label',
+    toggleId: 'settings-audio-ctfd-cat-team-toggle',
+    speakToggleId: 'settings-audio-ctfd-cat-team-speak',
+    speakLabelId: 'settings-audio-ctfd-cat-team-speak-label',
+    templateInputId: 'settings-audio-ctfd-cat-team-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-cat-team-speak-template-add',
+    templateListId: 'settings-audio-ctfd-cat-team-speak-template-list',
+    speakHelpId: 'settings-audio-ctfd-cat-team-speak-help',
+  placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{team_first}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
+    defaultEnabled: true,
+    defaultSpeak: true,
+    defaultSpeakTemplate: '{{audio}} {{team_first}} is first to solve a {{category}} challenge{{project_clause}}.',
+    legacyDefaultSpeakBefore: '',
+    legacyDefaultSpeakAfter: '{{team_first}} is first to solve a {{category}} challenge{{project_clause}}.'
   }
 };
 const SETTINGS_AUDIO_DEFAULTS = Object.fromEntries(Object.entries(SETTINGS_AUDIO_FIELDS).map(([key, cfg]) => [key, cfg.defaultEnabled !== undefined ? !!cfg.defaultEnabled : true]));
@@ -130,14 +213,20 @@ const SETTINGS_AUDIO_PREVIEW_DEFAULT_CONTEXT = {
   third_team: 'Team Nova',
   challenge: 'Forensics Intro',
   challenge_clause: ' for challenge Forensics Intro',
+  category: 'Forensics',
+  category_clause: ' in Forensics',
   points: '100',
   points_clause: ' worth 100 points',
   reason: 'scoreboard reveal',
   reason_clause: ' for scoreboard reveal',
-  countdown_seconds: '10'
+  countdown_seconds: '10',
+  interval_minutes: '30'
 };
 const SETTINGS_AUDIO_PREVIEW_CONTEXT = {
-  ctfdFirstTeam: { leader: 'Team Eclipse' }
+  ctfdFirstTeam: { leader: 'Team Eclipse' },
+  ctfdPeriodic: { interval_minutes: '30' },
+  ctfdFirstCategoryUser: { category: 'Web Exploitation', leader: 'Alex Jordan' },
+  ctfdFirstCategoryTeam: { category: 'Reverse Engineering', team_first: 'Team Aurora' }
 };
 function settingsModalPreviewContext(key){
   const overrides = SETTINGS_AUDIO_PREVIEW_CONTEXT[key];
@@ -160,11 +249,23 @@ function settingsModalRenderSpeechTemplate(template, context){
   return replaced.replace(/\s{2,}/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
 }
 function settingsModalBuildPreviewSpeechText(key, entry){
-  const tpl = entry && typeof entry.speakTemplate === 'string'
-    ? entry.speakTemplate
-    : settingsAudioDefaultSpeakTemplate(key);
+  const templates = settingsAudioValidTemplates(entry);
+  const tpl = templates.length ? templates[0] : settingsAudioDefaultSpeakTemplate(key);
   if (!tpl) return '';
-  return settingsModalRenderSpeechTemplate(tpl, settingsModalPreviewContext(key));
+  const context = settingsModalPreviewContext(key);
+  const cfg = SETTINGS_AUDIO_FIELDS[key];
+  if (cfg && Array.isArray(cfg.numericFields)) {
+    cfg.numericFields.forEach(field => {
+      if (!field) return;
+      const ctxKey = field.contextKey || field.key;
+      if (!ctxKey) return;
+      const value = entry ? entry[field.key] : undefined;
+      if (value !== undefined && value !== null && value !== '') {
+        context[ctxKey] = String(value);
+      }
+    });
+  }
+  return settingsModalRenderSpeechTemplate(tpl, context);
 }
 function settingsModalSpeakPreview(text){
   if (!text || !settingsSpeechSupported()) return;
@@ -271,11 +372,33 @@ function wireSettingsTtsControls(){
   });
 }
 function cloneSettingsAudio(src){ try { return JSON.parse(JSON.stringify(src || {})); } catch { return {}; } }
+function settingsAudioValidSounds(entry){
+  const list = Array.isArray(entry && entry.sounds) ? entry.sounds : [];
+  return list.filter(sound => {
+    if (!sound) return false;
+    const dataUrl = typeof sound.dataUrl === 'string' ? sound.dataUrl : '';
+    return dataUrl.startsWith('data:');
+  });
+}
+function settingsAudioValidTemplates(entry){
+  const list = Array.isArray(entry && entry.speakTemplates) ? entry.speakTemplates : [];
+  return list.map(t => {
+    if (typeof t === 'string') return t.trim();
+    if (t != null) return String(t).trim();
+    return '';
+  }).filter(Boolean);
+}
 function describeAudioEntry(entry){
-  if (!entry || !entry.dataUrl) return 'Using built-in tone.';
-  const size = entry.size ? ` (${Math.round(Number(entry.size||0) / 1024)} KB)` : '';
-  const name = entry.name ? String(entry.name) : 'Custom audio';
-  return `Custom: ${name}${size}`;
+  const sounds = settingsAudioValidSounds(entry);
+  if (!sounds.length) return 'Using built-in tone.';
+  if (sounds.length === 1) {
+    const sound = sounds[0] || {};
+    const name = sound.name ? String(sound.name) : 'Custom audio';
+    const sizeKb = Number(sound.size);
+    const sizeLabel = Number.isFinite(sizeKb) && sizeKb > 0 ? ` (${Math.round(sizeKb / 1024)} KB)` : '';
+    return `Custom: ${name}${sizeLabel}`;
+  }
+  return `Custom: ${sounds.length} clips`;
 }
 function settingsAudioDefaultEnabled(key){
   const cfg = SETTINGS_AUDIO_FIELDS[key];
@@ -318,25 +441,86 @@ function settingsAudioNormalizeLegacyTemplate(entry, key){
   delete entry.speakBefore;
   delete entry.speakAfter;
 }
+function settingsAudioClampNumeric(raw, field){
+  if (!field) return undefined;
+  let value = Number(raw);
+  if (!Number.isFinite(value)) {
+    if (field.defaultValue !== undefined) value = Number(field.defaultValue);
+  }
+  if (!Number.isFinite(value)) return undefined;
+  if (field.min !== undefined && Number.isFinite(Number(field.min))) value = Math.max(Number(field.min), value);
+  if (field.max !== undefined && Number.isFinite(Number(field.max))) value = Math.min(Number(field.max), value);
+  if (field.step !== undefined && Number.isFinite(Number(field.step)) && Number(field.step) > 0) {
+    const step = Number(field.step);
+    value = Math.round(value / step) * step;
+  }
+  return Number.isFinite(value) ? value : undefined;
+}
+function settingsAudioApplyNumericFields(entry, key){
+  if (!entry || typeof entry !== 'object') return;
+  const cfg = SETTINGS_AUDIO_FIELDS[key];
+  if (!cfg || !Array.isArray(cfg.numericFields)) return;
+  cfg.numericFields.forEach(field => {
+    if (!field || !field.key) return;
+    const clamped = settingsAudioClampNumeric(entry[field.key], field);
+    if (clamped === undefined) {
+      if (field.defaultValue !== undefined) {
+        const fallback = settingsAudioClampNumeric(field.defaultValue, field);
+        if (fallback !== undefined) entry[field.key] = fallback;
+        else delete entry[field.key];
+      } else {
+        delete entry[field.key];
+      }
+    } else {
+      entry[field.key] = clamped;
+    }
+  });
+}
 function settingsAudioEnsureEntry(key){
   const defEnabled = settingsAudioDefaultEnabled(key);
   const defSpeak = settingsAudioDefaultSpeak(key);
   const defTemplate = settingsAudioDefaultSpeakTemplate(key);
   let entry = _settingsAudioWorking[key];
   if (!entry || typeof entry !== 'object') {
-    entry = { enabled: defEnabled };
-    if (defSpeak !== undefined) entry.speak = defSpeak;
-    entry.speakTemplate = defTemplate;
+    entry = {};
     _settingsAudioWorking[key] = entry;
-    return entry;
   }
   if (entry.enabled === undefined) entry.enabled = defEnabled;
   if (entry.speak === undefined && defSpeak !== undefined) entry.speak = defSpeak;
   settingsAudioNormalizeLegacyTemplate(entry, key);
-  if (entry.speakTemplate === undefined) entry.speakTemplate = defTemplate;
-  if (entry.speakTemplate !== undefined && typeof entry.speakTemplate !== 'string') {
-    entry.speakTemplate = entry.speakTemplate != null ? String(entry.speakTemplate) : '';
+  if (!Array.isArray(entry.sounds)) entry.sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
+  if (entry.dataUrl) {
+    entry.sounds.push({
+      name: entry.name || '',
+      size: entry.size || 0,
+      type: entry.type || '',
+      dataUrl: entry.dataUrl,
+      updated: entry.updated || Date.now()
+    });
   }
+  entry.sounds = settingsAudioValidSounds(entry).map(sound => ({
+    name: sound.name || '',
+    size: Number(sound.size) || 0,
+    type: sound.type || '',
+    dataUrl: sound.dataUrl,
+    updated: sound.updated || 0
+  }));
+  delete entry.dataUrl;
+  delete entry.name;
+  delete entry.size;
+  delete entry.type;
+  delete entry.updated;
+
+  if (!Array.isArray(entry.speakTemplates)) {
+    entry.speakTemplates = Array.isArray(entry.speakTemplates) ? entry.speakTemplates : [];
+  }
+  if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
+    entry.speakTemplates.push(String(entry.speakTemplate));
+  }
+  entry.speakTemplates = settingsAudioValidTemplates(entry);
+  if (!entry.speakTemplates.length && defTemplate) entry.speakTemplates = [String(defTemplate)];
+  delete entry.speakTemplate;
+  settingsAudioApplyNumericFields(entry, key);
   return entry;
 }
 function settingsModalUpdateAudioUi(key){
@@ -348,10 +532,14 @@ function settingsModalUpdateAudioUi(key){
   const toggle = cfg.toggleId ? document.getElementById(cfg.toggleId) : null;
   const speakToggle = cfg.speakToggleId ? document.getElementById(cfg.speakToggleId) : null;
   const speakLabel = cfg.speakLabelId ? document.getElementById(cfg.speakLabelId) : null;
-  const speakTemplate = cfg.speakTemplateId ? document.getElementById(cfg.speakTemplateId) : null;
+  const templateInput = cfg.templateInputId ? document.getElementById(cfg.templateInputId) : null;
+  const templateAdd = cfg.templateAddId ? document.getElementById(cfg.templateAddId) : null;
+  const templateList = cfg.templateListId ? document.getElementById(cfg.templateListId) : null;
+  const audioList = cfg.listId ? document.getElementById(cfg.listId) : null;
   const speakHelp = cfg.speakHelpId ? document.getElementById(cfg.speakHelpId) : null;
   const entry = settingsAudioEnsureEntry(key);
-  settingsAudioNormalizeLegacyTemplate(entry, key);
+  const sounds = settingsAudioValidSounds(entry);
+  const templates = settingsAudioValidTemplates(entry);
   if (toggle) toggle.checked = !!entry.enabled;
   const speechSupported = settingsSpeechSupported();
   if (speakToggle) {
@@ -359,6 +547,22 @@ function settingsModalUpdateAudioUi(key){
     speakToggle.disabled = !speechSupported;
   }
   const speechInputsEnabled = speechSupported && !!entry.speak;
+  const numericFields = Array.isArray(cfg.numericFields) ? cfg.numericFields : [];
+  numericFields.forEach(field => {
+    if (!field || !field.inputId) return;
+    const input = document.getElementById(field.inputId);
+    if (!input) return;
+    const value = entry[field.key];
+    if (Number.isFinite(value)) {
+      input.value = String(value);
+    } else if (field.defaultValue !== undefined) {
+      const fallback = settingsAudioClampNumeric(field.defaultValue, field);
+      input.value = fallback !== undefined ? String(fallback) : '';
+    } else {
+      input.value = '';
+    }
+    input.disabled = false;
+  });
   const previewSpeech = entry.speak ? settingsModalBuildPreviewSpeechText(key, entry) : '';
   const canSpeak = speechSupported && !!entry.speak && !!previewSpeech;
   if (speakLabel) {
@@ -366,22 +570,66 @@ function settingsModalUpdateAudioUi(key){
     const base = speakLabel.dataset.labelDefault || '';
     speakLabel.textContent = speechSupported ? base : `${base} (not supported in this browser)`;
   }
-  if (speakTemplate) {
-    const val = entry.speakTemplate !== undefined ? entry.speakTemplate : settingsAudioDefaultSpeakTemplate(key);
-    speakTemplate.value = typeof val === 'string' ? val : '';
-    speakTemplate.disabled = !speechInputsEnabled;
-  }
   if (speakHelp) {
     const hint = cfg.placeholderHint ? `Speech template placeholders: ${cfg.placeholderHint}` : (speakHelp.dataset.placeholderBase || speakHelp.textContent || '');
     if (!speakHelp.dataset.placeholderBase) speakHelp.dataset.placeholderBase = speakHelp.textContent || '';
     speakHelp.textContent = hint;
     speakHelp.style.display = speechInputsEnabled ? '' : 'none';
   }
+  if (templateInput) {
+    templateInput.disabled = !speechInputsEnabled;
+  }
+  if (templateAdd) {
+    const readyValue = templateInput ? templateInput.value.trim() : '';
+    templateAdd.disabled = !speechInputsEnabled || !readyValue;
+  }
+  if (templateList) {
+    if (templates.length) {
+      templateList.innerHTML = templates.map((tpl, idx) => {
+        const safe = escHtml(tpl);
+        return `<li class="list-group-item d-flex align-items-center gap-2" data-template-index="${idx}">
+  <input class="form-control form-control-sm flex-grow-1" value="${safe}" data-template-index="${idx}">
+  <button type="button" class="btn btn-outline-danger btn-sm" data-action="remove-template">Remove</button>
+</li>`;
+      }).join('');
+    } else {
+      templateList.innerHTML = '<li class="list-group-item small text-muted">Default template will be used.</li>';
+    }
+    templateList.querySelectorAll('input[data-template-index]').forEach(inputEl => {
+      inputEl.disabled = !speechInputsEnabled;
+    });
+    templateList.querySelectorAll('[data-action="remove-template"]').forEach(btn => {
+      btn.disabled = !speechInputsEnabled;
+    });
+  }
+  if (audioList) {
+    if (sounds.length) {
+      audioList.innerHTML = sounds.map((sound, idx) => {
+        const name = sound.name ? escHtml(String(sound.name)) : `Clip ${idx + 1}`;
+        const sizeBytes = Number(sound.size);
+        const sizeLabel = Number.isFinite(sizeBytes) && sizeBytes > 0 ? `${Math.round(sizeBytes / 1024)} KB` : 'Size unknown';
+        const typeLabel = sound.type ? sound.type : 'Audio';
+  const meta = `${sizeLabel}${typeLabel ? ` | ${escHtml(String(typeLabel))}` : ''}`;
+        return `<li class="list-group-item d-flex align-items-center justify-content-between gap-2" data-sound-index="${idx}">
+  <div class="flex-grow-1">
+    <div>${name}</div>
+    <div class="small text-muted">${meta}</div>
+  </div>
+  <div class="btn-group btn-group-sm">
+    <button type="button" class="btn btn-outline-secondary" data-action="preview-sound">Preview</button>
+    <button type="button" class="btn btn-outline-danger" data-action="remove-sound">Remove</button>
+  </div>
+</li>`;
+      }).join('');
+    } else {
+      audioList.innerHTML = '<li class="list-group-item small text-muted">No custom clips.</li>';
+    }
+  }
   const desc = describeAudioEntry(entry);
   if (label) label.textContent = entry && entry.enabled ? desc : `${desc} (disabled)`;
-  const hasAudio = !!(entry && entry.dataUrl);
-  if (preview) preview.disabled = !(hasAudio || canSpeak);
-  if (clear) clear.disabled = !hasAudio;
+  const hasCustomAudio = sounds.length > 0;
+  if (preview) preview.disabled = !(hasCustomAudio || canSpeak);
+  if (clear) clear.disabled = !hasCustomAudio;
 }
 function settingsModalUpdateAllAudio(){ Object.keys(SETTINGS_AUDIO_FIELDS).forEach(settingsModalUpdateAudioUi); }
 function settingsModalResetFromStorage(){
@@ -408,8 +656,7 @@ function settingsModalResetFromStorage(){
     if (saved && saved.enabled === undefined) saved.enabled = settingsAudioDefaultEnabled(key);
     if (saved && saved.speak === undefined) saved.speak = settingsAudioDefaultSpeak(key);
     settingsAudioNormalizeLegacyTemplate(saved, key);
-    if (saved && saved.speakTemplate === undefined) saved.speakTemplate = settingsAudioDefaultSpeakTemplate(key);
-    _settingsAudioWorking[key] = saved && typeof saved === 'object' ? saved : { enabled: settingsAudioDefaultEnabled(key), speakTemplate: settingsAudioDefaultSpeakTemplate(key) };
+    _settingsAudioWorking[key] = saved && typeof saved === 'object' ? saved : {};
     settingsAudioEnsureEntry(key);
   });
   settingsModalUpdateAllAudio();
@@ -428,11 +675,13 @@ function settingsModalHandleFile(key, file){
       return;
     }
     const entry = settingsAudioEnsureEntry(key);
-    entry.name = file.name || '';
-    entry.size = file.size || 0;
-    entry.type = file.type || '';
-    entry.dataUrl = dataUrl;
-    entry.updated = Date.now();
+    entry.sounds.push({
+      name: file.name || `Clip ${entry.sounds.length + 1}`,
+      size: file.size || 0,
+      type: file.type || '',
+      dataUrl,
+      updated: Date.now()
+    });
     settingsModalUpdateAudioUi(key);
   };
   reader.onerror = () => {
@@ -440,7 +689,7 @@ function settingsModalHandleFile(key, file){
   };
   reader.readAsDataURL(file);
 }
-function settingsModalPreviewAudio(key){
+function settingsModalPreviewAudio(key, soundIndex){
   try {
     const entry = settingsAudioEnsureEntry(key);
     if (!entry) return;
@@ -448,6 +697,9 @@ function settingsModalPreviewAudio(key){
     const wantsSpeech = speechSupported && !!entry.speak;
     const speechText = wantsSpeech ? settingsModalBuildPreviewSpeechText(key, entry) : '';
     const hasSpeech = !!speechText;
+    const sounds = settingsAudioValidSounds(entry);
+    const idx = Number.isFinite(soundIndex) ? Number(soundIndex) : NaN;
+    const clip = Number.isFinite(idx) && idx >= 0 && idx < sounds.length ? sounds[idx] : (sounds[0] || null);
     let fallbackTimer = null;
     let speechTriggered = false;
     const triggerSpeech = ()=>{
@@ -465,8 +717,8 @@ function settingsModalPreviewAudio(key){
       if (fallbackTimer) clearTimeout(fallbackTimer);
       fallbackTimer = setTimeout(triggerSpeech, waitMs);
     };
-    if (entry.dataUrl) {
-      const audio = new Audio(entry.dataUrl);
+    if (clip && clip.dataUrl) {
+      const audio = new Audio(clip.dataUrl);
       if (hasSpeech) {
         scheduleFallback(audio);
         audio.addEventListener('loadedmetadata', ()=> scheduleFallback(audio), { once: true });
@@ -482,12 +734,47 @@ function settingsModalPreviewAudio(key){
 }
 function settingsModalClearAudio(key){
   const entry = settingsAudioEnsureEntry(key);
-  delete entry.dataUrl;
-  delete entry.name;
-  delete entry.size;
-  delete entry.type;
-  delete entry.updated;
+  entry.sounds = [];
   settingsModalUpdateAudioUi(key);
+}
+function settingsModalRemoveSound(key, index){
+  const entry = settingsAudioEnsureEntry(key);
+  if (!Array.isArray(entry.sounds)) entry.sounds = [];
+  const idx = Number(index);
+  if (!Number.isFinite(idx) || idx < 0 || idx >= entry.sounds.length) return;
+  entry.sounds.splice(idx, 1);
+  settingsModalUpdateAudioUi(key);
+}
+function settingsModalAddTemplate(key){
+  const cfg = SETTINGS_AUDIO_FIELDS[key];
+  if (!cfg) return;
+  const entry = settingsAudioEnsureEntry(key);
+  if (!Array.isArray(entry.speakTemplates)) entry.speakTemplates = [];
+  const input = cfg.templateInputId ? document.getElementById(cfg.templateInputId) : null;
+  const addBtn = cfg.templateAddId ? document.getElementById(cfg.templateAddId) : null;
+  const raw = input ? input.value.trim() : '';
+  if (!raw) {
+    if (addBtn) addBtn.disabled = true;
+    return;
+  }
+  entry.speakTemplates.push(raw);
+  if (input) input.value = '';
+  settingsModalUpdateAudioUi(key);
+}
+function settingsModalRemoveTemplate(key, index){
+  const entry = settingsAudioEnsureEntry(key);
+  if (!Array.isArray(entry.speakTemplates)) entry.speakTemplates = [];
+  const idx = Number(index);
+  if (!Number.isFinite(idx) || idx < 0 || idx >= entry.speakTemplates.length) return;
+  entry.speakTemplates.splice(idx, 1);
+  settingsModalUpdateAudioUi(key);
+}
+function settingsModalSetTemplate(key, index, value){
+  const entry = settingsAudioEnsureEntry(key);
+  if (!Array.isArray(entry.speakTemplates)) entry.speakTemplates = [];
+  const idx = Number(index);
+  if (!Number.isFinite(idx) || idx < 0 || idx >= entry.speakTemplates.length) return;
+  entry.speakTemplates[idx] = value;
 }
 function wireSettingsAudioControls(){
   Object.entries(SETTINGS_AUDIO_FIELDS).forEach(([key, cfg]) => {
@@ -496,7 +783,11 @@ function wireSettingsAudioControls(){
     const clear = document.getElementById(cfg.clearId);
     const toggle = cfg.toggleId ? document.getElementById(cfg.toggleId) : null;
     const speakToggle = cfg.speakToggleId ? document.getElementById(cfg.speakToggleId) : null;
-  const speakTemplateInput = cfg.speakTemplateId ? document.getElementById(cfg.speakTemplateId) : null;
+    const templateInput = cfg.templateInputId ? document.getElementById(cfg.templateInputId) : null;
+    const templateAdd = cfg.templateAddId ? document.getElementById(cfg.templateAddId) : null;
+    const templateList = cfg.templateListId ? document.getElementById(cfg.templateListId) : null;
+    const audioList = cfg.listId ? document.getElementById(cfg.listId) : null;
+    const numericFields = Array.isArray(cfg.numericFields) ? cfg.numericFields : [];
     if (input && !input._toolhubBound) {
       input.addEventListener('change', (ev)=>{
         const file = ev.target && ev.target.files && ev.target.files[0];
@@ -505,6 +796,50 @@ function wireSettingsAudioControls(){
       });
       input._toolhubBound = true;
     }
+    numericFields.forEach(field => {
+      if (!field || !field.inputId) return;
+      const numInput = document.getElementById(field.inputId);
+      if (!numInput || numInput._toolhubBound) return;
+      const commitValue = ()=>{
+        const entry = settingsAudioEnsureEntry(key);
+        const raw = String(numInput.value || '').trim();
+        if (!raw) {
+          if (field.defaultValue !== undefined) {
+            const fallback = settingsAudioClampNumeric(field.defaultValue, field);
+            if (fallback !== undefined) entry[field.key] = fallback;
+            else delete entry[field.key];
+          } else {
+            delete entry[field.key];
+          }
+        } else {
+          const clamped = settingsAudioClampNumeric(raw, field);
+          if (clamped === undefined) {
+            const existing = entry[field.key];
+            if (Number.isFinite(existing)) numInput.value = String(existing);
+            else if (field.defaultValue !== undefined) {
+              const fallback = settingsAudioClampNumeric(field.defaultValue, field);
+              if (fallback !== undefined) numInput.value = String(fallback);
+            } else {
+              numInput.value = '';
+            }
+            return;
+          }
+          entry[field.key] = clamped;
+        }
+        settingsAudioApplyNumericFields(entry, key);
+        settingsModalUpdateAudioUi(key);
+      };
+      numInput.addEventListener('change', commitValue);
+      numInput.addEventListener('blur', commitValue);
+      numInput.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          commitValue();
+          numInput.blur();
+        }
+      });
+      numInput._toolhubBound = true;
+    });
     if (preview && !preview._toolhubBound) {
       preview.addEventListener('click', ()=> settingsModalPreviewAudio(key));
       preview._toolhubBound = true;
@@ -529,12 +864,73 @@ function wireSettingsAudioControls(){
       });
       speakToggle._toolhubBound = true;
     }
-    if (speakTemplateInput && !speakTemplateInput._toolhubBound) {
-      speakTemplateInput.addEventListener('input', ()=>{
-        const entry = settingsAudioEnsureEntry(key);
-        entry.speakTemplate = speakTemplateInput.value || '';
+    if (templateInput && !templateInput._toolhubBound) {
+      const refreshAddState = ()=>{
+        if (templateAdd) {
+          templateAdd.disabled = templateInput.disabled || !templateInput.value.trim();
+        }
+      };
+      templateInput.addEventListener('input', refreshAddState);
+      templateInput.addEventListener('blur', refreshAddState);
+      templateInput.addEventListener('keydown', (ev)=>{
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          settingsModalAddTemplate(key);
+        }
       });
-      speakTemplateInput._toolhubBound = true;
+      refreshAddState();
+      templateInput._toolhubBound = true;
+    }
+    if (templateAdd && !templateAdd._toolhubBound) {
+      templateAdd.addEventListener('click', ()=> settingsModalAddTemplate(key));
+      templateAdd._toolhubBound = true;
+    }
+    if (templateList && !templateList._toolhubBound) {
+      templateList.addEventListener('input', (ev)=>{
+        const inputEl = ev.target && ev.target.closest('input[data-template-index]');
+        if (!inputEl) return;
+        const idx = Number(inputEl.getAttribute('data-template-index'));
+        settingsModalSetTemplate(key, idx, inputEl.value);
+      });
+      templateList.addEventListener('blur', (ev)=>{
+        const inputEl = ev.target && ev.target.closest('input[data-template-index]');
+        if (!inputEl) return;
+        const idx = Number(inputEl.getAttribute('data-template-index'));
+        const trimmed = inputEl.value.trim();
+        settingsModalSetTemplate(key, idx, trimmed);
+        inputEl.value = trimmed;
+      }, true);
+      templateList.addEventListener('click', (ev)=>{
+        const btn = ev.target && ev.target.closest('[data-action="remove-template"]');
+        if (!btn) return;
+        ev.preventDefault();
+        const parent = btn.closest('[data-template-index]');
+        if (!parent) return;
+        const rawIdx = parent.getAttribute('data-template-index');
+        if (rawIdx == null) return;
+        settingsModalRemoveTemplate(key, Number(rawIdx));
+      });
+      templateList._toolhubBound = true;
+    }
+    if (audioList && !audioList._toolhubBound) {
+      audioList.addEventListener('click', (ev)=>{
+        const previewBtn = ev.target && ev.target.closest('[data-action="preview-sound"]');
+        if (previewBtn) {
+          const row = previewBtn.closest('[data-sound-index]');
+          const rawIdx = row ? row.getAttribute('data-sound-index') : null;
+          const idx = rawIdx != null ? Number(rawIdx) : NaN;
+          settingsModalPreviewAudio(key, Number.isFinite(idx) ? idx : undefined);
+          return;
+        }
+        const removeBtn = ev.target && ev.target.closest('[data-action="remove-sound"]');
+        if (removeBtn) {
+          const row = removeBtn.closest('[data-sound-index]');
+          const rawIdx = row ? row.getAttribute('data-sound-index') : null;
+          const idx = rawIdx != null ? Number(rawIdx) : NaN;
+          settingsModalRemoveSound(key, idx);
+        }
+      });
+      audioList._toolhubBound = true;
     }
   });
 }
@@ -578,22 +974,39 @@ function saveSettingsInternal(){
     const defEnabled = settingsAudioDefaultEnabled(key);
     const defSpeak = settingsAudioDefaultSpeak(key);
     const defTemplate = settingsAudioDefaultSpeakTemplate(key);
-    settingsAudioNormalizeLegacyTemplate(entry, key);
     const enabled = entry.enabled === undefined ? defEnabled : !!entry.enabled;
     const speak = entry.speak === undefined ? defSpeak : !!entry.speak;
-    const templateRaw = entry.speakTemplate === undefined ? defTemplate : entry.speakTemplate;
-    const speakTemplate = typeof templateRaw === 'string' ? templateRaw : '';
-    entry.speakTemplate = speakTemplate;
-    const hasCustom = !!entry.dataUrl;
+    const sounds = settingsAudioValidSounds(entry);
+    const templates = settingsAudioValidTemplates(entry);
     const payload = {};
-    if (hasCustom) {
-      ['name','size','type','dataUrl','updated'].forEach(prop => {
-        if (entry[prop] !== undefined && entry[prop] !== null) payload[prop] = entry[prop];
-      });
-    }
     if (enabled !== defEnabled) payload.enabled = enabled;
     if (speak !== defSpeak) payload.speak = speak;
-    if (speakTemplate !== (typeof defTemplate === 'string' ? defTemplate : '')) payload.speakTemplate = speakTemplate;
+    if (sounds.length) {
+      payload.sounds = sounds.map(sound => ({
+        name: sound.name || '',
+        size: Number(sound.size) || 0,
+        type: sound.type || '',
+        dataUrl: sound.dataUrl,
+        updated: sound.updated || Date.now()
+      }));
+    }
+    const defTemplateTrimmed = typeof defTemplate === 'string' ? defTemplate.trim() : '';
+    const normalizedTemplates = templates.map(t => t.trim()).filter(Boolean);
+    const shouldStoreTemplates = normalizedTemplates.length > 0 && !(normalizedTemplates.length === 1 && normalizedTemplates[0] === defTemplateTrimmed);
+    if (shouldStoreTemplates) payload.speakTemplates = normalizedTemplates;
+    const cfg = SETTINGS_AUDIO_FIELDS[key];
+    if (cfg && Array.isArray(cfg.numericFields)) {
+      cfg.numericFields.forEach(field => {
+        if (!field || !field.key) return;
+        const value = entry[field.key];
+        const defaultValue = field.defaultValue !== undefined ? settingsAudioClampNumeric(field.defaultValue, field) : undefined;
+        if (Number.isFinite(value)) {
+          if (defaultValue === undefined || value !== defaultValue) payload[field.key] = value;
+        } else if (defaultValue !== undefined && payload[field.key] !== undefined) {
+          delete payload[field.key];
+        }
+      });
+    }
     if (!Object.keys(payload).length) return;
     mergedAudio[key] = payload;
   });

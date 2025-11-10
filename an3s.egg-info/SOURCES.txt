@@ -28,6 +28,7 @@ app/static/js/creds.js
 app/static/js/ctfd_challenges.js
 app/static/js/ctfd_manager.js
 app/static/js/instances.js
+app/static/js/queue_persistence.js
 app/static/js/shell.js
 app/static/js/vm_manager.js
 app/storage/projects.py

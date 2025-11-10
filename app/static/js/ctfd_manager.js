@@ -24,6 +24,7 @@ let CTFD_TEAM_SORT_MODE = 'name'; // 'name' | 'rank'
 const CTFD_FIRST_PLACE_HISTORY = {};
 let CTFD_AUDIO_CONTEXT = null;
 const CTFD_AUDIO_CACHE = {};
+const CTFD_AUDIO_ROTATION = {};
 const CTFD_SPEECH_DEFAULT_DELAY = 0.35;
 const CTFD_AUDIO_SEGMENT_BUFFER = 0.12;
 const CTFD_SPEECH_SEGMENT_BUFFER = 0.12;
@@ -52,6 +53,21 @@ const CTFD_AUDIO_FALLBACKS = {
     { freq: 784, dur: 0.18, gap: 0.08, type: 'sawtooth', gain: 0.24 },
     { freq: 988, dur: 0.24, gap: 0.12, type: 'sawtooth', gain: 0.24 },
     { freq: 1175, dur: 0.28, gap: 0, type: 'triangle', gain: 0.22 }
+  ],
+  ctfdPeriodic: [
+    { freq: 440, dur: 0.14, gap: 0.08, type: 'sine', gain: 0.22 },
+    { freq: 554, dur: 0.16, gap: 0.08, type: 'sine', gain: 0.22 },
+    { freq: 659, dur: 0.2, gap: 0, type: 'triangle', gain: 0.2 }
+  ],
+  ctfdFirstCategoryUser: [
+    { freq: 622, dur: 0.16, gap: 0.09, type: 'square', gain: 0.24 },
+    { freq: 740, dur: 0.18, gap: 0.09, type: 'square', gain: 0.22 },
+    { freq: 880, dur: 0.24, gap: 0, type: 'square', gain: 0.2 }
+  ],
+  ctfdFirstCategoryTeam: [
+    { freq: 392, dur: 0.18, gap: 0.08, type: 'triangle', gain: 0.24 },
+    { freq: 523, dur: 0.2, gap: 0.08, type: 'triangle', gain: 0.22 },
+    { freq: 659, dur: 0.24, gap: 0, type: 'triangle', gain: 0.2 }
   ]
 };
 
@@ -61,11 +77,19 @@ let CTFD_COUNTDOWN_REMAINING = 0;
 let CTFD_COUNTDOWN_TOTAL_SECONDS = 0;
 let CTFD_COUNTDOWN_USE_TICKS = false;
 let CTFD_COUNTDOWN_REASON = '';
+let CTFD_PERIODIC_TIMER = null;
+let CTFD_PERIODIC_ACTIVE_PID = '';
+const CTFD_CATEGORY_FIRSTS = {};
+let CTFD_LAST_CHALLENGES_STATE = null;
 
 function ctfdResetAudioCache(){
   Object.keys(CTFD_AUDIO_CACHE).forEach(key => { delete CTFD_AUDIO_CACHE[key]; });
+  Object.keys(CTFD_AUDIO_ROTATION).forEach(key => { delete CTFD_AUDIO_ROTATION[key]; });
 }
-document.addEventListener('settings-changed', ctfdResetAudioCache);
+document.addEventListener('settings-changed', ()=>{
+  ctfdResetAudioCache();
+  ctfdReschedulePeriodicForCurrent();
+});
 
 function ctfdReadSettingsSafe(){
   try {
@@ -78,6 +102,104 @@ function ctfdGetSettingsAudio(){
   const audio = settings && typeof settings.audio === 'object' ? settings.audio : {};
   return audio || {};
 }
+function ctfdClearPeriodicTimer(){
+  if (CTFD_PERIODIC_TIMER) {
+    clearTimeout(CTFD_PERIODIC_TIMER);
+    CTFD_PERIODIC_TIMER = null;
+  }
+  CTFD_PERIODIC_ACTIVE_PID = '';
+}
+function ctfdSchedulePeriodicTimer(pid){
+  const targetPid = pid || ctfdCurrentPid() || '';
+  if (!targetPid) {
+    ctfdClearPeriodicTimer();
+    return;
+  }
+  const entry = ctfdGetAudioEntry('ctfdPeriodic');
+  const enabled = entry && entry.enabled !== undefined ? !!entry.enabled : ctfdDefaultAudioEnabled('ctfdPeriodic');
+  const intervalMinutes = entry && Number(entry.intervalMinutes);
+  if (!enabled || !Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+    ctfdClearPeriodicTimer();
+    return;
+  }
+  const delayMs = Math.max(60000, Math.round(intervalMinutes * 60000));
+  ctfdClearPeriodicTimer();
+  CTFD_PERIODIC_ACTIVE_PID = String(targetPid);
+  CTFD_PERIODIC_TIMER = setTimeout(()=>{
+    const activePid = CTFD_PERIODIC_ACTIVE_PID || ctfdCurrentPid() || '';
+    if (!activePid) {
+      ctfdClearPeriodicTimer();
+      return;
+    }
+    ctfdAnnouncePeriodic(activePid);
+    ctfdSchedulePeriodicTimer(activePid);
+  }, delayMs);
+}
+function ctfdReschedulePeriodicForProject(pid){
+  const targetPid = pid || ctfdCurrentPid() || '';
+  if (!targetPid) {
+    ctfdClearPeriodicTimer();
+    return;
+  }
+  const entry = ctfdGetAudioEntry('ctfdPeriodic');
+  const enabled = entry && entry.enabled !== undefined ? !!entry.enabled : ctfdDefaultAudioEnabled('ctfdPeriodic');
+  const intervalMinutes = entry && Number(entry.intervalMinutes);
+  if (!enabled || !Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+    ctfdClearPeriodicTimer();
+    return;
+  }
+  ctfdSchedulePeriodicTimer(targetPid);
+}
+function ctfdReschedulePeriodicForCurrent(){
+  ctfdReschedulePeriodicForProject(ctfdCurrentPid());
+}
+function ctfdCategoryState(pid){
+  const key = String(pid || '').trim();
+  if (!key) return { user: {}, team: {} };
+  if (!CTFD_CATEGORY_FIRSTS[key]) {
+    CTFD_CATEGORY_FIRSTS[key] = { user: {}, team: {}, seededUser: false, seededTeam: false };
+  }
+  const state = CTFD_CATEGORY_FIRSTS[key];
+  if (!state.user) state.user = {};
+  if (!state.team) state.team = {};
+  if (state.seededUser === undefined) state.seededUser = false;
+  if (state.seededTeam === undefined) state.seededTeam = false;
+  return state;
+}
+function ctfdNormalizeCategoryName(name){
+  const raw = typeof name === 'string' ? name.trim() : '';
+  if (!raw) return 'Uncategorized';
+  return raw;
+}
+function ctfdCategoryKey(name){
+  return ctfdNormalizeCategoryName(name).toLowerCase();
+}
+function ctfdNormalizeCategorySolve(kind, item){
+  if (!item) return null;
+  const category = ctfdNormalizeCategoryName(item.category);
+  const key = ctfdCategoryKey(item.category);
+  let timestampEpoch = Number(item.timestamp_epoch);
+  if (!Number.isFinite(timestampEpoch)) {
+    const tsRaw = item.timestamp || item.timestamp_iso || item.generated_at;
+    const parsed = tsRaw ? Date.parse(tsRaw) : NaN;
+    if (Number.isFinite(parsed)) timestampEpoch = Math.floor(parsed / 1000);
+  }
+  const challenge = item.challenge ? String(item.challenge).trim() : '';
+  const challengeId = item.challenge_id !== undefined ? item.challenge_id : item.challengeId;
+  const userName = item.user || item.user_name || item.account_name || item.name;
+  const teamName = item.team || item.team_name || item.group;
+  const normalized = {
+    category,
+    key,
+    challenge,
+    challenge_id: challengeId,
+    timestampEpoch: Number.isFinite(timestampEpoch) ? timestampEpoch : null,
+    timestamp: item.timestamp || item.timestamp_iso || null,
+    user: kind === 'user' ? (userName ? String(userName).trim() : '') : '',
+    team: teamName ? String(teamName).trim() : ''
+  };
+  return normalized;
+}
 function ctfdDefaultAudioEnabled(key){
   const defaults = window.SETTINGS_AUDIO_DEFAULTS || {};
   if (Object.prototype.hasOwnProperty.call(defaults, key)) return !!defaults[key];
@@ -88,20 +210,131 @@ function ctfdGetAudioEntry(key){
   const raw = audio && typeof audio[key] === 'object' ? audio[key] : null;
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
   const cfg = meta && typeof meta === 'object' ? meta[key] : {};
-  const entry = raw ? { ...raw } : {};
+  let entry;
+  try { entry = raw ? JSON.parse(JSON.stringify(raw)) : {}; }
+  catch { entry = raw ? { ...raw } : {}; }
   if (entry.enabled === undefined) entry.enabled = ctfdDefaultAudioEnabled(key);
   if (entry.speak === undefined) entry.speak = cfg && cfg.defaultSpeak !== undefined ? !!cfg.defaultSpeak : false;
-  if (entry.speakTemplate === undefined) {
-    const fallback = cfg && typeof cfg.defaultSpeakTemplate === 'string' ? cfg.defaultSpeakTemplate : '';
-    entry.speakTemplate = fallback;
-  } else if (typeof entry.speakTemplate !== 'string') {
-    entry.speakTemplate = String(entry.speakTemplate || '');
+  if (typeof settingsAudioNormalizeLegacyTemplate === 'function') {
+    try { settingsAudioNormalizeLegacyTemplate(entry, key); } catch {}
+  }
+  const defaultTemplate = cfg && typeof cfg.defaultSpeakTemplate === 'string' ? cfg.defaultSpeakTemplate : '';
+  const sounds = [];
+  if (Array.isArray(entry.sounds)) {
+    entry.sounds.forEach(sound => {
+      if (!sound) return;
+      const dataUrl = typeof sound.dataUrl === 'string' ? sound.dataUrl : '';
+      if (!dataUrl.startsWith('data:')) return;
+      sounds.push({
+        dataUrl,
+        name: sound.name || '',
+        size: Number(sound.size) || 0,
+        type: sound.type || '',
+        updated: sound.updated || 0
+      });
+    });
+  }
+  if (!sounds.length && entry.dataUrl) {
+    const legacyUrl = String(entry.dataUrl || '');
+    if (legacyUrl.startsWith('data:')) {
+      sounds.push({
+        dataUrl: legacyUrl,
+        name: entry.name || '',
+        size: Number(entry.size) || 0,
+        type: entry.type || '',
+        updated: entry.updated || 0
+      });
+    }
+  }
+  entry.sounds = sounds;
+  delete entry.dataUrl;
+  delete entry.name;
+  delete entry.size;
+  delete entry.type;
+  delete entry.updated;
+  const templates = [];
+  if (Array.isArray(entry.speakTemplates)) {
+    entry.speakTemplates.forEach(t => {
+      if (t === null || t === undefined) return;
+      const str = String(t).trim();
+      if (str) templates.push(str);
+    });
+  }
+  if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
+    const legacyTpl = String(entry.speakTemplate).trim();
+    if (legacyTpl) templates.push(legacyTpl);
+  }
+  if (!templates.length && defaultTemplate) templates.push(defaultTemplate);
+  entry.speakTemplates = templates;
+  entry.defaultSpeakTemplate = defaultTemplate;
+  delete entry.speakTemplate;
+  if (typeof settingsAudioApplyNumericFields === 'function') {
+    try { settingsAudioApplyNumericFields(entry, key); } catch {}
   }
   return entry;
 }
+function ctfdListValidSounds(entry){
+  const list = entry && Array.isArray(entry.sounds) ? entry.sounds : [];
+  return list.map((sound, idx) => ({ sound, idx })).filter(item => {
+    const dataUrl = item && item.sound && typeof item.sound.dataUrl === 'string' ? item.sound.dataUrl : '';
+    return dataUrl.startsWith('data:');
+  });
+}
+function ctfdListValidTemplates(entry){
+  const list = entry && Array.isArray(entry.speakTemplates) ? entry.speakTemplates : [];
+  return list.map((tpl, idx) => {
+    const str = tpl != null ? String(tpl).trim() : '';
+    return { tpl: str, idx };
+  }).filter(item => !!item.tpl);
+}
+function ctfdRotationState(key){
+  if (!CTFD_AUDIO_ROTATION[key]) {
+    CTFD_AUDIO_ROTATION[key] = { soundsQueue: [], templatesQueue: [] };
+  }
+  return CTFD_AUDIO_ROTATION[key];
+}
+function ctfdShuffleIndices(count){
+  const arr = [];
+  for (let i = 0; i < count; i++) arr.push(i);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
+}
+function ctfdSelectNextSoundSlot(key, entry){
+  const list = ctfdListValidSounds(entry);
+  if (!list.length) return null;
+  const state = ctfdRotationState(key);
+  const active = new Set(list.map(item => item.idx));
+  state.soundsQueue = (state.soundsQueue || []).filter(idx => active.has(idx));
+  if (!state.soundsQueue.length) {
+    const order = ctfdShuffleIndices(list.length);
+    state.soundsQueue = order.map(i => list[i].idx);
+  }
+  const nextIdx = state.soundsQueue.shift();
+  const selected = list.find(item => item.idx === nextIdx) || list[0];
+  return selected || null;
+}
+function ctfdSelectNextTemplateText(key, entry, fallback){
+  const list = ctfdListValidTemplates(entry);
+  if (!list.length) return fallback || '';
+  const state = ctfdRotationState(key);
+  const active = new Set(list.map(item => item.idx));
+  state.templatesQueue = (state.templatesQueue || []).filter(idx => active.has(idx));
+  if (!state.templatesQueue.length) {
+    const order = ctfdShuffleIndices(list.length);
+    state.templatesQueue = order.map(i => list[i].idx);
+  }
+  const nextIdx = state.templatesQueue.shift();
+  const selected = list.find(item => item.idx === nextIdx) || list[0];
+  return selected ? selected.tpl : (fallback || '');
+}
 function ctfdHasCustomAudio(key){
   const entry = ctfdGetAudioEntry(key);
-  return !!(entry && entry.dataUrl);
+  return ctfdListValidSounds(entry).length > 0;
 }
 function ctfdIsAudioEnabled(key){
   const entry = ctfdGetAudioEntry(key);
@@ -148,29 +381,9 @@ async function ctfdDecodeAudioBuffer(ctx, arrayBuffer){
   return null;
 }
 function ctfdSpeechTemplateFor(key){
-  const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
-  const cfg = meta && typeof meta === 'object' ? meta[key] : null;
   const entry = ctfdGetAudioEntry(key);
-  if (entry && Object.prototype.hasOwnProperty.call(entry, 'speakTemplate')) {
-    const raw = entry.speakTemplate;
-    if (typeof raw === 'string') return raw;
-  }
-  const hasLegacyBefore = entry && typeof entry.speakBefore === 'string';
-  const hasLegacyAfter = entry && typeof entry.speakAfter === 'string';
-  if (hasLegacyBefore || hasLegacyAfter) {
-    const before = hasLegacyBefore ? entry.speakBefore : (cfg && typeof cfg.legacyDefaultSpeakBefore === 'string' ? cfg.legacyDefaultSpeakBefore : '');
-    const after = hasLegacyAfter ? entry.speakAfter : (cfg && typeof cfg.legacyDefaultSpeakAfter === 'string' ? cfg.legacyDefaultSpeakAfter : '');
-    const pieces = [];
-    if (before) pieces.push(before);
-    if (after) pieces.push(after);
-    const combined = pieces.join(pieces.length > 1 ? ' ' : '');
-    if (combined) return combined;
-  }
-  if (cfg && Object.prototype.hasOwnProperty.call(cfg, 'defaultSpeakTemplate')) {
-    const def = cfg.defaultSpeakTemplate;
-    if (typeof def === 'string') return def;
-  }
-  return '';
+  const fallback = entry && typeof entry.defaultSpeakTemplate === 'string' ? entry.defaultSpeakTemplate : '';
+  return ctfdSelectNextTemplateText(key, entry, fallback);
 }
 function ctfdCompileSpeechTemplate(template, context){
   const ctx = context && typeof context === 'object' ? context : {};
@@ -238,20 +451,25 @@ function ctfdBuildSpeechPlan(key, context, fallbackText){
 async function ctfdTryPlayCustomAudio(key, delaySeconds){
   try {
     const entry = ctfdGetAudioEntry(key);
-    if (!entry || !entry.dataUrl) return { played: false, duration: 0 };
     if (!ctfdIsAudioEnabled(key)) return { played: false, duration: 0 };
+    const selection = ctfdSelectNextSoundSlot(key, entry);
+    if (!selection || !selection.sound) return { played: false, duration: 0 };
+    const clip = selection.sound;
+    const dataUrl = typeof clip.dataUrl === 'string' ? clip.dataUrl : '';
+    if (!dataUrl) return { played: false, duration: 0 };
     const offset = Math.max(0, Number(delaySeconds) || 0);
     const ctx = ctfdEnsureAudioContext();
+    const cacheKey = `${key}:${selection.idx}`;
     if (ctx) {
-      const existing = CTFD_AUDIO_CACHE[key];
-      if (!existing || existing.source !== entry.dataUrl) {
-        const buf = ctfdDataUrlToBuffer(entry.dataUrl);
+      const existing = CTFD_AUDIO_CACHE[cacheKey];
+      if (!existing || existing.source !== dataUrl) {
+        const buf = ctfdDataUrlToBuffer(dataUrl);
         if (!buf) return { played: false, duration: 0 };
         const decoded = await ctfdDecodeAudioBuffer(ctx, buf);
         if (!decoded) return { played: false, duration: 0 };
-        CTFD_AUDIO_CACHE[key] = { source: entry.dataUrl, buffer: decoded };
+        CTFD_AUDIO_CACHE[cacheKey] = { source: dataUrl, buffer: decoded };
       }
-      const payload = CTFD_AUDIO_CACHE[key];
+      const payload = CTFD_AUDIO_CACHE[cacheKey];
       if (!payload || !payload.buffer) return { played: false, duration: 0 };
       const totalSeconds = offset + Math.max(0, Number(payload.buffer.duration) || 0);
       return await new Promise((resolve) => {
@@ -266,7 +484,7 @@ async function ctfdTryPlayCustomAudio(key, delaySeconds){
         }
       });
     }
-    const audioEl = new Audio(entry.dataUrl);
+    const audioEl = new Audio(dataUrl);
     return await new Promise((resolve) => {
       let settled = false;
       const cleanup = () => {
@@ -470,6 +688,7 @@ async function ctfdSpeakForEvent(key, payload, delaySeconds, opts){
 function ctfdCountdownReasonLabel(reason){
   if (!reason) return '';
   if (reason === 'scoreboard') return ' for scoreboard reveal';
+  if (reason === 'challenges') return ' for challenge list reveal';
   return ` (${reason})`;
 }
 function ctfdSpeechContextProject(projectId){
@@ -482,6 +701,104 @@ function ctfdSpeechContextProject(projectId){
     second_team: leaderboard[1] || '',
     third_team: leaderboard[2] || ''
   };
+}
+function ctfdSpeechContextPeriodic(projectId){
+  const base = ctfdSpeechContextProject(projectId);
+  let intervalMinutes = 0;
+  try {
+    const entry = ctfdGetAudioEntry('ctfdPeriodic');
+    if (entry && Number.isFinite(Number(entry.intervalMinutes))) {
+      intervalMinutes = Number(entry.intervalMinutes);
+    }
+  } catch {}
+  if (Number.isFinite(intervalMinutes) && intervalMinutes > 0) {
+    const rounded = Math.round(intervalMinutes);
+    base.interval_minutes = String(rounded);
+    base.interval_minutes_clause = ` ${rounded} minute${rounded === 1 ? '' : 's'}`;
+  } else {
+    base.interval_minutes = '';
+    base.interval_minutes_clause = '';
+  }
+  return base;
+}
+function ctfdSpeechContextCategoryFirst(projectId, kind, info){
+  const base = ctfdSpeechContextProject(projectId);
+  const categoryRaw = info && info.category ? String(info.category).trim() : '';
+  const category = ctfdNormalizeCategoryName(categoryRaw);
+  base.category = category;
+  base.category_clause = category ? ` in ${category}` : '';
+  const challengeRaw = info && info.challenge ? String(info.challenge).trim() : '';
+  const challenge = challengeRaw;
+  base.challenge = challenge;
+  base.challenge_clause = challenge ? ` on ${challenge}` : '';
+  if (kind === 'user') {
+    const leader = info && info.user ? String(info.user).trim() : '';
+    base.leader = leader;
+    base.user_first = leader;
+    const teamName = info && info.team ? String(info.team).trim() : '';
+    base.team_first = teamName;
+    base.team_clause = teamName ? ` from team ${teamName}` : '';
+  } else {
+    const teamName = info && info.team ? String(info.team).trim() : '';
+    base.leader = teamName;
+    base.team_first = teamName;
+    base.team_clause = '';
+  }
+  return base;
+}
+function ctfdAnnouncePeriodic(projectId){
+  const pid = projectId || ctfdCurrentPid() || '';
+  if (!pid) return;
+  const entry = ctfdGetAudioEntry('ctfdPeriodic');
+  const enabled = entry && entry.enabled !== undefined ? !!entry.enabled : ctfdDefaultAudioEnabled('ctfdPeriodic');
+  if (!enabled) return;
+  const context = ctfdSpeechContextPeriodic(pid);
+  const intervalVal = Number(context.interval_minutes);
+  const projectClause = context.project_clause || '';
+  const intervalLabel = Number.isFinite(intervalVal) && intervalVal > 0 ? `${intervalVal} minute${intervalVal === 1 ? '' : 's'}` : 'the configured interval';
+  const fallback = `Periodic update${projectClause}. Next check in ${intervalLabel}.`;
+  void ctfdSpeakForEvent('ctfdPeriodic', { context, fallbackText: fallback }, 0, {
+    onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdPeriodic', CTFD_AUDIO_FALLBACKS.ctfdPeriodic || [], startDelay)
+  });
+  try {
+    const label = ctfdProjectLabel(pid);
+    const suffix = label ? ` — ${label}` : '';
+    shell.logInfo(`[CTFd] Periodic update${suffix}.`);
+  } catch {}
+}
+function ctfdAnnounceFirstCategorySolve(projectId, kind, info){
+  if (!info) return;
+  const pid = projectId || ctfdCurrentPid() || '';
+  if (!pid) return;
+  const context = ctfdSpeechContextCategoryFirst(pid, kind, info);
+  const category = context.category || '';
+  const categoryLabel = category || 'this';
+  const challengeSegment = context.challenge ? ` by solving ${context.challenge}` : '';
+  const projectClause = context.project_clause || '';
+  let fallback;
+  if (kind === 'user') {
+    const actor = context.leader || 'A competitor';
+    const teamClause = context.team_clause || '';
+    fallback = `${actor} is first to solve a ${categoryLabel} challenge${projectClause}${challengeSegment}${teamClause}.`;
+  } else {
+    const team = context.team_first || 'A team';
+    fallback = `${team} is first to solve a ${categoryLabel} challenge${projectClause}${challengeSegment}.`;
+  }
+  const audioKey = kind === 'user' ? 'ctfdFirstCategoryUser' : 'ctfdFirstCategoryTeam';
+  void ctfdSpeakForEvent(audioKey, { context, fallbackText: fallback }, 0, {
+    onAudioRequest: (startDelay)=> ctfdPlayNamedSound(audioKey, CTFD_AUDIO_FALLBACKS[audioKey] || [], startDelay)
+  });
+  try {
+    const label = ctfdProjectLabel(pid);
+    const suffix = label ? ` — ${label}` : '';
+    if (kind === 'user') {
+      const actor = context.leader || 'A competitor';
+      shell.logSuccess(`[CTFd] ${actor} solved the first ${categoryLabel} challenge${suffix}.`);
+    } else {
+      const team = context.team_first || 'A team';
+      shell.logSuccess(`[CTFd] ${team} solved the first ${categoryLabel} challenge${suffix}.`);
+    }
+  } catch {}
 }
 function ctfdLeaderboardSnapshot(){
   try {
@@ -604,13 +921,13 @@ function ctfdStopCountdown(playFinal){
   }
   CTFD_COUNTDOWN_TOTAL_SECONDS = 0;
 }
-function ctfdHandleScoreboardStateChange(newState){
-  const prev = CTFD_LAST_SCOREBOARD_STATE;
+function ctfdHandleChallengesStateChange(newState){
+  const prev = CTFD_LAST_CHALLENGES_STATE;
   const next = !!newState;
-  CTFD_LAST_SCOREBOARD_STATE = next;
+  CTFD_LAST_CHALLENGES_STATE = next;
   const previous = (prev === null) ? false : !!prev;
   if (next && !previous) {
-    ctfdStartCountdown(CTFD_COUNTDOWN_DEFAULT_SECONDS, { reason: 'scoreboard' });
+    ctfdStartCountdown(CTFD_COUNTDOWN_DEFAULT_SECONDS, { reason: 'challenges' });
   } else if (!next && previous) {
     ctfdStopCountdown(false);
   }
@@ -1094,6 +1411,57 @@ function ctfdAnnounceFirstScore(projectId, summary){
   void ctfdSpeakForEvent('ctfdFirstScore', { context: speechCtx, fallbackText: fallbackSpeech }, 0, {
     onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdFirstScore', CTFD_AUDIO_FALLBACKS.ctfdFirstScore || [], startDelay)
   });
+}
+function ctfdHandleCategoryFirsts(projectId, payload){
+  try {
+    const pid = String(projectId || '').trim();
+    if (!pid || pid === 'multi') return;
+    const data = payload && typeof payload === 'object' ? payload : {};
+    const state = ctfdCategoryState(pid);
+    const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+    if (errors.length) {
+      errors.slice(0, 3).forEach(msg => {
+        try { shell.logWarn(`[CTFd] Category firsts warning: ${msg}`); } catch {}
+      });
+    }
+    const newEvents = [];
+    const process = (list, kind)=>{
+      if (!Array.isArray(list)) return;
+      list.forEach(item => {
+        const normalized = ctfdNormalizeCategorySolve(kind, item);
+        if (!normalized) return;
+        const store = kind === 'user' ? state.user : state.team;
+        const seedFlag = kind === 'user' ? 'seededUser' : 'seededTeam';
+        const existing = store[normalized.key];
+        const stamp = normalized.timestampEpoch;
+        const changed = !existing || existing.timestampEpoch !== stamp || (kind === 'user' && existing.user !== normalized.user) || (kind === 'team' && existing.team !== normalized.team);
+        const next = { ...normalized, announced: existing ? !!existing.announced : false };
+        if (changed) next.announced = false;
+        store[normalized.key] = next;
+        const seeded = state[seedFlag];
+        if (!seeded) return;
+        if (!next.announced && changed) {
+          newEvents.push({ kind, info: { ...next } });
+        }
+      });
+      state[kind === 'user' ? 'seededUser' : 'seededTeam'] = true;
+    };
+    process(data.user, 'user');
+    process(data.team, 'team');
+    if (!newEvents.length) return;
+    newEvents.sort((a, b)=>{
+      const aEpoch = Number(a.info.timestampEpoch || 0);
+      const bEpoch = Number(b.info.timestampEpoch || 0);
+      if (Number.isFinite(aEpoch) && Number.isFinite(bEpoch) && aEpoch !== bEpoch) return aEpoch - bEpoch;
+      return String(a.info.category || '').localeCompare(String(b.info.category || ''));
+    });
+    newEvents.forEach(evt => {
+      ctfdAnnounceFirstCategorySolve(pid, evt.kind, evt.info);
+      const store = evt.kind === 'user' ? state.user : state.team;
+      const ref = store[evt.info.key];
+      if (ref) ref.announced = true;
+    });
+  } catch {}
 }
 function ctfdDetectFirstScore(projectId, meta){
   try {
@@ -1798,13 +2166,13 @@ async function ctfdLoadProjectConfig(pid){
     const info = document.getElementById('ctfd-info');
     if(!proj){
       ctfdStopCountdown(false);
-      CTFD_LAST_SCOREBOARD_STATE = null;
+      CTFD_LAST_CHALLENGES_STATE = null;
       if(info) info.textContent='Project not found.';
       return;
     }
     PROJ = proj;
     ctfdStopCountdown(false);
-    CTFD_LAST_SCOREBOARD_STATE = null;
+    CTFD_LAST_CHALLENGES_STATE = null;
     if(info) info.textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
     // Restore UI state for this project (filters/sort etc.)
     try {
@@ -1869,6 +2237,7 @@ async function ctfdLoadProjectById(pid){
   if (!id) return;
   const info = document.getElementById('ctfd-info');
   const totalSteps = 3;
+  let categoryPayload = null;
   // Use inline progress bar instead of modal
   try { ctfdSetProgress(`Step 1/${totalSteps}: Loading project…`, 10, true); } catch {}
   try {
@@ -1876,15 +2245,16 @@ async function ctfdLoadProjectById(pid){
     const proj = (data.projects||[]).find(p=>p.id===id);
     if(!proj){
       ctfdStopCountdown(false);
-      CTFD_LAST_SCOREBOARD_STATE = null;
+      CTFD_LAST_CHALLENGES_STATE = null;
       if(info) info.textContent='Project not found.';
       PROJ=null;
       renderCtfdTable(null);
+      ctfdClearPeriodicTimer();
       return;
     }
     PROJ = proj; if(info) info.textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
     ctfdStopCountdown(false);
-    CTFD_LAST_SCOREBOARD_STATE = null;
+    CTFD_LAST_CHALLENGES_STATE = null;
     // Restore UI state for this project
     try {
       const st = readCtfdUiState(PROJ.id)||{};
@@ -1950,6 +2320,9 @@ async function ctfdLoadProjectById(pid){
           resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, { ...payloadBase });
         }, { projectId: PROJ?.id });
         clearInterval(animTimer); animTimer = null;
+        if (resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
+          categoryPayload = resp.category_firsts || {};
+        }
         const list = Array.isArray(resp?.users) ? resp.users : [];
         list.forEach(u => {
           const uname = String(u?.username || '').trim();
@@ -1990,6 +2363,9 @@ async function ctfdLoadProjectById(pid){
               resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, { ...payloadBase, only: [name] });
             }, { projectId: PROJ?.id });
             const list = Array.isArray(resp?.users) ? resp.users : [];
+            if (!categoryPayload && resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
+              categoryPayload = resp.category_firsts || {};
+            }
             list.forEach(u => {
               const uname = String(u?.username || '').trim();
               if (!uname) return;
@@ -2017,6 +2393,9 @@ async function ctfdLoadProjectById(pid){
       }
     }
     ctfdApplyUserMeta(PROJ?.id, metaMap);
+    if (categoryPayload !== null) {
+      ctfdHandleCategoryFirsts(PROJ?.id, categoryPayload);
+    }
   ctfdSetProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false);
     renderCtfdTable(PROJ);
   ctfdSetProgress('Done', 100, false);
@@ -2025,6 +2404,7 @@ async function ctfdLoadProjectById(pid){
     try { shell.logError(`CTFd Refresh failed: ${e?.message||e}`); } catch {}
   } finally {
     try { ctfdHideProgress(); } catch {}
+    try { ctfdReschedulePeriodicForProject(PROJ?.id); } catch {}
     updateCtfdControlsEnabled();
   }
 }
@@ -2051,6 +2431,7 @@ async function ctfdRefreshMulti(opts){
   const options = opts || {};
   const pids = Array.isArray(CTFD_SELECTED_PIDS)? CTFD_SELECTED_PIDS.slice(): [];
   if (!pids.length) return;
+  ctfdClearPeriodicTimer();
   try { ctfdSetProgress('Preparing multi-project refresh…', 10, true); } catch {}
   // Preflight credentials
   const pf = await ctfdPreflightPids(pids);
@@ -2091,6 +2472,9 @@ async function ctfdRefreshMulti(opts){
         resp = await http('POST', `/api/projects/${pid}/ctfd/users_check`, { baseUrl, port, token: sess.token||'', verifySSL: true });
       }, { projectId: pid });
       const list = Array.isArray(resp?.users) ? resp.users : [];
+      if (resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
+        ctfdHandleCategoryFirsts(pid, resp.category_firsts || {});
+      }
       const projectMeta = {};
       list.forEach(u => {
         const uname = String(u?.username||'').trim();
@@ -2307,7 +2691,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       try {
         const pid = e.detail || '';
         ctfdStopCountdown(false);
-        CTFD_LAST_SCOREBOARD_STATE = null;
+        CTFD_LAST_CHALLENGES_STATE = null;
         if (pid) {
           try { ctfdLoadProjectConfig(pid); } catch {}
           try {
@@ -2399,11 +2783,11 @@ async function ctfdLoadSettings(){
     const ch = document.getElementById('ctfd-toggle-chals'); if (ch) ch.checked = !!st.challenges_visible;
     const sc = document.getElementById('ctfd-toggle-scoreboard'); if (sc) sc.checked = !!st.scoreboard_visible;
     const pa = document.getElementById('ctfd-toggle-paused'); if (pa) pa.checked = !!st.ctfd_paused;
-    const scoreboardVisible = !!st.scoreboard_visible;
-    if (CTFD_LAST_SCOREBOARD_STATE === null) {
-      CTFD_LAST_SCOREBOARD_STATE = scoreboardVisible;
+    const challengesVisible = !!st.challenges_visible;
+    if (CTFD_LAST_CHALLENGES_STATE === null) {
+      CTFD_LAST_CHALLENGES_STATE = challengesVisible;
     } else {
-      ctfdHandleScoreboardStateChange(scoreboardVisible);
+      ctfdHandleChallengesStateChange(challengesVisible);
     }
   } catch (e) {
     try { shell.logWarn(`CTFd settings load failed: ${e?.message||e}`); } catch {}
@@ -2430,10 +2814,10 @@ async function ctfdUpdateSettings(updates){
       res = await http('POST', `/api/projects/${PROJ.id}/ctfd/settings/update`, payload);
     }, { projectId: PROJ?.id });
     const st = res?.settings || {};
-    const ch = document.getElementById('ctfd-toggle-chals'); if (ch) ch.checked = !!st.challenges_visible;
-    const sc = document.getElementById('ctfd-toggle-scoreboard'); if (sc) sc.checked = !!st.scoreboard_visible;
+  const ch = document.getElementById('ctfd-toggle-chals'); if (ch) ch.checked = !!st.challenges_visible;
+  const sc = document.getElementById('ctfd-toggle-scoreboard'); if (sc) sc.checked = !!st.scoreboard_visible;
     const pa = document.getElementById('ctfd-toggle-paused'); if (pa) pa.checked = !!st.ctfd_paused;
-    ctfdHandleScoreboardStateChange(!!st.scoreboard_visible);
+  ctfdHandleChallengesStateChange(!!st.challenges_visible);
     try {
       if (statusEl) { statusEl.textContent = 'Applied'; statusEl.className = 'small text-success'; setTimeout(()=>{ try{ statusEl.textContent=''; statusEl.className='small text-muted'; }catch{} }, 1200); }
     } catch {}
