@@ -71,7 +71,6 @@ const CTFD_AUDIO_FALLBACKS = {
   ],
   ctfdFirstCategoryTeam: [
     { freq: 392, dur: 0.18, gap: 0.08, type: 'triangle', gain: 0.24 },
-    { freq: 523, dur: 0.2, gap: 0.08, type: 'triangle', gain: 0.22 },
     { freq: 659, dur: 0.24, gap: 0, type: 'triangle', gain: 0.2 }
   ]
 };
@@ -401,7 +400,8 @@ function ctfdCompileSpeechTemplate(template, context){
     hasSpeech: false,
     hasAudio: false,
     hasSpeechIntent: false,
-    templateTrimmed: raw.trim()
+    templateTrimmed: raw.trim(),
+    fallbackTargets: []
   };
   if (!raw) return result;
   const regex = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
@@ -412,6 +412,10 @@ function ctfdCompileSpeechTemplate(template, context){
     if (last && last.type === 'text') last.text += value;
     else result.segments.push({ type: 'text', text: value });
     if (!result.hasSpeech && value.trim()) result.hasSpeech = true;
+  };
+  const markFallbackTarget = ()=>{
+    const idx = result.segments.length;
+    if (!result.fallbackTargets.includes(idx)) result.fallbackTargets.push(idx);
   };
   let match;
   while ((match = regex.exec(raw))) {
@@ -428,8 +432,16 @@ function ctfdCompileSpeechTemplate(template, context){
       } else {
         result.hasSpeechIntent = true;
         if (Object.prototype.hasOwnProperty.call(ctx, key) && ctx[key] != null) {
-          const value = String(ctx[key]);
-          if (value) pushText(value);
+          const rawValue = String(ctx[key]);
+          const trimmedValue = rawValue.trim();
+          if (trimmedValue) {
+            pushText(rawValue);
+          } else {
+            if (rawValue) pushText(rawValue);
+            markFallbackTarget();
+          }
+        } else {
+          markFallbackTarget();
         }
       }
     }
@@ -439,6 +451,9 @@ function ctfdCompileSpeechTemplate(template, context){
   if (trailing) {
     pushText(trailing);
     if (trailing.trim()) result.hasSpeechIntent = true;
+  }
+  if (result.fallbackTargets.length > 1) {
+    result.fallbackTargets.sort((a, b) => a - b);
   }
   return result;
 }
@@ -450,7 +465,17 @@ function ctfdBuildSpeechPlan(key, context, fallbackText){
   if (!hasSpeech) {
     const fallback = fallbackText != null ? String(fallbackText).trim() : '';
     if (fallback && (compiled.hasSpeechIntent || !compiled.templateTrimmed)) {
-      segments.push({ type: 'text', text: fallback });
+      const insertAt = compiled.fallbackTargets.length ? compiled.fallbackTargets[0] : segments.length;
+      const clamped = Math.max(0, Math.min(insertAt, segments.length));
+      const prev = clamped > 0 ? segments[clamped - 1] : null;
+      const next = clamped < segments.length ? segments[clamped] : null;
+      if (prev && prev.type === 'text') {
+        prev.text += fallback;
+      } else if (next && next.type === 'text') {
+        next.text = fallback + next.text;
+      } else {
+        segments.splice(clamped, 0, { type: 'text', text: fallback });
+      }
       hasSpeech = true;
     }
   }
