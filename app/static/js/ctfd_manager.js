@@ -88,6 +88,7 @@ const CTFD_CATEGORY_FIRSTS = {};
 let CTFD_LAST_CHALLENGES_STATE = null;
 let CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
 let CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+let CTFD_CHALLENGE_HIDE_EXPECTED = false;
 
 function ctfdResetAudioCache(){
   Object.keys(CTFD_AUDIO_CACHE).forEach(key => { delete CTFD_AUDIO_CACHE[key]; });
@@ -997,12 +998,20 @@ function ctfdHandleChallengesStateChange(newState){
     } else {
       void ctfdPlayCountdownCueForChallenges();
     }
+    CTFD_CHALLENGE_HIDE_EXPECTED = false;
   }
   if (!next && previous) {
-    void ctfdPlayCountdownStopForChallenges();
+    if (CTFD_CHALLENGE_HIDE_EXPECTED) {
+      CTFD_CHALLENGE_HIDE_EXPECTED = false;
+    } else {
+      void ctfdPlayCountdownStopForChallenges();
+    }
     ctfdStopCountdown(false);
   }
-  if (!next) CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+  if (!next) {
+    CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+    CTFD_CHALLENGE_HIDE_EXPECTED = false;
+  }
 }
 // Sort behavior for rows with n/a values across any visible columns
 // Sort Missing Fields toggle removed: always place rows missing the active sort field at the end
@@ -2890,10 +2899,12 @@ async function ctfdUpdateSettings(updates){
   const targetChallenges = togglingChallenges ? !!updates.challenges_visible : null;
   const lastChallengesVisible = !!CTFD_LAST_CHALLENGES_STATE;
   const shouldDelayReveal = togglingChallenges && targetChallenges === true && !lastChallengesVisible && ctfdCountdownNotificationActive();
+  const shouldDelayHide = togglingChallenges && targetChallenges === false && lastChallengesVisible && ctfdCountdownStopNotificationActive();
   let countdownCuePlayed = true;
   if (shouldDelayReveal) {
     CTFD_CHALLENGE_REVEAL_IN_PROGRESS = true;
     CTFD_CHALLENGE_REVEAL_EXPECTED = true;
+    CTFD_CHALLENGE_HIDE_EXPECTED = false;
     if (statusEl) { statusEl.textContent = 'Countdown cue…'; statusEl.className = 'small text-muted'; }
     if (chToggle) {
       chToggle.checked = false;
@@ -2907,9 +2918,31 @@ async function ctfdUpdateSettings(updates){
       try { shell.logWarn(`[CTFd] Countdown cue failed: ${err?.message||err}`); } catch {}
     }
     if (!countdownCuePlayed) CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+  } else if (shouldDelayHide) {
+    CTFD_CHALLENGE_REVEAL_IN_PROGRESS = true;
+    CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+    CTFD_CHALLENGE_HIDE_EXPECTED = true;
+    if (statusEl) { statusEl.textContent = 'Countdown stop…'; statusEl.className = 'small text-muted'; }
+    if (chToggle) {
+      chToggle.checked = true;
+      chToggle.indeterminate = true;
+      chToggle.setAttribute('data-ctfd-pending-reveal', '1');
+    }
+    let countdownStopPlayed = true;
+    try {
+      await ctfdPlayCountdownStopForChallenges();
+    } catch (err) {
+      countdownStopPlayed = false;
+      try { shell.logWarn(`[CTFd] Countdown stop cue failed: ${err?.message||err}`); } catch {}
+    }
+    if (!countdownStopPlayed) CTFD_CHALLENGE_HIDE_EXPECTED = false;
   } else if (togglingChallenges && targetChallenges === false) {
     CTFD_CHALLENGE_REVEAL_EXPECTED = false;
-    if (chToggle) chToggle.removeAttribute('data-ctfd-pending-reveal');
+    CTFD_CHALLENGE_HIDE_EXPECTED = false;
+    if (chToggle) {
+      chToggle.indeterminate = false;
+      chToggle.removeAttribute('data-ctfd-pending-reveal');
+    }
   }
   // Mark the update as in-flight once any pre-reveal cue has completed
   try { if (statusEl) { statusEl.textContent = 'Applying…'; statusEl.className = 'small text-muted'; } } catch {}
@@ -2934,6 +2967,8 @@ async function ctfdUpdateSettings(updates){
     } catch {}
   } catch (e) {
     CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
+    CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+    CTFD_CHALLENGE_HIDE_EXPECTED = false;
     if (chToggle) {
       chToggle.indeterminate = false;
       chToggle.removeAttribute('data-ctfd-pending-reveal');
@@ -2946,6 +2981,8 @@ async function ctfdUpdateSettings(updates){
   finally {
     // Re-enable toggles based on auth state
     CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
+    CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+    CTFD_CHALLENGE_HIDE_EXPECTED = false;
     try {
       if (chToggle) chToggle.indeterminate = false;
       updateCtfdControlsEnabled();
