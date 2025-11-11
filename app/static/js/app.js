@@ -126,6 +126,26 @@ const SETTINGS_AUDIO_FIELDS = {
     legacyDefaultSpeakBefore: '',
     legacyDefaultSpeakAfter: 'Countdown complete{{reason_clause}}.'
   },
+  ctfdCountdownStop: {
+    inputId: 'settings-audio-ctfd-countdown-stop',
+    previewId: 'settings-audio-ctfd-countdown-stop-preview',
+    clearId: 'settings-audio-ctfd-countdown-stop-clear',
+    listId: 'settings-audio-ctfd-countdown-stop-list',
+    labelId: 'settings-audio-ctfd-countdown-stop-label',
+    toggleId: 'settings-audio-ctfd-countdown-stop-toggle',
+    speakToggleId: 'settings-audio-ctfd-countdown-stop-speak',
+    speakLabelId: 'settings-audio-ctfd-countdown-stop-speak-label',
+    templateInputId: 'settings-audio-ctfd-countdown-stop-speak-template-input',
+    templateAddId: 'settings-audio-ctfd-countdown-stop-speak-template-add',
+    templateListId: 'settings-audio-ctfd-countdown-stop-speak-template-list',
+    speakHelpId: 'settings-audio-ctfd-countdown-stop-speak-help',
+    placeholderHint: '{{audio}}, {{reason}}, {{reason_clause}}, {{project}}, {{project_clause}}',
+    defaultEnabled: false,
+    defaultSpeak: false,
+    defaultSpeakTemplate: '{{audio}} Countdown cancelled{{reason_clause}}.',
+    legacyDefaultSpeakBefore: '',
+    legacyDefaultSpeakAfter: 'Countdown cancelled{{reason_clause}}.'
+  },
   ctfdPeriodic: {
     inputId: 'settings-audio-ctfd-periodic',
     previewId: 'settings-audio-ctfd-periodic-preview',
@@ -226,7 +246,8 @@ const SETTINGS_AUDIO_PREVIEW_CONTEXT = {
   ctfdFirstTeam: { leader: 'Team Eclipse' },
   ctfdPeriodic: { interval_minutes: '30' },
   ctfdFirstCategoryUser: { category: 'Web Exploitation', leader: 'Alex Jordan' },
-  ctfdFirstCategoryTeam: { category: 'Reverse Engineering', team_first: 'Team Aurora' }
+  ctfdFirstCategoryTeam: { category: 'Reverse Engineering', team_first: 'Team Aurora' },
+  ctfdCountdownStop: { reason: 'challenges_hidden', reason_clause: ' while challenges are hidden' }
 };
 function settingsModalPreviewContext(key){
   const overrides = SETTINGS_AUDIO_PREVIEW_CONTEXT[key];

@@ -138,7 +138,8 @@
                   <button class="nav-link" id="settings-event-ctfd-score-tab" data-bs-toggle="pill" data-bs-target="#settings-event-ctfd-score" type="button" role="tab" aria-controls="settings-event-ctfd-score" aria-selected="false">Any First Solve</button>
                   <button class="nav-link" id="settings-event-ctfd-cat-user-tab" data-bs-toggle="pill" data-bs-target="#settings-event-ctfd-cat-user" type="button" role="tab" aria-controls="settings-event-ctfd-cat-user" aria-selected="false">Category First Solve (User)</button>
                   <button class="nav-link" id="settings-event-ctfd-cat-team-tab" data-bs-toggle="pill" data-bs-target="#settings-event-ctfd-cat-team" type="button" role="tab" aria-controls="settings-event-ctfd-cat-team" aria-selected="false">Category First Solve (Team)</button>
-                  <button class="nav-link" id="settings-event-ctfd-countdown-tab" data-bs-toggle="pill" data-bs-target="#settings-event-ctfd-countdown" type="button" role="tab" aria-controls="settings-event-ctfd-countdown" aria-selected="false">Countdown Alert</button>
+                  <button class="nav-link" id="settings-event-ctfd-countdown-tab" data-bs-toggle="pill" data-bs-target="#settings-event-ctfd-countdown" type="button" role="tab" aria-controls="settings-event-ctfd-countdown" aria-selected="false">Countdown Start Alert</button>
+                  <button class="nav-link" id="settings-event-ctfd-countdown-stop-tab" data-bs-toggle="pill" data-bs-target="#settings-event-ctfd-countdown-stop" type="button" role="tab" aria-controls="settings-event-ctfd-countdown-stop" aria-selected="false">Countdown Stop Alert</button>
                   <button class="nav-link" id="settings-event-ctfd-periodic-tab" data-bs-toggle="pill" data-bs-target="#settings-event-ctfd-periodic" type="button" role="tab" aria-controls="settings-event-ctfd-periodic" aria-selected="false">Periodic Update</button>
                 </div>
               </div>
@@ -293,6 +294,45 @@
                       <div class="col-12">
                         <div class="form-text text-muted mb-1">The template wraps your placeholders when text-to-speech runs.</div>
                         <div class="form-text" id="settings-audio-ctfd-countdown-speak-help">Placeholders: {{audio}}, {{reason}}, {{reason_clause}}, {{countdown_seconds}}, {{first_team}}, {{second_team}}, {{third_team}}</div>
+                      </div>
+                    </div>
+                    <div class="small text-muted mt-1">Files are stored locally in this browser (max 600 KB each).</div>
+                  </div>
+                  <div class="tab-pane fade" id="settings-event-ctfd-countdown-stop" role="tabpanel" aria-labelledby="settings-event-ctfd-countdown-stop-tab">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <label class="form-label mb-0">Countdown Stop Sound</label>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input" type="checkbox" id="settings-audio-ctfd-countdown-stop-toggle">
+                        <label class="form-check-label small text-muted" for="settings-audio-ctfd-countdown-stop-toggle">Enabled</label>
+                      </div>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 mt-2">
+                      <label class="btn btn-outline-secondary btn-sm mb-0">
+                        Add Clip<input type="file" id="settings-audio-ctfd-countdown-stop" accept="audio/*" hidden>
+                      </label>
+                      <button type="button" class="btn btn-outline-secondary btn-sm" id="settings-audio-ctfd-countdown-stop-preview" disabled>Preview Next</button>
+                      <button type="button" class="btn btn-outline-danger btn-sm" id="settings-audio-ctfd-countdown-stop-clear" disabled>Clear All</button>
+                    </div>
+                    <ul class="list-group list-group-sm mt-2" id="settings-audio-ctfd-countdown-stop-list"></ul>
+                    <div class="small text-muted" id="settings-audio-ctfd-countdown-stop-label">Using built-in tone.</div>
+                    <div class="form-check form-switch mt-2">
+                      <input class="form-check-input" type="checkbox" id="settings-audio-ctfd-countdown-stop-speak">
+                      <label class="form-check-label small text-muted" id="settings-audio-ctfd-countdown-stop-speak-label" for="settings-audio-ctfd-countdown-stop-speak">Announce cancellation via text-to-speech</label>
+                    </div>
+                    <div class="row g-2 mt-2">
+                      <div class="col-12">
+                        <label class="form-label small mb-1" for="settings-audio-ctfd-countdown-stop-speak-template-input">Speech Templates</label>
+                        <div class="input-group input-group-sm">
+                          <input class="form-control" type="text" id="settings-audio-ctfd-countdown-stop-speak-template-input" placeholder="Include {{audio}} to play the sound (e.g., {{audio}} Countdown cancelled {{reason_clause}})">
+                          <button class="btn btn-outline-primary" type="button" id="settings-audio-ctfd-countdown-stop-speak-template-add">Add</button>
+                        </div>
+                      </div>
+                      <div class="col-12">
+                        <ul class="list-group list-group-sm mt-2" id="settings-audio-ctfd-countdown-stop-speak-template-list"></ul>
+                      </div>
+                      <div class="col-12">
+                        <div class="form-text text-muted mb-1">The template wraps your placeholders when text-to-speech runs.</div>
+                        <div class="form-text" id="settings-audio-ctfd-countdown-stop-speak-help">Placeholders: {{audio}}, {{reason}}, {{reason_clause}}, {{project}}, {{project_clause}}</div>
                       </div>
                     </div>
                     <div class="small text-muted mt-1">Files are stored locally in this browser (max 600 KB each).</div>

@@ -54,6 +54,11 @@ const CTFD_AUDIO_FALLBACKS = {
     { freq: 988, dur: 0.24, gap: 0.12, type: 'sawtooth', gain: 0.24 },
     { freq: 1175, dur: 0.28, gap: 0, type: 'triangle', gain: 0.22 }
   ],
+  ctfdCountdownStop: [
+    { freq: 392, dur: 0.16, gap: 0.08, type: 'triangle', gain: 0.22 },
+    { freq: 330, dur: 0.18, gap: 0.1, type: 'sine', gain: 0.2 },
+    { freq: 262, dur: 0.22, gap: 0, type: 'sine', gain: 0.18 }
+  ],
   ctfdPeriodic: [
     { freq: 440, dur: 0.14, gap: 0.08, type: 'sine', gain: 0.22 },
     { freq: 554, dur: 0.16, gap: 0.08, type: 'sine', gain: 0.22 },
@@ -81,6 +86,8 @@ let CTFD_PERIODIC_TIMER = null;
 let CTFD_PERIODIC_ACTIVE_PID = '';
 const CTFD_CATEGORY_FIRSTS = {};
 let CTFD_LAST_CHALLENGES_STATE = null;
+let CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
+let CTFD_CHALLENGE_REVEAL_EXPECTED = false;
 
 function ctfdResetAudioCache(){
   Object.keys(CTFD_AUDIO_CACHE).forEach(key => { delete CTFD_AUDIO_CACHE[key]; });
@@ -689,7 +696,56 @@ function ctfdCountdownReasonLabel(reason){
   if (!reason) return '';
   if (reason === 'scoreboard') return ' for scoreboard reveal';
   if (reason === 'challenges') return ' for challenge list reveal';
+  if (reason === 'challenges_hidden') return ' while challenges are hidden';
   return ` (${reason})`;
+}
+function ctfdCountdownNotificationActive(){
+  try {
+    const audioEnabled = ctfdIsAudioEnabled('ctfdCountdown');
+    const speechEnabled = ctfdSpeechSupported() && ctfdShouldSpeak('ctfdCountdown');
+    return !!(audioEnabled || speechEnabled);
+  } catch { return false; }
+}
+function ctfdCountdownStopNotificationActive(){
+  try {
+    const audioEnabled = ctfdIsAudioEnabled('ctfdCountdownStop');
+    const speechEnabled = ctfdSpeechSupported() && ctfdShouldSpeak('ctfdCountdownStop');
+    return !!(audioEnabled || speechEnabled);
+  } catch { return false; }
+}
+async function ctfdPlayCountdownCueForChallenges(){
+  if (!ctfdCountdownNotificationActive()) return;
+  const reason = 'challenges';
+  const context = {
+    reason,
+    reason_clause: ctfdCountdownReasonLabel(reason),
+    countdown_seconds: CTFD_COUNTDOWN_DEFAULT_SECONDS
+  };
+  const fallback = `Countdown complete${context.reason_clause}.`;
+  try {
+    await ctfdSpeakForEvent('ctfdCountdown', { context, fallbackText: fallback }, 0, {
+      onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdCountdown', CTFD_AUDIO_FALLBACKS.ctfdCountdownFinal || [], startDelay)
+    });
+  } catch {}
+}
+async function ctfdPlayCountdownStopForChallenges(){
+  if (!ctfdCountdownStopNotificationActive()) return;
+  const reason = 'challenges_hidden';
+  const baseContext = ctfdSpeechContextProject(ctfdCurrentPid());
+  const context = {
+    ...baseContext,
+    reason,
+    reason_clause: ctfdCountdownReasonLabel(reason)
+  };
+  const reasonClause = context.reason_clause || '';
+  const projectClause = context.project_clause || '';
+  const extra = `${reasonClause}${projectClause}`;
+  const fallback = `Countdown cancelled${extra}.`;
+  try {
+    await ctfdSpeakForEvent('ctfdCountdownStop', { context, fallbackText: fallback }, 0, {
+      onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdCountdownStop', CTFD_AUDIO_FALLBACKS.ctfdCountdownStop || [], startDelay)
+    });
+  } catch {}
 }
 function ctfdSpeechContextProject(projectId){
   const project = ctfdProjectLabel(projectId);
@@ -926,11 +982,27 @@ function ctfdHandleChallengesStateChange(newState){
   const next = !!newState;
   CTFD_LAST_CHALLENGES_STATE = next;
   const previous = (prev === null) ? false : !!prev;
+  if (next !== previous) {
+    try {
+      const chToggle = document.getElementById('ctfd-toggle-chals');
+      if (chToggle) {
+        chToggle.indeterminate = false;
+        chToggle.removeAttribute('data-ctfd-pending-reveal');
+      }
+    } catch {}
+  }
   if (next && !previous) {
-    ctfdStartCountdown(CTFD_COUNTDOWN_DEFAULT_SECONDS, { reason: 'challenges' });
-  } else if (!next && previous) {
+    if (CTFD_CHALLENGE_REVEAL_EXPECTED) {
+      CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+    } else {
+      void ctfdPlayCountdownCueForChallenges();
+    }
+  }
+  if (!next && previous) {
+    void ctfdPlayCountdownStopForChallenges();
     ctfdStopCountdown(false);
   }
+  if (!next) CTFD_CHALLENGE_REVEAL_EXPECTED = false;
 }
 // Sort behavior for rows with n/a values across any visible columns
 // Sort Missing Fields toggle removed: always place rows missing the active sort field at the end
@@ -2692,6 +2764,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const pid = e.detail || '';
         ctfdStopCountdown(false);
         CTFD_LAST_CHALLENGES_STATE = null;
+        CTFD_CHALLENGE_REVEAL_EXPECTED = false;
         if (pid) {
           try { ctfdLoadProjectConfig(pid); } catch {}
           try {
@@ -2780,7 +2853,12 @@ async function ctfdLoadSettings(){
       res = await http('POST', `/api/projects/${PROJ.id}/ctfd/settings`, payload);
     }, { projectId: PROJ?.id });
     const st = res?.settings || {};
-    const ch = document.getElementById('ctfd-toggle-chals'); if (ch) ch.checked = !!st.challenges_visible;
+    const ch = document.getElementById('ctfd-toggle-chals');
+    if (ch) {
+      ch.checked = !!st.challenges_visible;
+      ch.indeterminate = false;
+      ch.removeAttribute('data-ctfd-pending-reveal');
+    }
     const sc = document.getElementById('ctfd-toggle-scoreboard'); if (sc) sc.checked = !!st.scoreboard_visible;
     const pa = document.getElementById('ctfd-toggle-paused'); if (pa) pa.checked = !!st.ctfd_paused;
     const challengesVisible = !!st.challenges_visible;
@@ -2805,23 +2883,61 @@ async function ctfdUpdateSettings(updates){
   const payload = { baseUrl, port, token: sess.token||'', verifySSL, ...updates };
   const statusEl = document.getElementById('ctfd-settings-status');
   const tgls = [document.getElementById('ctfd-toggle-chals'), document.getElementById('ctfd-toggle-scoreboard'), document.getElementById('ctfd-toggle-paused')];
-  // Show applying and temporarily disable toggles to prevent flapping
-  try { if (statusEl) { statusEl.textContent = 'Applying…'; statusEl.className = 'small text-muted'; } } catch {}
+  const chToggle = document.getElementById('ctfd-toggle-chals');
+  // Temporarily disable toggles to prevent flapping
   try { tgls.forEach(el => { if (el) el.disabled = true; }); } catch {}
+  const togglingChallenges = updates && Object.prototype.hasOwnProperty.call(updates, 'challenges_visible');
+  const targetChallenges = togglingChallenges ? !!updates.challenges_visible : null;
+  const lastChallengesVisible = !!CTFD_LAST_CHALLENGES_STATE;
+  const shouldDelayReveal = togglingChallenges && targetChallenges === true && !lastChallengesVisible && ctfdCountdownNotificationActive();
+  let countdownCuePlayed = true;
+  if (shouldDelayReveal) {
+    CTFD_CHALLENGE_REVEAL_IN_PROGRESS = true;
+    CTFD_CHALLENGE_REVEAL_EXPECTED = true;
+    if (statusEl) { statusEl.textContent = 'Countdown cue…'; statusEl.className = 'small text-muted'; }
+    if (chToggle) {
+      chToggle.checked = false;
+      chToggle.indeterminate = true;
+      chToggle.setAttribute('data-ctfd-pending-reveal', '1');
+    }
+    try {
+      await ctfdPlayCountdownCueForChallenges();
+    } catch (err) {
+      countdownCuePlayed = false;
+      try { shell.logWarn(`[CTFd] Countdown cue failed: ${err?.message||err}`); } catch {}
+    }
+    if (!countdownCuePlayed) CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+  } else if (togglingChallenges && targetChallenges === false) {
+    CTFD_CHALLENGE_REVEAL_EXPECTED = false;
+    if (chToggle) chToggle.removeAttribute('data-ctfd-pending-reveal');
+  }
+  // Mark the update as in-flight once any pre-reveal cue has completed
+  try { if (statusEl) { statusEl.textContent = 'Applying…'; statusEl.className = 'small text-muted'; } } catch {}
   try {
     let res;
     await runQueued(`CTFd update settings for ${PROJ?.name || PROJ?.id || ''}`, async () => {
       res = await http('POST', `/api/projects/${PROJ.id}/ctfd/settings/update`, payload);
     }, { projectId: PROJ?.id });
     const st = res?.settings || {};
-  const ch = document.getElementById('ctfd-toggle-chals'); if (ch) ch.checked = !!st.challenges_visible;
-  const sc = document.getElementById('ctfd-toggle-scoreboard'); if (sc) sc.checked = !!st.scoreboard_visible;
+    CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
+    const ch = document.getElementById('ctfd-toggle-chals');
+    if (ch) {
+      ch.checked = !!st.challenges_visible;
+      ch.indeterminate = false;
+      ch.removeAttribute('data-ctfd-pending-reveal');
+    }
+    const sc = document.getElementById('ctfd-toggle-scoreboard'); if (sc) sc.checked = !!st.scoreboard_visible;
     const pa = document.getElementById('ctfd-toggle-paused'); if (pa) pa.checked = !!st.ctfd_paused;
-  ctfdHandleChallengesStateChange(!!st.challenges_visible);
+    ctfdHandleChallengesStateChange(!!st.challenges_visible);
     try {
       if (statusEl) { statusEl.textContent = 'Applied'; statusEl.className = 'small text-success'; setTimeout(()=>{ try{ statusEl.textContent=''; statusEl.className='small text-muted'; }catch{} }, 1200); }
     } catch {}
   } catch (e) {
+    CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
+    if (chToggle) {
+      chToggle.indeterminate = false;
+      chToggle.removeAttribute('data-ctfd-pending-reveal');
+    }
     // Reload last-known-good
     try { await ctfdLoadSettings(); } catch {}
     try { shell.logError(`CTFd settings update failed: ${e?.message||e}`); } catch {}
@@ -2829,7 +2945,11 @@ async function ctfdUpdateSettings(updates){
   }
   finally {
     // Re-enable toggles based on auth state
-    try { updateCtfdControlsEnabled(); } catch {}
+    CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
+    try {
+      if (chToggle) chToggle.indeterminate = false;
+      updateCtfdControlsEnabled();
+    } catch {}
   }
 }
 
