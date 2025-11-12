@@ -9,6 +9,7 @@ import socket
 import secrets
 import string
 import logging
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
 import re
@@ -3206,6 +3207,94 @@ def instances_nets_assign(pid: str):
     return jsonify({ 'updated': updated, 'skipped': skipped, 'errors': errors })
 
 
+@api_bp.route("/projects/<pid>/instances/actions/nets_clear", methods=["POST"])
+def instances_nets_clear(pid: str):
+    """Remove all configured network adaptors (netX entries) from selected VMs."""
+    _start_job(pid, 'nets_clear')
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    try:
+        body = request.get_json(force=True) or {}
+    except Exception:
+        body = {}
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+    targets = body.get('targets') or []
+    if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
+        return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "No targets provided"}), 400
+
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+    cleared = []
+
+    def do_clear(m):
+        if _is_cancelled(pid):
+            raise RuntimeError('cancelled')
+        idx = int(m['index'])
+        gen_name = str(m['name'] or '')
+        node = m['node']
+        vmid = m['vmid']
+        existing_cfg = {}
+        try:
+            existing_cfg = client.get_qemu_config(node=node, vmid=vmid) or {}
+        except Exception:
+            existing_cfg = {}
+        delete_keys = [k for k in (existing_cfg or {}).keys() if str(k).startswith('net')]
+        if not delete_keys:
+            return ('skipped', { 'index': idx, 'name': gen_name, 'reason': 'no network interfaces found' })
+        try:
+            client.set_qemu_nets(node=node, vmid=vmid, nets=[], delete_keys=delete_keys)
+            return ('cleared', { 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node, 'removed': delete_keys })
+        except Exception as e:
+            return ('error', { 'index': idx, 'name': gen_name, 'reason': f'clear nets failed: {e}' })
+
+    with ThreadPoolExecutor(max_workers=min(len(mapped), 16) or 1) as pool:
+        future_map = { pool.submit(do_clear, m): m for m in mapped }
+        for fut in as_completed(future_map):
+            m = future_map[fut]
+            try:
+                kind, payload = fut.result()
+                if kind == 'cleared':
+                    cleared.append(payload)
+                elif kind == 'skipped':
+                    skipped.append(payload)
+                else:
+                    errors.append(payload)
+            except Exception as e:
+                if str(e) == 'cancelled':
+                    errors.append({ 'reason': 'cancelled' })
+                else:
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'network clear failed: {e}' })
+
+    _end_job(pid)
+    return jsonify({ 'cleared': cleared, 'skipped': skipped, 'errors': errors })
+
+
 @api_bp.route("/projects/<pid>/instances/actions/users_create", methods=["POST"])
 def instances_users_create(pid: str):
     """Create Proxmox user(s) and pools for selected instance credential usernames and add selected VMs to the pools."""
@@ -5058,6 +5147,52 @@ def update_project(pid: str):
     return jsonify(d)
 
 
+@api_bp.route("/projects/<pid>/duplicate", methods=["POST"])
+@_secure_route()
+def duplicate_project(pid: str):
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Not found"}), 404
+    try:
+        base_name = (proj.name or '').strip() or 'Untitled'
+    except Exception:
+        base_name = 'Untitled'
+    try:
+        existing_names = {str((p.name or '').strip()) for p in s.list()}
+    except Exception:
+        existing_names = set()
+    existing_names.discard('')
+
+    def _next_name(base: str, used: set) -> str:
+        candidate = f"{base} (Copy)"
+        idx = 2
+        while candidate in used:
+            candidate = f"{base} (Copy {idx})"
+            idx += 1
+        return candidate
+
+    new_name = _next_name(base_name, existing_names)
+    new_proj = copy.deepcopy(proj)
+    new_proj.id = str(uuid.uuid4())
+    new_proj.name = new_name
+    try:
+        new_proj.exports = []
+    except Exception:
+        pass
+    try:
+        new_proj.instance_statuses = []
+    except Exception:
+        pass
+    try:
+        new_proj.associated_projects = []
+    except Exception:
+        pass
+    s.upsert(new_proj)
+    d = _project_to_json(new_proj)
+    return jsonify(d), 201
+
+
 # Export project (zip with manifest and materials)
 @api_bp.route("/projects/<pid>/export", methods=["GET"])
 @_secure_route()
@@ -6214,6 +6349,135 @@ def export_project_start(pid: str):
     if not username or not password:
         return jsonify({"error": "Missing Proxmox credentials"}), 400
 
+    base_url = getattr(proj, 'proxmox_url', '') or ''
+    prox_host = _parse_host_from_url(base_url) or ''
+    verify_ssl = getattr(proj, 'proxmox_verify_ssl', True)
+
+    if include_vms and base_url:
+        client = None
+        try:
+            client = ProxmoxClient(base_url=base_url, username=username, password=password, verify=verify_ssl is not False)
+            node_by_id = {}
+            node_by_name = {}
+            nodes = client.list_nodes()
+            for node_entry in nodes or []:
+                node_name = str(node_entry.get('node') or '').strip()
+                if not node_name:
+                    continue
+                try:
+                    vms = client.list_qemu_vms(node_name)
+                except Exception:
+                    continue
+                for vm in vms or []:
+                    info = {
+                        'node': node_name,
+                        'vmid': vm.get('vmid'),
+                        'name': vm.get('name'),
+                    }
+                    vmid = vm.get('vmid')
+                    if vmid is not None:
+                        try:
+                            node_by_id[int(vmid)] = info
+                        except Exception:
+                            pass
+                    vm_name = str(vm.get('name') or '').strip().lower()
+                    if vm_name:
+                        node_by_name[vm_name] = info
+        except Exception as e:
+            return jsonify({"error": f"Proxmox validation failed: {e}"}), 502
+        finally:
+            try:
+                if client and getattr(client, '_session', None):
+                    client._session.close()
+            except Exception:
+                pass
+
+        prox_host_lc = prox_host.strip().lower()
+        host_candidates = set()
+        if prox_host_lc:
+            host_candidates.add(prox_host_lc)
+            if '.' in prox_host_lc:
+                host_candidates.add(prox_host_lc.split('.', 1)[0])
+
+        mapping_raw = {}
+        try:
+            mapping_raw = dict(getattr(proj, 'proxmox_node_host_map', {}) or {})
+        except Exception:
+            mapping_raw = {}
+        map_by_node = {}
+        for nk, hv in mapping_raw.items():
+            node_key = str(nk or '').strip().lower()
+            if not node_key:
+                continue
+            host_val = str(hv or '').strip().lower()
+            if host_val:
+                map_by_node[node_key] = host_val
+
+        def _node_matches_host(node_name: str) -> bool:
+            if not host_candidates:
+                return True
+            n = str(node_name or '').strip().lower()
+            if not n:
+                return False
+            if n in host_candidates:
+                return True
+            mapped = map_by_node.get(n)
+            if mapped:
+                mapped_candidates = {mapped}
+                if '.' in mapped:
+                    mapped_candidates.add(mapped.split('.', 1)[0])
+                if mapped_candidates & host_candidates:
+                    return True
+            return False
+
+        mismatched = []
+        node_assignments = []
+        seen_keys = set()
+        for vm_cfg in getattr(proj, 'vms', []) or []:
+            vm_name = getattr(vm_cfg, 'name', '') or ''
+            vmid = getattr(vm_cfg, 'vmid', None)
+            info = None
+            if vmid is not None:
+                try:
+                    vmid_int = int(vmid)
+                except Exception:
+                    vmid_int = None
+                if vmid_int is not None and vmid_int in node_by_id:
+                    info = node_by_id[vmid_int]
+            if info is None and vm_name and vm_name.strip().lower() in node_by_name:
+                info = node_by_name[vm_name.strip().lower()]
+            if not info:
+                continue
+            node_name = info.get('node') or ''
+            node_assignments.append({'name': vm_name, 'node': node_name, 'vmid': info.get('vmid')})
+            if node_name and not _node_matches_host(node_name):
+                key = f"{vm_name}@@{node_name}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                mismatched.append({
+                    'name': vm_name,
+                    'node': node_name,
+                    'vmid': info.get('vmid'),
+                })
+
+        unique_nodes = {str(entry.get('node') or '').strip().lower() for entry in node_assignments if entry.get('node')}
+        if mismatched and len(unique_nodes) == 1 and not host_candidates:
+            mismatched = []
+
+        if mismatched:
+            display_host = prox_host or 'the configured node'
+            def _fmt(vm):
+                n = str(vm.get('name') or '')
+                node_label = str(vm.get('node') or '')
+                return f"{n} (node {node_label})" if node_label else n
+            problem = ', '.join(sorted({_fmt(m) for m in mismatched if (m.get('name') or m.get('node'))}))
+            return jsonify({
+                "error": f"Cannot export VMs because some templates are on a different node than {display_host}.",
+                "details": mismatched,
+                "message": f"Move these VM(s) to {display_host} or update the Proxmox URL: {problem}"
+            }), 400
+
     job_id = uuid.uuid4().hex
     rec = _job_record(pid, job_id)
     rec['status'] = 'queued'
@@ -6242,6 +6506,40 @@ def export_project_start(pid: str):
                     return str(data) if data is not None else ''
                 except Exception:
                     return ''
+
+            def _maybe_clear_readonly_volume(message: str) -> bool:
+                try:
+                    msg_lc = (message or '').lower()
+                except Exception:
+                    msg_lc = ''
+                keywords = ('not a writable', 'not writable', 'read-only')
+                if not any(k in msg_lc for k in keywords):
+                    return False
+                match = re.search(r'(base-\d+-disk-\d+)', message or '')
+                if not match:
+                    return False
+                volume = match.group(1)
+                if not volume:
+                    return False
+                lv_path = f"/dev/pve/{volume}"
+                try:
+                    _emit(f"[CMD] lvs {lv_path}")
+                    _ssh_run_cmd(c, f"lvs {lv_path}", sudo=use_sudo, sudo_password=password)
+                except Exception as lvs_err:
+                    _emit(f"[WARN] lvs check failed for {lv_path}: {lvs_err}")
+                try:
+                    _emit(f"[CMD] lvchange -prw {lv_path}")
+                    _ssh_run_cmd(c, f"lvchange -prw {lv_path}", sudo=use_sudo, sudo_password=password)
+                except Exception as lvchange_err:
+                    _emit(f"[WARN] Failed to clear read-only state on {lv_path}: {lvchange_err}")
+                    return False
+                try:
+                    _emit(f"[CMD] lvs {lv_path}")
+                    _ssh_run_cmd(c, f"lvs {lv_path}", sudo=use_sudo, sudo_password=password)
+                except Exception:
+                    pass
+                _emit(f"[{volume}] Read-only protection cleared; will retry vzdump")
+                return True
             try:
                 _ACTIVE_JOBS[key]['status'] = 'connecting'
                 host = _parse_host_from_url(getattr(proj, 'proxmox_url', '') or '')
@@ -6318,7 +6616,7 @@ def export_project_start(pid: str):
                     _ssh_run_cmd(c, f"mkdir -p {base_remote}/{vm_name}", sudo=use_sudo, sudo_password=password)
                     # Run vzdump with streaming; dumpdir is absolute
                     cmd = f"vzdump {int(vmid)} --compress zstd --mode snapshot --remove 0 --zstd 0 --tmpdir /root/ --dumpdir {base_remote}/{vm_name}"
-                    try:
+                    def _run_vzdump_operation():
                         def on_line(_txt):
                             try:
                                 vmrec['progress'] = min(95, vmrec.get('progress', 0) + 1)
@@ -6335,11 +6633,31 @@ def export_project_start(pid: str):
                             on_stdout_line=on_line,
                             cmd_prefix="[CMD]",
                         )
+
+                    success = False
+                    last_error = None
+                    try:
+                        _run_vzdump_operation()
+                        success = True
+                    except Exception as e:
+                        last_error = str(e)
+                        _emit(f"[{vm_name}] vzdump failed: {e}")
+                        cleared = _maybe_clear_readonly_volume(last_error)
+                        if cleared:
+                            try:
+                                _run_vzdump_operation()
+                                success = True
+                                last_error = None
+                            except Exception as retry_err:
+                                last_error = f"{last_error}; retry failed: {retry_err}"
+                                _emit(f"[{vm_name}] Retry after clearing read-only failed: {retry_err}")
+                    if success:
                         vmrec['progress'] = 100
                         vmrec['status'] = 'done'
-                    except Exception as e:
+                    else:
                         vmrec['status'] = 'error'
-                        _emit(f"[{vm_name}] vzdump failed: {e}")
+                        if last_error:
+                            vmrec['error'] = last_error
                     _ACTIVE_JOBS[key]['per_vm'][idx] = vmrec
                     _ACTIVE_JOBS[key]['progress'] = int(((idx + 1) / max(total, 1)) * 80)
 

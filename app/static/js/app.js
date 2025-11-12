@@ -1044,6 +1044,7 @@ function saveSettingsInternal(){
   }
 }
 window.saveSettings = saveSettingsInternal;
+window.importProject = importProject;
 
 async function loadProjects() {
   const container = document.getElementById('projects');
@@ -1402,6 +1403,7 @@ function renderProjectCard(p) {
           <span id="save-status-${p.id}" class="ms-2 small text-muted" aria-label="Save status"></span>
         </div>
         <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-primary" onclick="duplicateProject('${p.id}')">Duplicate</button>
           <button class="btn btn-sm btn-outline-secondary" onclick="openExportOptions('${p.id}')">Export</button>
           <button class="btn btn-sm btn-outline-danger" onclick="deleteProject('${p.id}')">Delete</button>
         </div>
@@ -1946,6 +1948,23 @@ async function renameProject(id, newName) {
   }
 }
 
+async function duplicateProject(id) {
+  try {
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: duplicating project ${id}…`) : console.log('Duplicating project', id); } catch {}
+    const res = await http('POST', `/api/projects/${encodeURIComponent(id)}/duplicate`);
+    const newId = res && (res.id || res.pid) ? (res.id || res.pid) : '';
+    const newName = res && typeof res.name === 'string' ? res.name : '';
+    try { if (newId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(newId); } catch {}
+    await loadProjects();
+    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
+    const tail = newName ? ` as ${newName}` : '';
+    try { showToast(`Project duplicated${tail}.`, 'success'); } catch {}
+  } catch (e) {
+    try { showToast('Failed to duplicate project: ' + (e?.message || e), 'danger'); } catch {}
+    try { (window.shell && shell.logError) ? shell.logError('Config: duplicate project failed: ' + (e?.message || e)) : console.error('Duplicate project failed:', e); } catch {}
+  }
+}
+
 // Delete a project from the header button
 async function deleteProject(id) {
   try {
@@ -2291,27 +2310,143 @@ function openExportOptions(pid) {
   m.show();
   const dl = document.getElementById('exp-download');
   if (dl) {
-    dl.onclick = () => {
+    const setBusy = (flag) => {
+      if (flag) dl.dataset.busy = '1'; else delete dl.dataset.busy;
+      dl.disabled = !!flag;
+      dl.classList.toggle('disabled', !!flag);
+      if (flag) dl.setAttribute('aria-disabled', 'true'); else dl.removeAttribute('aria-disabled');
+    };
+    dl.onclick = async () => {
+      if (dl.dataset.busy === '1' || dl.disabled) return;
       const includeCreds = !!document.getElementById('exp-creds')?.checked;
       const includeVms = !!document.getElementById('exp-vms')?.checked;
-      if (includeVms) {
-        const proceed = confirm('Exporting VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
-        if (!proceed) { return; }
-      }
-      if (includeVms) {
-        // Require Proxmox login first; show modal and continue on success
-        try { m.hide(); } catch {}
-        gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms });
-      } else {
-        // Simple export (no VM images) via direct download
-        const a = document.createElement('a');
-        a.href = `/api/projects/${encodeURIComponent(EXPORT_CONTEXT.pid)}/export?includeCreds=${includeCreds}&includeVms=${includeVms}`;
-        a.click();
-        try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: export started') : console.log('Export started'); } catch {}
-        try { m.hide(); } catch {}
+      setBusy(true);
+      let proceed = true;
+      try {
+        if (includeVms) {
+          proceed = confirm('Exporting VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
+          if (!proceed) { return; }
+        }
+        if (includeVms) {
+          try { m.hide(); } catch {}
+          await gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms });
+        } else {
+          const a = document.createElement('a');
+          a.href = `/api/projects/${encodeURIComponent(EXPORT_CONTEXT.pid)}/export?includeCreds=${includeCreds}&includeVms=${includeVms}`;
+          a.click();
+          try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: export started') : console.log('Export started'); } catch {}
+          try { m.hide(); } catch {}
+        }
+      } finally {
+        if (!includeVms || proceed) {
+          // Reset immediately for non-VM exports or confirmed VM exports
+          setTimeout(() => setBusy(false), 0);
+        } else {
+          setBusy(false);
+        }
       }
     };
   }
+}
+
+async function performProjectImport(options = {}) {
+  const input = document.getElementById('import-file');
+  if (!input || !input.files || !input.files[0]) return false;
+  const file = input.files[0];
+  const fd = new FormData();
+  fd.append('file', file);
+  if (options.includeCreds !== undefined) fd.append('includeCreds', options.includeCreds ? 'true' : 'false');
+  if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
+  const label = `Import project: ${file.name}`;
+  try {
+    if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(true);
+  } catch {}
+  let resp = null;
+  try {
+    await runQueued(label, async () => {
+      resp = await http('POST', '/api/projects/import', fd);
+    }, { projectId: options.queueKey || 'import' });
+  } catch (err) {
+    try { showToast('Failed to import project: ' + (err?.message || err), 'danger'); } catch {}
+    try {
+      (window.shell && shell.logError)
+        ? shell.logError('Config: import project failed: ' + (err?.message || err))
+        : console.error('Import project failed:', err);
+    } catch {}
+    return false;
+  } finally {
+    try {
+      if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(false);
+    } catch {}
+  }
+  if (!resp) return false;
+  try { input.value = ''; } catch {}
+  const importedId = resp?.id || (Array.isArray(resp?.imported) && resp.imported[0]?.id) || '';
+  if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') {
+    try { shell.setCurrentProjectId(importedId); } catch {}
+  }
+  try { await loadProjects(); } catch {}
+  try {
+    if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config');
+  } catch {}
+  try { showToast('Project imported.', 'success'); } catch {}
+  try {
+    (window.shell && shell.logSuccess)
+      ? shell.logSuccess('Config: project imported')
+      : console.log('Project imported');
+  } catch {}
+  return true;
+}
+
+function importProject() {
+  const input = document.getElementById('import-file');
+  if (!input || !input.files || !input.files[0]) return;
+  const modalEl = document.getElementById('importOptionsModal');
+  if (!modalEl || !window.bootstrap) {
+    performProjectImport({ includeCreds: true, includeVms: true });
+    return;
+  }
+  const credsEl = document.getElementById('imp-creds');
+  const vmsEl = document.getElementById('imp-vms');
+  const warnEl = document.getElementById('imp-vms-warning');
+  if (credsEl) credsEl.checked = true;
+  if (vmsEl) vmsEl.checked = true;
+  if (warnEl) warnEl.style.display = vmsEl && vmsEl.checked ? 'block' : 'none';
+  if (vmsEl) {
+    vmsEl.onchange = () => {
+      if (warnEl) warnEl.style.display = vmsEl.checked ? 'block' : 'none';
+    };
+  }
+  const modal = new bootstrap.Modal(modalEl);
+  const continueBtn = document.getElementById('imp-continue');
+  if (continueBtn) {
+    const setBusy = (flag) => {
+      if (flag) continueBtn.dataset.busy = '1'; else delete continueBtn.dataset.busy;
+      continueBtn.disabled = !!flag;
+      continueBtn.classList.toggle('disabled', !!flag);
+      if (flag) continueBtn.setAttribute('aria-disabled', 'true'); else continueBtn.removeAttribute('aria-disabled');
+    };
+    continueBtn.onclick = null;
+    continueBtn.onclick = async () => {
+      if (continueBtn.dataset.busy === '1' || continueBtn.disabled) return;
+      const includeCreds = !!document.getElementById('imp-creds')?.checked;
+      const includeVms = !!document.getElementById('imp-vms')?.checked;
+      if (includeVms) {
+        const proceed = confirm('Importing VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
+        if (!proceed) return;
+      }
+      setBusy(true);
+      try {
+        const ok = await performProjectImport({ includeCreds, includeVms, queueKey: 'import' });
+        if (ok) {
+          try { modal.hide(); } catch {}
+        }
+      } finally {
+        setBusy(false);
+      }
+    };
+  }
+  modal.show();
 }
 
 async function startExportJob(pid, opts) {
@@ -2660,6 +2795,7 @@ async function uploadCredentialsFile(pid){
     const warn = document.getElementById(`cred-warn-${pid}`);
     if (!input || !input.files || input.files.length === 0) return;
     const file = input.files[0];
+    const existing = collectCredentials(pid);
     const text = await file.text();
     const lines = String(text||'').split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
     const creds = [];
@@ -2696,8 +2832,24 @@ async function uploadCredentialsFile(pid){
     const inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
     let applied = creds;
     if (inst > 0) applied = creds.slice(0, inst);
+    const targetLength = inst > 0 ? inst : Math.max(existing.length, applied.length);
+    const merged = [];
+    for (let i = 0; i < targetLength; i++) {
+      if (i < applied.length) {
+        const item = applied[i] || { username: '', password: '' };
+        merged.push({ username: item.username || '', password: item.password || '' });
+      } else if (i < existing.length) {
+        const item = existing[i] || { username: '', password: '' };
+        merged.push({ username: item.username || '', password: item.password || '' });
+      } else {
+        merged.push({ username: '', password: '' });
+      }
+    }
     const host = document.getElementById(`cred-${pid}-list`);
-    if (host) host.innerHTML = renderCredentials(pid, harmonizeCredentialsToInstances(pid, applied));
+    if (host) {
+      const renderList = targetLength > 0 ? merged : applied;
+      host.innerHTML = renderCredentials(pid, renderList);
+    }
     if (warn){
       if (creds.length === 0) warn.textContent = 'No valid rows found. Expected two columns: username,password';
       else if (inst > 0 && creds.length > inst) warn.textContent = `Imported ${applied.length} of ${creds.length} rows (trimmed to Instances=${inst}).`;

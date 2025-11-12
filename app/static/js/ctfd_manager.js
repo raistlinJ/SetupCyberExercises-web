@@ -2697,11 +2697,37 @@ async function createProjectSidebar(){
 }
 async function importProjectSidebar(){
   const input = document.getElementById('import-file'); if(!input||!input.files||!input.files[0]) return;
-  const fd = new FormData(); fd.append('file', input.files[0]);
-  const resp = await http('POST','/api/projects/import', fd); input.value='';
-  const importedId = (resp && resp.id) || (resp && resp.imported && resp.imported[0] && resp.imported[0].id) || '';
-  if(importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
-  if(window.shell && shell.refreshSidebar) await shell.refreshSidebar('vm');
+  const toggleBusy = (flag) => {
+    try {
+      if (window.shell && typeof shell.setSidebarImportBusy === 'function') {
+        shell.setSidebarImportBusy(flag);
+        return;
+      }
+    } catch {}
+    try {
+      input.disabled = !!flag;
+      const label = input.closest('label');
+      if (label) {
+        label.classList.toggle('disabled', !!flag);
+        if (flag) label.setAttribute('aria-disabled', 'true'); else label.removeAttribute('aria-disabled');
+        label.style.pointerEvents = flag ? 'none' : '';
+        label.style.opacity = flag ? '0.65' : '';
+      }
+    } catch {}
+  };
+  toggleBusy(true);
+  try {
+    const fd = new FormData(); fd.append('file', input.files[0]);
+    const resp = await http('POST','/api/projects/import', fd); input.value='';
+    const importedId = (resp && resp.id) || (resp && resp.imported && resp.imported[0] && resp.imported[0].id) || '';
+    if(importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
+    if(window.shell && shell.refreshSidebar) await shell.refreshSidebar('vm');
+  } catch(e){
+    alert('Failed to import project: ' + (e && e.message ? e.message : 'Unknown error'));
+    try { (window.shell && shell.logError) ? shell.logError('CTFd: import project failed: ' + (e && e.message ? e.message : e)) : console.error('CTFd import project failed:', e); } catch {}
+  } finally {
+    toggleBusy(false);
+  }
   // Do not auto-load after import; user must press Refresh or add valid credentials
 }
 

@@ -1,5 +1,243 @@
 // Shared shell for sidebar project list and cross-page sync
 const CURRENT_PROJECT_KEY = 'toolhub.currentProjectId.v1';
+const SIDEBAR_COLLAPSE_KEY = 'toolhub.sidebarCollapsed.v1';
+
+function readSidebarCollapsedFromStorage() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_COLLAPSE_KEY);
+    if (raw === '1' || raw === 'true') return true;
+    if (raw === '0' || raw === 'false') return false;
+  } catch {}
+  return false;
+}
+
+let _sidebarCollapsed = readSidebarCollapsedFromStorage();
+let _sidebarBoundsCache = null;
+let _toggleWidthCache = null;
+let _toggleHeightCache = null;
+let _toggleAnchorYCache = null;
+
+function isSidebarCollapsed() {
+  return !!_sidebarCollapsed;
+}
+
+function updateSidebarToggleLabel() {
+  const btn = document.querySelector('[data-shell-sidebar-toggle]');
+  if (!btn) return;
+  const collapsed = !!_sidebarCollapsed;
+  const expanded = collapsed ? 'false' : 'true';
+  btn.setAttribute('aria-expanded', expanded);
+  btn.setAttribute('aria-label', collapsed ? 'Show projects sidebar' : 'Hide projects sidebar');
+  btn.setAttribute('title', collapsed ? 'Show projects sidebar' : 'Hide projects sidebar');
+  btn.innerHTML = '';
+  const icon = document.createElement('span');
+  icon.className = 'icon';
+  icon.innerHTML = collapsed ? '&rsaquo;' : '&lsaquo;';
+  btn.appendChild(icon);
+}
+
+function positionSidebarToggle() {
+  const btn = document.querySelector('[data-shell-sidebar-toggle]');
+  const sidebar = document.querySelector('.shell-container .shell-sidebar');
+  if (!btn) return;
+  const wrapper = sidebar ? sidebar.parentElement : document.querySelector('.shell-container .row');
+  if (wrapper && window.getComputedStyle(wrapper).position === 'static') {
+    wrapper.style.position = 'relative';
+  }
+  const wrapperRect = wrapper ? wrapper.getBoundingClientRect() : null;
+  const btnWidth = btn.offsetWidth || _toggleWidthCache || 16;
+  if (btnWidth > 0) _toggleWidthCache = btnWidth;
+  const btnHeight = btn.offsetHeight || _toggleHeightCache || 26;
+  if (btnHeight > 0) _toggleHeightCache = btnHeight;
+  const importSection = sidebar ? (() => {
+    const blocks = sidebar.querySelectorAll('.border-bottom');
+    return blocks.length > 1 ? blocks[1] : null;
+  })() : null;
+  const importRect = importSection ? importSection.getBoundingClientRect() : null;
+
+  let seamOffset = 16;
+  if (wrapperRect) {
+    if (!_sidebarCollapsed && sidebar) {
+      const rect = sidebar.getBoundingClientRect();
+      if (rect && rect.width > 0) {
+        seamOffset = rect.right - wrapperRect.left;
+        _sidebarBoundsCache = { seamLeft: seamOffset };
+      }
+    } else if (_sidebarCollapsed) {
+      const content = document.querySelector('.shell-container .shell-content');
+      if (content) {
+        const rect = content.getBoundingClientRect();
+        seamOffset = rect.left - wrapperRect.left;
+      }
+    } else if (_sidebarBoundsCache && typeof _sidebarBoundsCache.seamLeft === 'number') {
+      seamOffset = _sidebarBoundsCache.seamLeft;
+    }
+  }
+
+  let anchorOffset = null;
+  if (wrapperRect) {
+    if (!_sidebarCollapsed) {
+      const navTabs = document.querySelector('.shell-content .nav');
+      const navRect = navTabs ? navTabs.getBoundingClientRect() : null;
+      const topSection = sidebar ? sidebar.querySelector('.border-bottom') : null;
+      const topRect = topSection ? topSection.getBoundingClientRect() : null;
+      let anchorAbs = null;
+      if (importRect && importRect.height > 0) {
+        anchorAbs = importRect.top + importRect.height / 2;
+      }
+      if (anchorAbs == null && topRect && navRect) {
+        anchorAbs = topRect.bottom + (navRect.top - topRect.bottom) / 2;
+      }
+      if (anchorAbs == null && navRect) {
+        anchorAbs = navRect.top + navRect.height / 2;
+      }
+      if (anchorAbs == null && topRect) {
+        anchorAbs = topRect.bottom;
+      }
+      if (anchorAbs != null) {
+        anchorOffset = anchorAbs - wrapperRect.top;
+      }
+    }
+  }
+  if (anchorOffset != null) {
+    _toggleAnchorYCache = anchorOffset;
+  } else if (_toggleAnchorYCache != null) {
+    anchorOffset = _toggleAnchorYCache;
+  } else if (wrapperRect) {
+    const navTabs = document.querySelector('.shell-content .nav');
+    const navRect = navTabs ? navTabs.getBoundingClientRect() : null;
+    if (navRect) {
+      anchorOffset = navRect.top + navRect.height / 2 - wrapperRect.top;
+    }
+  }
+
+  let leftPx = seamOffset;
+  leftPx = Math.max(leftPx, 0);
+  const topPx = Math.max((anchorOffset != null ? anchorOffset - Math.floor(btnHeight / 2) : 16), 0);
+
+  btn.style.left = `${leftPx}px`;
+  btn.style.top = `${topPx}px`;
+  btn.style.opacity = '1';
+}
+
+function applySidebarCollapseState(collapsed) {
+  const prev = _sidebarCollapsed;
+  _sidebarCollapsed = !!collapsed;
+  try {
+    const container = document.querySelector('.shell-container');
+    if (container) container.classList.toggle('sidebar-collapsed', _sidebarCollapsed);
+  } catch {}
+  try {
+    const body = document.body;
+    if (body) body.classList.toggle('sidebar-collapsed', _sidebarCollapsed);
+  } catch {}
+  const sidebar = document.querySelector('.shell-container .shell-sidebar');
+  const wrapper = sidebar ? sidebar.parentElement : document.querySelector('.shell-container .row');
+  const wrapperRect = wrapper ? wrapper.getBoundingClientRect() : null;
+  if (!_sidebarCollapsed) {
+    if (sidebar && wrapperRect) {
+      const rect = sidebar.getBoundingClientRect();
+      if (rect) {
+        _sidebarBoundsCache = { seamLeft: rect.right - wrapperRect.left };
+      }
+    }
+    if (wrapperRect) {
+      const blocks = sidebar ? sidebar.querySelectorAll('.border-bottom') : null;
+      const importSection = blocks && blocks.length > 1 ? blocks[1] : null;
+      const importRect = importSection ? importSection.getBoundingClientRect() : null;
+      const topSection = blocks && blocks.length ? blocks[0] : null;
+      const topRect = topSection ? topSection.getBoundingClientRect() : null;
+      const navTabs = document.querySelector('.shell-content .nav');
+      const navRect = navTabs ? navTabs.getBoundingClientRect() : null;
+      let anchorAbs = null;
+      if (importRect && importRect.height > 0) {
+        anchorAbs = importRect.top + importRect.height / 2;
+      }
+      if (anchorAbs == null && topRect && navRect) {
+        anchorAbs = topRect.bottom + (navRect.top - topRect.bottom) / 2;
+      }
+      if (anchorAbs == null && navRect) {
+        anchorAbs = navRect.top + navRect.height / 2;
+      }
+      if (anchorAbs == null && topRect) {
+        anchorAbs = topRect.bottom;
+      }
+      if (anchorAbs != null) {
+        _toggleAnchorYCache = anchorAbs - wrapperRect.top;
+      }
+    }
+  } else {
+    if (wrapperRect) {
+      const content = document.querySelector('.shell-container .shell-content');
+      if (content) {
+        const contentRect = content.getBoundingClientRect();
+        if (contentRect) {
+          _sidebarBoundsCache = { seamLeft: contentRect.left - wrapperRect.left };
+        }
+      }
+      // keep existing anchor cache when collapsed to avoid vertical drift
+    }
+  }
+  updateSidebarToggleLabel();
+  positionSidebarToggle();
+}
+
+function setSidebarCollapsed(collapsed) {
+  const flag = !!collapsed;
+  try { localStorage.setItem(SIDEBAR_COLLAPSE_KEY, flag ? '1' : '0'); } catch {}
+  applySidebarCollapseState(flag);
+}
+
+function toggleSidebar() {
+  setSidebarCollapsed(!_sidebarCollapsed);
+}
+
+function setSidebarImportBusy(flag) {
+  const input = document.getElementById('import-file');
+  if (!input) return;
+  const label = input.closest('label');
+  if (flag) {
+    if (!input.dataset.shellImportPrevDisabled) {
+      input.dataset.shellImportPrevDisabled = input.disabled ? '1' : '0';
+    }
+    input.disabled = true;
+  } else {
+    const prev = input.dataset.shellImportPrevDisabled;
+    input.disabled = prev === '1';
+    delete input.dataset.shellImportPrevDisabled;
+  }
+  if (label) {
+    label.classList.toggle('disabled', !!flag);
+    if (flag) label.setAttribute('aria-disabled', 'true'); else label.removeAttribute('aria-disabled');
+    label.style.pointerEvents = flag ? 'none' : '';
+    label.style.opacity = flag ? '0.65' : '';
+  }
+}
+
+function ensureSidebarToggleControl() {
+  const sidebar = document.querySelector('.shell-container .shell-sidebar');
+  if (!sidebar || !sidebar.parentElement) return;
+  const wrapper = sidebar.parentElement;
+  if (wrapper && window.getComputedStyle(wrapper).position === 'static') {
+    wrapper.style.position = 'relative';
+  }
+  let btn = document.querySelector('[data-shell-sidebar-toggle]');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-sm sidebar-toggle-btn';
+    btn.setAttribute('data-shell-sidebar-toggle', 'true');
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      toggleSidebar();
+    });
+  }
+  if (!btn.parentElement) {
+    wrapper.insertBefore(btn, sidebar.nextSibling);
+  }
+  updateSidebarToggleLabel();
+  positionSidebarToggle();
+}
 
 function getCurrentProjectId() {
   try { return localStorage.getItem(CURRENT_PROJECT_KEY) || ''; } catch { return ''; }
@@ -77,12 +315,17 @@ async function renderSidebarProjects(activeTab) {
     });
   });
   updateTopLinks(current);
+  positionSidebarToggle();
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
 
 async function initShell(activeTab) {
+  ensureSidebarToggleControl();
+  applySidebarCollapseState(_sidebarCollapsed);
   await renderSidebarProjects(activeTab);
+  updateSidebarToggleLabel();
+  positionSidebarToggle();
   // If a query ?id= is present, prefer that and set current
   const u = new URL(window.location.href);
   const qid = u.searchParams.get('id');
@@ -92,6 +335,10 @@ async function initShell(activeTab) {
 
 async function refreshSidebar(activeTab) {
   await renderSidebarProjects(activeTab);
+  ensureSidebarToggleControl();
+  applySidebarCollapseState(_sidebarCollapsed);
+  updateSidebarToggleLabel();
+  positionSidebarToggle();
 }
 
 // --- Shared Remote Action Queue (global across pages) ---
@@ -956,7 +1203,31 @@ function logSuccess(msg){ ConsoleDock.append('success', [msg]); }
 function logDebug(msg){ ConsoleDock.append('debug', [msg]); }
 function enableConsoleDebug(on){ try { ConsoleDock.setLevel('debug', on===undefined ? true : !!on); } catch {} }
 
-window.shell = { initShell, refreshSidebar, getCurrentProjectId, setCurrentProjectId, log, logInfo, logWarn, logError, logSuccess, logDebug, enableConsoleDebug, beginActionContext, endActionContext, step, readLastAction };
+window.shell = {
+  initShell,
+  refreshSidebar,
+  getCurrentProjectId,
+  setCurrentProjectId,
+  toggleSidebar,
+  setSidebarImportBusy,
+  setSidebarCollapsed,
+  isSidebarCollapsed,
+  log,
+  logInfo,
+  logWarn,
+  logError,
+  logSuccess,
+  logDebug,
+  enableConsoleDebug,
+  beginActionContext,
+  endActionContext,
+  step,
+  readLastAction
+};
+
+window.addEventListener('resize', () => positionSidebarToggle());
+window.addEventListener('orientationchange', () => positionSidebarToggle());
+window.addEventListener('scroll', () => positionSidebarToggle(), { passive: true });
 
 // Auto-init console dock once DOM is ready
 if (document.readyState === 'loading') {

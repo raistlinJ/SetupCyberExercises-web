@@ -160,6 +160,8 @@
                 <li><button class="dropdown-item" type="button" onclick="vmAction('create')">Create</button></li>
                 <li><button class="dropdown-item" type="button" onclick="vmAction('start')">Start</button></li>
                 <li><button class="dropdown-item" type="button" onclick="vmAction('restore')">Restore</button></li>
+                <li><hr class="dropdown-divider"/></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('nets_assign')">Create Network Interfaces</button></li>
               </ul>
             </div>
             <!-- Stop group -->
@@ -168,6 +170,8 @@
               <ul class="dropdown-menu">
                 <li><button class="dropdown-item" type="button" onclick="vmAction('suspend')">Suspend</button></li>
                 <li><button class="dropdown-item" type="button" onclick="vmAction('poweroff')">Power Off</button></li>
+                <li><hr class="dropdown-divider"/></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('nets_clear')">Delete Network Interfaces</button></li>
                 <li><hr class="dropdown-divider"/></li>
                 <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('delete')">Delete</button></li>
               </ul>

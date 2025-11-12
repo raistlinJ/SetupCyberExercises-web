@@ -697,7 +697,12 @@ function renderMergedVmTable(rows){
       const idHtml = d&&d.vmid!=null? `#${d.vmid}` : '—';
       const nodeHtml = d&&d.node? escHtml(d.node) : '—';
       const templateHtml = (()=>{ const tid = d&&d.template_id!=null? `#${d.template_id}`:''; const tn = d&&d.template_name? escHtml(d.template_name):''; const both = [tn, tid].filter(Boolean).join(' '); return both || '—'; })();
-      let adaptorsCell='—'; const nets = Array.isArray(d?.nets)? d.nets: []; if (nets.length){ const ddId = `dd-nets-${r.pid}-${r.index}-${encodeURIComponent(r.vmName)}`; const items = `<li><span class=\"dropdown-item-text small\">${nets.map(escHtml).join(', ')}</span></li>`; adaptorsCell = `<div class=\"dropdown\"><button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" id=\"${ddId}\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">View</button><ul class=\"dropdown-menu\" aria-labelledby=\"${ddId}\">${items}</ul></div>`; }
+      let adaptorsCell = '<span class="text-muted">—</span>';
+      const nets = Array.isArray(d?.nets) ? d.nets : [];
+      if (nets.length) {
+        const pills = nets.map(n => `<span class="badge bg-light text-dark border">${escHtml(n)}</span>`).join(' ');
+        adaptorsCell = `<div class="d-flex flex-wrap gap-1">${pills}</div>`;
+      }
       const key=`${r.pid}|${r.index}|${r.vmName}`; const checked = SELECTED_ROWS.has(key)?'checked':'';
       html += `<tr>`+
         `<td><input type=\"checkbox\" class=\"row-chk\" data-key=\"${escHtml(key)}\" ${checked} /></td>`+
@@ -768,6 +773,25 @@ async function createProjectSidebar() {
 async function importProjectSidebar() {
   const input = document.getElementById('import-file');
   if (!input || !input.files || !input.files[0]) return;
+  const toggleBusy = (flag) => {
+    try {
+      if (window.shell && typeof shell.setSidebarImportBusy === 'function') {
+        shell.setSidebarImportBusy(flag);
+        return;
+      }
+    } catch {}
+    try {
+      input.disabled = !!flag;
+      const label = input.closest('label');
+      if (label) {
+        label.classList.toggle('disabled', !!flag);
+        if (flag) label.setAttribute('aria-disabled', 'true'); else label.removeAttribute('aria-disabled');
+        label.style.pointerEvents = flag ? 'none' : '';
+        label.style.opacity = flag ? '0.65' : '';
+      }
+    } catch {}
+  };
+  toggleBusy(true);
   const fd = new FormData();
   fd.append('file', input.files[0]);
   try {
@@ -784,6 +808,8 @@ async function importProjectSidebar() {
   } catch (e) {
     alert('Error importing project: ' + (e && e.message ? e.message : 'Unknown error'));
     try { (window.shell && shell.logError) ? shell.logError('VM: import project failed: ' + (e && e.message ? e.message : e)) : console.error('VM: import project failed:', e); } catch {}
+  } finally {
+    toggleBusy(false);
   }
 }
 
@@ -826,6 +852,25 @@ async function importProjectSidebarWithFlags(opts) {
   fd.append('file', input.files[0]);
   if (opts && typeof opts.includeCreds === 'boolean') fd.append('includeCreds', String(opts.includeCreds));
   if (opts && typeof opts.includeVms === 'boolean') fd.append('includeVms', String(opts.includeVms));
+  const toggleBusy = (flag) => {
+    try {
+      if (window.shell && typeof shell.setSidebarImportBusy === 'function') {
+        shell.setSidebarImportBusy(flag);
+        return;
+      }
+    } catch {}
+    try {
+      input.disabled = !!flag;
+      const label = input.closest('label');
+      if (label) {
+        label.classList.toggle('disabled', !!flag);
+        if (flag) label.setAttribute('aria-disabled', 'true'); else label.removeAttribute('aria-disabled');
+        label.style.pointerEvents = flag ? 'none' : '';
+        label.style.opacity = flag ? '0.65' : '';
+      }
+    } catch {}
+  };
+  toggleBusy(true);
   try {
     await runQueued(`Import project: ${input.files[0].name}`, async () => {
       try { (window.shell && shell.logInfo) ? shell.logInfo(`VM: importing project from ${input.files[0].name}`) : console.log('VM: importing project from', input.files[0].name); } catch {}
@@ -840,6 +885,8 @@ async function importProjectSidebarWithFlags(opts) {
   } catch (e) {
     alert('Error importing project: ' + (e && e.message ? e.message : 'Unknown error'));
     try { (window.shell && shell.logError) ? shell.logError('VM: import project failed: ' + (e && e.message ? e.message : e)) : console.error('VM: import project failed:', e); } catch {}
+  } finally {
+    toggleBusy(false);
   }
 }
 
@@ -921,8 +968,10 @@ function emitActionLogs(actionName, resp) {
     const resumed = Array.isArray(resp?.resumed) ? resp.resumed : [];
     const suspended = Array.isArray(resp?.suspended) ? resp.suspended : [];
     const poweredOff = Array.isArray(resp?.powered_off) ? resp.powered_off : [];
-    const snapshotted = Array.isArray(resp?.snapshotted) ? resp.snapshotted : [];
-    const restored = Array.isArray(resp?.restored) ? resp.restored : [];
+  const snapshotted = Array.isArray(resp?.snapshotted) ? resp.snapshotted : [];
+  const restored = Array.isArray(resp?.restored) ? resp.restored : [];
+  const netsUpdated = Array.isArray(resp?.updated) ? resp.updated : [];
+  const netsCleared = Array.isArray(resp?.cleared) ? resp.cleared : [];
     const createdUsers = Array.isArray(resp?.created_users) ? resp.created_users : [];
     const createdPools = Array.isArray(resp?.created_pools) ? resp.created_pools : [];
     const addedMembers = Array.isArray(resp?.added_members) ? resp.added_members : [];
@@ -943,6 +992,8 @@ function emitActionLogs(actionName, resp) {
     if (poweredOff.length) poweredOff.forEach(i => { try { shell.logSuccess(`${name}: powered off ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''}`); } catch {} });
     if (snapshotted.length) snapshotted.forEach(i => { try { shell.logSuccess(`${name}: snapshot ${i?.name || ''} ${i?.snapname?`(${i.snapname})`:''} ${i?.vmid?`#${i.vmid}`:''}`); } catch {} });
     if (restored.length) restored.forEach(i => { try { shell.logSuccess(`${name}: restored ${i?.name || ''} ${i?.snapname?`(${i.snapname})`:''} ${i?.started?'(started)':''}`); } catch {} });
+  if (netsUpdated.length) netsUpdated.forEach(i => { try { shell.logSuccess(`${name}: network assigned ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''} ${i?.node?`on ${i.node}`:''}`); } catch {} });
+  if (netsCleared.length) netsCleared.forEach(i => { try { shell.logSuccess(`${name}: network removed ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''} ${i?.node?`on ${i.node}`:''}`); } catch {} });
     if (createdUsers.length) createdUsers.forEach(i => { try { shell.logSuccess(`${name}: user created ${i?.userid || ''}`); } catch {} });
     if (createdPools.length) createdPools.forEach(i => { try { shell.logSuccess(`${name}: pool created ${i?.pool || ''}${i?.index?` (instance ${i.index})`:''}`); } catch {} });
     if (addedMembers.length) addedMembers.forEach(i => {
@@ -1147,16 +1198,12 @@ function renderVmTable(proj) {
       const both = [tn, tid].filter(Boolean).join(' ');
       return both || '—';
     })();
-    // Adaptors dropdown (single VM)
-    let adaptorsCell = '—';
+    // Adaptors list (single VM)
+    let adaptorsCell = '<span class="text-muted">—</span>';
     const nets = Array.isArray(d?.nets) ? d.nets : [];
     if (nets.length) {
-      const ddId = `dd-nets-${r.index}-${encodeURIComponent(r.vmName)}`;
-      const items = `<li><span class="dropdown-item-text small">${nets.map(escHtml).join(', ')}</span></li>`;
-      adaptorsCell = `<div class="dropdown">`+
-                     `<button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" id="${ddId}" data-bs-toggle="dropdown" aria-expanded="false">View</button>`+
-                     `<ul class="dropdown-menu" aria-labelledby="${ddId}">${items}</ul>`+
-                     `</div>`;
+      const pills = nets.map(n => `<span class="badge bg-light text-dark border">${escHtml(n)}</span>`).join(' ');
+      adaptorsCell = `<div class="d-flex flex-wrap gap-1">${pills}</div>`;
     }
     // Credentials cell extras: Proxmox pool icon colored by status
     let credExtras = '';
@@ -1997,11 +2044,26 @@ function hasAuthForAllSelected(){
   } catch { return false; }
 }
 
+function friendlyActionName(action){
+  const map = {
+    nets_assign: 'Assign Network Interfaces',
+    nets_clear: 'Remove Network Interfaces',
+    run_startup_cmds: 'Run Startup Commands',
+    run_stored_cmds: 'Run Stored Commands',
+    users_create: 'Create Users',
+    users_delete: 'Delete Users',
+  };
+  if (!action) return '';
+  if (map[action]) return map[action];
+  return action.split('_').map(part => part ? part.charAt(0).toUpperCase() + part.slice(1) : '').join(' ').trim();
+}
+
 // Dispatch VM actions (queued wrapper)
 async function vmAction(action) {
   const multi = (vmIsMulti && vmIsMulti());
   const selCount = Array.isArray(SELECTED_ROWS) ? SELECTED_ROWS.size : (SELECTED_ROWS ? SELECTED_ROWS.size : 0);
-  const label = multi ? `Multi ${action}` : `${String(action).replace(/_/g,' ')} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
+  const labelName = friendlyActionName(action) || action;
+  const label = multi ? `Multi ${labelName}` : `${labelName} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
   await runQueued(label, async () => { await vmActionExec(action); }, { projectId: PROJ?.id });
 }
 
@@ -2035,7 +2097,7 @@ async function vmActionExec(action) {
       apText.textContent = detail || text || '';
     }
   };
-  const prettyAction = action.split('_').map(part => part ? part.charAt(0).toUpperCase()+part.slice(1) : '').join(' ').trim() || action;
+  const prettyAction = friendlyActionName(action) || action;
   if (apTitle) apTitle.textContent = `${prettyAction} in progress`;
   setAp(5, 'Preparing…', 'Gathering selection…');
   ACTION_IN_FLIGHT = true;
@@ -2044,6 +2106,35 @@ async function vmActionExec(action) {
   updateRefreshState();
   try { actionModal && actionModal.show(); } catch {}
   try {
+    if (action === 'nets_assign' || action === 'nets_clear') {
+      const friendly = friendlyActionName(action) || action;
+      try { shell.beginActionContext(friendly); } catch {}
+      const setProg = (pct, text, detail) => setAp(pct, text, detail);
+      const sess = readProxCreds(PROJ.id) || {};
+      const path = `/api/projects/${PROJ.id}/instances/actions/${action}`;
+      const startDetail = action === 'nets_assign' ? 'Assigning network interfaces…' : 'Removing network interfaces…';
+      const doneWord = action === 'nets_assign' ? 'Assigned' : 'Removed';
+      setProg(10, 'Preparing…', startDetail);
+      try { shell.step('Submitting network action'); } catch {}
+      const resp = await http('POST', path, {
+        username: sess.username || undefined,
+        password: sess.password || undefined,
+        baseUrl: PROJ.proxmox_url || undefined,
+        apiPort: PROJ.proxmox_api_port || undefined,
+        verifySSL: PROJ.proxmox_verify_ssl !== false,
+        targets,
+      });
+      try { shell.step('Network action response'); } catch {}
+      const successKey = action === 'nets_assign' ? 'updated' : 'cleared';
+      const successArr = Array.isArray(resp[successKey]) ? resp[successKey] : [];
+      const skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
+      setProg(100, 'Done', `${doneWord} ${successArr.length}/${targets.length}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+      try { showActionSummary(friendly, resp || {}); } catch {}
+      try { emitActionLogs(friendly, resp || {}); } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`${friendly}: ${successArr.length} VM(s)`) : console.log(friendly, 'done'); } catch {}
+      try { shell.endActionContext(true); } catch {}
+      return;
+    }
     if (action === 'create') {
       // Convert generated names back to base config names
   const tag = String(PROJ?.tag || '').trim();
@@ -2416,13 +2507,13 @@ async function vmActionExec(action) {
 // Multi-project action orchestrator (queued wrapper)
 async function vmActionMulti(action){
   const selCount = Array.isArray(SELECTED_ROWS) ? SELECTED_ROWS.size : (SELECTED_ROWS ? SELECTED_ROWS.size : 0);
-  const label = `Multi ${action} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
+  const label = `Multi ${friendlyActionName(action) || action} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
   await runQueued(label, async () => { await vmActionMultiExec(action); });
 }
 
 // Original implementation moved to vmActionMultiExec
 async function vmActionMultiExec(action){
-  try { shell.beginActionContext(`Multi ${action}`); } catch {}
+  try { shell.beginActionContext(`Multi ${friendlyActionName(action) || action}`); } catch {}
   const selected = Array.from(SELECTED_ROWS||[]);
   if (!selected.length) { alert('Select at least one VM row.'); return; }
   // Group selections by project id
@@ -2457,7 +2548,7 @@ async function vmActionMultiExec(action){
   let doneProjects = 0;
   const topProg = document.getElementById('vm-progress');
   try { if (topProg) { topProg.classList.remove('d-none'); topProg.removeAttribute('aria-hidden'); const bar = document.getElementById('vm-progress-bar'); if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow','100'); } } } catch {}
-  try { (window.shell && shell.logInfo) ? shell.logInfo(`Multi action ${action} across ${totalProjects} project(s)`) : console.log('Multi action', action); } catch {}
+  try { (window.shell && shell.logInfo) ? shell.logInfo(`Multi action ${friendlyActionName(action) || action} across ${totalProjects} project(s)`) : console.log('Multi action', action); } catch {}
   // Fetch latest projects list to ensure data
   try { const d = await http('GET','/api/projects'); ALL_PROJECTS = d.projects || ALL_PROJECTS; } catch {}
   const byId = {}; (ALL_PROJECTS||[]).forEach(p=> { const key = canonicalPid(p.id); if (key) byId[key] = p; });
@@ -2539,6 +2630,14 @@ async function vmActionMultiExec(action){
         }
         continue;
       }
+      if (action === 'nets_assign' || action === 'nets_clear') {
+        setAp(Math.max(20,pct), 'Working…', `${friendlyActionName(action) || action} in ${projName}…`);
+        const resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
+        const successKey = action === 'nets_assign' ? 'updated' : 'cleared';
+        addArr(successKey, resp[successKey], projName);
+        ['skipped','errors','notices'].forEach(k=> addArr(k, resp[k], projName));
+        continue;
+      }
       if (action === 'users_create' || action === 'users_delete') {
         setAp(Math.max(20,pct), 'Working…', `${action==='users_create'?'Creating':'Deleting'} users in ${projName}…`);
         const resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
@@ -2590,8 +2689,9 @@ async function vmActionMultiExec(action){
     }
   }
   // Show summary
-  try { showActionSummary(action.charAt(0).toUpperCase()+action.slice(1), agg); } catch {}
-  try { emitActionLogs(action.charAt(0).toUpperCase()+action.slice(1), agg); } catch {}
+  const summaryName = friendlyActionName(action) || action;
+  try { showActionSummary(summaryName, agg); } catch {}
+  try { emitActionLogs(summaryName, agg); } catch {}
   try { shell.endActionContext(true); } catch {}
   // Cleanup
   ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
@@ -2787,12 +2887,16 @@ function showActionSummary(actionName, resp) {
   const poweredOff = Array.isArray(resp.powered_off) ? resp.powered_off : [];
   const snapshotted = Array.isArray(resp.snapshotted) ? resp.snapshotted : [];
   const restored = Array.isArray(resp.restored) ? resp.restored : [];
+  const netsUpdated = Array.isArray(resp.updated) ? resp.updated : [];
+  const netsCleared = Array.isArray(resp.cleared) ? resp.cleared : [];
   if (started.length) sections.push(`<h6>Started</h6>${list(started, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   if (resumed.length) sections.push(`<h6>Resumed</h6>${list(resumed, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   if (suspended.length) sections.push(`<h6>Suspended</h6>${list(suspended, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   if (poweredOff.length) sections.push(`<h6>Powered Off</h6>${list(poweredOff, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   if (snapshotted.length) sections.push(`<h6>Snapshots</h6>${list(snapshotted, i => `<li>${esc(i.name)} — ${esc(i.snapname||'snapshot')} ${i.vmid?`(#${esc(i.vmid)})`:''}</li>`)}`);
   if (restored.length) sections.push(`<h6>Restored</h6>${list(restored, i => `<li>${esc(i.name)} — ${esc(i.snapname||'snapshot')} ${i.started? '(started)': ''}</li>`)}`);
+  if (netsUpdated.length) sections.push(`<h6>Network Assigned</h6>${list(netsUpdated, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  if (netsCleared.length) sections.push(`<h6>Network Removed</h6>${list(netsCleared, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   // Users / Pools sections
   if (createdUsers.length) sections.push(`<h6>Users Created</h6>${list(createdUsers, i => `<li>${esc(i.userid||'')}</li>`)}`);
   if (createdPools.length) sections.push(`<h6>Pools Created</h6>${list(createdPools, i => `<li>${esc(i.pool||'')} ${i.index?`(instance ${esc(i.index)})`:''}</li>`)}`);
@@ -2833,6 +2937,8 @@ function showActionSummary(actionName, resp) {
       addedMembers.length ? `${addedMembers.length} member(s)` : null,
       deletedUsers.length ? `${deletedUsers.length} user(s) deleted` : null,
       deletedPools.length ? `${deletedPools.length} pool(s) deleted` : null,
+      netsUpdated.length ? `${netsUpdated.length} network assigned` : null,
+      netsCleared.length ? `${netsCleared.length} network removed` : null,
       appliedNodes.length ? `network applied on ${appliedNodes.length} node(s)` : null,
       applyErrors.length ? `${applyErrors.length} network apply errors` : null
     ].filter(Boolean).join(' · ');
