@@ -28,6 +28,7 @@ const CTFD_AUDIO_ROTATION = {};
 const CTFD_SPEECH_DEFAULT_DELAY = 0.35;
 const CTFD_AUDIO_SEGMENT_BUFFER = 0.12;
 const CTFD_SPEECH_SEGMENT_BUFFER = 0.12;
+const CTFD_SPEECH_TEAM_NAME_MAX = 12;
 const CTFD_AUDIO_FALLBACKS = {
   ctfdFirstUser: [
     { freq: 784, dur: 0.18, gap: 0.08, type: 'square', gain: 0.22 },
@@ -364,6 +365,11 @@ function ctfdSpeechSupported(){
       && typeof window.speechSynthesis.speak === 'function'
       && typeof window.SpeechSynthesisUtterance === 'function';
   } catch { return false; }
+}
+function ctfdSpeechTrimTeamName(name){
+  const raw = typeof name === 'string' ? name.trim() : String(name || '').trim();
+  if (!raw) return '';
+  return raw.length > CTFD_SPEECH_TEAM_NAME_MAX ? raw.slice(0, CTFD_SPEECH_TEAM_NAME_MAX) : raw;
 }
 function ctfdDataUrlToBuffer(dataUrl){
   try {
@@ -776,12 +782,13 @@ async function ctfdPlayCountdownStopForChallenges(){
 function ctfdSpeechContextProject(projectId){
   const project = ctfdProjectLabel(projectId);
   const leaderboard = ctfdLeaderboardSnapshot();
+  const trimmed = leaderboard.map(name => ctfdSpeechTrimTeamName(name));
   return {
     project,
     project_clause: project ? ` in ${project}` : '',
-    first_team: leaderboard[0] || '',
-    second_team: leaderboard[1] || '',
-    third_team: leaderboard[2] || ''
+    first_team: trimmed[0] || '',
+    second_team: trimmed[1] || '',
+    third_team: trimmed[2] || ''
   };
 }
 function ctfdSpeechContextPeriodic(projectId){
@@ -813,15 +820,15 @@ function ctfdSpeechContextCategoryFirst(projectId, kind, info){
   const challenge = challengeRaw;
   base.challenge = challenge;
   base.challenge_clause = challenge ? ` on ${challenge}` : '';
+  const teamNameRaw = info && info.team ? String(info.team).trim() : '';
+  const teamName = ctfdSpeechTrimTeamName(teamNameRaw);
   if (kind === 'user') {
     const leader = info && info.user ? String(info.user).trim() : '';
     base.leader = leader;
     base.user_first = leader;
-    const teamName = info && info.team ? String(info.team).trim() : '';
     base.team_first = teamName;
-    base.team_clause = teamName ? ` from team ${teamName}` : '';
+    base.team_clause = teamNameRaw ? ` from team ${teamName}` : '';
   } else {
-    const teamName = info && info.team ? String(info.team).trim() : '';
     base.leader = teamName;
     base.team_first = teamName;
     base.team_clause = '';
@@ -910,24 +917,24 @@ function ctfdSpeechContextFirstPlace(projectId, kind, name){
   const base = ctfdSpeechContextProject(projectId);
   const ctx = { ...base };
   const meta = CTFD_USER_META && typeof CTFD_USER_META === 'object' ? CTFD_USER_META : {};
+  const nameRaw = typeof name === 'string' ? name.trim() : '';
   if (kind === 'team') {
-    ctx.team_first = name || '';
+    const teamName = ctfdSpeechTrimTeamName(nameRaw);
+    ctx.team_first = teamName;
     ctx.user_first = '';
     ctx.team_clause = '';
-    ctx.leader = name || '';
+    ctx.leader = teamName;
   } else {
-    ctx.user_first = name || '';
-    ctx.leader = name || '';
-    const info = name && meta ? meta[name] : null;
-    const teamName = info && info.team_name ? String(info.team_name).trim() : '';
+    ctx.user_first = nameRaw;
+    ctx.leader = nameRaw;
+    const info = nameRaw && meta ? meta[nameRaw] : null;
+    const teamRaw = info && info.team_name ? String(info.team_name).trim() : '';
+    const teamName = ctfdSpeechTrimTeamName(teamRaw);
     ctx.team_first = teamName;
-    ctx.team_clause = teamName && teamName !== name ? ` from team ${teamName}` : '';
-  }
-  if (kind === 'team') {
-    ctx.team_first = name || '';
-    ctx.team_clause = '';
+    ctx.team_clause = teamRaw && teamRaw !== nameRaw ? ` from team ${teamName}` : '';
   }
   if (!ctx.first_team) ctx.first_team = ctx.team_first || ctx.leader || '';
+  ctx.first_team = ctfdSpeechTrimTeamName(ctx.first_team);
   return ctx;
 }
 function ctfdStartCountdown(seconds, opts){
@@ -1441,15 +1448,16 @@ function ctfdSpeechContextFirstScore(projectId, summary){
   const base = ctfdSpeechContextProject(projectId);
   const ctx = { ...base };
   const data = summary || {};
-  const leader = data.firstUser || data.firstTeam || '';
-  const teamName = data.firstTeam || '';
+  const teamNameRaw = data.firstTeam ? String(data.firstTeam).trim() : '';
+  const teamName = ctfdSpeechTrimTeamName(teamNameRaw);
   const userName = data.firstUser || '';
+  const leader = userName || teamName;
   ctx.leader = leader;
   ctx.user_first = userName;
   ctx.team_first = teamName;
-  if (userName && teamName && userName !== teamName) {
+  if (userName && teamNameRaw && userName !== teamNameRaw) {
     ctx.team_clause = ` from team ${teamName}`;
-  } else if (!userName && teamName) {
+  } else if (!userName && teamNameRaw) {
     ctx.team_clause = ` for team ${teamName}`;
   } else {
     ctx.team_clause = '';
@@ -1473,6 +1481,7 @@ function ctfdSpeechContextFirstScore(projectId, summary){
   ctx.project = base.project;
   ctx.project_clause = base.project_clause;
   if (!ctx.first_team) ctx.first_team = teamName || leader || '';
+  ctx.first_team = ctfdSpeechTrimTeamName(ctx.first_team);
   return ctx;
 }
 function ctfdSeedFirstScoreState(projectId, meta){
@@ -1502,9 +1511,11 @@ function ctfdAnnounceFirstScore(projectId, summary){
   const pointsSegment = Number.isFinite(pts) && pts > 0 ? ` (+${pts} pts)` : '';
   try { shell.logSuccess(`[CTFd] First score${scope}: ${leader}${teamSegment}${challengeSegment}${pointsSegment}`); } catch {}
   const speechScope = projectLabel ? ` in ${projectLabel}` : '';
+  const speechTeamName = ctfdSpeechTrimTeamName(summary.firstTeam || '');
+  const leaderSpeech = summary.firstUser || speechTeamName || 'Unknown competitor';
   let teamSpeech = '';
   if (summary.firstUser && summary.firstTeam && summary.firstTeam !== summary.firstUser) {
-    teamSpeech = ` from team ${summary.firstTeam}`;
+    teamSpeech = speechTeamName ? ` from team ${speechTeamName}` : '';
   }
   const challengeSpeech = summary.firstChallenge ? ` on ${summary.firstChallenge}` : '';
   let pointsSpeech = '';
@@ -1513,7 +1524,7 @@ function ctfdAnnounceFirstScore(projectId, summary){
     pointsSpeech = ` worth ${pts} ${unit}`;
   }
   const speechCtx = ctfdSpeechContextFirstScore(projectId, summary);
-  const fallbackSpeech = `First score${speechScope} goes to ${leader}${teamSpeech}${challengeSpeech}${pointsSpeech}.`;
+  const fallbackSpeech = `First score${speechScope} goes to ${leaderSpeech}${teamSpeech}${challengeSpeech}${pointsSpeech}.`;
   void ctfdSpeakForEvent('ctfdFirstScore', { context: speechCtx, fallbackText: fallbackSpeech }, 0, {
     onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdFirstScore', CTFD_AUDIO_FALLBACKS.ctfdFirstScore || [], startDelay)
   });

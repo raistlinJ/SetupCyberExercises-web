@@ -1,5 +1,6 @@
 import json
 import os
+import base64
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
 
@@ -27,6 +28,7 @@ class Project:
     vms: List[VMConfig] = field(default_factory=list)
     materials: List[str] = field(default_factory=list)  # filenames under materials dir
     exports: List[Dict[str, Any]] = field(default_factory=list)  # export records: {id,timestamp,include_creds,include_vms,remote_path,host}
+    audio: Dict[str, Any] = field(default_factory=dict)  # notification audio configuration (data URLs + metadata)
     # Per-project associations (other project IDs logically linked to this one)
     associated_projects: List[str] = field(default_factory=list)
     # configuration with defaults
@@ -72,6 +74,147 @@ class ProjectStore:
         os.makedirs(self.data_dir, exist_ok=True)
         if not os.path.exists(self.db_path):
             self._write_all({})
+
+    _MAX_AUDIO_BYTES = 600 * 1024  # 600 KB, matches front-end limit per clip
+
+    @classmethod
+    def _decode_data_url(cls, data_url: str):
+        try:
+            if not isinstance(data_url, str):
+                return None, b""
+            if not data_url.startswith('data:'):
+                return None, b""
+            header, payload = data_url.split(',', 1)
+            if ';base64' not in header:
+                return None, b""
+            mime = header[5:].split(';')[0] or 'application/octet-stream'
+            raw = base64.b64decode(payload, validate=True)
+            return mime, raw
+        except Exception:
+            return None, b""
+
+    @classmethod
+    def _sanitize_audio_map(cls, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        clean: Dict[str, Any] = {}
+        for raw_key, raw_entry in value.items():
+            try:
+                key = str(raw_key or '').strip()
+            except Exception:
+                key = ''
+            if not key:
+                continue
+            if not isinstance(raw_entry, dict):
+                continue
+            entry: Dict[str, Any] = {}
+            # Preserve simple scalar fields (bool/int/float/short str)
+            for scalar_key, scalar_val in raw_entry.items():
+                if scalar_key in {'sounds', 'speakTemplates', 'speakTemplate', 'dataUrl', 'name', 'size', 'type', 'updated'}:
+                    continue
+                if isinstance(scalar_val, bool):
+                    entry[scalar_key] = bool(scalar_val)
+                elif isinstance(scalar_val, (int, float)) and not isinstance(scalar_val, bool):
+                    entry[scalar_key] = scalar_val
+                elif isinstance(scalar_val, str):
+                    trimmed = scalar_val.strip()
+                    if trimmed:
+                        entry[scalar_key] = trimmed
+            # Normalize speak templates
+            templates: List[str] = []
+            raw_templates = raw_entry.get('speakTemplates')
+            if isinstance(raw_templates, list):
+                for tpl in raw_templates:
+                    try:
+                        text = str(tpl or '').strip()
+                    except Exception:
+                        text = ''
+                    if text:
+                        templates.append(text)
+            raw_single_tpl = raw_entry.get('speakTemplate')
+            if raw_single_tpl is not None:
+                try:
+                    text = str(raw_single_tpl).strip()
+                except Exception:
+                    text = ''
+                if text:
+                    templates.append(text)
+            if templates:
+                entry['speakTemplates'] = templates
+
+            sounds: List[Dict[str, Any]] = []
+
+            def _ingest_sound(sound_obj: Dict[str, Any]):
+                if not isinstance(sound_obj, dict):
+                    return
+                data_url = sound_obj.get('dataUrl')
+                try:
+                    data_url = str(data_url or '').strip()
+                except Exception:
+                    data_url = ''
+                if not data_url.startswith('data:'):
+                    return
+                mime, raw_bytes = cls._decode_data_url(data_url)
+                if raw_bytes and len(raw_bytes) > cls._MAX_AUDIO_BYTES:
+                    return
+                if not raw_bytes:
+                    return
+                enc = base64.b64encode(raw_bytes).decode('ascii') if raw_bytes else ''
+                if not enc:
+                    return
+                mime_type = mime or 'application/octet-stream'
+                normalized_url = f"data:{mime_type};base64,{enc}"
+                sound_rec: Dict[str, Any] = {'dataUrl': normalized_url}
+                size_hint = sound_obj.get('size')
+                if isinstance(size_hint, (int, float)) and size_hint >= 0:
+                    sound_rec['size'] = int(size_hint)
+                else:
+                    sound_rec['size'] = len(raw_bytes)
+                name = sound_obj.get('name')
+                if name is not None:
+                    try:
+                        label = str(name).strip()
+                    except Exception:
+                        label = ''
+                    if label:
+                        sound_rec['name'] = label[:160]
+                type_hint = sound_obj.get('type')
+                if type_hint is not None:
+                    try:
+                        tlabel = str(type_hint).strip()
+                    except Exception:
+                        tlabel = ''
+                    if tlabel:
+                        sound_rec['type'] = tlabel[:160]
+                updated_val = sound_obj.get('updated')
+                try:
+                    if isinstance(updated_val, (int, float)):
+                        sound_rec['updated'] = int(updated_val)
+                except Exception:
+                    pass
+                sounds.append(sound_rec)
+
+            raw_sounds = raw_entry.get('sounds')
+            if isinstance(raw_sounds, list):
+                for sound in raw_sounds:
+                    _ingest_sound(sound)
+
+            # Legacy single sound fields
+            legacy_sound = {
+                'dataUrl': raw_entry.get('dataUrl'),
+                'name': raw_entry.get('name'),
+                'size': raw_entry.get('size'),
+                'type': raw_entry.get('type'),
+                'updated': raw_entry.get('updated'),
+            }
+            if legacy_sound.get('dataUrl'):
+                _ingest_sound(legacy_sound)
+
+            if sounds:
+                entry['sounds'] = sounds
+
+            clean[key] = entry
+        return clean
 
     def _read_all(self) -> Dict[str, Dict]:
         with open(self.db_path, "r", encoding="utf-8") as f:
@@ -175,6 +318,11 @@ class ProjectStore:
                     base["associated_projects"] = dedup
                 except Exception:
                     base["associated_projects"] = []
+            elif k == "audio":
+                try:
+                    base["audio"] = self._sanitize_audio_map(v)
+                except Exception:
+                    base["audio"] = {}
             elif k in base:
                 base[k] = v
         return Project(**base)
@@ -250,6 +398,15 @@ class ProjectStore:
         allp[project.id] = asdict(project)
         self._write_all(allp)
         return project
+
+    def update_audio(self, pid: str, audio: Dict[str, Any]) -> Project:
+        proj = self.get(pid)
+        if not proj:
+            raise KeyError("Project not found")
+        sanitized = self._sanitize_audio_map(audio)
+        proj.audio = sanitized
+        self.upsert(proj)
+        return proj
 
     def delete(self, pid: str) -> bool:
         allp = self._read_all()

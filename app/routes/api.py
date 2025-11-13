@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
 import re
 import hashlib
+import mimetypes
 from urllib.parse import urlparse, urlunparse
 from werkzeug.utils import secure_filename
 from urllib.parse import urlsplit
@@ -227,6 +228,80 @@ def _parse_iso_datetime(s: str):
         return _dt.datetime.fromisoformat(s)
     except Exception:
         return None
+
+
+def _iter_project_audio_clips(proj: Project):
+    """Yield (key, index, name, bytes, mime) for each valid audio clip on the project."""
+    try:
+        audio_map = getattr(proj, 'audio', {}) or {}
+    except Exception:
+        audio_map = {}
+    if not isinstance(audio_map, dict):
+        return
+    for raw_key, entry in audio_map.items():
+        if not isinstance(entry, dict):
+            continue
+        sounds = entry.get('sounds')
+        if not isinstance(sounds, list):
+            continue
+        for idx, sound in enumerate(sounds):
+            if not isinstance(sound, dict):
+                continue
+            data_url = sound.get('dataUrl')
+            if not isinstance(data_url, str):
+                continue
+            mime, raw_bytes = ProjectStore._decode_data_url(data_url)
+            if not raw_bytes:
+                continue
+            try:
+                name = str(sound.get('name') or '').strip()
+            except Exception:
+                name = ''
+            yield (raw_key, idx, name, raw_bytes, mime)
+
+
+def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project) -> int:
+    """Write audio clips (if any) to the provided zip file. Returns clips written."""
+    written = set()
+    total = 0
+    try:
+        raw_pid = getattr(proj, 'id', '') or 'project'
+    except Exception:
+        raw_pid = 'project'
+    safe_pid = secure_filename(str(raw_pid)) or 'project'
+    for raw_key, idx, display_name, raw_bytes, mime in _iter_project_audio_clips(proj):
+        try:
+            safe_key = secure_filename(str(raw_key or 'event')) or 'event'
+        except Exception:
+            safe_key = 'event'
+        try:
+            safe_name = secure_filename(str(display_name or ''))
+        except Exception:
+            safe_name = ''
+        base_root, ext = os.path.splitext(safe_name) if safe_name else ('', '')
+        if not base_root:
+            base_root = f"clip_{idx + 1}"
+        if not ext:
+            guessed = mimetypes.guess_extension(mime or '') or ''
+            if guessed == '.jpe':  # normalize common alias
+                guessed = '.jpg'
+            ext = guessed
+        if ext and not ext.startswith('.'):
+            ext = f".{ext}"
+        if not ext:
+            ext = '.bin'
+        base_root = secure_filename(base_root) or f"clip_{idx + 1}"
+        arc_dir = f"materials/audio/{safe_pid}/{safe_key}"
+        filename = f"{base_root}{ext}"
+        arcname = f"{arc_dir}/{filename}"
+        suffix = 2
+        while arcname in written:
+            arcname = f"{arc_dir}/{base_root}_{suffix}{ext}"
+            suffix += 1
+        zf.writestr(arcname, raw_bytes)
+        written.add(arcname)
+        total += 1
+    return total
 @api_bp.route("/proxmox/verify", methods=["POST"])
 @_secure_route()
 def proxmox_verify_global():
@@ -5147,6 +5222,93 @@ def update_project(pid: str):
     return jsonify(d)
 
 
+def _validate_audio_payload(payload):
+    errors = []
+    if payload is None:
+        return errors
+    if not isinstance(payload, dict):
+        return ["audio payload must be an object"]
+    for raw_key, entry in payload.items():
+        try:
+            key_label = str(raw_key or '').strip()
+        except Exception:
+            key_label = ''
+        key_label = key_label or '(unnamed event)'
+        if not isinstance(entry, dict):
+            errors.append(f"{key_label}: entry must be an object")
+            continue
+        sounds = entry.get('sounds')
+        if sounds is None:
+            sounds = []
+        if not isinstance(sounds, list):
+            errors.append(f"{key_label}: sounds must be a list")
+            continue
+        if not sounds and entry.get('dataUrl'):
+            sounds = [
+                {
+                    'dataUrl': entry.get('dataUrl'),
+                    'name': entry.get('name'),
+                    'size': entry.get('size'),
+                    'type': entry.get('type'),
+                    'updated': entry.get('updated'),
+                }
+            ]
+        for idx, sound in enumerate(sounds):
+            if not isinstance(sound, dict):
+                errors.append(f"{key_label} clip {idx + 1}: sound must be an object")
+                continue
+            data_url = sound.get('dataUrl')
+            if not isinstance(data_url, str) or not data_url.startswith('data:'):
+                errors.append(f"{key_label} clip {idx + 1}: dataUrl must be a base64 data URI")
+                continue
+            mime, raw_bytes = ProjectStore._decode_data_url(data_url)
+            if raw_bytes is None or raw_bytes == b"":
+                errors.append(f"{key_label} clip {idx + 1}: invalid audio data")
+                continue
+            if len(raw_bytes) > ProjectStore._MAX_AUDIO_BYTES:
+                errors.append(f"{key_label} clip {idx + 1}: exceeds {ProjectStore._MAX_AUDIO_BYTES // 1024} KB limit")
+                continue
+            # Optional: ensure MIME looks like audio but allow arbitrary if provided
+    return errors
+
+
+@api_bp.route("/projects/<pid>/audio", methods=["GET"])
+def get_project_audio(pid: str):
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    audio = getattr(proj, 'audio', {}) or {}
+    if not isinstance(audio, dict):
+        audio = {}
+    return jsonify({"audio": audio})
+
+
+@api_bp.route("/projects/<pid>/audio", methods=["PUT", "PATCH"])
+@_secure_route()
+def update_project_audio(pid: str):
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    try:
+        body = request.get_json(force=True) or {}
+    except Exception:
+        body = {}
+    payload = body.get('audio') if isinstance(body, dict) else {}
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "audio must be an object"}), 400
+    validation_errors = _validate_audio_payload(payload)
+    if validation_errors:
+        return jsonify({"errors": validation_errors}), 400
+    sanitized = ProjectStore._sanitize_audio_map(payload)
+    proj = s.update_audio(pid, sanitized)
+    audio = getattr(proj, 'audio', {}) or {}
+    return jsonify({"audio": audio})
+
+
 @api_bp.route("/projects/<pid>/duplicate", methods=["POST"])
 @_secure_route()
 def duplicate_project(pid: str):
@@ -5213,6 +5375,7 @@ def export_project(pid: str):
             "project": _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms),
         }
         zf.writestr("project.json", json.dumps(manifest, indent=2))
+        _write_project_audio_to_zip(zf, proj)
         for fname in proj.materials:
             fpath = os.path.join(mats_dir, fname)
             if os.path.isfile(fpath):
@@ -5429,6 +5592,11 @@ def import_project():
                     project.associated_projects = []
                 except Exception:
                     pass
+                try:
+                    if 'audio' in pdata2:
+                        project.audio = ProjectStore._sanitize_audio_map(pdata2.get('audio'))
+                except Exception:
+                    project.audio = getattr(project, 'audio', {}) or {}
 
                 # Import materials at materials/* or materials/<orig_id>/*
                 imported = []
@@ -5684,6 +5852,11 @@ def import_project_start():
                                 proj.vms = kept
                             except Exception:
                                 proj.vms = []
+                            try:
+                                if 'audio' in pdata2:
+                                    proj.audio = ProjectStore._sanitize_audio_map(pdata2.get('audio'))
+                            except Exception:
+                                proj.audio = getattr(proj, 'audio', {}) or {}
                             # If user provided Proxmox connection in the dialog, store it on the project
                             try:
                                 if prox.get('baseUrl'):
@@ -5806,6 +5979,11 @@ def import_project_start():
                             project.vms = kept
                         except Exception:
                             project.vms = []
+                        try:
+                            if 'audio' in pdata2:
+                                project.audio = ProjectStore._sanitize_audio_map(pdata2.get('audio'))
+                        except Exception:
+                            project.audio = getattr(project, 'audio', {}) or {}
                         # If user provided Proxmox connection in the dialog, store it on the project
                         try:
                             if prox.get('baseUrl'):
@@ -6170,6 +6348,7 @@ def export_projects():
         }
         zf.writestr("project.json", json.dumps(manifest, indent=2))
         if include_materials:
+            _write_project_audio_to_zip(zf, proj)
             for fname in proj.materials:
                 fpath = os.path.join(mats_dir, fname)
                 if os.path.isfile(fpath):
@@ -6823,6 +7002,9 @@ def export_project_start(pid: str):
                     manifest_bytes = json.dumps(manifest, indent=2).encode('utf-8')
                     zf.writestr("project.json", manifest_bytes)
                     _emit(f"[PKG] wrote project.json ({len(manifest_bytes)} bytes)")
+                    audio_written = _write_project_audio_to_zip(zf, proj)
+                    if audio_written:
+                        _emit(f"[PKG] added {audio_written} audio clip(s)")
 
                     # Add backup files with progress updates mapped to 90..99%
                     packed = 0
