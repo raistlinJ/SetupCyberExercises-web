@@ -2,6 +2,7 @@ const UI_STATE_KEY = 'toolhub.uiState.v1';
 const UI_SETTINGS_KEY = 'toolhub.settings.v1';
 // Project cache for UI-only previews
 window.PROJ_CACHE = window.PROJ_CACHE || {};
+window.MATERIAL_PENDING = window.MATERIAL_PENDING || {};
 
 // Basic HTTP helper (restored after refactor removed it inadvertently)
 async function http(method, url, body) {
@@ -1242,7 +1243,10 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-function escHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+function escHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+}
 
 // Simple validators
 function isValidVmName(name) {
@@ -1497,12 +1501,26 @@ function renderProjectCard(p) {
       </div>
     </div>
   `).join('');
-  const mats = (p.materials || []).map(m => `
-    <li class="list-group-item d-flex justify-content-between align-items-center">
-      <a href="/api/projects/${p.id}/materials/${encodeURIComponent(m)}">${m}</a>
-      <button class="btn btn-sm btn-outline-danger" onclick="deleteMaterial('${p.id}','${m}')">Delete</button>
-    </li>
-  `).join('');
+  const pendingStore = getMaterialPendingStore(p.id);
+  const pendingOptions = pendingStore.length
+    ? pendingStore.map(entry => {
+  const optValue = escHtml(entry.key);
+  const optTitle = escHtml(entry.relativePath || entry.file?.name || entry.display || '');
+  const optLabel = escHtml(entry.display || '');
+        return `<option value="${optValue}" title="${optTitle}">${optLabel}</option>`;
+      }).join('')
+    : '<option value="" disabled>No pending files</option>';
+  const pendingFiles = getPendingMaterialFiles(p.id);
+  const pendingCount = pendingFiles.length;
+  const pendingFolderCount = pendingFiles.folderCount || 0;
+  const pendingSummary = pendingCount ? `${pendingCount} item${pendingCount === 1 ? '' : 's'} selected${pendingFolderCount ? ` (${pendingFolderCount} from folders)` : ''}` : '';
+  const pendingFolderSummary = pendingFolderCount ? `${pendingFolderCount} file${pendingFolderCount === 1 ? '' : 's'} in folder` : '';
+  const existingOptions = (p.materials || []).map(m => {
+  const label = escHtml(m);
+  return `<option value="${label}" title="${label}">${label}</option>`;
+  }).join('');
+  const hasPending = pendingCount > 0;
+  const hasMaterials = Array.isArray(p.materials) && p.materials.length > 0;
   const cfgId = `cfg-${p.id}`;
   const matId = `mat-${p.id}`;
   const advId = `adv-${p.id}`;
@@ -1621,12 +1639,40 @@ function renderProjectCard(p) {
       <span>Materials</span>
     </div>
     <div class="collapse ${matShow ? 'show' : ''}" id="${matId}">
-          <div class="d-flex align-items-center gap-2">
-            <input id="file-${p.id}" type="file" class="form-control form-control-sm" title="Upload a file to Materials" />
-            <button class="btn btn-sm btn-secondary" onclick="uploadMaterial('${p.id}')">Upload</button>
-          </div>
-          <div class="materials-scroll mt-2">
-            <ul class="list-group list-group-flush">${mats || '<li class="list-group-item text-muted">No materials</li>'}</ul>
+          <div class="d-flex flex-column gap-2">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <input id="file-${p.id}" type="file" class="material-input-hidden" title="Select one or more files" multiple onchange="onMaterialSelectionChange('${p.id}')" />
+              <button type="button" class="btn btn-outline-secondary btn-sm" onclick="openMaterialPicker('${p.id}','file')">Choose Files</button>
+              <input id="folder-${p.id}" type="file" class="material-input-hidden" title="Choose a folder to import all files within" aria-label="Choose folder" webkitdirectory directory multiple onchange="onMaterialSelectionChange('${p.id}')" />
+              <button type="button" class="btn btn-outline-secondary btn-sm" onclick="openMaterialPicker('${p.id}','folder')">Choose Folder</button>
+            </div>
+            <div class="row g-3 mt-1">
+              <div class="col-12 col-lg-6">
+                <label class="form-label small text-uppercase text-muted mb-1">Pending Uploads</label>
+                <div class="d-flex gap-2 align-items-start flex-wrap">
+                  <select id="mat-pending-${p.id}" class="form-select form-select-sm material-select" size="6" multiple onchange="onPendingMaterialsSelectionChange('${p.id}')">${pendingOptions}</select>
+                  <div class="btn-group-vertical btn-group-sm flex-shrink-0" role="group" aria-label="Pending uploads actions">
+                    <button id="btn-remove-pending-${p.id}" type="button" class="btn btn-outline-secondary" onclick="removeSelectedPendingMaterials('${p.id}')" disabled>Remove Selected</button>
+                    <button id="btn-clear-mat-${p.id}" type="button" class="btn btn-outline-secondary" onclick="clearMaterialSelection('${p.id}')" ${hasPending ? '' : 'disabled'}>Clear All</button>
+                  </div>
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-2 mt-1 flex-wrap">
+                  <small id="mat-selection-summary-${p.id}" class="text-muted">${pendingSummary}</small>
+                  <small id="mat-folder-summary-${p.id}" class="text-muted">${pendingFolderSummary}</small>
+                  <button id="btn-upload-mat-${p.id}" class="btn btn-sm btn-secondary ms-sm-auto" onclick="uploadMaterial('${p.id}')" ${hasPending ? '' : 'disabled'}>Upload</button>
+                </div>
+              </div>
+              <div class="col-12 col-lg-6">
+                <label class="form-label small text-uppercase text-muted mb-1">Existing Materials</label>
+                <div class="d-flex gap-2 align-items-start flex-wrap">
+                  <select id="mat-existing-${p.id}" class="form-select form-select-sm material-select" size="6" multiple onchange="onExistingMaterialsSelectionChange('${p.id}')">${existingOptions || '<option value="" disabled>No materials</option>'}</select>
+                  <div class="btn-group-vertical btn-group-sm flex-shrink-0" role="group" aria-label="Existing materials actions">
+                    <button id="btn-remove-existing-${p.id}" type="button" class="btn btn-outline-danger" onclick="removeSelectedExistingMaterials('${p.id}')" disabled>Remove Selected</button>
+                    <button id="btn-remove-mat-${p.id}" type="button" class="btn btn-outline-danger" onclick="removeAllMaterials('${p.id}')" ${hasMaterials ? '' : 'disabled'}>Remove All</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
   <!-- Advanced moved to bottom -->
@@ -2160,7 +2206,11 @@ async function addSelectedTemplates(){
   } catch {}
   // reload
   try { await loadProjects(); } catch { loadProjects(); }
-  try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
+  try {
+    if (window.shell && typeof window.shell.refreshSidebar === 'function') {
+      window.shell.refreshSidebar('config');
+    }
+  } catch {}
   try { showToast('Templates added.', 'success'); } catch {}
 }
 
@@ -2485,20 +2535,434 @@ async function vmNameKey(pid, idx, ev) {
   }
 }
 
-async function uploadMaterial(id) {
-  const input = document.getElementById(`file-${id}`);
-  if (!input.files || !input.files[0]) return;
-  const fd = new FormData();
-  fd.append('file', input.files[0]);
+function getMaterialInputs(pid){
+  return {
+    files: document.getElementById(`file-${pid}`),
+    folder: document.getElementById(`folder-${pid}`),
+  };
+}
+
+function openMaterialPicker(pid, kind){
   try {
-    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: uploading material ${input.files[0].name}`) : console.log('Uploading material', input.files[0].name); } catch {}
-    await http('POST', `/api/projects/${id}/materials`, fd);
-    input.value='';
-    loadProjects();
-    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: material uploaded') : console.log('Material uploaded'); } catch {}
+    const input = document.getElementById(`${kind}-${pid}`);
+    if (input) input.click();
+  } catch {}
+}
+
+function getMaterialPendingStore(pid){
+  const key = String(pid ?? '');
+  if (!window.MATERIAL_PENDING[key]) window.MATERIAL_PENDING[key] = [];
+  return window.MATERIAL_PENDING[key];
+}
+
+function materialKeyFor(file, relPath){
+  const pathPart = relPath ? String(relPath) : '';
+  return `${pathPart}::${file.name}::${file.size}::${file.lastModified}`;
+}
+
+function materialFormatSize(bytes){
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let value = num;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
   }
-  catch (e) { alert('Error uploading: ' + e.message); try { (window.shell && shell.logError) ? shell.logError('Config: upload material failed: ' + e.message) : console.error('Upload material failed:', e); } catch {} }
+  const precision = value < 10 && unitIndex > 0 ? 1 : 0;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function getPendingMaterialFiles(pid){
+  const store = getMaterialPendingStore(pid);
+  const files = store.map(entry => entry.file);
+  const folderCount = store.reduce((count, entry) => count + (entry.relativePath ? 1 : 0), 0);
+  files.folderCount = folderCount;
+  return files;
+}
+
+function renderMaterialPending(pid){
+  const select = document.getElementById(`mat-pending-${pid}`);
+  if (!select) return;
+  const store = getMaterialPendingStore(pid);
+  if (!store.length) {
+    select.innerHTML = '<option value="" disabled>No pending files</option>';
+  } else {
+    const opts = store.map(entry => {
+      const value = escHtml(entry.key);
+      const title = escHtml(entry.relativePath || entry.file?.name || entry.display || '');
+      const label = escHtml(entry.display || '');
+      return `<option value="${value}" title="${title}">${label}</option>`;
+    }).join('');
+    select.innerHTML = opts;
+  }
+  onPendingMaterialsSelectionChange(pid);
+}
+
+function stageMaterialSelection(pid){
+  const inputs = getMaterialInputs(pid);
+  const store = getMaterialPendingStore(pid);
+  const existingKeys = new Set(store.map(entry => entry.key));
+  const added = [];
+  const pushFile = (file, relPath) => {
+    if (!file) return;
+    const key = materialKeyFor(file, relPath);
+    if (existingKeys.has(key)) return;
+    existingKeys.add(key);
+    const baseLabel = relPath || file.name || 'unnamed';
+    const sizeLabel = materialFormatSize(file.size);
+    const display = sizeLabel ? `${baseLabel} (${sizeLabel})` : baseLabel;
+    store.push({ key, file, display, relativePath: relPath || '', sortKey: baseLabel.toLowerCase() });
+    added.push(key);
+  };
+  try {
+    if (inputs.files?.files?.length) {
+      Array.from(inputs.files.files).forEach(file => pushFile(file, ''));
+    }
+  } catch {}
+  try {
+    if (inputs.folder?.files?.length) {
+      Array.from(inputs.folder.files).forEach(file => {
+        const rel = file.webkitRelativePath || '';
+        pushFile(file, rel);
+      });
+    }
+  } catch {}
+  if (inputs.files) {
+    try { inputs.files.value = ''; } catch {}
+  }
+  if (inputs.folder) {
+    try { inputs.folder.value = ''; } catch {}
+  }
+  if (added.length) {
+    store.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  }
+  return added.length;
+}
+
+function onPendingMaterialsSelectionChange(pid){
+  const select = document.getElementById(`mat-pending-${pid}`);
+  const btn = document.getElementById(`btn-remove-pending-${pid}`);
+  if (!btn) return;
+  const store = getMaterialPendingStore(pid);
+  if (!select || !store.length) {
+    btn.disabled = true;
+    return;
+  }
+  btn.disabled = select.selectedOptions.length === 0;
+}
+
+function removeSelectedPendingMaterials(pid){
+  const select = document.getElementById(`mat-pending-${pid}`);
+  if (!select) return;
+  const values = Array.from(select.selectedOptions || []).map(opt => opt.value).filter(Boolean);
+  if (!values.length) {
+    try { showToast('Select pending files to remove first.', 'warning'); } catch { alert('Select pending files to remove first.'); }
+    return;
+  }
+  const store = getMaterialPendingStore(pid);
+  const before = store.length;
+  window.MATERIAL_PENDING[pid] = store.filter(entry => !values.includes(entry.key));
+  renderMaterialPending(pid);
+  updateMaterialSelectionSummary(pid, getPendingMaterialFiles(pid));
+  onPendingMaterialsSelectionChange(pid);
+  const after = getMaterialPendingStore(pid).length;
+  if (after < before) {
+    try { showToast('Removed selected pending files.', 'info'); } catch { alert('Removed selected pending files.'); }
+  }
+}
+
+function onExistingMaterialsSelectionChange(pid){
+  const select = document.getElementById(`mat-existing-${pid}`);
+  const btn = document.getElementById(`btn-remove-existing-${pid}`);
+  if (!btn) return;
+  if (!select || !select.options.length) {
+    btn.disabled = true;
+    return;
+  }
+  btn.disabled = select.selectedOptions.length === 0;
+}
+
+async function removeSelectedExistingMaterials(pid){
+  const select = document.getElementById(`mat-existing-${pid}`);
+  if (!select) return;
+  const names = Array.from(select.selectedOptions || []).map(opt => opt.value).filter(Boolean);
+  if (!names.length) {
+    try { showToast('Select materials to remove first.', 'warning'); } catch { alert('Select materials to remove first.'); }
+    return;
+  }
+  const proj = (window.PROJ_CACHE||{})[pid] || {};
+  const projectName = proj.name || pid;
+  const count = names.length;
+  const confirmMsg = `Remove ${count} selected material${count === 1 ? '' : 's'} from this project? This will delete the files from the server.`;
+  if (!window.confirm(confirmMsg)) return;
+  const errors = [];
+  try {
+    if (window.shell && typeof window.shell.beginActionContext === 'function') {
+      window.shell.beginActionContext('Remove materials');
+    }
+  } catch {}
+  try {
+    if (window.shell && typeof window.shell.logWarn === 'function') {
+      window.shell.logWarn(`Config: removing ${count} selected material${count === 1 ? '' : 's'} for ${projectName}`);
+    }
+  } catch {}
+  const queueResult = await runQueued(`Remove selected materials for ${projectName}`, async () => {
+    for (const fname of names) {
+      try {
+        try {
+          if (window.shell && typeof window.shell.step === 'function') {
+            window.shell.step(`Removing ${fname}`);
+          }
+        } catch {}
+        await http('DELETE', `/api/projects/${pid}/materials/${encodeURIComponent(fname)}`);
+      } catch (err) {
+        errors.push({ name: fname, error: err });
+      }
+    }
+  }, { projectId: pid });
+  if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
+    try { showToast('Material removal canceled.', 'warning'); } catch { alert('Material removal canceled.'); }
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    return;
+  }
+  try { await loadProjects(); } catch { loadProjects(); }
+  try {
+    if (window.shell && typeof window.shell.refreshSidebar === 'function') {
+      window.shell.refreshSidebar('config');
+    }
+  } catch {}
+  if (errors.length) {
+    const failedNames = errors.map(e => e.name || 'unknown').join(', ');
+    try { showToast(`Some materials failed to delete: ${failedNames}`, 'danger'); } catch { alert(`Some materials failed to delete: ${failedNames}`); }
+    try {
+      if (window.shell && typeof window.shell.logError === 'function') {
+        window.shell.logError(`Config: remove materials failed for ${failedNames}`);
+      }
+    } catch {}
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    onExistingMaterialsSelectionChange(pid);
+    return;
+  }
+  try { showToast('Selected materials removed.', 'success'); } catch { alert('Selected materials removed.'); }
+  try {
+    if (window.shell && typeof window.shell.logSuccess === 'function') {
+      window.shell.logSuccess(`Config: removed selected materials for ${projectName}`);
+    }
+  } catch {}
+  onExistingMaterialsSelectionChange(pid);
+  const removeAllBtn = document.getElementById(`btn-remove-mat-${pid}`);
+  if (removeAllBtn) removeAllBtn.disabled = !((window.PROJ_CACHE||{})[pid]?.materials || []).length;
+  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch {}
+}
+
+function collectMaterialFiles(pid){
+  return getPendingMaterialFiles(pid);
+}
+
+function updateMaterialSelectionSummary(pid, files){
+  const lbl = document.getElementById(`mat-selection-summary-${pid}`);
+  const btn = document.getElementById(`btn-upload-mat-${pid}`);
+  const folderLbl = document.getElementById(`mat-folder-summary-${pid}`);
+  const clearBtn = document.getElementById(`btn-clear-mat-${pid}`);
+  const count = files.length;
+  const folderCount = files.folderCount || 0;
+  if (btn) btn.disabled = count === 0;
+  if (clearBtn) clearBtn.disabled = count === 0;
+  if (folderLbl) folderLbl.textContent = folderCount ? `${folderCount} file${folderCount === 1 ? '' : 's'} in folder` : '';
+  if (lbl) {
+    if (!count) {
+      lbl.textContent = '';
+    } else {
+      const base = `${count} item${count === 1 ? '' : 's'} selected`;
+      lbl.textContent = folderCount ? `${base} (${folderCount} from folders)` : base;
+    }
+  }
+}
+
+function onMaterialSelectionChange(pid){
+  stageMaterialSelection(pid);
+  renderMaterialPending(pid);
+  const files = collectMaterialFiles(pid);
+  updateMaterialSelectionSummary(pid, files);
+}
+
+function clearMaterialSelections(pid){
+  const inputs = getMaterialInputs(pid);
+  try { if (inputs.files) inputs.files.value = ''; } catch {}
+  try { if (inputs.folder) inputs.folder.value = ''; } catch {}
+  window.MATERIAL_PENDING[pid] = [];
+  renderMaterialPending(pid);
+  updateMaterialSelectionSummary(pid, []);
+  onPendingMaterialsSelectionChange(pid);
+}
+
+function clearMaterialSelection(pid){
+  clearMaterialSelections(pid);
+  try { showToast('Material selection cleared.', 'info'); } catch { alert('Material selection cleared.'); }
+}
+
+async function uploadMaterial(id) {
+  const files = collectMaterialFiles(id);
+  if (!files.length) {
+    try { showToast('Select files or a folder first.', 'warning'); } catch { alert('Select files or a folder first.'); }
+    return;
+  }
+  const proj = (window.PROJ_CACHE||{})[id] || {};
+  const label = files.length === 1 ? `Uploading 1 material` : `Uploading ${files.length} materials`;
+  const projectName = proj.name || id;
+  const errors = [];
+  const btn = document.getElementById(`btn-upload-mat-${id}`);
+  if (btn) btn.disabled = true;
+  try {
+    if (window.shell && typeof window.shell.beginActionContext === 'function') {
+      window.shell.beginActionContext('Upload materials');
+    }
+  } catch {}
+  try {
+    if (window.shell && typeof window.shell.logInfo === 'function') {
+      window.shell.logInfo(`Config: ${label} for ${projectName}`);
+    } else {
+      console.log('Uploading materials', projectName, files.length);
+    }
+  } catch {}
+  const queueResult = await runQueued(`Upload materials for ${projectName}`, async () => {
+    for (let i = 0; i < files.length; i += 1) {
+      const file = files[i];
+      const fd = new FormData();
+      fd.append('file', file);
+      const rel = file.webkitRelativePath || '';
+      if (rel) fd.append('relative_path', rel);
+      try {
+        try {
+          if (window.shell && typeof window.shell.step === 'function') {
+            window.shell.step(`Uploading ${rel || file.name}`);
+          } else {
+            console.log('Uploading material', rel || file.name);
+          }
+        } catch {}
+        await http('POST', `/api/projects/${id}/materials`, fd);
+      } catch (e) {
+        errors.push({ file, error: e });
+      }
+    }
+  }, { projectId: id });
+  clearMaterialSelections(id);
+  if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
+    try {
+      if (window.shell && typeof window.shell.logWarn === 'function') {
+        window.shell.logWarn('Config: material upload canceled');
+      } else {
+        console.warn('Material upload canceled');
+      }
+    } catch {}
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    try { showToast('Material upload canceled.', 'warning'); } catch { alert('Material upload canceled.'); }
+    return;
+  }
+  try { await loadProjects(); } catch { loadProjects(); }
+  try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
+  if (errors.length) {
+    const failedNames = errors.map(e => e.file?.name || 'unknown').join(', ');
+    try { showToast(`Some materials failed to upload: ${failedNames}`, 'danger'); } catch { alert(`Some materials failed to upload: ${failedNames}`); }
+    try {
+      if (window.shell && typeof window.shell.logError === 'function') {
+        window.shell.logError(`Config: material upload failed for ${failedNames}`);
+      } else {
+        console.error('Material upload failed for', failedNames);
+      }
+    } catch {}
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    return;
+  }
+  try { showToast('Materials uploaded.', 'success'); } catch { alert('Materials uploaded.'); }
+  try {
+    if (window.shell && typeof window.shell.logSuccess === 'function') {
+      window.shell.logSuccess('Config: materials uploaded');
+    } else {
+      console.log('Materials uploaded');
+    }
+  } catch {}
+  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch {}
+}
+
+async function removeAllMaterials(pid) {
+  const proj = (window.PROJ_CACHE||{})[pid] || {};
+  const mats = Array.isArray(proj.materials) ? [...proj.materials] : [];
+  if (!mats.length) {
+    try { showToast('No materials to remove.', 'info'); } catch { alert('No materials to remove.'); }
+    return;
+  }
+  const count = mats.length;
+  const confirmMsg = `Remove all ${count} material${count === 1 ? '' : 's'} from this project? This will delete the files from the server.`;
+  const proceed = window.confirm(confirmMsg);
+  if (!proceed) return;
+  const projectName = proj.name || pid;
+  const errors = [];
+  try {
+    if (window.shell && typeof window.shell.beginActionContext === 'function') {
+      window.shell.beginActionContext('Remove materials');
+    }
+  } catch {}
+  try {
+    if (window.shell && typeof window.shell.logWarn === 'function') {
+      window.shell.logWarn(`Config: removing ${count} material${count === 1 ? '' : 's'} for ${projectName}`);
+    }
+  } catch {}
+  const queueResult = await runQueued(`Remove materials for ${projectName}`, async () => {
+    for (const fname of mats) {
+      try {
+        try {
+          if (window.shell && typeof window.shell.step === 'function') {
+            window.shell.step(`Removing ${fname}`);
+          }
+        } catch {}
+        await http('DELETE', `/api/projects/${pid}/materials/${encodeURIComponent(fname)}`);
+      } catch (e) {
+        errors.push({ name: fname, error: e });
+      }
+    }
+  }, { projectId: pid });
+  if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
+    try { showToast('Material removal canceled.', 'warning'); } catch { alert('Material removal canceled.'); }
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    return;
+  }
+  try { await loadProjects(); } catch { loadProjects(); }
+  try {
+    if (window.shell && typeof window.shell.refreshSidebar === 'function') {
+      window.shell.refreshSidebar('config');
+    }
+  } catch {}
+  clearMaterialSelections(pid);
+  onExistingMaterialsSelectionChange(pid);
+  if (errors.length) {
+    const failedNames = errors.map(e => e.name || 'unknown').join(', ');
+    try { showToast(`Some materials failed to delete: ${failedNames}`, 'danger'); } catch { alert(`Some materials failed to delete: ${failedNames}`); }
+    try {
+      if (window.shell && typeof window.shell.logError === 'function') {
+        window.shell.logError(`Config: remove materials failed for ${failedNames}`);
+      }
+    } catch {}
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    const removeBtn = document.getElementById(`btn-remove-mat-${pid}`);
+    if (removeBtn) removeBtn.disabled = false;
+    const removeSelectedBtn = document.getElementById(`btn-remove-existing-${pid}`);
+    if (removeSelectedBtn) removeSelectedBtn.disabled = !((window.PROJ_CACHE||{})[pid]?.materials || []).length;
+    return;
+  }
+  try { showToast('All materials removed.', 'success'); } catch { alert('All materials removed.'); }
+  try {
+    if (window.shell && typeof window.shell.logSuccess === 'function') {
+      window.shell.logSuccess(`Config: removed materials for ${projectName}`);
+    }
+  } catch {}
+  const removeBtn = document.getElementById(`btn-remove-mat-${pid}`);
+  if (removeBtn) removeBtn.disabled = true;
+  const removeSelectedBtn = document.getElementById(`btn-remove-existing-${pid}`);
+  if (removeSelectedBtn) removeSelectedBtn.disabled = true;
+  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch {}
 }
 
 async function deleteMaterial(id, fname) {

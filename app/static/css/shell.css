@@ -4,6 +4,16 @@
 .shell-sidebar .list-group-item { cursor: pointer; }
 .shell-content { overflow: auto; }
 
+/* Scrollable containers for data tables */
+.data-scrollbox {
+	max-height: min(60vh, 620px);
+	overflow-y: auto;
+	border: 1px solid rgba(108, 117, 125, .35);
+	border-radius: .75rem;
+	background-color: rgba(248, 249, 250, .7);
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
+}
+
 .shell-container.sidebar-collapsed .shell-sidebar {
 	display: none !important;
 }
@@ -454,11 +464,30 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 
 /* Boxed collapsible sections in configuration card */
 .section-box {
-	border: 1px solid rgba(0,0,0,.12);
-	border-radius: .5rem;
-	background: #fff; /* keep light background regardless of OS theme */
-	padding: .75rem 1rem;
+	border: 1px solid rgba(15, 23, 42, .14);
+	border-radius: .6rem;
+	background: linear-gradient(180deg, #ffffff 0%, #fafdff 100%);
+	padding: .85rem 1.1rem;
 	position: relative;
+	box-shadow: 0 8px 20px rgba(15, 23, 42, .08);
+	transition: box-shadow .2s ease, transform .2s ease;
+}
+.section-box:hover {
+	transform: translateY(-2px);
+	box-shadow: 0 12px 24px rgba(15, 23, 42, .12);
+}
+.section-box::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	pointer-events: none;
+	background: linear-gradient(135deg, rgba(59, 130, 246, .14), rgba(16, 185, 129, .16));
+	opacity: .15;
+	transition: opacity .2s ease;
+}
+.section-box:hover::before {
+	opacity: .35;
 }
 .section-box + .section-box { margin-top: 1rem; }
 .section-box .section-header { cursor: pointer; user-select: none; font-weight: 500; }

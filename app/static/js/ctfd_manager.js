@@ -2467,6 +2467,14 @@ async function ctfdLoadProjectById(pid){
     const usernames = creds.map(c => String(c?.username||'').trim()).filter(Boolean);
     const total = usernames.length;
     const sess = readCtfdCreds(PROJ.id)||{};
+    const hasValidatedAuth = !!(sess?.validated && (sess.token || (sess.username && sess.password)));
+    if (!hasValidatedAuth) {
+      try { shell?.logInfo?.(`CTFd: skipping state refresh for ${PROJ.name || PROJ.id}; credentials not validated.`); } catch {}
+      try { ctfdSetProgress('CTFd credentials not validated. Showing configuration only.', 95, false); } catch {}
+      try { ctfdHideProgress(); } catch {}
+      updateCtfdControlsEnabled();
+      return;
+    }
     const baseUrl = (PROJ.challenge_url||'').trim();
     const port = Number(PROJ.challenge_port||443);
     const verifyEl = document.getElementById('ctfd-verify-ssl');

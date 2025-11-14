@@ -7293,6 +7293,20 @@ def upload_material(pid: str):
     mats_dir = os.path.join(current_app.config["DATA_DIR"], "materials")
     os.makedirs(mats_dir, exist_ok=True)
     original = secure_filename(file.filename)
+    rel_path = request.form.get('relative_path')
+    if rel_path:
+        try:
+            rel_norm = str(rel_path).replace('\\', '/').strip('/')
+            if rel_norm:
+                parts = []
+                for segment in rel_norm.split('/'):
+                    safe = secure_filename(segment)
+                    if safe:
+                        parts.append(safe)
+                if parts:
+                    original = "__".join(parts)
+        except Exception:
+            pass
     safe_name = f"{pid}_{uuid.uuid4().hex}_{original}"
     path = os.path.join(mats_dir, safe_name)
     file.save(path)
