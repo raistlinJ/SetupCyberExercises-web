@@ -345,8 +345,10 @@ async function refreshSidebar(activeTab) {
 const REMOTE_ACTION_QUEUE = [];
 const REMOTE_QUEUE_LABELS = new Set();
 const REMOTE_PROJECT_LOCKS = new Set();
-let REMOTE_ACTION_ACTIVE = false;
-let REMOTE_ACTIVE_ENTRY = null;
+const REMOTE_COMPLETED_ITEMS = [];
+const REMOTE_COMPLETED_LIMIT = 50;
+const REMOTE_ACTIVE_ENTRIES = [];
+let REMOTE_ACTIVE_EXCLUSIVE_COUNT = 0;
 let REMOTE_ACTION_SEQ = 0;
 const REMOTE_QUEUE_STORE_KEY = 'toolhub.remoteQueue.state.v2';
 const REMOTE_QUEUE_ABORT_KEY = 'toolhub.remoteQueue.abort.v2';
@@ -374,6 +376,9 @@ function _remoteQueue_serializeTask(entry, status){
     persist,
     createdAt: entry.createdAt || Date.now(),
     status: status || 'queued',
+    exclusive: entry.exclusive !== false,
+    lockProject: entry.lockProject !== false,
+    dedupeWhileActive: !!entry.dedupeWhileActive,
   };
 }
 
@@ -382,13 +387,14 @@ function _remoteQueue_saveState(){
   const store = _remoteQueue_storage();
   if (!store) return;
   try {
-    const active = REMOTE_ACTIVE_ENTRY ? _remoteQueue_serializeTask(REMOTE_ACTIVE_ENTRY, 'active') : null;
+    const active = REMOTE_ACTIVE_ENTRIES.map(it => _remoteQueue_serializeTask(it, 'active')).filter(Boolean);
     const items = REMOTE_ACTION_QUEUE.map(it => _remoteQueue_serializeTask(it, 'queued')).filter(Boolean);
-    if (!active && !items.length) {
+    const completed = REMOTE_COMPLETED_ITEMS.map(item => ({ ...item }));
+    if (!active.length && !items.length && !completed.length) {
       store.removeItem(REMOTE_QUEUE_STORE_KEY);
       return;
     }
-    const payload = { seq: REMOTE_ACTION_SEQ, active, items, ts: Date.now() };
+    const payload = { seq: REMOTE_ACTION_SEQ, active, items, completed, ts: Date.now() };
     store.setItem(REMOTE_QUEUE_STORE_KEY, JSON.stringify(payload));
   } catch {}
 }
@@ -410,13 +416,17 @@ function _remoteQueue_scheduleRestoredEntry(saved){
       return;
     }
     REMOTE_QUEUE_RESTORING = true;
-    queueRemoteAction(saved.label || 'Action', fn, {
+    const restoreOptions = {
       projectId: saved.projectId,
       allowDuplicate: true,
       dedupeKey: saved.dedupeKey,
       persist: saved.persist,
       persistToken: saved.token,
-    });
+    };
+  if (saved.exclusive !== undefined) restoreOptions.exclusive = !!saved.exclusive;
+  if (saved.lockProject !== undefined) restoreOptions.lockProject = !!saved.lockProject;
+  if (saved.dedupeWhileActive !== undefined) restoreOptions.dedupeWhileActive = !!saved.dedupeWhileActive;
+    queueRemoteAction(saved.label || 'Action', fn, restoreOptions);
   } catch (err) {
     try { logError ? logError(`[QUEUE] Failed to restore ${saved.label || saved.persist.key}: ${err?.message || err}`) : console.error('Queue restore failed', err); } catch {}
   } finally {
@@ -434,23 +444,76 @@ function _remoteQueue_restoreFromStorage(){
   let data;
   try { data = JSON.parse(raw); } catch { return; }
   const pending = [];
-  if (data.active) pending.push(data.active);
+  if (Array.isArray(data.active)) pending.push(...data.active);
+  else if (data.active) pending.push(data.active);
   if (Array.isArray(data.items)) pending.push(...data.items);
   pending.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   pending.forEach(item => _remoteQueue_scheduleRestoredEntry(item));
+  try {
+    REMOTE_COMPLETED_ITEMS.length = 0;
+    if (Array.isArray(data.completed)) {
+      data.completed.forEach(entry => {
+        if (!entry) return;
+        const finished = Number(entry.finishedAt);
+        const started = Number(entry.startedAt);
+        const duration = Number(entry.durationMs);
+        REMOTE_COMPLETED_ITEMS.push({
+          id: Number(entry.id) || 0,
+          label: entry.label != null ? String(entry.label) : '',
+          projectId: entry.projectId != null ? String(entry.projectId) : '',
+          status: entry.status ? String(entry.status) : 'success',
+          finishedAt: Number.isFinite(finished) ? finished : Date.now(),
+          startedAt: Number.isFinite(started) ? started : null,
+          durationMs: Number.isFinite(duration) ? duration : null,
+          errorMessage: entry.errorMessage ? String(entry.errorMessage) : '',
+          cancelRequested: !!entry.cancelRequested,
+        });
+      });
+    }
+    if (REMOTE_COMPLETED_ITEMS.length > REMOTE_COMPLETED_LIMIT) {
+      REMOTE_COMPLETED_ITEMS.splice(REMOTE_COMPLETED_LIMIT);
+    }
+  } catch {}
+  _remoteQueue_emit();
 }
 
 function _remoteQueue_collectVolatile(){
   const list = [];
-  if (REMOTE_ACTIVE_ENTRY && (!REMOTE_ACTIVE_ENTRY.persist || !REMOTE_ACTIVE_ENTRY.persist.key)) {
-    list.push(_remoteQueue_serializeTask(REMOTE_ACTIVE_ENTRY, 'active'));
-  }
+  REMOTE_ACTIVE_ENTRIES.forEach(entry => {
+    if (entry && (!entry.persist || !entry.persist.key)) {
+      list.push(_remoteQueue_serializeTask(entry, 'active'));
+    }
+  });
   REMOTE_ACTION_QUEUE.forEach(entry => {
     if (entry && (!entry.persist || !entry.persist.key)) {
       list.push(_remoteQueue_serializeTask(entry, 'queued'));
     }
   });
   return list.filter(Boolean);
+}
+
+function _remoteQueue_recordCompleted(task, status, error){
+  if (!task) return;
+  const finishedAt = Date.now();
+  const startedAt = Number(task.startedAt);
+  const durationMs = Number.isFinite(startedAt) ? Math.max(0, finishedAt - startedAt) : null;
+  const normalized = {
+    id: Number(task.id) || 0,
+    label: task.label != null ? String(task.label) : '',
+    projectId: task.projectId != null ? String(task.projectId) : '',
+  status: status || 'completed',
+    finishedAt,
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+    durationMs,
+    errorMessage: error ? String(error?.message || error) : '',
+    cancelRequested: !!task.cancelRequested,
+  };
+  REMOTE_COMPLETED_ITEMS.unshift(normalized);
+  if (REMOTE_COMPLETED_ITEMS.length > REMOTE_COMPLETED_LIMIT) {
+    REMOTE_COMPLETED_ITEMS.splice(REMOTE_COMPLETED_LIMIT);
+  }
+  _remoteQueue_saveState();
+  _remoteQueue_emit();
 }
 
 function _remoteQueue_checkForAbortNotice(){
@@ -471,7 +534,9 @@ function _remoteQueue_checkForAbortNotice(){
 }
 
 function _remoteQueue_hasVolatileTasks(){
-  if (REMOTE_ACTIVE_ENTRY && (!REMOTE_ACTIVE_ENTRY.persist || !REMOTE_ACTIVE_ENTRY.persist.key)) return true;
+  for (const entry of REMOTE_ACTIVE_ENTRIES) {
+    if (entry && (!entry.persist || !entry.persist.key)) return true;
+  }
   for (const entry of REMOTE_ACTION_QUEUE) {
     if (entry && (!entry.persist || !entry.persist.key)) return true;
   }
@@ -549,17 +614,24 @@ function queueRemoteAction(label, fn, options) {
   }
   const persistOpt = opts.persist || (opts.persistKey ? { key: opts.persistKey, data: opts.persistData } : null);
   const persistToken = opts.persistToken || (persistOpt ? `persist-${Date.now()}-${Math.random().toString(16).slice(2)}` : null);
+  const projectId = canonicalPid(opts.projectId);
+  const exclusive = opts.exclusive !== false;
+  const lockProject = opts.lockProject !== undefined ? !!opts.lockProject : exclusive;
+  const dedupeWhileActive = !!opts.dedupeWhileActive;
   const task = {
     id: ++REMOTE_ACTION_SEQ,
     label: entryLabel,
     fn: typeof fn === 'function' ? fn : async ()=>{},
     key: dedupeKey,
-    projectId: canonicalPid(opts.projectId),
+    projectId,
     onCancel: typeof opts.onCancel === 'function' ? opts.onCancel : null,
     cancelRequested: false,
     persist: persistOpt && persistOpt.key ? { key: persistOpt.key, data: persistOpt.data, token: persistToken } : null,
     persistToken,
     createdAt: Date.now(),
+    exclusive,
+    lockProject,
+    dedupeWhileActive,
   };
   REMOTE_ACTION_QUEUE.push(task);
   if (dedupeKey) REMOTE_QUEUE_LABELS.add(dedupeKey);
@@ -584,6 +656,9 @@ function runQueued(label, fn, options){
       persistKey: opts.persistKey,
       persistData: opts.persistData,
       persistToken: opts.persistToken,
+      exclusive: opts.exclusive,
+      lockProject: opts.lockProject,
+      dedupeWhileActive: opts.dedupeWhileActive,
       onCancel: () => { try { resolve({ status: 'canceled' }); } catch {} },
     });
     if (!entry) { try { resolve({ status: 'skipped' }); } catch {} }
@@ -608,60 +683,65 @@ function cancelRemoteAction(id) {
     }
   }
   // Active entry (best-effort flag)
-  if (REMOTE_ACTIVE_ENTRY && REMOTE_ACTIVE_ENTRY.id === targetId) {
-    REMOTE_ACTIVE_ENTRY.cancelRequested = true;
-    _remoteQueue_emit();
-    _remoteQueue_saveState();
-    return true;
+  for (const entry of REMOTE_ACTIVE_ENTRIES) {
+    if (entry && entry.id === targetId) {
+      entry.cancelRequested = true;
+      _remoteQueue_emit();
+      _remoteQueue_saveState();
+      return true;
+    }
   }
   return false;
 }
 
-function _remoteQueue_process(){
-  if (REMOTE_ACTION_ACTIVE) return;
-  if (!REMOTE_ACTION_QUEUE.length) {
-    _remoteQueue_emit();
-    return;
+function _remoteQueue_canStart(entry){
+  if (!entry) return false;
+  if (entry.lockProject !== false) {
+    const pid = entry.projectId;
+    if (pid && REMOTE_PROJECT_LOCKS.has(pid)) return false;
   }
-  // Remove any canceled placeholders (should be none, but defensive)
-  for (let i = REMOTE_ACTION_QUEUE.length - 1; i >= 0; i -= 1) {
-    const entry = REMOTE_ACTION_QUEUE[i];
-    if (!entry) REMOTE_ACTION_QUEUE.splice(i, 1);
-  }
-  // Find next entry that is not blocked by a project lock
-  let taskIndex = -1;
-  for (let i = 0; i < REMOTE_ACTION_QUEUE.length; i += 1) {
-    const entry = REMOTE_ACTION_QUEUE[i];
-    if (!entry) continue;
-    if (entry.projectId && REMOTE_PROJECT_LOCKS.has(entry.projectId)) continue;
-    taskIndex = i;
-    break;
-  }
-  if (taskIndex === -1) {
-    // All tasks are blocked; try again after current lock releases
-    _remoteQueue_emit();
-    return;
-  }
-  const task = REMOTE_ACTION_QUEUE.splice(taskIndex, 1)[0];
+  if (entry.exclusive !== false && REMOTE_ACTIVE_EXCLUSIVE_COUNT > 0) return false;
+  return true;
+}
+
+function _remoteQueue_start(task){
   if (!task) return;
-  if (task.key) REMOTE_QUEUE_LABELS.delete(task.key);
-  REMOTE_ACTION_ACTIVE = true;
-  REMOTE_ACTIVE_ENTRY = task;
-  if (task.projectId) REMOTE_PROJECT_LOCKS.add(task.projectId);
-  const { label, fn } = task;
+  const releaseKeyOnStart = !task.dedupeWhileActive;
+  if (task.key && releaseKeyOnStart) REMOTE_QUEUE_LABELS.delete(task.key);
+  const requiresLock = task.lockProject !== false;
+  if (requiresLock && task.projectId) REMOTE_PROJECT_LOCKS.add(task.projectId);
+  if (task.exclusive !== false) REMOTE_ACTIVE_EXCLUSIVE_COUNT += 1;
+  REMOTE_ACTIVE_ENTRIES.push(task);
+  const label = task.label;
   try { window.CURRENT_ACTION_LABEL = String(label||''); } catch {}
   try { logInfo ? logInfo(`[QUEUE] Starting: ${label}`) : console.log('[QUEUE] Starting:', label); } catch {}
   _remoteQueue_emit();
   _remoteQueue_saveState();
+  task.startedAt = Date.now();
+  const fn = typeof task.fn === 'function' ? task.fn : async () => {};
   Promise.resolve()
-    .then(fn)
-    .then(() => { try { logSuccess ? logSuccess(`[QUEUE] Finished: ${label}`) : console.log('[QUEUE] Finished:', label); } catch {} })
-    .catch((e) => { try { logError ? logError(`[QUEUE] Failed: ${label} (${e && e.message ? e.message : e})`) : console.error('[QUEUE] Failed:', label, e); } catch {} })
+    .then(() => fn())
+    .then(() => {
+      try { logSuccess ? logSuccess(`[QUEUE] Finished: ${label}`) : console.log('[QUEUE] Finished:', label); } catch {}
+      const resolvedStatus = task.cancelRequested ? 'cancelled' : 'completed';
+      _remoteQueue_recordCompleted(task, resolvedStatus);
+    })
+    .catch((e) => {
+      try { logError ? logError(`[QUEUE] Failed: ${label} (${e && e.message ? e.message : e})`) : console.error('[QUEUE] Failed:', label, e); } catch {}
+      _remoteQueue_recordCompleted(task, 'error', e);
+    })
     .finally(() => {
-      if (task.projectId) REMOTE_PROJECT_LOCKS.delete(task.projectId);
-      REMOTE_ACTION_ACTIVE = false;
-      REMOTE_ACTIVE_ENTRY = null;
-      try { window.CURRENT_ACTION_LABEL = ''; } catch {}
+      if (requiresLock && task.projectId) REMOTE_PROJECT_LOCKS.delete(task.projectId);
+      if (task.exclusive !== false) {
+        REMOTE_ACTIVE_EXCLUSIVE_COUNT = Math.max(0, REMOTE_ACTIVE_EXCLUSIVE_COUNT - 1);
+      }
+      if (task.key) REMOTE_QUEUE_LABELS.delete(task.key);
+      const idx = REMOTE_ACTIVE_ENTRIES.indexOf(task);
+      if (idx !== -1) REMOTE_ACTIVE_ENTRIES.splice(idx, 1);
+      try {
+        const next = REMOTE_ACTIVE_ENTRIES.length ? REMOTE_ACTIVE_ENTRIES[REMOTE_ACTIVE_ENTRIES.length - 1] : null;
+        window.CURRENT_ACTION_LABEL = next ? String(next.label || '') : '';
+      } catch {}
       _remoteQueue_log();
       _remoteQueue_emit();
       _remoteQueue_saveState();
@@ -669,20 +749,54 @@ function _remoteQueue_process(){
     });
 }
 
+function _remoteQueue_process(){
+  if (!REMOTE_ACTION_QUEUE.length) {
+    if (!REMOTE_ACTIVE_ENTRIES.length) _remoteQueue_emit();
+    return;
+  }
+  // Remove any canceled placeholders (should be none, but defensive)
+  for (let i = REMOTE_ACTION_QUEUE.length - 1; i >= 0; i -= 1) {
+    const entry = REMOTE_ACTION_QUEUE[i];
+    if (!entry) REMOTE_ACTION_QUEUE.splice(i, 1);
+  }
+  let startedAny = false;
+  for (let i = 0; i < REMOTE_ACTION_QUEUE.length; i += 1) {
+    const entry = REMOTE_ACTION_QUEUE[i];
+    if (!entry) { REMOTE_ACTION_QUEUE.splice(i, 1); i -= 1; continue; }
+    if (!_remoteQueue_canStart(entry)) continue;
+    REMOTE_ACTION_QUEUE.splice(i, 1);
+    _remoteQueue_start(entry);
+    startedAny = true;
+    i -= 1;
+  }
+  if (!startedAny) {
+    _remoteQueue_emit();
+  }
+}
+
 function _remoteQueue_log(){
   try {
     const waiting = REMOTE_ACTION_QUEUE.length;
-    const activeLabel = REMOTE_ACTIVE_ENTRY ? String(REMOTE_ACTIVE_ENTRY.label || '') : '';
-    const lines = REMOTE_ACTION_QUEUE.map((a, i) => {
+    const activeLabels = REMOTE_ACTIVE_ENTRIES.map(a => a && a.label ? String(a.label) : '').filter(Boolean);
+    const activeLines = REMOTE_ACTIVE_ENTRIES.map((a, i) => {
       if (!a) return '';
       const projSuffix = a.projectId ? ` [${a.projectId}]` : '';
-      const blocked = a.projectId && REMOTE_PROJECT_LOCKS.has(a.projectId) ? ' (blocked)' : '';
-      return `${i+1}. ${a.label}${projSuffix}${blocked}`;
+      const mode = a.exclusive === false ? ' (shared)' : '';
+      return `A${i+1}. ${a.label}${projSuffix}${mode}`;
     }).filter(Boolean).join('\n');
-    const status = REMOTE_ACTIVE_ENTRY
-      ? `[QUEUE] Active (${activeLabel || 'unnamed'}) • ${waiting} waiting`
+    const waitingLines = REMOTE_ACTION_QUEUE.map((a, i) => {
+      if (!a) return '';
+      const projSuffix = a.projectId ? ` [${a.projectId}]` : '';
+      const mode = a.exclusive === false ? ' (shared)' : '';
+      const locked = a.lockProject !== false && a.projectId && REMOTE_PROJECT_LOCKS.has(a.projectId) ? ' (blocked)' : '';
+      return `${i+1}. ${a.label}${projSuffix}${mode}${locked}`;
+    }).filter(Boolean).join('\n');
+    const status = activeLabels.length
+      ? `[QUEUE] Active (${activeLabels.length}) • ${waiting} waiting`
       : `[QUEUE] Idle • ${waiting} waiting`;
-    const msg = lines ? `${status}\n${lines}` : status;
+    let msg = status;
+    if (activeLines) msg += `\n${activeLines}`;
+    if (waitingLines) msg += `\n${waitingLines}`;
     if (logInfo) logInfo(msg); else console.log(msg);
   } catch {}
 }
@@ -693,23 +807,175 @@ function _remoteQueue_emit(){
 
 function getRemoteQueueState(){
   try {
+    const activeItems = REMOTE_ACTIVE_ENTRIES.map(it => it ? ({
+      id: it.id,
+      label: it.label,
+      projectId: it.projectId,
+      cancelRequested: !!it.cancelRequested,
+      createdAt: it.createdAt,
+      startedAt: it.startedAt || null,
+      exclusive: it.exclusive !== false,
+      lockProject: it.lockProject !== false,
+    }) : null).filter(Boolean);
     return {
-      active: !!REMOTE_ACTIVE_ENTRY,
-      current: REMOTE_ACTIVE_ENTRY ? {
-        id: REMOTE_ACTIVE_ENTRY.id,
-        label: REMOTE_ACTIVE_ENTRY.label,
-        projectId: REMOTE_ACTIVE_ENTRY.projectId,
-        cancelRequested: !!REMOTE_ACTIVE_ENTRY.cancelRequested,
-      } : null,
+      active: activeItems.length > 0,
+      current: activeItems.length ? activeItems[0] : null,
+      activeItems,
       items: REMOTE_ACTION_QUEUE.map(it => it ? ({
         id: it.id,
         label: it.label,
         projectId: it.projectId,
-        blocked: !!(it.projectId && REMOTE_PROJECT_LOCKS.has(it.projectId)),
+        blocked: !!(it.lockProject !== false && it.projectId && REMOTE_PROJECT_LOCKS.has(it.projectId)),
+        createdAt: it.createdAt,
+        exclusive: it.exclusive !== false,
+        lockProject: it.lockProject !== false,
       }) : null).filter(Boolean),
+      completed: REMOTE_COMPLETED_ITEMS.map(item => ({
+        id: item.id,
+        label: item.label,
+        projectId: item.projectId,
+        status: item.status,
+        finishedAt: item.finishedAt,
+        startedAt: item.startedAt,
+        durationMs: item.durationMs,
+        errorMessage: item.errorMessage,
+        cancelRequested: item.cancelRequested,
+      })),
     };
-  } catch { return { active:false, current:null, items:[] }; }
+  } catch { return { active:false, current:null, activeItems:[], items:[], completed:[] }; }
 }
+
+function clearCompletedRemoteActions(){
+  if (!REMOTE_COMPLETED_ITEMS.length) return;
+  REMOTE_COMPLETED_ITEMS.length = 0;
+  _remoteQueue_saveState();
+  _remoteQueue_emit();
+}
+
+const ACTION_PROGRESS_DEFAULT_STATE = Object.freeze({
+  active: false,
+  visible: false,
+  title: '',
+  text: '',
+  percent: 0,
+  barText: '',
+  updatedAt: 0
+});
+let ACTION_PROGRESS_STATE = { ...ACTION_PROGRESS_DEFAULT_STATE };
+function actionProgressEmit(){ try { document.dispatchEvent(new CustomEvent('queue-progress-updated')); } catch {} }
+function hasActiveActionProgress(){ return !!ACTION_PROGRESS_STATE.active; }
+function getActionProgressState(){ return { ...ACTION_PROGRESS_STATE }; }
+function showActionProgress(title, text){
+  const nextTitle = title || 'Working…';
+  const nextText = text || '';
+  const modal = document.getElementById('actionProgressModal');
+  const titleEl = document.getElementById('action-progress-title');
+  const textEl = document.getElementById('action-progress-text');
+  const barEl = document.getElementById('action-progress-bar');
+  if (titleEl) titleEl.textContent = nextTitle;
+  if (textEl) textEl.textContent = nextText;
+  if (barEl) {
+    barEl.style.width = '20%';
+    barEl.setAttribute('aria-valuenow', '20');
+    barEl.textContent = nextText || 'Starting…';
+    barEl.classList.add('progress-bar-striped', 'progress-bar-animated');
+  }
+  ACTION_PROGRESS_STATE = {
+    active: true,
+    visible: false,
+    title: nextTitle,
+    text: nextText,
+    percent: 20,
+    barText: nextText || 'Starting…',
+    updatedAt: Date.now()
+  };
+  actionProgressEmit();
+  try { showQueuePanel(); } catch {}
+  if (modal && modal.parentElement !== document.body) {
+    try { document.body.appendChild(modal); } catch {}
+  }
+}
+function updateActionProgress(percent, label, detail){
+  const textEl = document.getElementById('action-progress-text');
+  const barEl = document.getElementById('action-progress-bar');
+  const p = Math.max(0, Math.min(100, Number(percent) || 0));
+  if (barEl) {
+    barEl.style.width = `${p}%`;
+    barEl.setAttribute('aria-valuenow', String(p));
+    if (label !== undefined && label !== null && label !== '') {
+      barEl.textContent = String(label);
+    }
+  }
+  const message = (detail !== undefined && detail !== null && detail !== '')
+    ? String(detail)
+    : (label !== undefined && label !== null ? String(label) : '');
+  if (textEl && message) textEl.textContent = message;
+  if (ACTION_PROGRESS_STATE.active) {
+    ACTION_PROGRESS_STATE.percent = p;
+    if (label !== undefined) ACTION_PROGRESS_STATE.barText = (label !== null ? String(label) : '');
+    if (message) ACTION_PROGRESS_STATE.text = message;
+    ACTION_PROGRESS_STATE.updatedAt = Date.now();
+    actionProgressEmit();
+  }
+}
+function hideActionProgress(){
+  const modal = document.getElementById('actionProgressModal');
+  const barEl = document.getElementById('action-progress-bar');
+  if (barEl) {
+    barEl.style.width = '100%';
+    barEl.textContent = 'Done';
+    barEl.classList.remove('progress-bar-animated');
+  }
+  if (modal && window.bootstrap && window.bootstrap.Modal) {
+    try {
+      const inst = bootstrap.Modal.getInstance(modal) || bootstrap.Modal.getOrCreateInstance(modal);
+      inst.hide();
+    } catch {}
+  }
+  try { document.querySelectorAll('.modal-backdrop').forEach(b => b.remove()); } catch {}
+  try {
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('padding-right');
+    document.body.style.removeProperty('overflow');
+  } catch {}
+  ACTION_PROGRESS_STATE = { ...ACTION_PROGRESS_DEFAULT_STATE, updatedAt: Date.now() };
+  actionProgressEmit();
+}
+function openActionProgressModal(){
+  if (!ACTION_PROGRESS_STATE.active) return;
+  const modal = document.getElementById('actionProgressModal');
+  if (!modal || !window.bootstrap || !window.bootstrap.Modal) return;
+  const titleEl = document.getElementById('action-progress-title');
+  const textEl = document.getElementById('action-progress-text');
+  const barEl = document.getElementById('action-progress-bar');
+  if (titleEl) titleEl.textContent = ACTION_PROGRESS_STATE.title || 'Working…';
+  if (textEl) textEl.textContent = ACTION_PROGRESS_STATE.text || '';
+  if (barEl) {
+    barEl.style.width = `${ACTION_PROGRESS_STATE.percent || 0}%`;
+    barEl.setAttribute('aria-valuenow', String(ACTION_PROGRESS_STATE.percent || 0));
+    if (ACTION_PROGRESS_STATE.barText) barEl.textContent = ACTION_PROGRESS_STATE.barText;
+    barEl.classList.add('progress-bar-striped', 'progress-bar-animated');
+  }
+  const inst = bootstrap.Modal.getOrCreateInstance(modal);
+  ACTION_PROGRESS_STATE.visible = true;
+  ACTION_PROGRESS_STATE.updatedAt = Date.now();
+  actionProgressEmit();
+  setTimeout(() => {
+    try { inst.show(); } catch {}
+  }, 10);
+}
+document.addEventListener('hidden.bs.modal', (ev)=>{
+  if (!ev || !ev.target || ev.target.id !== 'actionProgressModal') return;
+  ACTION_PROGRESS_STATE.visible = false;
+  ACTION_PROGRESS_STATE.updatedAt = Date.now();
+  actionProgressEmit();
+});
+window.showActionProgress = showActionProgress;
+window.updateActionProgress = updateActionProgress;
+window.hideActionProgress = hideActionProgress;
+window.openActionProgressModal = openActionProgressModal;
+window.hasActiveActionProgress = hasActiveActionProgress;
+window.getActionProgressState = getActionProgressState;
 
 // Expose globally
 try {
@@ -718,6 +984,7 @@ try {
   window.getRemoteQueueState = getRemoteQueueState;
   window.cancelRemoteAction = cancelRemoteAction;
   window.registerRemoteActionHandler = registerRemoteActionHandler;
+  window.clearCompletedRemoteActions = clearCompletedRemoteActions;
   window.makeHttpPersist = makeHttpPersist;
 } catch {}
 
@@ -936,7 +1203,17 @@ const ConsoleDock = (() => {
   function setOpen(v){ state.open = !!v; saveState(); applyState(); }
   function toggle(){ setOpen(!state.open); }
   function setHeight(h){ state.height = Math.max(120, h|0); saveState(); applyState(); }
-  function saveState(){ writeConsoleState({ open: state.open, height: state.height, auto: autoScroll, search: state.search, tsUTC: state.tsUTC, levels: state.levels }); }
+  function saveState(){
+    writeConsoleState({
+      open: state.open,
+      height: state.height,
+      auto: autoScroll,
+      search: state.search,
+      tsUTC: state.tsUTC,
+      levels: state.levels,
+      mode: state.mode
+    });
+  }
   function applyState(){
     if (!el) return;
     const root = document.documentElement;
@@ -973,17 +1250,24 @@ const ConsoleDock = (() => {
         });
       }
     }
+    applyModeState();
   }
 
   function setMode(mode){
     state.mode = (mode === 'queue') ? 'queue' : 'console';
+    saveState();
+    applyModeState();
+    renderAll();
+  }
+
+  function applyModeState(){
     if (el) el.classList.toggle('mode-queue', state.mode === 'queue');
     if (dropBtn) {
       const dropLabel = dropBtn.querySelector('.label');
       if (dropLabel) dropLabel.textContent = state.mode === 'queue' ? 'Queue' : 'Console';
     }
+    if (dropBtn) dropBtn.setAttribute('aria-expanded', dropMenu && dropMenu.style.display === 'block' ? 'true' : 'false');
     try { if (titleEl) titleEl.textContent = (state.mode === 'queue') ? 'Queue' : 'Console'; } catch {}
-    renderAll();
   }
 
   function renderQueue(){
@@ -992,38 +1276,81 @@ const ConsoleDock = (() => {
       body.innerHTML = '<div class="queue-view"><div class="queue-empty">Queue API not available on this page.</div></div>';
       return;
     }
-    const st = window.getRemoteQueueState();
-    const waitingItems = Array.isArray(st.items) ? st.items : [];
-    const activeEntry = st.current && typeof st.current === 'object' ? st.current : null;
+    const formatStampLabel = (value, prefix) => {
+      const ts = Number(value);
+      if (!Number.isFinite(ts) || ts <= 0) return '';
+      try {
+        const stamp = new Date(ts).toLocaleTimeString();
+        return prefix ? `${prefix} ${stamp}` : stamp;
+      } catch { return ''; }
+    };
+  const st = window.getRemoteQueueState();
+  const waitingItems = Array.isArray(st.items) ? st.items : [];
+  const completedItems = Array.isArray(st.completed) ? st.completed : [];
+  const activeItems = Array.isArray(st.activeItems) ? st.activeItems : (st.current && typeof st.current === 'object' ? [st.current] : []);
+    const progressState = (typeof window.getActionProgressState === 'function') ? window.getActionProgressState() : null;
+    const progressAvailable = !!(progressState && progressState.active);
+    const progressPercentRaw = progressState ? Number(progressState.percent) : NaN;
+    const progressPercentLabel = progressAvailable && Number.isFinite(progressPercentRaw) ? `${Math.round(progressPercentRaw)}%` : '';
+    const progressText = progressAvailable && progressState.text ? String(progressState.text) : '';
+    const progressSummaryParts = [];
+    if (progressPercentLabel) progressSummaryParts.push(progressPercentLabel);
+    if (progressText) progressSummaryParts.push(progressText);
+    const progressSummary = progressAvailable && progressSummaryParts.length ? progressSummaryParts.join(' • ') : '';
     const waitingCount = waitingItems.length;
-    const total = waitingCount + (activeEntry ? 1 : 0);
-    const statusClass = activeEntry ? 'active' : 'idle';
-    const statusLabel = activeEntry ? 'Running' : 'Idle';
+    const completedCount = completedItems.length;
+    const activeCount = activeItems.length;
+    const total = waitingCount + activeCount;
+    const totalLabel = `${total} item${total===1?'':'s'}`;
+    const completedLabel = completedCount ? ` • ${completedCount} completed` : '';
+    const statusClass = activeCount ? 'active' : 'idle';
+    const statusLabel = activeCount ? (activeCount === 1 ? 'Running' : `Running (${activeCount})`) : 'Idle';
     let html = '<div class="queue-view">';
     html += `<div class="queue-status is-${statusClass}">`+
       `<div class="queue-status-main">`
         + `<span class="queue-pill ${statusClass}">${statusLabel}</span>`
-        + `<span class="queue-count">${total} item${total===1?'':'s'}</span>`
+    + `<span class="queue-count">${totalLabel}${completedLabel}</span>`
       + `</div>`
       + `<div class="queue-status-actions">`
         + `<button type="button" class="btn btn-sm btn-queue-refresh" data-act="q-refresh">Refresh</button>`
       + `</div>`
     + `</div>`;
-    if (activeEntry) {
-      const proj = activeEntry.projectId ? `<div class="queue-meta">Project: ${escapeHtml(activeEntry.projectId)}</div>` : '';
-      const cancelNote = activeEntry.cancelRequested ? '<div class="queue-meta text-warning">Cancel requested…</div>' : '';
-      const disableCancel = activeEntry.cancelRequested ? 'disabled' : '';
+    if (activeCount) {
       html += `<div class="queue-section">`
             + `<div class="queue-section-title">In Progress</div>`
-            + `<div class="queue-card current">`
-            + `<div class="queue-label">${escapeHtml(activeEntry.label)}</div>`
-            + `${proj}`
-            + `${cancelNote}`
-            + `<div class="queue-actions mt-2">`
-            + `<button type="button" class="btn btn-sm btn-outline-danger" data-act="q-cancel-current" data-id="${activeEntry.id}" ${disableCancel}>Cancel</button>`
-            + `</div>`
-            + `</div>`
-          + `</div>`;
+            + activeItems.map((entry, idx) => {
+                if (!entry) return '';
+                const proj = entry.projectId ? `<div class="queue-meta">Project: ${escapeHtml(entry.projectId)}</div>` : '';
+                const queuedLabel = formatStampLabel(entry.createdAt, 'Queued');
+                const startedLabel = formatStampLabel(entry.startedAt, 'Started');
+                const queuedMeta = queuedLabel ? `<div class="queue-meta text-muted">${escapeHtml(queuedLabel)}</div>` : '';
+                const startedMeta = startedLabel ? `<div class="queue-meta text-muted">${escapeHtml(startedLabel)}</div>` : '';
+                const cancelNote = entry.cancelRequested ? '<div class="queue-meta text-warning">Cancel requested…</div>' : '';
+                const disableCancel = entry.cancelRequested ? 'disabled' : '';
+                const isPrimary = idx === 0;
+                const progressMeta = (isPrimary && progressSummary) ? `<div class="queue-meta text-muted">${escapeHtml(progressSummary)}</div>` : '';
+                const progressHint = (isPrimary && progressAvailable) ? '<div class="queue-meta text-primary small">Click or tap for progress details.</div>' : '';
+                const progressButton = (isPrimary && progressAvailable) ? `<button type="button" class="btn btn-sm btn-outline-primary me-2" data-act="q-show-progress">View Progress</button>` : '';
+                const cardAttrs = (isPrimary && progressAvailable)
+                  ? 'class="queue-card current queue-card-clickable" data-act="q-open-progress" style="cursor:pointer;"'
+                  : 'class="queue-card current"';
+                const modeMeta = entry.exclusive === false ? '<div class="queue-meta text-muted">Shared task</div>' : '';
+                return `<div ${cardAttrs}>`
+                  + `<div class="queue-label">${escapeHtml(entry.label)}</div>`
+                  + `${proj}`
+                  + `${modeMeta}`
+                  + `${queuedMeta}`
+                  + `${startedMeta}`
+                  + `${progressMeta}`
+                  + `${progressHint}`
+                  + `${cancelNote}`
+                  + `<div class="queue-actions mt-2">`
+                  + `${progressButton}`
+                  + `<button type="button" class="btn btn-sm btn-outline-danger" data-act="q-cancel-active" data-id="${entry.id}" ${disableCancel}>Cancel</button>`
+                  + `</div>`
+                  + `</div>`;
+              }).join('')
+            + `</div>`;
     }
     if (waitingCount) {
       html += `<div class="queue-section">`
@@ -1031,12 +1358,15 @@ const ConsoleDock = (() => {
             + `<ol class="queue-list">`
             + waitingItems.map((item, idx) => {
                 const proj = item.projectId ? `<span class="queue-meta">${escapeHtml(item.projectId)}</span>` : '';
+                const queuedLabel = formatStampLabel(item.createdAt, 'Queued');
+                const queuedMeta = queuedLabel ? `<span class="queue-meta text-muted">${escapeHtml(queuedLabel)}</span>` : '';
                 const blocked = item.blocked ? ' queue-item-blocked' : '';
                 const blockedNote = item.blocked ? '<span class="queue-blocked text-warning ms-2">Waiting on project</span>' : '';
                 return `<li class="queue-item${blocked}">`
                   + `<span class="queue-index">${idx+1}</span>`
                   + `<span class="queue-label">${escapeHtml(item.label)}</span>`
                   + `${proj}`
+                  + `${queuedMeta}`
                   + `${blockedNote}`
                   + `<button type="button" class="btn btn-sm btn-outline-danger ms-auto" data-act="q-cancel" data-id="${item.id}">Cancel</button>`
                   + `</li>`;
@@ -1044,7 +1374,58 @@ const ConsoleDock = (() => {
             + `</ol>`
           + `</div>`;
     }
-    if (!st.active && !waitingCount) {
+    if (completedCount) {
+      html += `<div class="queue-section">`
+            + `<div class="queue-section-title">Completed</div>`
+            + `<div class="queue-actions mb-2">`
+            + `<button type="button" class="btn btn-sm btn-outline-secondary" data-act="q-clear-completed">Clear Completed</button>`
+            + `</div>`
+            + `<ol class="queue-list queue-list-completed">`
+            + completedItems.map((item, idx) => {
+                const proj = item.projectId ? `<span class="queue-meta">${escapeHtml(item.projectId)}</span>` : '';
+                const status = (item.status || 'completed').toLowerCase();
+                let statusLabel = 'Completed';
+                let statusClass = 'text-success';
+                if (status === 'error') { statusLabel = 'Failed'; statusClass = 'text-danger'; }
+                else if (status === 'cancelled' || status === 'canceled') { statusLabel = 'Cancelled'; statusClass = 'text-muted'; }
+                const durationMs = Number(item.durationMs);
+                let durationMeta = '';
+                if (Number.isFinite(durationMs) && durationMs > 0) {
+                  const seconds = durationMs / 1000;
+                  let display;
+                  if (seconds >= 10) display = `${Math.round(seconds)}s`;
+                  else display = `${(Math.round(seconds * 10) / 10).toFixed(1)}s`;
+                  durationMeta = `<span class="queue-meta text-muted">${escapeHtml(display)} elapsed</span>`;
+                }
+                const finishedAt = Number(item.finishedAt);
+                let finishedMeta = '';
+                if (Number.isFinite(finishedAt) && finishedAt > 0) {
+                  try {
+                    const stamp = new Date(finishedAt).toLocaleTimeString();
+                    finishedMeta = `<span class="queue-meta text-muted">${escapeHtml(stamp)}</span>`;
+                  } catch {}
+                }
+                const cancelMeta = item.cancelRequested && status !== 'cancelled' && status !== 'canceled'
+                  ? '<span class="queue-meta text-muted">cancel requested</span>'
+                  : '';
+                const errorMeta = (status === 'failed' || status === 'error') && item.errorMessage
+                  ? `<div class="queue-meta text-danger small">${escapeHtml(item.errorMessage)}</div>`
+                  : '';
+                return `<li class="queue-item queue-item-completed">`
+                  + `<span class="queue-index">${idx+1}</span>`
+                  + `<span class="queue-label">${escapeHtml(item.label || 'Completed action')}</span>`
+                  + `${proj}`
+                  + `<span class="queue-meta ${statusClass}">${statusLabel}</span>`
+                  + `${durationMeta}`
+                  + `${finishedMeta}`
+                  + `${cancelMeta}`
+                  + `${errorMeta}`
+                  + `</li>`;
+              }).join('')
+            + `</ol>`
+          + `</div>`;
+    }
+    if (!st.active && !waitingCount && !completedCount) {
       html += `<div class="queue-empty">No actions in queue.</div>`;
     }
     html += '</div>';
@@ -1059,14 +1440,41 @@ const ConsoleDock = (() => {
         }
       });
     });
-    const cancelCurrentBtn = body.querySelector('[data-act="q-cancel-current"]');
-    if (cancelCurrentBtn) {
-      cancelCurrentBtn.addEventListener('click', () => {
-        const id = Number(cancelCurrentBtn.getAttribute('data-id'));
+    body.querySelectorAll('[data-act="q-cancel-active"]').forEach(cancelBtn => {
+      cancelBtn.addEventListener('click', () => {
+        const id = Number(cancelBtn.getAttribute('data-id'));
         if (Number.isFinite(id)) {
           try { window.cancelRemoteAction && window.cancelRemoteAction(id); } catch {}
           renderQueue();
         }
+      });
+    });
+    const clearCompletedBtn = body.querySelector('[data-act="q-clear-completed"]');
+    if (clearCompletedBtn) {
+      clearCompletedBtn.addEventListener('click', () => {
+        try { window.clearCompletedRemoteActions && window.clearCompletedRemoteActions(); } catch {}
+        renderQueue();
+      });
+    }
+    if (progressAvailable) {
+      const progressButtons = body.querySelectorAll('[data-act="q-show-progress"]');
+      progressButtons.forEach(btnEl => {
+        btnEl.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (typeof window.openActionProgressModal === 'function') {
+            window.openActionProgressModal();
+          }
+        });
+      });
+      const clickableCards = body.querySelectorAll('[data-act="q-open-progress"]');
+      clickableCards.forEach(card => {
+        card.addEventListener('click', (ev) => {
+          if (ev.target && ev.target.closest('[data-act="q-cancel-active"]')) return;
+          if (typeof window.openActionProgressModal === 'function') {
+            window.openActionProgressModal();
+          }
+        });
       });
     }
   }
@@ -1104,11 +1512,15 @@ const ConsoleDock = (() => {
   if (typeof s.tsUTC === 'boolean') state.tsUTC = s.tsUTC;
     if (typeof s.search === 'string') state.search = s.search;
     if (s.levels && typeof s.levels === 'object') state.levels = Object.assign(state.levels, s.levels);
+    if (typeof s.mode === 'string') state.mode = (s.mode === 'queue') ? 'queue' : 'console';
     applyState();
     renderAll();
     hookConsole();
     try {
       document.addEventListener('remote-queue-changed', () => { if (state.mode === 'queue') renderAll(); });
+    } catch {}
+    try {
+      document.addEventListener('queue-progress-updated', () => { if (state.mode === 'queue') renderAll(); });
     } catch {}
   }
 
@@ -1202,6 +1614,10 @@ function logError(msg){ log('error', msg); }
 function logSuccess(msg){ ConsoleDock.append('success', [msg]); }
 function logDebug(msg){ ConsoleDock.append('debug', [msg]); }
 function enableConsoleDebug(on){ try { ConsoleDock.setLevel('debug', on===undefined ? true : !!on); } catch {} }
+function showQueuePanel(){
+  try { ConsoleDock.setMode('queue'); } catch {}
+  try { ConsoleDock.setOpen(true); } catch {}
+}
 
 window.shell = {
   initShell,
@@ -1219,6 +1635,7 @@ window.shell = {
   logSuccess,
   logDebug,
   enableConsoleDebug,
+  showQueuePanel,
   beginActionContext,
   endActionContext,
   step,

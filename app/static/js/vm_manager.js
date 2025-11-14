@@ -952,7 +952,13 @@ async function vmRefresh() {
         if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden', 'true'); }
       } catch {}
     }
-  }, { projectId: PROJ?.id });
+  }, {
+    projectId: PROJ?.id,
+    dedupeKey: PROJ && PROJ.id ? `vm-refresh::${PROJ.id}` : label,
+    exclusive: false,
+    lockProject: false,
+    dedupeWhileActive: true,
+  });
 }
 
 // Emit detailed action results to bottom console dock
@@ -2080,31 +2086,17 @@ async function vmActionExec(action) {
   // Show top progress bar for any action
   let topProg = null;
   try { topProg = document.getElementById('vm-progress'); if (topProg) { topProg.classList.remove('d-none'); topProg.removeAttribute('aria-hidden'); const bar = document.getElementById('vm-progress-bar'); if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow','100'); } } } catch {}
-  // Progress modal setup
-  const actionModalEl = document.getElementById('actionProgressModal');
-  const actionModal = (window.bootstrap && window.bootstrap.Modal) ? bootstrap.Modal.getOrCreateInstance(actionModalEl) : null;
-  const apTitle = document.getElementById('action-progress-title');
-  const apBar = document.getElementById('action-progress-bar');
-  const apText = document.getElementById('action-progress-text');
-  const apCancel = null; // cancel button removed
+  // Progress indicator helpers funnel into shared queue state
   const setAp = (pct, text, detail) => {
-    if (apBar) {
-      apBar.style.width = `${pct|0}%`;
-      apBar.setAttribute('aria-valuenow', String(pct|0));
-      if (text) apBar.textContent = text;
-    }
-    if (apText && (detail || text)) {
-      apText.textContent = detail || text || '';
-    }
+    try { updateActionProgress(pct, text, detail); } catch {}
   };
   const prettyAction = friendlyActionName(action) || action;
-  if (apTitle) apTitle.textContent = `${prettyAction} in progress`;
+  try { showActionProgress(`${prettyAction} in progress`, 'Gathering selection…'); } catch {}
   setAp(5, 'Preparing…', 'Gathering selection…');
   ACTION_IN_FLIGHT = true;
   CURRENT_ACTION = action;
   ACTION_RUN_ID += 1;
   updateRefreshState();
-  try { actionModal && actionModal.show(); } catch {}
   try {
     if (action === 'nets_assign' || action === 'nets_clear') {
       const friendly = friendlyActionName(action) || action;
@@ -2137,7 +2129,7 @@ async function vmActionExec(action) {
     }
     if (action === 'create') {
       // Convert generated names back to base config names
-  const tag = String(PROJ?.tag || '').trim();
+      const tag = String(PROJ?.tag || '').trim();
       const baseNames = new Set((PROJ?.vms || []).map(v => v.name));
       targets = targets.map(t => {
         const idxStr = String(t.index);
@@ -2153,9 +2145,9 @@ async function vmActionExec(action) {
         }
         return { index: t.index, name: base };
       });
-    // Show progress bar and increment as we go (best effort)
-  const setProg = (pct, text, detail) => setAp(pct, text, detail);
-  setProg(10, 'Preparing…', 'Preparing targets…');
+      // Show progress bar and increment as we go (best effort)
+      const setProg = (pct, text, detail) => setAp(pct, text, detail);
+      setProg(10, 'Preparing…', 'Preparing targets…');
       // Filter out rows already created based on current table state
       try {
         const statuses = PROJ.instance_statuses || [];
@@ -2190,8 +2182,6 @@ async function vmActionExec(action) {
       };
       // Preflight: resolve ALL ambiguities before cloning begins (loop until none remain)
       try {
-        // Hide the progress modal while prompting to avoid stacking/order issues
-        try { actionModal && actionModal.hide(); } catch {}
         let guard = 0;
         for (;;) {
           if (guard++ > 5) break; // safety cap
@@ -2228,15 +2218,11 @@ async function vmActionExec(action) {
           }
           // Loop and re-check until no ambiguous remain
         }
-        // Re-show progress modal now that resolutions are done
-        try { actionModal && actionModal.show(); } catch {}
       } catch (e) {
         // Non-fatal: proceed; server-side early check will still prevent cloning if ambiguities remain
-        try { actionModal && actionModal.show(); } catch {}
       }
       let lastResp = null;
       try {
-  if (apCancel) apCancel.disabled = false;
   setProg(35, 'Cloning…', `Cloning ${targets.length} template(s)…`);
   const resp = await makeRequest();
         lastResp = resp;
@@ -2266,15 +2252,6 @@ async function vmActionExec(action) {
           for (const [baseName, map] of group.entries()) {
             await showTemplateResolveDialog(baseName, Array.from(map.values()));
           }
-          // Retry once after resolving all ambiguities
-          // Re-show progress modal now that resolutions are done
-          try {
-            const progEl = document.getElementById('actionProgressModal');
-            if (progEl && window.bootstrap) {
-              const pm = bootstrap.Modal.getOrCreateInstance(progEl);
-              pm.show();
-            }
-          } catch {}
           const resp2 = await makeRequest();
           lastResp = resp2 || resp;
           createdCount = Array.isArray(lastResp.created) ? lastResp.created.length : createdCount;
@@ -2329,11 +2306,10 @@ async function vmActionExec(action) {
       };
       const [shortStart, longStart, pastTense] = verbMap[action] || ['Working…','Working','Done'];
       setProg(10, 'Preparing…', `${longStart} for ${targets.length} VM(s)…`);
-      if (apCancel) apCancel.disabled = false;
       // No snapshot/restore prompt: handled server-side (timestamp name; restore latest)
       const path = `/api/projects/${PROJ.id}/instances/actions/${action}`;
-  try { shell.step('Submitting action'); } catch {}
-  let resp = await http('POST', path, {
+      try { shell.step('Submitting action'); } catch {}
+      let resp = await http('POST', path, {
         username: sess.username || undefined,
         password: sess.password || undefined,
         baseUrl: PROJ.proxmox_url || undefined,
@@ -2341,7 +2317,7 @@ async function vmActionExec(action) {
         verifySSL: PROJ.proxmox_verify_ssl !== false,
         targets,
       });
-  try { shell.step('Action response'); } catch {}
+      try { shell.step('Action response'); } catch {}
       // Special handling: if snapshot failed for some VMs, ask user if they want to retry just those
       if (action === 'snapshot') {
         try {
@@ -2386,8 +2362,8 @@ async function vmActionExec(action) {
           }
         } catch {}
       }
-      // Determine counts based on action response keys
-  const keyMap = { start: 'started', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran' };
+    // Determine counts based on action response keys
+    const keyMap = { start: 'started', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran' };
       const k = keyMap[action];
       let doneArr = Array.isArray(resp[k]) ? resp[k] : [];
       // If start action returned resumed array, include it in counts and tweak wording
@@ -2457,7 +2433,6 @@ async function vmActionExec(action) {
         alert('No existing VMs found among the selection.');
         return;
       }
-  if (apCancel) apCancel.disabled = false;
   setProg(25, 'Deleting…', `Deleting ${targets.length} VM(s)…`);
   try { shell.step('Submitting delete'); } catch {}
   const resp = await http('POST', `/api/projects/${PROJ.id}/instances/actions/delete`, {
@@ -2497,8 +2472,8 @@ async function vmActionExec(action) {
       document.querySelectorAll('.modal-backdrop').forEach(el => { try { el.remove(); } catch {} });
     } catch {}
     // Hide top progress bar and progress modal promptly
-    try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
-    try { actionModal && actionModal.hide(); } catch {}
+  try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
+  try { hideActionProgress(); } catch {}
     // Always refresh after any action (even on failure) but do not block UI while pending
     try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
   }
@@ -2522,15 +2497,13 @@ async function vmActionMultiExec(action){
   if (byPid.size===0) { alert('No valid selections.'); return; }
   // Validate auth for all involved projects
   for (const pid of byPid.keys()) { if (!hasAuthForPid(pid)) { alert('Some selected projects are missing Proxmox credentials or token. Fix credentials and try again.'); return; } }
-  // Progress modal
-  const actionModalEl = document.getElementById('actionProgressModal');
-  const actionModal = (window.bootstrap && window.bootstrap.Modal) ? bootstrap.Modal.getOrCreateInstance(actionModalEl) : null;
-  const apTitle = document.getElementById('action-progress-title');
-  const apBar = document.getElementById('action-progress-bar');
-  const apText = document.getElementById('action-progress-text');
-  const setAp = (pct, text, detail) => { if (apBar) { apBar.style.width = `${pct|0}%`; apBar.setAttribute('aria-valuenow', String(pct|0)); if (text) apBar.textContent = text; } if (apText && (detail || text)) apText.textContent = detail || text || ''; };
-  if (apTitle) apTitle.textContent = `Multi ${action}`;
-  try { actionModal && actionModal.show(); } catch {}
+  // Progress indicator routed through shared helpers
+  const friendly = friendlyActionName(action) || action;
+  const setAp = (pct, text, detail) => { try { updateActionProgress(pct, text, detail); } catch {} };
+  try {
+    showActionProgress(`Multi ${friendly}`, 'Preparing selections…');
+    setAp(10, 'Preparing…', 'Collecting project selections…');
+  } catch {}
   ACTION_IN_FLIGHT = true; CURRENT_ACTION = action; ACTION_RUN_ID += 1; updateRefreshState();
   // Aggregate results across projects
   const agg = {};
@@ -2696,7 +2669,7 @@ async function vmActionMultiExec(action){
   // Cleanup
   ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
   try { const prog=document.getElementById('vm-progress'); if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden','true'); } } catch {}
-  try { actionModal && actionModal.hide(); } catch {}
+  try { hideActionProgress(); } catch {}
   try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
 }
 

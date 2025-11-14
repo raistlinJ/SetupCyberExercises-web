@@ -43,6 +43,9 @@ function readSettings() {
 }
 function writeSettings(s) { localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(s || {})); }
 
+const PROJECT_AUDIO_CACHE = {};
+const PROJECT_AUDIO_LOADED = new Set();
+
 // Settings modal + audio customization
 const SETTINGS_AUDIO_MAX_BYTES = 600 * 1024;
 const SETTINGS_AUDIO_FIELDS = {
@@ -393,6 +396,64 @@ function wireSettingsTtsControls(){
   });
 }
 function cloneSettingsAudio(src){ try { return JSON.parse(JSON.stringify(src || {})); } catch { return {}; } }
+function cloneAudioEntry(entry){ try { return JSON.parse(JSON.stringify(entry || {})); } catch { return {}; } }
+function projectAudioCacheKey(pid){ return String(pid || '').trim(); }
+async function loadProjectAudio(pid, options){
+  const id = projectAudioCacheKey(pid);
+  if (!id) return {};
+  const opts = options && typeof options === 'object' ? options : {};
+  if (!opts.force && PROJECT_AUDIO_LOADED.has(id)) {
+    return cloneSettingsAudio(PROJECT_AUDIO_CACHE[id] || {});
+  }
+  try {
+    const res = await http('GET', `/api/projects/${id}/audio`);
+    const audio = res && typeof res.audio === 'object' ? res.audio : {};
+    const sanitized = cloneSettingsAudio(audio);
+    PROJECT_AUDIO_CACHE[id] = sanitized;
+    PROJECT_AUDIO_LOADED.add(id);
+    return cloneSettingsAudio(sanitized);
+  } catch (err) {
+    if (!opts.silent) {
+      try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to load audio for project ${id}: ${err?.message || err}`) : console.warn('Settings: failed to load audio', id, err); } catch {}
+    }
+    if (!PROJECT_AUDIO_LOADED.has(id)) return {};
+    return cloneSettingsAudio(PROJECT_AUDIO_CACHE[id] || {});
+  }
+}
+function peekProjectAudio(pid){
+  const id = projectAudioCacheKey(pid);
+  if (!id) return null;
+  if (!PROJECT_AUDIO_LOADED.has(id)) return null;
+  return PROJECT_AUDIO_CACHE[id] || {};
+}
+function getProjectAudio(pid){
+  const cached = peekProjectAudio(pid);
+  if (cached === null) return {};
+  return cloneSettingsAudio(cached || {});
+}
+function projectAudioIsLoaded(pid){
+  const id = projectAudioCacheKey(pid);
+  if (!id) return false;
+  return PROJECT_AUDIO_LOADED.has(id);
+}
+async function saveProjectAudio(pid, audio){
+  const id = projectAudioCacheKey(pid);
+  if (!id) throw new Error('Project id required to save audio');
+  const payload = { audio: cloneSettingsAudio(audio || {}) };
+  const res = await http('PUT', `/api/projects/${id}/audio`, payload);
+  const normalized = res && typeof res.audio === 'object' ? res.audio : {};
+  const sanitized = cloneSettingsAudio(normalized);
+  PROJECT_AUDIO_CACHE[id] = sanitized;
+  PROJECT_AUDIO_LOADED.add(id);
+  const detailAudio = cloneSettingsAudio(sanitized);
+  try { document.dispatchEvent(new CustomEvent('project-audio-updated', { detail: { pid: id, audio: detailAudio } })); } catch {}
+  return detailAudio;
+}
+window.loadProjectAudio = loadProjectAudio;
+window.saveProjectAudio = saveProjectAudio;
+window.getProjectAudio = getProjectAudio;
+window.peekProjectAudio = peekProjectAudio;
+window.projectAudioIsLoaded = projectAudioIsLoaded;
 function settingsAudioValidSounds(entry){
   const list = Array.isArray(entry && entry.sounds) ? entry.sounds : [];
   return list.filter(sound => {
@@ -653,7 +714,7 @@ function settingsModalUpdateAudioUi(key){
   if (clear) clear.disabled = !hasCustomAudio;
 }
 function settingsModalUpdateAllAudio(){ Object.keys(SETTINGS_AUDIO_FIELDS).forEach(settingsModalUpdateAudioUi); }
-function settingsModalResetFromStorage(){
+async function settingsModalResetFromStorage(){
   const settings = readSettings();
   _settingsSpeechSupported = settingsSpeechSupported();
   settingsModalUpdateTtsSupportNote();
@@ -670,10 +731,28 @@ function settingsModalResetFromStorage(){
   if (defCfg) defCfg.checked = !!settings.defaultCfgExpanded;
   if (defVm) defVm.checked = !!settings.defaultVmExpanded;
   if (defMat) defMat.checked = !!settings.defaultMatExpanded;
-  const storedAudio = cloneSettingsAudio(settings.audio);
+  const currentPid = (window.shell && shell.getCurrentProjectId) ? String(shell.getCurrentProjectId() || '').trim() : '';
+  let projectAudio = {};
+  let audioLoaded = false;
+  let loadError = null;
+  if (currentPid) {
+    try {
+      projectAudio = await loadProjectAudio(currentPid);
+      audioLoaded = true;
+    } catch (err) {
+      loadError = err;
+    }
+  }
+  if (!audioLoaded) {
+    if (currentPid && settings && settings.projectAudio && typeof settings.projectAudio === 'object' && settings.projectAudio[currentPid]) {
+      projectAudio = cloneSettingsAudio(settings.projectAudio[currentPid]);
+    } else {
+      projectAudio = cloneSettingsAudio(settings.audio);
+    }
+  }
   _settingsAudioWorking = {};
   Object.keys(SETTINGS_AUDIO_FIELDS).forEach((key)=>{
-    const saved = storedAudio && typeof storedAudio[key] === 'object' ? cloneSettingsAudio(storedAudio[key]) : {};
+    const saved = projectAudio && typeof projectAudio[key] === 'object' ? cloneAudioEntry(projectAudio[key]) : {};
     if (saved && saved.enabled === undefined) saved.enabled = settingsAudioDefaultEnabled(key);
     if (saved && saved.speak === undefined) saved.speak = settingsAudioDefaultSpeak(key);
     settingsAudioNormalizeLegacyTemplate(saved, key);
@@ -681,6 +760,9 @@ function settingsModalResetFromStorage(){
     settingsAudioEnsureEntry(key);
   });
   settingsModalUpdateAllAudio();
+  if (loadError && currentPid) {
+    try { showToast('Project audio could not be loaded. Using local copy.', 'warning'); } catch {}
+  }
 }
 function settingsModalHandleFile(key, file){
   if (!file) return;
@@ -966,7 +1048,7 @@ function wireSettingsModal(){
   settingsModalResetFromStorage();
 }
 window.prepareSettingsModal = wireSettingsModal;
-function saveSettingsInternal(){
+async function saveSettingsInternal(){
   const settings = readSettings();
   const defCfg = document.getElementById('def-cfg');
   const defVm = document.getElementById('def-vm');
@@ -1031,12 +1113,52 @@ function saveSettingsInternal(){
     if (!Object.keys(payload).length) return;
     mergedAudio[key] = payload;
   });
-  if (Object.keys(mergedAudio).length) settings.audio = mergedAudio;
+  const currentPid = (window.shell && shell.getCurrentProjectId) ? String(shell.getCurrentProjectId() || '').trim() : '';
+  const cacheId = projectAudioCacheKey(currentPid);
+  let storedProjectAudio = cloneSettingsAudio(mergedAudio);
+  let audioSaveFailed = false;
+  if (cacheId) {
+    if (!settings.projectAudio || typeof settings.projectAudio !== 'object') settings.projectAudio = {};
+    try {
+      const savedAudio = await saveProjectAudio(cacheId, mergedAudio);
+      storedProjectAudio = cloneSettingsAudio(savedAudio);
+      if (Object.keys(storedProjectAudio).length) settings.projectAudio[cacheId] = storedProjectAudio;
+      else delete settings.projectAudio[cacheId];
+    } catch (err) {
+      audioSaveFailed = true;
+      storedProjectAudio = cloneSettingsAudio(mergedAudio);
+      settings.projectAudio[cacheId] = storedProjectAudio;
+      PROJECT_AUDIO_CACHE[cacheId] = cloneSettingsAudio(storedProjectAudio);
+      PROJECT_AUDIO_LOADED.add(cacheId);
+      try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to save audio for project ${cacheId}: ${err?.message || err}`) : console.warn('Settings: failed to save project audio', cacheId, err); } catch {}
+    }
+    if (settings.projectAudio && !Object.keys(settings.projectAudio).length) delete settings.projectAudio;
+  }
+  const audioForStorage = cloneSettingsAudio(storedProjectAudio);
+  if (Object.keys(audioForStorage).length) settings.audio = audioForStorage;
   else delete settings.audio;
   writeSettings(settings);
-  settingsModalResetFromStorage();
   try { document.dispatchEvent(new CustomEvent('settings-changed', { detail: { settings } })); } catch {}
-  try { showToast('Settings saved.', 'success'); } catch {}
+  let resetFailed = false;
+  try {
+    await settingsModalResetFromStorage();
+  } catch (err) {
+    resetFailed = true;
+    try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to refresh UI after save: ${err?.message || err}`) : console.warn('Settings: failed to refresh settings UI after save', err); } catch {}
+  }
+  let toastMessage = 'Settings saved.';
+  let toastLevel = 'success';
+  if (audioSaveFailed && resetFailed) {
+    toastMessage = 'Settings saved locally, but the server update failed and the UI may be stale. Please reload.';
+    toastLevel = 'warning';
+  } else if (audioSaveFailed) {
+    toastMessage = 'Settings saved locally. Failed to update project audio on server.';
+    toastLevel = 'warning';
+  } else if (resetFailed) {
+    toastMessage = 'Settings saved, but the UI may be out of date. Please reload.';
+    toastLevel = 'warning';
+  }
+  try { showToast(toastMessage, toastLevel); } catch {}
   const modal = document.getElementById('settingsModal');
   if (modal && window.bootstrap && window.bootstrap.Modal) {
     const inst = bootstrap.Modal.getInstance(modal) || null;

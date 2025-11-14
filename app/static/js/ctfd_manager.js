@@ -90,6 +90,10 @@ let CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
 let CTFD_CHALLENGE_REVEAL_EXPECTED = false;
 let CTFD_CHALLENGE_HIDE_EXPECTED = false;
 
+let CTFD_LOAD_REQUEST_COUNTER = 0;
+let CTFD_LOAD_ACTIVE_TOKEN = 0;
+let CTFD_CONFIG_REQUEST_TOKEN = 0;
+
 function ctfdResetAudioCache(){
   Object.keys(CTFD_AUDIO_CACHE).forEach(key => { delete CTFD_AUDIO_CACHE[key]; });
   Object.keys(CTFD_AUDIO_ROTATION).forEach(key => { delete CTFD_AUDIO_ROTATION[key]; });
@@ -1158,6 +1162,18 @@ function ctfdMigrateSelectedToAssoc(basePid){ try {
   try { sessionStorage.removeItem(CTFD_STORE_SELECTED); } catch {}
 } catch {} }
 function ctfdCurrentPid(){ try { return (window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : (PROJ?.id||''); } catch { return PROJ?.id||''; } }
+
+function ctfdSelectionMatches(expectedPid){
+  const target = String(expectedPid || '').trim();
+  if (!target) return true;
+  const current = String(ctfdCurrentPid() || '').trim();
+  if (!current) return true;
+  return current === target;
+}
+
+function ctfdSelectionChanged(expectedPid){
+  return !ctfdSelectionMatches(expectedPid);
+}
 function ctfdProjectsBadgeUpdate(){ try { const c = document.getElementById('projects-count'); if (!c) return; const arr = CTFD_SELECTED_PIDS; const n = Array.isArray(arr)? arr.length : 1; c.textContent = String(n); c.className = 'badge '+(n>1?'bg-primary':'bg-secondary'); } catch {} }
 async function ctfdEnsureProjects(){ if (CTFD_ALL_PROJECTS && CTFD_ALL_PROJECTS.length) return; try { const resp = await http('GET','/api/projects'); CTFD_ALL_PROJECTS = Array.isArray(resp?.projects)? resp.projects: []; } catch { CTFD_ALL_PROJECTS = []; } }
 function ctfdRenderProjectsList(filter){
@@ -2277,16 +2293,21 @@ function ctfdRenderTableMerged(){
 // Lightweight: load project configuration only (no CTFd calls, no progress modal)
 async function ctfdLoadProjectConfig(pid){
   try {
-    const id = (pid||'').trim(); if(!id) return;
-  const data = await http('GET','/api/projects');
-  const proj = (data.projects||[]).find(p => String(p.id) === id);
+    const id = String(pid||'').trim(); if(!id) return;
+    const token = ++CTFD_CONFIG_REQUEST_TOKEN;
+    const data = await http('GET','/api/projects');
+    if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
+    const proj = (data.projects||[]).find(p => String(p.id) === id);
     const info = document.getElementById('ctfd-info');
     if(!proj){
       ctfdStopCountdown(false);
       CTFD_LAST_CHALLENGES_STATE = null;
       if(info) info.textContent='Project not found.';
+      ctfdClearSkipped();
+      ctfdRenderSkippedIndicatorRaw([], '');
       return;
     }
+    if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
     PROJ = proj;
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
@@ -2313,6 +2334,7 @@ async function ctfdLoadProjectConfig(pid){
     // Render table; most meta columns will show 'n/a' as intended
     renderCtfdTable(PROJ);
     updateCtfdControlsEnabled();
+    ctfdRestoreSkippedIndicator();
   } catch (e) { try { shell.logError(`CTFd config load failed: ${e?.message||e}`); } catch {} }
 }
 
@@ -2348,17 +2370,45 @@ function ctfdSort(key){
 async function ctfdLoadProjectById(pid){
   // Prevent any implicit auto-refresh on initial page load
   if (!CTFD_ALLOW_LOAD) { try { shell.logDebug('CTFd: load blocked until user action'); } catch {} return; }
-  // If multiple projects are selected, run the multi refresh path
-  try { if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) { return await ctfdRefreshMulti(); } } catch {}
   const id = String(pid || '').trim();
   if (!id) return;
+  const loadToken = ++CTFD_LOAD_REQUEST_COUNTER;
+  CTFD_LOAD_ACTIVE_TOKEN = loadToken;
+  // If multiple projects are selected, run the multi refresh path
+  try {
+    if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
+      return await ctfdRefreshMulti({ loadToken, basePid: id });
+    }
+  } catch {}
   const info = document.getElementById('ctfd-info');
   const totalSteps = 3;
   let categoryPayload = null;
+  let animTimer = null;
+  let aborted = false;
+  let abortLogged = false;
+  const abortIfStale = () => {
+    const newerLoad = loadToken !== CTFD_LOAD_ACTIVE_TOKEN;
+    const selectionMoved = ctfdSelectionChanged(id);
+    if (!newerLoad && !selectionMoved) return false;
+    if (animTimer) { try { clearInterval(animTimer); } catch {} animTimer = null; }
+    if (!abortLogged && (selectionMoved || newerLoad)) {
+      const current = String(ctfdCurrentPid() || '');
+      try { shell?.logDebug?.(`CTFd load cancelled for ${id} (current selection ${current || 'none'}, newer=${newerLoad})`); } catch {}
+      abortLogged = true;
+    }
+    if (selectionMoved && !newerLoad) {
+      try { ctfdHideProgress(); } catch {}
+      updateCtfdControlsEnabled();
+    }
+    aborted = true;
+    return true;
+  };
   // Use inline progress bar instead of modal
   try { ctfdSetProgress(`Step 1/${totalSteps}: Loading project…`, 10, true); } catch {}
+  if (abortIfStale()) return;
   try {
     const data = await http('GET','/api/projects');
+    if (abortIfStale()) return;
     const proj = (data.projects||[]).find(p=>p.id===id);
     if(!proj){
       ctfdStopCountdown(false);
@@ -2367,8 +2417,11 @@ async function ctfdLoadProjectById(pid){
       PROJ=null;
       renderCtfdTable(null);
       ctfdClearPeriodicTimer();
+      ctfdClearSkipped();
+      ctfdRenderSkippedIndicatorRaw([], '');
       return;
     }
+    if (abortIfStale()) return;
     PROJ = proj; if(info) info.textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
@@ -2389,16 +2442,18 @@ async function ctfdLoadProjectById(pid){
       const input = document.getElementById('ctfd-filter'); if (input) input.value = CTFD_FILTER_TEXT;
       const reg = document.getElementById('ctfd-filter-regex'); if (reg) reg.checked = CTFD_FILTER_IS_REGEX;
     } catch {}
-  ctfdSetProgress(`Step 2/${totalSteps}: Rendering table…`, 50, true);
+    if (abortIfStale()) return;
+    ctfdSetProgress(`Step 2/${totalSteps}: Rendering table…`, 50, true);
     // Load column visibility and reflect Columns dropdown
     try {
       CTFD_COLS = readCtfdCols(PROJ.id);
       const ids = ['project','cred','team','user_points','team_points','user_last','team_last'];
-      ids.forEach(id=>{ const el = document.getElementById(`ctfd-col-${id}`); if (el) el.checked = !!CTFD_COLS[id]; });
+      ids.forEach(cid=>{ const el = document.getElementById(`ctfd-col-${cid}`); if (el) el.checked = !!CTFD_COLS[cid]; });
     } catch {}
-  renderCtfdTable(PROJ);
-  try { ctfdCacheSnapshot('single'); } catch {}
-  ctfdSetProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true);
+    renderCtfdTable(PROJ);
+    try { ctfdCacheSnapshot('single'); } catch {}
+    ctfdSetProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true);
+    if (abortIfStale()) return;
     try {
       if (window.bootstrap) {
         document.querySelectorAll('#ctfd-table [data-bs-toggle="tooltip"]').forEach(el => {
@@ -2406,6 +2461,7 @@ async function ctfdLoadProjectById(pid){
         });
       }
     } catch {}
+    if (abortIfStale()) return;
     // Progressive per-user existence check with x/y
     const creds = Array.isArray(PROJ.credentials) ? PROJ.credentials : [];
     const usernames = creds.map(c => String(c?.username||'').trim()).filter(Boolean);
@@ -2425,7 +2481,7 @@ async function ctfdLoadProjectById(pid){
     } else {
       ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, 72, true);
       let animPct = 72;
-      let animTimer = setInterval(()=>{
+      animTimer = setInterval(()=>{
         try {
           animPct = Math.min(animPct + 2, 88);
           ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, animPct, true);
@@ -2436,7 +2492,8 @@ async function ctfdLoadProjectById(pid){
         await runQueued(`Check CTFd users for ${PROJ?.name || PROJ?.id || ''}`, async () => {
           resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, { ...payloadBase });
         }, { projectId: PROJ?.id });
-        clearInterval(animTimer); animTimer = null;
+        if (abortIfStale()) return;
+        if (animTimer) { clearInterval(animTimer); animTimer = null; }
         if (resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
           categoryPayload = resp.category_firsts || {};
         }
@@ -2444,41 +2501,44 @@ async function ctfdLoadProjectById(pid){
         list.forEach(u => {
           const uname = String(u?.username || '').trim();
           if (!uname) return;
-            metaMap[uname] = {
-              exists: !!u?.exists,
-              user_rank: (u?.user_rank ?? null),
-              user_points: (u?.user_points ?? null),
-              team_name: (u?.team_name ?? null),
-              team_rank: (u?.team_rank ?? null),
-              team_points: (u?.team_points ?? null),
-              user_id: (u?.user_id ?? null),
-              team_id: (u?.team_id ?? null),
-              user_last_solve_time: (u?.user_last_solve_time ?? null),
-              user_last_solve_challenge: (u?.user_last_solve_challenge ?? null),
-              team_captain: (u?.team_captain ?? null),
-              team_size: (u?.team_size ?? null),
-              team_last_solve_time: (u?.team_last_solve_time ?? null),
-              team_last_solve_challenge: (u?.team_last_solve_challenge ?? null),
-            };
+          metaMap[uname] = {
+            exists: !!u?.exists,
+            user_rank: (u?.user_rank ?? null),
+            user_points: (u?.user_points ?? null),
+            team_name: (u?.team_name ?? null),
+            team_rank: (u?.team_rank ?? null),
+            team_points: (u?.team_points ?? null),
+            user_id: (u?.user_id ?? null),
+            team_id: (u?.team_id ?? null),
+            user_last_solve_time: (u?.user_last_solve_time ?? null),
+            user_last_solve_challenge: (u?.user_last_solve_challenge ?? null),
+            team_captain: (u?.team_captain ?? null),
+            team_size: (u?.team_size ?? null),
+            team_last_solve_time: (u?.team_last_solve_time ?? null),
+            team_last_solve_challenge: (u?.team_last_solve_challenge ?? null),
+          };
         });
         bulkSucceeded = true;
         ctfdSetProgress(`Step 3/${totalSteps}: Users loaded (${list.length})`, 90, false);
       } catch(bulkErr){
         try { console.warn('CTFd users bulk check failed; falling back to per-user mode:', bulkErr); } catch {}
-        try { clearInterval(animTimer); } catch {}
+        if (animTimer) { try { clearInterval(animTimer); } catch {} animTimer = null; }
       }
       if (!bulkSucceeded) {
+        if (abortIfStale()) return;
         // Legacy fallback loop
         let done = 0;
         const baseStart = 70, baseEnd = 90;
         const computePercent = () => { if (total <= 0) return baseEnd; const frac = Math.min(1, Math.max(0, done/total)); return Math.floor(baseStart + frac*(baseEnd-baseStart)); };
         ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (0/${total})…`, computePercent(), true);
         for (const name of usernames){
+          if (abortIfStale()) return;
           try {
             let resp;
             await runQueued(`Check CTFd user ${name}`, async () => {
               resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, { ...payloadBase, only: [name] });
             }, { projectId: PROJ?.id });
+            if (abortIfStale()) return;
             const list = Array.isArray(resp?.users) ? resp.users : [];
             if (!categoryPayload && resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
               categoryPayload = resp.category_firsts || {};
@@ -2509,19 +2569,27 @@ async function ctfdLoadProjectById(pid){
         }
       }
     }
+    if (abortIfStale()) return;
     ctfdApplyUserMeta(PROJ?.id, metaMap);
     if (categoryPayload !== null) {
       ctfdHandleCategoryFirsts(PROJ?.id, categoryPayload);
     }
-  ctfdSetProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false);
+    if (abortIfStale()) return;
+    ctfdSetProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false);
     renderCtfdTable(PROJ);
-  ctfdSetProgress('Done', 100, false);
+    ctfdSetProgress('Done', 100, false);
+    if (abortIfStale()) return;
     try { await ctfdLoadSettings(); } catch {}
   } catch (e) {
-    try { shell.logError(`CTFd Refresh failed: ${e?.message||e}`); } catch {}
+    if (!aborted) {
+      try { shell.logError(`CTFd Refresh failed: ${e?.message||e}`); } catch {}
+    }
   } finally {
-    try { ctfdHideProgress(); } catch {}
-    try { ctfdReschedulePeriodicForProject(PROJ?.id); } catch {}
+    if (animTimer) { try { clearInterval(animTimer); } catch {} }
+    if (!aborted && loadToken === CTFD_LOAD_ACTIVE_TOKEN) {
+      try { ctfdHideProgress(); } catch {}
+      try { ctfdReschedulePeriodicForProject(PROJ?.id); } catch {}
+    }
     updateCtfdControlsEnabled();
   }
 }
@@ -2548,10 +2616,28 @@ async function ctfdRefreshMulti(opts){
   const options = opts || {};
   const pids = Array.isArray(CTFD_SELECTED_PIDS)? CTFD_SELECTED_PIDS.slice(): [];
   if (!pids.length) return;
+  const loadToken = options.loadToken || ++CTFD_LOAD_REQUEST_COUNTER;
+  if (!options.loadToken) CTFD_LOAD_ACTIVE_TOKEN = loadToken;
+  const basePid = String(options.basePid || ctfdCurrentPid() || '').trim();
+  let aborted = false;
+  const abortIfStale = () => {
+    const newerLoad = loadToken !== CTFD_LOAD_ACTIVE_TOKEN;
+    const selectionMoved = basePid ? ctfdSelectionChanged(basePid) : false;
+    if (!newerLoad && !selectionMoved) return false;
+    if (selectionMoved && !newerLoad) {
+      try { ctfdHideProgress(); } catch {}
+      updateCtfdControlsEnabled();
+    }
+    aborted = true;
+    return true;
+  };
   ctfdClearPeriodicTimer();
+  if (abortIfStale()) return;
   try { ctfdSetProgress('Preparing multi-project refresh…', 10, true); } catch {}
+  if (abortIfStale()) return;
   // Preflight credentials
   const pf = await ctfdPreflightPids(pids);
+  if (abortIfStale()) return;
   if (!pf.ok) {
     try {
       // Render visible indicator with Fix Tokens button
@@ -2572,13 +2658,14 @@ async function ctfdRefreshMulti(opts){
     try { ctfdHideProgress(); } catch {}
     return;
   }
+  if (abortIfStale()) return;
   // Clear any previous indicator
   try { ctfdRenderSkippedIndicator([], ''); } catch {}
-  // Merge users_check across pids
   const metaMap = { ...(CTFD_USER_META||{}) };
   const failures = [];
   let done = 0; const total = pids.length;
   for (const pid of pids){
+    if (abortIfStale()) return;
     try {
       const proj = (CTFD_ALL_PROJECTS||[]).find(p=> String(p.id)===String(pid)); if (!proj) { failures.push(pid); continue; }
       const sess = readCtfdCreds(String(pid)) || {};
@@ -2588,6 +2675,7 @@ async function ctfdRefreshMulti(opts){
       await runQueued(`CTFd multi-check users for ${proj.name || pid}`, async () => {
         resp = await http('POST', `/api/projects/${pid}/ctfd/users_check`, { baseUrl, port, token: sess.token||'', verifySSL: true });
       }, { projectId: pid });
+      if (abortIfStale()) return;
       const list = Array.isArray(resp?.users) ? resp.users : [];
       if (resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
         ctfdHandleCategoryFirsts(pid, resp.category_firsts || {});
@@ -2620,12 +2708,14 @@ async function ctfdRefreshMulti(opts){
     } catch (e) { failures.push(pid); }
     done += 1;
   }
+  if (abortIfStale()) return;
   ctfdApplyUserMeta('multi', metaMap);
-  // Render merged table
+  if (abortIfStale()) return;
   ctfdSetProgress('Applying updates…', 95, false);
   ctfdRenderTableMerged();
   try { ctfdCacheSnapshot('multi'); } catch {}
   ctfdSetProgress('Done', 100, false);
+  if (abortIfStale()) return;
   // Minimal indicator via console for now; can add UI alert similar to Challenges page in a follow-up
   try {
     if (failures.length) {
@@ -2635,19 +2725,51 @@ async function ctfdRefreshMulti(opts){
       ctfdRenderSkippedIndicator([], '');
     }
   } catch {}
-  try { ctfdHideProgress(); } catch {}
+  if (!aborted && loadToken === CTFD_LOAD_ACTIVE_TOKEN) {
+    try { ctfdHideProgress(); } catch {}
+  }
   // Refresh settings toggles for the currently focused project (if any & validated)
-  try { if (PROJ) await ctfdLoadSettings(); } catch {}
+  if (!aborted) {
+    try { if (PROJ) await ctfdLoadSettings(); } catch {}
+  }
 }
 
-function ctfdRenderSkippedIndicator(pids, reason){
+function ctfdSkippedKey(){
+  const base = String(ctfdCurrentPid() || '').trim();
+  return base ? `toolhub.ctfd.skipped.${base}` : 'toolhub.ctfd.skipped.global';
+}
+
+function ctfdReadSkipped(){
+  try {
+    const raw = sessionStorage.getItem(ctfdSkippedKey());
+    if (!raw) return { projects: [], reason: '' };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { projects: [], reason: '' };
+    const projects = Array.isArray(parsed.projects) ? parsed.projects.map(id => String(id)).filter(Boolean) : [];
+    const reason = parsed.reason ? String(parsed.reason) : '';
+    return { projects, reason };
+  } catch { return { projects: [], reason: '' }; }
+}
+
+function ctfdWriteSkipped(projects, reason){
+  try {
+    const payload = { projects: (projects||[]).map(id => String(id)).filter(Boolean), reason: reason ? String(reason) : '' };
+    sessionStorage.setItem(ctfdSkippedKey(), JSON.stringify(payload));
+  } catch {}
+}
+
+function ctfdClearSkipped(){
+  try { sessionStorage.removeItem(ctfdSkippedKey()); } catch {}
+}
+
+function ctfdRenderSkippedIndicatorRaw(pids, reason){
   try {
     const box = document.getElementById('ctfd-proj-errors');
     if (!box) return;
     if (!pids || pids.length === 0) { box.classList.add('d-none'); box.textContent = ''; return; }
     const byId = {}; (CTFD_ALL_PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
     const names = pids.map(id=> (byId[String(id)]?.name || String(id)) );
-    box.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-2"><div><strong>Some projects were skipped</strong>:</div><div>${names.map(n=>`<span class=\"badge bg-light text-dark me-1\">${escHtml(n)}</span>`).join(' ')}</div><button id="ctfd-proj-errors-fix" type="button" class="btn btn-sm btn-outline-primary" title="Enter/Update tokens">Fix tokens</button></div><div class="mt-1">Reason: ${escHtml(reason||'credential or connection issue')}.</div>`;
+    box.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-2"><div><strong>Some projects were skipped</strong>:</div><div>${names.map(n=>`<span class="badge bg-light text-dark me-1">${escHtml(n)}</span>`).join(' ')}</div><button id="ctfd-proj-errors-fix" type="button" class="btn btn-sm btn-outline-primary" title="Enter/Update tokens">Fix tokens</button></div><div class="mt-1">Reason: ${escHtml(reason||'credential or connection issue')}.</div>`;
     box.classList.remove('d-none');
     const btn = document.getElementById('ctfd-proj-errors-fix');
       if (btn && !btn._bound){
@@ -2669,6 +2791,25 @@ function ctfdRenderSkippedIndicator(pids, reason){
         });
       }
   } catch {}
+}
+
+function ctfdRenderSkippedIndicator(pids, reason){
+  try {
+    const list = Array.isArray(pids) ? Array.from(new Set(pids.map(id => String(id)).filter(Boolean))) : [];
+    if (!list.length) {
+      ctfdClearSkipped();
+      ctfdRenderSkippedIndicatorRaw([], '');
+      return;
+    }
+    ctfdWriteSkipped(list, reason || '');
+    ctfdRenderSkippedIndicatorRaw(list, reason);
+  } catch {}
+}
+
+function ctfdRestoreSkippedIndicator(){
+  const state = ctfdReadSkipped();
+  if (state.projects.length) ctfdRenderSkippedIndicatorRaw(state.projects, state.reason);
+  else ctfdRenderSkippedIndicatorRaw([], '');
 }
 
 async function ctfdRefresh(){
@@ -2761,6 +2902,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireCtfdCols();
   // Projects selector UI (does not alter single-project flow yet)
   try { await ctfdSetupProjectsUi(); } catch {}
+  ctfdRestoreSkippedIndicator();
   // Auto-refresh wiring with pause/resume controls
   (function(){
     let timer = null;
@@ -3902,80 +4044,21 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Defensive cleanup for modal backdrops if Cancel/Close leaves a grey screen
-document.addEventListener('hidden.bs.modal', function(){
+document.addEventListener('hidden.bs.modal', ()=>{
   try {
     document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('padding-right');
+    document.body.style.removeProperty('overflow');
   } catch {}
 });
 
-// --- Shared action progress/results modals (VM Manager) ---
 function safeHideModalById(id) {
   try {
     const modal = document.getElementById(id);
     if (!modal || !window.bootstrap) return;
     const inst = bootstrap.Modal.getInstance(modal) || bootstrap.Modal.getOrCreateInstance(modal);
     try { inst.hide(); } catch {}
-  } catch {}
-}
-function closeAllModals() {
-  try {
-    // Attempt to hide known modals first
-    safeHideModalById('actionProgressModal');
-    safeHideModalById('actionSummaryModal');
-    safeHideModalById('ctfdLoginModal');
-  } catch {}
-  // Clean any lingering artifacts
-  try { document.querySelectorAll('.modal-backdrop').forEach(b => b.remove()); } catch {}
-  try {
-    document.body.classList.remove('modal-open');
-    document.body.style.removeProperty('padding-right');
-    document.body.style.removeProperty('overflow');
-  } catch {}
-}
-function showActionProgress(title, text) {
-  try {
-    // Ensure no other modal is visible before showing progress
-    closeAllModals();
-    const modal = document.getElementById('actionProgressModal');
-    if (!modal || !window.bootstrap) return;
-    const titleEl = document.getElementById('action-progress-title');
-    const textEl = document.getElementById('action-progress-text');
-    const barEl = document.getElementById('action-progress-bar');
-    if (titleEl) titleEl.textContent = title || 'Working…';
-    if (textEl) textEl.textContent = text || '';
-    if (barEl) { barEl.style.width = '20%'; barEl.setAttribute('aria-valuenow', '20'); barEl.textContent = 'Starting…'; barEl.classList.add('progress-bar-striped','progress-bar-animated'); }
-    const bs = bootstrap.Modal.getOrCreateInstance(modal);
-    // Defer show slightly to allow any previous hides to complete
-    setTimeout(() => { try { bs.show(); } catch {} }, 10);
-  } catch {}
-}
-function updateActionProgress(percent, text) {
-  try {
-    const textEl = document.getElementById('action-progress-text');
-    const barEl = document.getElementById('action-progress-bar');
-    if (textEl && text) textEl.textContent = text;
-    if (barEl) { const p = Math.max(0, Math.min(100, Number(percent)||0)); barEl.style.width = `${p}%`; barEl.setAttribute('aria-valuenow', String(p)); if (text) barEl.textContent = text; }
-  } catch {}
-}
-function hideActionProgress() {
-  try {
-    const modal = document.getElementById('actionProgressModal');
-    if (!modal || !window.bootstrap) return;
-    const barEl = document.getElementById('action-progress-bar');
-    if (barEl) { barEl.style.width = '100%'; barEl.textContent = 'Done'; barEl.classList.remove('progress-bar-animated'); }
-    const inst = bootstrap.Modal.getInstance(modal) || bootstrap.Modal.getOrCreateInstance(modal);
-    try { inst.hide(); } catch {}
-    // Force-clean any lingering Bootstrap modal state/backdrops to restore scroll
-    try {
-      document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
-    } catch {}
-    try {
-      document.body.classList.remove('modal-open');
-      document.body.style.removeProperty('padding-right');
-      document.body.style.removeProperty('overflow');
-    } catch {}
   } catch {}
 }
 function showActionSummary(title, htmlBody) {
@@ -3992,13 +4075,3 @@ function showActionSummary(title, htmlBody) {
     setTimeout(() => { try { bs.show(); } catch {} }, 10);
   } catch {}
 }
-
-// Defensive cleanup when closing summary via Escape or X to ensure scroll works next view
-document.addEventListener('hidden.bs.modal', function(){
-  try {
-    document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
-    document.body.classList.remove('modal-open');
-    document.body.style.removeProperty('padding-right');
-    document.body.style.removeProperty('overflow');
-  } catch {}
-});

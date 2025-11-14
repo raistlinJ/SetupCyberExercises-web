@@ -2873,6 +2873,13 @@ def instances_start(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     started = []
     resumed = []
+    try:
+        max_jobs = int(getattr(proj, 'proxmox_max_create_jobs', 20) or 1)
+    except Exception:
+        max_jobs = 1
+    if max_jobs < 1:
+        max_jobs = 1
+    pool_workers = max(1, min(len(mapped), max_jobs, 16)) if mapped else 1
     # Run in parallel with a reasonable pool size
     def do_start(m):
         if _is_cancelled(pid):
@@ -2886,7 +2893,7 @@ def instances_start(pid: str):
         client._wait_task(m['node'], upid, timeout=600)
         return ('started', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
-    with ThreadPoolExecutor(max_workers=min(len(mapped), 16) or 1) as pool:
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_start, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
@@ -6366,7 +6373,7 @@ def export_projects():
 
 
 # --- Export (long-running, remote vzdump) ---
-import datetime
+import datetime as datetime_module
 
 def _parse_host_from_url(url: str) -> str:
     try:
@@ -7052,7 +7059,7 @@ def export_project_start(pid: str):
                             size = 0
                         rec = {
                             'id': job_id,
-                            'timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
+                            'timestamp': datetime_module.datetime.utcnow().isoformat() + 'Z',
                             'include_creds': bool(include_creds),
                             'include_vms': True,
                             'local_path': local_zip,
@@ -7753,7 +7760,7 @@ def ctfd_stats_challenges(pid: str):
                         return None
                     # Try ISO8601
                     try:
-                        dt = datetime.datetime.fromisoformat(s.replace('Z','+00:00'))
+                        dt = datetime_module.datetime.fromisoformat(s.replace('Z','+00:00'))
                         return dt.timestamp()
                     except Exception:
                         pass
@@ -8181,7 +8188,7 @@ def ctfd_stats_challenge_one(pid: str, cid: int):
                 s = str(val).strip();
                 if not s: return None
                 try:
-                    dt = datetime.datetime.fromisoformat(s.replace('Z','+00:00'))
+                    dt = datetime_module.datetime.fromisoformat(s.replace('Z','+00:00'))
                     return dt.timestamp()
                 except Exception: pass
                 try: return float(int(s))

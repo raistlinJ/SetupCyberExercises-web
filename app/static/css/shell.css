@@ -94,6 +94,7 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	height: var(--console-height);
 	background: linear-gradient(135deg, rgba(13, 23, 37, .96), rgba(8, 12, 22, .96));
 	color: #e2e8f0;
+	font-family: var(--bs-body-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 	z-index: 2100;
 	transform: translateY(calc(100% - 52px));
 	transition: transform .28s ease, box-shadow .28s ease;
@@ -136,6 +137,8 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 .console-dock.mode-queue .dock-header .title { color: #facc15; }
 .console-dock.mode-queue .dock-header .filters,
 .console-dock.mode-queue .dock-header .actions { display: none !important; }
+.console-dock:not(.open) .dock-header .actions { display: none !important; }
+.console-dock.open .dock-header .actions { display: flex; align-items: center; gap: .4rem; }
 .console-dock .dock-header .filters { gap: .4rem; }
 .console-dock .dock-header .filters .btn {
 	border: 0;
@@ -191,7 +194,7 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	position: absolute;
 	inset: 52px 0 0 0;
 	overflow: auto;
-	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-family: inherit;
 	font-size: 12px;
 	line-height: 1.45;
 	padding: .75rem 1.1rem;
@@ -227,6 +230,7 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	border-radius: 999px;
 	padding: .4rem 1rem;
 	font-size: .72rem;
+	font-family: var(--bs-body-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 	letter-spacing: .08em;
 	text-transform: uppercase;
 	box-shadow: 0 8px 24px rgba(15, 23, 42, .35);
@@ -259,6 +263,7 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	border: 1px solid rgba(148, 163, 184, .22);
 	background: rgba(15, 23, 42, .97);
 	color: #e2e8f0;
+	font-family: var(--bs-body-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 .console-drop-menu .list-group-item {
 	background: transparent;
@@ -304,8 +309,8 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	justify-content: center;
 	padding: .28rem .9rem;
 	border-radius: 999px;
-	font-size: .72rem;
-	letter-spacing: .08em;
+	font-size: .68rem;
+	letter-spacing: .06em;
 	text-transform: uppercase;
 	font-weight: 600;
 	color: #e2e8f0;
@@ -313,7 +318,7 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 }
 .console-dock .queue-pill.active { background: rgba(59, 130, 246, .35); color: #dbeafe; }
 .console-dock .queue-pill.idle { background: rgba(148, 163, 184, .24); color: #f1f5f9; }
-.console-dock .queue-count { font-size: .82rem; color: rgba(226, 232, 240, .75); }
+.console-dock .queue-count { font-size: .78rem; color: rgba(226, 232, 240, .75); }
 .console-dock .queue-status-actions .btn-queue-refresh {
 	border-radius: 999px;
 	border: 1px solid rgba(148, 163, 184, .3);
@@ -339,8 +344,8 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	box-shadow: inset 0 0 0 1px rgba(148, 163, 184, .08);
 }
 .console-dock .queue-section-title {
-	font-size: .74rem;
-	letter-spacing: .12em;
+	font-size: .7rem;
+	letter-spacing: .1em;
 	text-transform: uppercase;
 	color: #94a3b8;
 	margin-bottom: .6rem;
@@ -377,7 +382,7 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 }
 .console-dock .queue-item.queue-item-blocked { border-style: dashed; opacity: .75; }
 .console-dock .queue-item .queue-meta { font-size: .75rem; color: rgba(203, 213, 225, .8); margin-left: .5rem; }
-.console-dock .queue-item .queue-blocked { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; }
+.console-dock .queue-item .queue-blocked { font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
 .console-dock .queue-index {
 	display: inline-flex;
 	align-items: center;
