@@ -1896,10 +1896,74 @@ function proxMetaKey(pid){ return `toolhub.session.proxmox.meta.${pid}`; }
 function writeProxMeta(pid,obj){ try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj||{})); } catch {} }
 function normalizeUrl(s){ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
 
-let AFS_CTX = { pid: null, templates: [], selected: new Set() };
+function normalizeHost(raw){
+  if (!raw) return '';
+  try {
+    const str = String(raw).trim();
+    const trimmed = str.replace(/^.*@/, '');
+    if (/^https?:\/\//i.test(trimmed)) {
+      const u = new URL(trimmed);
+      return (u.hostname || '').split(':')[0].toLowerCase();
+    }
+    return trimmed.split(/[/:]/)[0].toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function hostRoot(host){
+  if (!host) return '';
+  try { return String(host).split('.')[0].toLowerCase(); } catch { return ''; }
+}
+
+function deriveAfsCurrentNode(pid, templates, urlBase){
+  const proj = (window.PROJ_CACHE||{})[pid] || {};
+  const hostFull = normalizeHost(urlBase || proj.proxmox_url || '');
+  const hostPrefix = hostRoot(hostFull);
+  const tplNodes = Array.isArray(templates) ? templates.map(t => String(t.node||'')) : [];
+  const tplLower = tplNodes.map(n => n.toLowerCase());
+
+  const mapping = proj.proxmox_node_host_map || {};
+  for (const [node, target] of Object.entries(mapping)){
+    const mappedHost = normalizeHost(target);
+    const mappedRoot = hostRoot(mappedHost);
+    if (mappedHost && hostFull && mappedHost === hostFull) return String(node);
+    if (mappedRoot && hostPrefix && mappedRoot === hostPrefix) return String(node);
+  }
+
+  const sshHost = normalizeHost(proj.proxmox_ssh_host || '');
+  const sshRoot = hostRoot(sshHost);
+  if (sshRoot) {
+    const matchIdx = tplLower.findIndex(n => n === sshRoot);
+    if (matchIdx !== -1) return tplNodes[matchIdx];
+  }
+
+  if (hostPrefix) {
+    const matchIdx = tplLower.findIndex(n => n === hostPrefix);
+    if (matchIdx !== -1) return tplNodes[matchIdx];
+  }
+
+  const uniques = Array.from(new Set(tplNodes.filter(Boolean)));
+  if (uniques.length === 1) return uniques[0];
+  return hostPrefix || '';
+}
+
+function setAfsLoading(isLoading){
+  const btn = document.getElementById('afs-fetch');
+  const spinner = document.getElementById('afs-fetch-spinner');
+  const label = document.getElementById('afs-fetch-label');
+  if (btn) {
+    btn.disabled = !!isLoading;
+    btn.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+  }
+  if (spinner) spinner.classList.toggle('d-none', !isLoading);
+  if (label) label.textContent = isLoading ? 'Fetching...' : 'Fetch';
+}
+
+let AFS_CTX = { pid: null, templates: [], selected: new Set(), currentNode: '' };
 
 function openAddFromServer(pid){
-  AFS_CTX = { pid, templates: [], selected: new Set() };
+  AFS_CTX = { pid, templates: [], selected: new Set(), currentNode: '' };
   // prefill from project cache and session creds
   const p = (window.PROJ_CACHE||{})[pid] || {};
   const modal = document.getElementById('addFromServerModal');
@@ -1923,6 +1987,7 @@ function openAddFromServer(pid){
   if (addBtn) addBtn.disabled = true;
   if (filterEl) filterEl.value = '';
   if (filterGroup) filterGroup.style.display = 'none';
+  setAfsLoading(false);
   // wire events (idempotent)
   try {
     document.getElementById('afs-fetch').onclick = fetchTemplatesForAFS;
@@ -1951,11 +2016,17 @@ async function fetchTemplatesForAFS(){
   if (!urlBase){ try { showToast('Enter Proxmox URL', 'warning'); } catch { alert('Enter Proxmox URL'); } return; }
   const baseUrl = urlBase.replace(/\/$/, '') + (apiPort ? '' : '') ; // API endpoints include /api2/json internally
   const body = { baseUrl, apiPort, verifySSL: !!(verEl?.checked), username: (uEl?.value||'').trim() || undefined, password: (pwEl?.value||'') || undefined };
+  setAfsLoading(true);
+  if (list) {
+    list.style.display = '';
+    list.innerHTML = '<div class="text-muted small p-2"><span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Fetching templates...</div>';
+  }
   try {
     await runQueued(`Fetch templates for ${pid}`, async () => {
       const resp = await http('POST', '/api/proxmox/templates', body);
       const items = Array.isArray(resp?.templates) ? resp.templates : [];
       AFS_CTX.templates = items.map(t => ({ node: String(t.node||''), vmid: Number(t.vmid||0), name: String(t.name||''), bridges: Array.isArray(t.bridges)? t.bridges.map(b=>String(b||'')) : [] }));
+      AFS_CTX.currentNode = deriveAfsCurrentNode(pid, AFS_CTX.templates, urlBase);
       // persist creds and meta for VM Manager prefill
       writeProxCreds(pid, { username: body.username||'', password: body.password||'' });
       writeProxMeta(pid, { url: urlBase, apiPort: apiPort, sshPort: Number(p.proxmox_ssh_port||22)||22 });
@@ -1965,6 +2036,8 @@ async function fetchTemplatesForAFS(){
     }, { projectId: pid });
   } catch (e){
   if (list) { list.innerHTML = `<div class="text-danger small p-2">Fetch failed: ${e.message}</div>`; list.style.display = ''; }
+  } finally {
+    setAfsLoading(false);
   }
 }
 
@@ -1978,21 +2051,57 @@ function renderAFSList(){
     return s.includes(filter);
   });
   if (!items.length){ if (list) list.innerHTML = '<div class="text-muted small p-2">No templates found.</div>'; if (addBtn) addBtn.disabled = true; return; }
-  const rows = items.map(t => {
+  const currentNode = String(AFS_CTX.currentNode||'').toLowerCase();
+  const hasCurrent = currentNode && (AFS_CTX.templates||[]).some(t => String(t.node||'').toLowerCase() === currentNode);
+  const restrict = !!hasCurrent;
+  const ordered = items.slice().sort((a, b) => {
+    if (restrict){
+      const aPreferred = String(a.node||'').toLowerCase() === currentNode;
+      const bPreferred = String(b.node||'').toLowerCase() === currentNode;
+      if (aPreferred !== bPreferred) return aPreferred ? -1 : 1;
+    }
+    const nameCmp = String(a.name||'').localeCompare(String(b.name||''));
+    if (nameCmp !== 0) return nameCmp;
+    return Number(a.vmid||0) - Number(b.vmid||0);
+  });
+  let hasPreferredInFilter = false;
+  const rows = ordered.map(t => {
     const key = `${t.node}|${t.vmid}|${t.name}`;
     const checked = AFS_CTX.selected.has(key) ? 'checked' : '';
     const bridges = (t.bridges||[]).join(', ');
-    return `<label class="list-group-item d-flex align-items-center gap-2">
-      <input type="checkbox" class="form-check-input me-2" data-key="${key}" ${checked} />
-      <span class="badge bg-secondary">${t.node}</span>
+    const nodeName = String(t.node||'');
+    const isPreferred = restrict && nodeName.toLowerCase() === currentNode;
+    if (isPreferred) hasPreferredInFilter = true;
+    const disableRow = restrict && !isPreferred;
+    if (disableRow) AFS_CTX.selected.delete(key);
+    const reason = disableRow ? (AFS_CTX.currentNode ? `Template is on node ${nodeName}. Current node is ${AFS_CTX.currentNode}.` : `Template is on node ${nodeName}.`) : '';
+    const tooltip = disableRow ? ` title="${escHtml(reason)}"` : '';
+    const labelCls = `list-group-item d-flex align-items-center gap-2${disableRow ? ' opacity-50' : ''}`;
+    const checkboxAttrs = `type="checkbox" class="form-check-input me-2" data-key="${key}" ${checked}${disableRow ? ' disabled' : ''}`;
+    const nodeBadgeCls = disableRow ? 'badge bg-light text-dark border' : 'badge bg-secondary';
+    const trailingBits = [];
+    if (bridges) trailingBits.push(`<span class="small text-muted">bridges: ${escHtml(bridges)}</span>`);
+    if (disableRow) trailingBits.push('<span class="badge bg-warning text-dark">Other node</span>');
+    const trailing = trailingBits.length ? `<span class="ms-auto d-flex align-items-center gap-2 flex-wrap">${trailingBits.join('')}</span>` : '';
+    return `<label class="${labelCls}"${tooltip}>
+      <input ${checkboxAttrs} />
+      <span class="${nodeBadgeCls}">${escHtml(nodeName || 'unknown')}</span>
       <strong>${escHtml(t.name)}</strong>
       <span class="text-muted">#${t.vmid}</span>
-      ${bridges ? `<span class="ms-auto small text-muted">bridges: ${escHtml(bridges)}</span>` : ''}
+      ${trailing || ''}
     </label>`;
   }).join('');
-  if (list) list.innerHTML = `<div class="list-group list-group-flush">${rows}</div>`;
+  if (list) {
+    let notice = '';
+    if (restrict){
+      const info = hasPreferredInFilter ? 'Templates on other nodes are disabled.' : 'No templates on the current node match this filter.';
+      notice = `<div class="small text-muted px-3 py-2 border-bottom">Current node: <strong>${escHtml(AFS_CTX.currentNode)}</strong>. ${escHtml(info)}</div>`;
+    }
+    list.innerHTML = `${notice}<div class="list-group list-group-flush">${rows}</div>`;
+  }
   // wire checkbox changes
   try {
+    if (!list) return;
     (list.querySelectorAll('input[type=checkbox]')||[]).forEach(cb => {
       cb.onchange = (e) => {
         const k = e.target.getAttribute('data-key');

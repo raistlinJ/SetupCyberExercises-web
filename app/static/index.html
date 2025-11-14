@@ -246,7 +246,10 @@
             <input id="afs-password" type="password" class="form-control form-control-sm" />
           </div>
           <div class="col-md-2 d-flex align-items-end">
-            <button id="afs-fetch" class="btn btn-sm btn-primary w-100">Fetch</button>
+            <button id="afs-fetch" type="button" class="btn btn-sm btn-primary w-100" aria-busy="false">
+              <span id="afs-fetch-label">Fetch</span>
+              <span id="afs-fetch-spinner" class="spinner-border spinner-border-sm ms-2 d-none" role="status" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
         <div id="afs-filter-group" class="mb-2" style="display:none;">
