@@ -21,6 +21,46 @@ let CURRENT_ACTION = null;
 let ACTION_RUN_ID = 0;
 let FIX_CREDS_IN_PROGRESS = false;
 
+const VM_SCROLL_KEY = 'toolhub.vmManager.scrollTop';
+
+function vmScrollContainer(){
+  try { return document.getElementById('vm-table'); } catch { return null; }
+}
+
+function vmRestoreScrollPosition(){
+  try {
+    const el = vmScrollContainer();
+    if (!el) return;
+    const raw = sessionStorage.getItem(VM_SCROLL_KEY);
+    if (raw === null) return;
+    const top = parseInt(raw, 10);
+    if (!Number.isFinite(top) || top < 0) return;
+    requestAnimationFrame(() => {
+      const max = Math.max(0, el.scrollHeight - el.clientHeight);
+      el.scrollTop = Math.max(0, Math.min(top, max));
+    });
+  } catch {}
+}
+
+function vmInitScrollPersistence(){
+  const el = vmScrollContainer();
+  if (!el || el._scrollPersistBound) return;
+  el._scrollPersistBound = true;
+  const save = () => {
+    try { sessionStorage.setItem(VM_SCROLL_KEY, String(el.scrollTop || 0)); } catch {}
+  };
+  el.addEventListener('scroll', save);
+  window.addEventListener('beforeunload', save);
+  vmRestoreScrollPosition();
+}
+
+function vmEnsureScrollPersistence(){
+  vmInitScrollPersistence();
+  vmRestoreScrollPosition();
+}
+
+document.addEventListener('DOMContentLoaded', vmEnsureScrollPersistence);
+
 // Column visibility per project
 let VM_COLS = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true };
 function vmColsKey(pid){ return `toolhub.vm.mgr.cols.${pid}`; }
@@ -234,13 +274,15 @@ async function vmLoadProject() {
     ALL_PROJECTS = list;
     const proj = list.find(p => p.id === pid);
     if (!proj) {
-      document.getElementById('vm-info').textContent = 'Project not found.';
+  const infoMiss = document.getElementById('vm-info');
+  if (infoMiss) infoMiss.textContent = 'Project not found.';
       PROJ = null;
       renderVmTable(null);
       return;
     }
-    PROJ = proj;
-    document.getElementById('vm-info').textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
+  PROJ = proj;
+  const infoFound = document.getElementById('vm-info');
+  if (infoFound) infoFound.textContent = '';
     try { VM_COLS = readVmCols(PROJ.id); const ids=['name','cred','status','state','id','node','template','nets']; ids.forEach(id=>{ const el=document.getElementById(`vm-col-${id}`); if(el) el.checked = !!VM_COLS[id]; }); } catch {}
     renderVmTable(proj);
   updateRefreshState();
@@ -259,7 +301,7 @@ async function vmLoadProjectById(pid) {
   const info = document.getElementById('vm-info');
   if (!proj) { if (info) info.textContent = 'Project not found.'; PROJ = null; renderVmTable(null); return; }
   PROJ = proj;
-  if (info) info.textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
+  if (info) info.textContent = '';
   try { VM_COLS = readVmCols(PROJ.id); const ids=['name','cred','status','state','id','node','template','nets']; ids.forEach(id=>{ const el=document.getElementById(`vm-col-${id}`); if(el) el.checked = !!VM_COLS[id]; }); } catch {}
   renderVmTable(proj);
   updateRefreshState();
@@ -726,6 +768,7 @@ function renderMergedVmTable(rows){
   }
   html += '</tbody></table>';
   host.innerHTML = html;
+  vmEnsureScrollPersistence();
   // Wire header checkbox and row checkboxes
   try {
     const all = host.querySelector('#chk-all');
@@ -1264,6 +1307,7 @@ function renderVmTable(proj) {
   }
   html += '</tbody></table>';
   host.innerHTML = html;
+  vmEnsureScrollPersistence();
   // Wire row checkboxes and header checkbox
   const all = host.querySelector('#chk-all');
   if (all) all.addEventListener('change', (e) => {

@@ -94,6 +94,46 @@ let CTFD_LOAD_REQUEST_COUNTER = 0;
 let CTFD_LOAD_ACTIVE_TOKEN = 0;
 let CTFD_CONFIG_REQUEST_TOKEN = 0;
 
+const CTFD_SCROLL_KEY = 'toolhub.ctfdManager.scrollTop';
+
+function ctfdScrollContainer(){
+  try { return document.getElementById('ctfd-table'); } catch { return null; }
+}
+
+function ctfdRestoreScrollPosition(){
+  try {
+    const el = ctfdScrollContainer();
+    if (!el) return;
+    const raw = sessionStorage.getItem(CTFD_SCROLL_KEY);
+    if (raw === null) return;
+    const top = parseInt(raw, 10);
+    if (!Number.isFinite(top) || top < 0) return;
+    requestAnimationFrame(() => {
+      const max = Math.max(0, el.scrollHeight - el.clientHeight);
+      el.scrollTop = Math.max(0, Math.min(top, max));
+    });
+  } catch {}
+}
+
+function ctfdInitScrollPersistence(){
+  const el = ctfdScrollContainer();
+  if (!el || el._scrollPersistBound) return;
+  el._scrollPersistBound = true;
+  const save = () => {
+    try { sessionStorage.setItem(CTFD_SCROLL_KEY, String(el.scrollTop || 0)); } catch {}
+  };
+  el.addEventListener('scroll', save);
+  window.addEventListener('beforeunload', save);
+  ctfdRestoreScrollPosition();
+}
+
+function ctfdEnsureScrollPersistence(){
+  ctfdInitScrollPersistence();
+  ctfdRestoreScrollPosition();
+}
+
+document.addEventListener('DOMContentLoaded', ctfdEnsureScrollPersistence);
+
 function ctfdResetAudioCache(){
   Object.keys(CTFD_AUDIO_CACHE).forEach(key => { delete CTFD_AUDIO_CACHE[key]; });
   Object.keys(CTFD_AUDIO_ROTATION).forEach(key => { delete CTFD_AUDIO_ROTATION[key]; });
@@ -1100,8 +1140,8 @@ function ctfdRestoreSnapshot(){
     if (data.mode === 'single' && data.proj) {
       PROJ = data.proj;
       try {
-        const info = document.getElementById('ctfd-info');
-        if (info && PROJ) info.textContent = `Project: ${PROJ.name} (Instances: ${PROJ.instances}, Tag: ${PROJ.tag})`;
+  const info = document.getElementById('ctfd-info');
+  if (info && PROJ) info.textContent = '';
       } catch {}
       renderCtfdTable(PROJ);
       return true;
@@ -2042,6 +2082,7 @@ function renderCtfdTable(proj){
   }
   html += '</tbody></table>';
   host.innerHTML = html;
+  ctfdEnsureScrollPersistence();
   // Snapshot latest single-project render
   try { ctfdCacheSnapshot('single'); } catch {}
 
@@ -2256,6 +2297,7 @@ function ctfdRenderTableMerged(){
   }
   html += '</tbody></table>';
   host.innerHTML = html;
+  ctfdEnsureScrollPersistence();
   // Initialize tooltips for any rendered elements
   try { if (window.bootstrap) { document.querySelectorAll('#ctfd-table [data-bs-toggle="tooltip"]').forEach(el => { try { bootstrap.Tooltip.getOrCreateInstance(el); } catch {} }); } } catch {}
   // Snapshot latest merged render
@@ -2311,7 +2353,7 @@ async function ctfdLoadProjectConfig(pid){
     PROJ = proj;
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
-    if(info) info.textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
+  if(info) info.textContent = '';
     // Restore UI state for this project (filters/sort etc.)
     try {
       const st = readCtfdUiState(PROJ.id)||{};
@@ -2422,7 +2464,7 @@ async function ctfdLoadProjectById(pid){
       return;
     }
     if (abortIfStale()) return;
-    PROJ = proj; if(info) info.textContent = `Project: ${proj.name} (Instances: ${proj.instances}, Tag: ${proj.tag})`;
+  PROJ = proj; if(info) info.textContent = '';
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
     // Restore UI state for this project

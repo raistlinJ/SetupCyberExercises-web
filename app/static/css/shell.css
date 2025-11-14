@@ -6,12 +6,20 @@
 
 /* Scrollable containers for data tables */
 .data-scrollbox {
-	max-height: min(60vh, 620px);
+	max-height: min(72vh, 740px);
 	overflow-y: auto;
 	border: 1px solid rgba(108, 117, 125, .35);
 	border-radius: .75rem;
 	background-color: rgba(248, 249, 250, .7);
 	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
+}
+
+.data-scrollbox table thead th {
+	position: sticky;
+	top: 0;
+	background-color: rgba(248, 249, 250, .96);
+	box-shadow: inset 0 -1px 0 rgba(108, 117, 125, .35), 0 1px 0 rgba(255, 255, 255, .9);
+	z-index: 2;
 }
 
 .shell-container.sidebar-collapsed .shell-sidebar {
