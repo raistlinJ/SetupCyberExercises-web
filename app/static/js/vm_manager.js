@@ -2040,7 +2040,7 @@ function updateRefreshState() {
   try {
     const anySelected = SELECTED_ROWS && SELECTED_ROWS.size > 0;
     const disable = !(loggedIn && anySelected);
-  ['act-startup','act-stop','act-state','act-control','act-users'].forEach(id => {
+  ['act-startup','act-stop','act-nets','act-state','act-control','act-users'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = disable;
     });
@@ -2872,6 +2872,19 @@ function showActionSummary(actionName, resp) {
     const body = document.getElementById('action-summary-body');
     if (!body) return;
     if (title) title.textContent = `${actionName} Results`;
+    const formatBytes = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let idx = 0;
+      let num = n;
+      while (num >= 1024 && idx < units.length - 1) {
+        num /= 1024;
+        idx += 1;
+      }
+      const precision = num >= 10 || idx === 0 ? 0 : 1;
+      return `${num.toFixed(precision)} ${units[idx]}`;
+    };
   const created = Array.isArray(resp.created) ? resp.created : [];
     const deleted = Array.isArray(resp.deleted) ? resp.deleted : [];
     const skipped = Array.isArray(resp.skipped) ? resp.skipped : [];
@@ -2891,11 +2904,15 @@ function showActionSummary(actionName, resp) {
   const addedMembers = Array.isArray(resp.added_members) ? resp.added_members : [];
   const deletedUsers = Array.isArray(resp.deleted_users) ? resp.deleted_users : [];
   const deletedPools = Array.isArray(resp.deleted_pools) ? resp.deleted_pools : [];
+  const outputsZipInfo = (resp.outputs_zip && resp.outputs_zip.base64) ? resp.outputs_zip : null;
 
     const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
     const list = (items, fmt) => items && items.length ? `<ul class="small">${items.map(fmt).join('')}</ul>` : '<div class="text-muted small">None</div>';
 
     const sections = [];
+  if (!ran.length && Array.isArray(resp.error_summary) && resp.error_summary.length) {
+    sections.unshift(`<div class="alert alert-danger py-1 small">${resp.error_summary.map(line => esc(line)).join('<br>')}</div>`);
+  }
   if (created.length) sections.push(`<h6>Created</h6>${list(created, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   if (deleted.length) sections.push(`<h6>Deleted</h6>${list(deleted, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   const started = Array.isArray(resp.started) ? resp.started : [];
@@ -2928,7 +2945,7 @@ function showActionSummary(actionName, resp) {
     const cmds = Array.isArray(i.cmds) ? i.cmds : [];
     const cmdList = cmds.length ? `<ul class="small">${cmds.map(c => `<li><code>${esc(c.cmd||'')}</code> — exit ${c.exitcode===null?'?':String(c.exitcode)}${(c.out_tail||c.err_tail)?`<pre class=\"mt-1 mb-2 small bg-light p-2 overflow-auto\" style=\"max-height:8rem\">${esc(c.out_tail||c.err_tail||'')}</pre>`:''}</li>`).join('')}</ul>` : '<div class="text-muted small">No commands</div>';
     return `<li>${esc(i.name)} — ${i.count||0} cmd(s)${cmds.length?':':''}${cmdList}</li>`;
-  }).join('')}`);
+    })}`);
   if (resp.notice && typeof resp.notice === 'string') {
     sections.unshift(`<div class="alert alert-warning py-1 small">${esc(resp.notice)}</div>`);
   }
@@ -2962,6 +2979,41 @@ function showActionSummary(actionName, resp) {
 
     body.innerHTML = `<div class="mb-2 text-muted">${esc(summaryCounts || 'No changes')}</div>${sections.join('\n') || '<div class="text-muted small">No results to display.</div>'}`;
     const modalEl = document.getElementById('actionSummaryModal');
+    if (outputsZipInfo) {
+      try {
+        const base64 = outputsZipInfo.base64;
+        const binary = atob(base64);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'application/zip' });
+        const url = URL.createObjectURL(blob);
+        const container = document.createElement('div');
+        container.className = 'mt-3';
+        const heading = document.createElement('h6');
+        heading.textContent = 'Command Outputs';
+        container.appendChild(heading);
+        const link = document.createElement('a');
+        link.className = 'btn btn-sm btn-outline-primary';
+        link.href = url;
+        link.download = outputsZipInfo.filename || 'startup-command-outputs.zip';
+        const sizeLabel = formatBytes(outputsZipInfo.size || bytes.length);
+        link.textContent = `Download (${sizeLabel})`;
+        container.appendChild(link);
+        body.appendChild(container);
+        if (modalEl && window.bootstrap) {
+          const cleanup = () => {
+            try { URL.revokeObjectURL(url); } catch {}
+            try { modalEl.removeEventListener('hidden.bs.modal', cleanup); } catch {}
+          };
+          modalEl.addEventListener('hidden.bs.modal', cleanup, { once: true });
+        }
+      } catch (err) {
+        try { console.error('Failed to prepare startup command outputs download', err); } catch {}
+      }
+    }
     if (modalEl && window.bootstrap) {
       const bs = bootstrap.Modal.getOrCreateInstance(modalEl);
       bs.show();

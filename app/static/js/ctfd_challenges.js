@@ -418,7 +418,13 @@
     };
     try { filtered.sort(cmp); } catch {}
 
-  const baseUrlSingle = ((projectInfo && projectInfo.challenge_url) ? String(projectInfo.challenge_url) : '').replace(/\/$/,'');
+    const baseUrlSingle = ((projectInfo && projectInfo.challenge_url) ? String(projectInfo.challenge_url) : '').replace(/\/$/,'');
+    const ensureAdminBase = url => {
+      const trimmed = (url || '').replace(/\/+$/,'');
+      if (!trimmed) return '';
+      if (/(^|\/)admin(?:\/|$)/.test(trimmed)) return trimmed;
+      return `${trimmed}/admin`;
+    };
     const icon = key => {
       const active = (sortKey === key);
       const cls = active ? (sortDir==='asc' ? 'bi-caret-up-fill' : 'bi-caret-down-fill') : 'bi-dot';
@@ -451,7 +457,8 @@
         return link ? `<a class="badge bg-info text-dark text-decoration-none" href="${link}" target="_blank" rel="noopener"${title}>${ord}${name}</a>`
                     : `<span class="badge bg-info text-dark"${title}>${ord}${name}</span>`;
       }).join(' ') : '<span class="text-muted">n/a</span>';
-      const chalLink = (baseUrl && it.id!=null) ? `${baseUrl}/challenges/${encodeURIComponent(String(it.id))}` : '';
+      const chalBase = ensureAdminBase(baseUrl);
+      const chalLink = (chalBase && it.id!=null) ? `${chalBase}/challenges/${encodeURIComponent(String(it.id))}` : '';
       const chalName = chalLink ? `<a href="${chalLink}" target="_blank" rel="noopener">${escapeHtml(it.name||'')}</a>`
                                 : `${escapeHtml(it.name||'')}`;
       const visBadge = (it.visible === true) ? '<span class="badge bg-success me-2">Visible</span>' : (it.visible === false) ? '<span class="badge bg-secondary me-2">Hidden</span>' : '<span class="badge bg-light text-muted me-2">Unknown</span>';

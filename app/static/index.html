@@ -292,6 +292,54 @@
   </div>
 </div>
 
+<!-- Start Commands Manager Modal -->
+<div class="modal fade" id="startCommandsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="startCommandsModalLabel">Manage Start Commands</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted">Create steps to run commands. Each step waits for its delay, then runs its commands at the same time.</p>
+        <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
+          <div class="list-group list-group-flush" id="start-commands-steps"></div>
+          <div id="start-commands-empty" class="text-muted small text-center py-3 d-none">No commands configured.</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="start-commands-add-step">Add Step</button>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="start-commands-save">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+  <!-- Stored Commands Manager Modal -->
+  <div class="modal fade" id="storedCommandsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="storedCommandsModalLabel">Manage Stored Commands</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="small text-muted">Create steps for stored commands just like startup commands. Each step waits for its delay, then runs its commands together.</p>
+          <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
+            <div class="list-group list-group-flush" id="stored-commands-steps"></div>
+            <div id="stored-commands-empty" class="text-muted small text-center py-3 d-none">No stored commands configured.</div>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline-primary" id="stored-commands-add-step">Add Step</button>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="stored-commands-save">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <!-- Proxmox Login Modal (session-only, used before VM export) -->
 <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">

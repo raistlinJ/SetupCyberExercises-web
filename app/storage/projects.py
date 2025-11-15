@@ -6,12 +6,165 @@ from typing import Dict, List, Optional, Any
 
 
 @dataclass
+class StartCommand:
+    command: str
+    enabled: bool = True
+
+
+@dataclass
+class StartCommandStep:
+    delay_seconds: float = 0.0
+    commands: List[StartCommand] = field(default_factory=list)
+
+
+def _clean_start_command(value: Any) -> str:
+    try:
+        text = str(value or "").strip()
+    except Exception:
+        text = ""
+    return text
+
+
+def _coerce_enabled(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return default
+        if normalized in {"false", "0", "no", "off", "disabled"}:
+            return False
+        if normalized in {"true", "1", "yes", "on", "enabled"}:
+            return True
+    return bool(value)
+
+
+def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
+    steps: List[StartCommandStep] = []
+
+    def coerce_delay(raw: Any) -> float:
+        try:
+            delay = float(raw)
+        except (TypeError, ValueError):
+            delay = 0.0
+        if delay < 0:
+            delay = 0.0
+        return round(delay, 3)
+
+    def normalize_command_entry(entry: Any) -> List[StartCommand]:
+        normalized: List[StartCommand] = []
+        if isinstance(entry, StartCommand):
+            text = _clean_start_command(entry.command)
+            if text:
+                normalized.append(StartCommand(command=text, enabled=_coerce_enabled(entry.enabled)))
+            return normalized
+        if isinstance(entry, dict):
+            nested = entry.get("commands") or entry.get("cmds") or entry.get("parallel")
+            if isinstance(nested, (list, tuple, set)):
+                for sub in nested:
+                    normalized.extend(normalize_command_entry(sub))
+                return normalized
+            text_source = entry.get("command")
+            if text_source is None:
+                for key in ("cmd", "value", "text"):
+                    if entry.get(key) is not None:
+                        text_source = entry.get(key)
+                        break
+            if isinstance(text_source, (list, tuple, set)):
+                for sub in text_source:
+                    normalized.extend(normalize_command_entry(sub))
+                return normalized
+            text = _clean_start_command(text_source)
+            if not text:
+                return normalized
+            enabled_hint = entry.get("enabled")
+            if enabled_hint is None and entry.get("disabled") is not None:
+                enabled_hint = not entry.get("disabled")
+            normalized.append(StartCommand(command=text, enabled=_coerce_enabled(enabled_hint)))
+            return normalized
+        if isinstance(entry, (list, tuple, set)):
+            for item in entry:
+                normalized.extend(normalize_command_entry(item))
+            return normalized
+        text = _clean_start_command(entry)
+        if text:
+            normalized.append(StartCommand(command=text, enabled=True))
+        return normalized
+
+    def append_step(delay: Any, commands_source: Any):
+        commands: List[StartCommand] = []
+        if isinstance(commands_source, (list, tuple, set)):
+            for cmd in commands_source:
+                commands.extend(normalize_command_entry(cmd))
+        else:
+            commands.extend(normalize_command_entry(commands_source))
+        if not commands:
+            return
+        delay_val = coerce_delay(delay)
+        cleaned_commands = [StartCommand(command=_clean_start_command(cmd.command), enabled=_coerce_enabled(cmd.enabled))
+                            for cmd in commands if _clean_start_command(cmd.command)]
+        if not cleaned_commands:
+            return
+        steps.append(StartCommandStep(delay_seconds=delay_val, commands=cleaned_commands))
+
+    if isinstance(value, StartCommandStep):
+        append_step(value.delay_seconds, value.commands)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, StartCommandStep):
+                append_step(item.delay_seconds, item.commands)
+                continue
+            if isinstance(item, dict):
+                commands = item.get("commands")
+                if commands is None:
+                    commands = item.get("cmds")
+                if commands is None:
+                    commands = item.get("parallel")
+                delay = (
+                    item.get("delay_seconds")
+                    if item.get("delay_seconds") is not None
+                    else item.get("delaySeconds")
+                )
+                if delay is None:
+                    for alt in ("delay", "wait", "pause"):
+                        if item.get(alt) is not None:
+                            delay = item.get(alt)
+                            break
+                if commands is not None:
+                    append_step(delay, commands)
+                    continue
+                single = item.get("command")
+                if single is None:
+                    single = item.get("cmd")
+                append_step(delay, single)
+                continue
+            if isinstance(item, (list, tuple)):
+                append_step(0.0, item)
+                continue
+            append_step(0.0, item)
+    elif isinstance(value, (tuple, set)):
+        append_step(0.0, list(value))
+    elif isinstance(value, str):
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        for line in lines:
+            append_step(0.0, line)
+    elif value is not None:
+        append_step(0.0, value)
+
+    return steps
+
+
+@dataclass
 class VMConfig:
     name: str
     vmid: Optional[int] = None
     viewable_to_user: bool = True
-    start_commands: Optional[List[str]] = None
-    stored_commands: Optional[List[str]] = None
+    start_commands: List[StartCommandStep] = field(default_factory=list)
+    stored_commands: List[StartCommandStep] = field(default_factory=list)
     internal_network_adaptors: Optional[List[str]] = None
     # Advanced per-VM clone options
     use_linked_clone: Optional[bool] = None  # override project default
@@ -240,6 +393,8 @@ class ProjectStore:
                     base["vmid"] = int(base["vmid"]) if str(base["vmid"]).strip() != "" else None
                 except Exception:
                     base["vmid"] = None
+            base["start_commands"] = sanitize_start_command_steps(base.get("start_commands"))
+            base["stored_commands"] = sanitize_start_command_steps(base.get("stored_commands"))
             return VMConfig(**base)
         # fallback
         return VMConfig(name=str(v))
@@ -470,13 +625,20 @@ class ProjectStore:
                     "skip_post_clone_snapshot",
                 ]:
                     if k in fields:
-                        vm_data[k] = fields[k]
+                        if k == "start_commands":
+                            vm_data[k] = sanitize_start_command_steps(fields[k])
+                        elif k == "stored_commands":
+                            vm_data[k] = sanitize_start_command_steps(fields[k])
+                        else:
+                            vm_data[k] = fields[k]
                 # Coerce vmid to int or None
                 if "vmid" in vm_data:
                     try:
                         vm_data["vmid"] = int(vm_data["vmid"]) if str(vm_data["vmid"]).strip() != "" else None
                     except Exception:
                         vm_data["vmid"] = None
+                vm_data["start_commands"] = sanitize_start_command_steps(vm_data.get("start_commands"))
+                vm_data["stored_commands"] = sanitize_start_command_steps(vm_data.get("stored_commands"))
                 proj.vms[i] = VMConfig(**vm_data)
                 break
         if not found:
@@ -499,9 +661,13 @@ class ProjectStore:
                 proj.vms[i] = VMConfig(name=new_name,
                                        vmid=vm.vmid,
                                        viewable_to_user=vm.viewable_to_user,
-                                       start_commands=vm.start_commands,
-                                       stored_commands=vm.stored_commands,
-                                       internal_network_adaptors=vm.internal_network_adaptors)
+                                       start_commands=sanitize_start_command_steps(vm.start_commands),
+                                       stored_commands=sanitize_start_command_steps(vm.stored_commands),
+                                       internal_network_adaptors=vm.internal_network_adaptors,
+                                       use_linked_clone=vm.use_linked_clone,
+                                       clone_timeout_sec=vm.clone_timeout_sec,
+                                       storage_volume=vm.storage_volume,
+                                       skip_post_clone_snapshot=vm.skip_post_clone_snapshot)
                 changed = True
                 break
         if not changed:

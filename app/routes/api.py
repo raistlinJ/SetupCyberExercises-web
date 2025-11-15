@@ -2,6 +2,7 @@ import os
 import io
 import json
 import zipfile
+import base64
 import uuid
 import time
 import random
@@ -12,6 +13,7 @@ import logging
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
+from typing import Any, Dict, Optional
 import re
 import hashlib
 import mimetypes
@@ -20,7 +22,9 @@ from werkzeug.utils import secure_filename
 from urllib.parse import urlsplit
 import threading
 from datetime import datetime, timedelta
+from dataclasses import asdict
 import time
+LOG = logging.getLogger(__name__)
 def _safe_sleep(sec: float):
     try:
         if sec and sec > 0:
@@ -151,9 +155,9 @@ def _validate_iface(name: str) -> str:
         raise ValueError(f'invalid iface name: {n!r}')
     return n
 
-from ..connectors.proxmox import ProxmoxClient
+from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
-from ..storage.projects import ProjectStore, Project
+from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps
 
 api_bp = Blueprint("api", __name__)
 
@@ -3919,6 +3923,7 @@ def instances_run_startup_cmds(pid: str):
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     ran = []
+    zip_entries = []
     for m in mapped:
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
@@ -3935,33 +3940,291 @@ def instances_run_startup_cmds(pid: str):
         except Exception:
             pass
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
-        cmds = list(getattr(vcfg, 'start_commands', []) or [])
-        if not cmds:
+        steps = sanitize_start_command_steps(getattr(vcfg, 'start_commands', [])) if vcfg else []
+
+        def extract_enabled_commands(step_obj):
+            commands_out = []
+            for cmd_obj in getattr(step_obj, 'commands', []) or []:
+                enabled = True
+                command_text = ''
+                if hasattr(cmd_obj, 'command'):
+                    command_text = getattr(cmd_obj, 'command', '')
+                    enabled = getattr(cmd_obj, 'enabled', True)
+                elif isinstance(cmd_obj, dict):
+                    command_text = cmd_obj.get('command') or cmd_obj.get('cmd') or ''
+                    enabled = cmd_obj.get('enabled', True)
+                else:
+                    command_text = cmd_obj
+                try:
+                    command_text = str(command_text).strip()
+                except Exception:
+                    command_text = ''
+                if not command_text:
+                    continue
+                if enabled is False:
+                    continue
+                commands_out.append(command_text)
+            return commands_out
+
+        total_commands = sum(len(extract_enabled_commands(step)) for step in steps)
+        if not total_commands:
             skipped.append({ 'index': m['index'], 'name': m['name'], 'reason': 'no startup commands configured' })
             continue
-        # Run commands via guest agent and capture output tails
-        cmd_results = []
-        for cmd in cmds:
+
+        LOG.info(
+            "run_startup_cmds guest agent check project=%s node=%s vmid=%s index=%s name=%s",
+            pid,
+            m.get('node'),
+            m.get('vmid'),
+            m.get('index'),
+            m.get('name'),
+        )
+        try:
+            client.ensure_guest_agent_ready(node=m['node'], vmid=m['vmid'])
+        except GuestAgentUnavailableError as exc:
+            msg = str(exc).strip() or 'Guest agent is not available'
+            errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'guest agent unavailable: {msg}' })
+            continue
+        except Exception as exc:
+            errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'guest agent check failed: {exc}' })
+            continue
+        LOG.info(
+            "run_startup_cmds guest agent ready project=%s node=%s vmid=%s index=%s name=%s",
+            pid,
+            m.get('node'),
+            m.get('vmid'),
+            m.get('index'),
+            m.get('name'),
+        )
+
+        def record_zip_entry(step_idx: int, cmd_idx: int, step_delay: float, result_dict: Dict[str, Any], err_msg: Optional[str]):
+            stdout_full = result_dict.pop('stdout_full', '') if isinstance(result_dict, dict) else ''
+            stderr_full = result_dict.pop('stderr_full', '') if isinstance(result_dict, dict) else ''
+            if not isinstance(stdout_full, str):
+                try:
+                    stdout_full = str(stdout_full)
+                except Exception:
+                    stdout_full = ''
+            if not isinstance(stderr_full, str):
+                try:
+                    stderr_full = str(stderr_full)
+                except Exception:
+                    stderr_full = ''
             try:
-                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(cmd))
+                command_text = str(result_dict.get('cmd', '') if isinstance(result_dict, dict) else '')
+            except Exception:
+                command_text = ''
+            error_text = ''
+            if err_msg:
+                try:
+                    error_text = str(err_msg).strip()
+                except Exception:
+                    error_text = str(err_msg)
+            zip_entries.append({
+                'vm_name': m.get('name'),
+                'vm_index': m.get('index'),
+                'node': m.get('node'),
+                'vmid': m.get('vmid'),
+                'step': int(step_idx) + 1,
+                'command_index': int(cmd_idx) + 1,
+                'delay': float(step_delay or 0.0),
+                'command': command_text,
+                'exitcode': result_dict.get('exitcode') if isinstance(result_dict, dict) else None,
+                'stdout': stdout_full or '',
+                'stderr': stderr_full or '',
+                'error': error_text
+            })
+
+        def execute_single(command: str):
+            tail_n = 300
+            try:
+                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command))
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
-                tail_n = 300
-                cmd_results.append({
-                    'cmd': str(cmd),
+                return {
+                    'cmd': str(command),
                     'exitcode': exitcode,
+                    'stdout_full': out,
+                    'stderr_full': err,
                     'out_tail': out[-tail_n:],
                     'err_tail': err[-tail_n:]
+                }, None
+            except Exception as exc:
+                return {
+                    'cmd': str(command),
+                    'exitcode': None,
+                    'stdout_full': '',
+                    'stderr_full': str(exc),
+                    'out_tail': '',
+                    'err_tail': str(exc)[:300]
+                }, f'cmd error ({command}): {exc}'
+
+        cmd_results = []
+        cancelled = False
+        for step_idx, step in enumerate(steps):
+            if _is_cancelled(pid):
+                cancelled = True
+                break
+            delay = float(step.delay_seconds or 0.0)
+            if delay > 0:
+                _safe_sleep(delay)
+            commands = extract_enabled_commands(step)
+            if not commands:
+                continue
+            if len(commands) == 1:
+                result, err_msg = execute_single(commands[0])
+                result.update({'step': step_idx + 1, 'delay': delay})
+                record_zip_entry(step_idx, 0, delay, result, err_msg)
+                cmd_results.append(result)
+                cmd_label = result.get('cmd', str(commands[0]))
+                if err_msg:
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
+                elif result.get('exitcode') not in (0, None):
+                    reason = f"cmd failed ({cmd_label}): {result.get('err_tail','')}"
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+                continue
+
+            parallel_results = []
+            with ThreadPoolExecutor(max_workers=len(commands)) as pool:
+                futures = []
+                for order, command in enumerate(commands):
+                    futures.append((order, command, pool.submit(execute_single, command)))
+                for order, command, future in futures:
+                    try:
+                        res_data, err_msg = future.result()
+                    except Exception as exc:
+                        res_data = {
+                            'cmd': str(command),
+                            'exitcode': None,
+                            'out_tail': '',
+                            'err_tail': str(exc)[:300]
+                        }
+                        err_msg = f'cmd error ({command}): {exc}'
+                    res_data['order'] = order
+                    parallel_results.append((res_data, err_msg))
+            parallel_results.sort(key=lambda entry: entry[0]['order'])
+            for res_data, err_msg in parallel_results:
+                order_idx = res_data.pop('order', 0)
+                res_data.update({'step': step_idx + 1, 'delay': delay})
+                record_zip_entry(step_idx, order_idx, delay, res_data, err_msg)
+                cmd_results.append(res_data)
+                cmd_label = res_data.get('cmd') or ''
+                if err_msg:
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
+                elif res_data.get('exitcode') not in (0, None):
+                    reason = f"cmd failed ({cmd_label}): {res_data.get('err_tail','')}"
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+
+        if cancelled:
+            errors.append({ 'index': m['index'], 'name': m['name'], 'reason': 'cancelled' })
+            break
+        ran.append({
+            'index': m['index'],
+            'name': m['name'],
+            'vmid': m['vmid'],
+            'node': m['node'],
+            'steps': len(steps),
+            'count': len(cmd_results),
+            'planned_count': total_commands,
+            'cmds': cmd_results
+        })
+    zip_payload = None
+    if zip_entries:
+        now = datetime.utcnow()
+        timestamp = _format_ymdhms(now)
+        safe_proj = _safe_file_stem(getattr(proj, 'name', '') or proj.id)
+        filename = f"startup_cmd_outputs_{safe_proj}_{timestamp}.zip"
+        buf = io.BytesIO()
+        summary_entries = []
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for entry in zip_entries:
+                vm_label = entry.get('vm_name') or f"vm_{entry.get('vm_index')}"
+                safe_vm = _safe_file_stem(vm_label) or f"vm_{entry.get('vm_index') or 'unknown'}"
+                step_dir = f"step_{int(entry.get('step', 0)):02d}"
+                cmd_file = f"cmd_{int(entry.get('command_index', 0)):02d}.txt"
+                file_path = f"{safe_vm}/{step_dir}/{cmd_file}"
+                exitcode = entry.get('exitcode')
+                lines = [
+                    f"VM Name: {vm_label}",
+                    f"VM Index: {entry.get('vm_index')}",
+                    f"Node: {entry.get('node')}",
+                    f"VMID: {entry.get('vmid')}",
+                    f"Step: {entry.get('step')}",
+                    f"Command Index: {entry.get('command_index')}",
+                    f"Delay Before Step: {entry.get('delay')}",
+                    f"Command: {entry.get('command')}",
+                    f"Exit Code: {'' if exitcode is None else exitcode}"
+                ]
+                if entry.get('error'):
+                    lines.append(f"Error: {entry.get('error')}")
+                lines.extend([
+                    '',
+                    'STDOUT:',
+                    entry.get('stdout') or '',
+                    '',
+                    'STDERR:',
+                    entry.get('stderr') or ''
+                ])
+                zf.writestr(file_path, "\n".join(lines))
+                summary_entries.append({
+                    'vm_name': vm_label,
+                    'step': entry.get('step'),
+                    'command_index': entry.get('command_index'),
+                    'command': entry.get('command'),
+                    'exitcode': exitcode,
+                    'error': entry.get('error'),
+                    'stdout_chars': len(entry.get('stdout') or ''),
+                    'stderr_chars': len(entry.get('stderr') or '')
                 })
-                if exitcode != 0:
-                    errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f"cmd failed ({cmd}): {res.get('stderr','')}" })
-            except Exception as e:
-                errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'cmd error ({cmd}): {e}' })
-                cmd_results.append({ 'cmd': str(cmd), 'exitcode': None, 'out_tail': '', 'err_tail': str(e)[:300] })
-        ran.append({ 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'], 'count': len(cmds), 'cmds': cmd_results })
+            summary_doc = {
+                'project_id': proj.id,
+                'project_name': getattr(proj, 'name', ''),
+                'generated_at': now.replace(microsecond=0).isoformat() + 'Z',
+                'ran_hosts': len(ran),
+                'skipped': skipped,
+                'errors': errors,
+                'commands': summary_entries
+            }
+            zf.writestr('summary.json', json.dumps(summary_doc, indent=2))
+        zip_bytes = buf.getvalue()
+        zip_payload = {
+            'filename': filename,
+            'size': len(zip_bytes),
+            'base64': base64.b64encode(zip_bytes).decode('ascii')
+        }
+
+    response_payload: Dict[str, Any] = { 'ran': ran, 'skipped': skipped, 'errors': errors }
+    if zip_payload:
+        response_payload['outputs_zip'] = zip_payload
+    if not ran:
+        summary_lines = []
+        for err in errors:
+            label = ''
+            reason_text = ''
+            reason_value = None
+            if isinstance(err, dict):
+                label = (err.get('name') or err.get('index') or '')
+                if err.get('step'):
+                    try:
+                        label = f"{label} step {err.get('step')}" if label else f"Step {err.get('step')}"
+                    except Exception:
+                        pass
+                reason_value = err.get('reason')
+            else:
+                reason_value = err
+            try:
+                reason_text = str(reason_value).strip() if reason_value is not None else ''
+            except Exception:
+                reason_text = ''
+            entry_text = f"{label}: {reason_text}" if label else reason_text
+            if entry_text:
+                summary_lines.append(entry_text)
+        if summary_lines:
+            response_payload['error_summary'] = summary_lines
+
     _end_job(pid)
-    return jsonify({ 'ran': ran, 'skipped': skipped, 'errors': errors })
+    return jsonify(response_payload)
 
 
 @api_bp.route("/projects/<pid>/instances/actions/run_stored_cmds", methods=["POST"])
@@ -4017,30 +4280,124 @@ def instances_run_stored_cmds(pid: str):
         except Exception:
             pass
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
-        cmds = list(getattr(vcfg, 'stored_commands', []) or [])
-        if not cmds:
+        steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
+
+        def extract_enabled_commands(step_obj):
+            commands_out = []
+            for cmd_obj in getattr(step_obj, 'commands', []) or []:
+                enabled = True
+                command_text = ''
+                if hasattr(cmd_obj, 'command'):
+                    command_text = getattr(cmd_obj, 'command', '')
+                    enabled = getattr(cmd_obj, 'enabled', True)
+                elif isinstance(cmd_obj, dict):
+                    command_text = cmd_obj.get('command') or cmd_obj.get('cmd') or ''
+                    enabled = cmd_obj.get('enabled', True)
+                else:
+                    command_text = cmd_obj
+                try:
+                    command_text = str(command_text).strip()
+                except Exception:
+                    command_text = ''
+                if not command_text:
+                    continue
+                if enabled is False:
+                    continue
+                commands_out.append(command_text)
+            return commands_out
+
+        total_commands = sum(len(extract_enabled_commands(step)) for step in steps)
+        if not total_commands:
             skipped.append({ 'index': m['index'], 'name': m['name'], 'reason': 'no stored commands configured' })
             continue
-        cmd_results = []
-        for cmd in cmds:
+        def execute_single(command: str):
+            tail_n = 300
             try:
-                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(cmd))
+                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command))
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
-                tail_n = 300
-                cmd_results.append({
-                    'cmd': str(cmd),
+                return {
+                    'cmd': str(command),
                     'exitcode': exitcode,
                     'out_tail': out[-tail_n:],
                     'err_tail': err[-tail_n:]
-                })
-                if exitcode != 0:
-                    errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f"cmd failed ({cmd}): {res.get('stderr','')}" })
-            except Exception as e:
-                errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'cmd error ({cmd}): {e}' })
-                cmd_results.append({ 'cmd': str(cmd), 'exitcode': None, 'out_tail': '', 'err_tail': str(e)[:300] })
-        ran.append({ 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'], 'count': len(cmds), 'cmds': cmd_results })
+                }, None
+            except Exception as exc:
+                return {
+                    'cmd': str(command),
+                    'exitcode': None,
+                    'out_tail': '',
+                    'err_tail': str(exc)[:300]
+                }, f'cmd error ({command}): {exc}'
+
+        cmd_results = []
+        cancelled = False
+        for step_idx, step in enumerate(steps):
+            if _is_cancelled(pid):
+                cancelled = True
+                break
+            delay = float(step.delay_seconds or 0.0)
+            if delay > 0:
+                _safe_sleep(delay)
+            commands = extract_enabled_commands(step)
+            if not commands:
+                continue
+            if len(commands) == 1:
+                result, err_msg = execute_single(commands[0])
+                result.update({'step': step_idx + 1, 'delay': delay})
+                cmd_results.append(result)
+                cmd_label = result.get('cmd', str(commands[0]))
+                if err_msg:
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
+                elif result.get('exitcode') not in (0, None):
+                    reason = f"cmd failed ({cmd_label}): {result.get('err_tail','')}"
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+                continue
+
+            parallel_results = []
+            with ThreadPoolExecutor(max_workers=len(commands)) as pool:
+                futures = []
+                for order, command in enumerate(commands):
+                    futures.append((order, command, pool.submit(execute_single, command)))
+                for order, command, future in futures:
+                    try:
+                        res_data, err_msg = future.result()
+                    except Exception as exc:
+                        res_data = {
+                            'cmd': str(command),
+                            'exitcode': None,
+                            'out_tail': '',
+                            'err_tail': str(exc)[:300]
+                        }
+                        err_msg = f'cmd error ({command}): {exc}'
+                    res_data['order'] = order
+                    parallel_results.append((res_data, err_msg))
+            parallel_results.sort(key=lambda entry: entry[0]['order'])
+            for res_data, err_msg in parallel_results:
+                res_data.pop('order', None)
+                res_data.update({'step': step_idx + 1, 'delay': delay})
+                cmd_results.append(res_data)
+                cmd_label = res_data.get('cmd') or ''
+                if err_msg:
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
+                elif res_data.get('exitcode') not in (0, None):
+                    reason = f"cmd failed ({cmd_label}): {res_data.get('err_tail','')}"
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+
+        if cancelled:
+            errors.append({ 'index': m['index'], 'name': m['name'], 'reason': 'cancelled' })
+            break
+        ran.append({
+            'index': m['index'],
+            'name': m['name'],
+            'vmid': m['vmid'],
+            'node': m['node'],
+            'steps': len(steps),
+            'count': len(cmd_results),
+            'planned_count': total_commands,
+            'cmds': cmd_results
+        })
     _end_job(pid)
     return jsonify({ 'ran': ran, 'skipped': skipped, 'errors': errors })
 
@@ -5069,12 +5426,10 @@ def _validate_project_fields(data: dict) -> list:
 
 
 def _project_to_json(p: Project) -> dict:
-    d = p.__dict__.copy()
-    d["vms"] = [vm.__dict__ for vm in (p.vms or [])]
-    # Ensure associated_projects is present and a list of strings
+    d = asdict(p)
     try:
-        assoc = list(getattr(p, 'associated_projects', []) or [])
-        d['associated_projects'] = [str(x) for x in assoc if str(x).strip()]
+        assoc = list(d.get('associated_projects', []) or [])
+        d['associated_projects'] = [str(x).strip() for x in assoc if str(x).strip()]
     except Exception:
         d['associated_projects'] = []
     return d

@@ -4,6 +4,288 @@ const UI_SETTINGS_KEY = 'toolhub.settings.v1';
 window.PROJ_CACHE = window.PROJ_CACHE || {};
 window.MATERIAL_PENDING = window.MATERIAL_PENDING || {};
 
+const START_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
+const STORED_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
+
+function sanitizeStartCommandSteps(steps) {
+  if (!Array.isArray(steps)) return [];
+
+  const toBool = (raw, defaultValue = true) => {
+    if (raw === undefined || raw === null) return defaultValue;
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'number') return raw !== 0;
+    if (typeof raw === 'string') {
+      const normalized = raw.trim().toLowerCase();
+      if (!normalized) return defaultValue;
+      if (['false', '0', 'no', 'off', 'disabled'].includes(normalized)) return false;
+      if (['true', '1', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+    }
+    return !!raw;
+  };
+
+  const normalizeCommand = (entry) => {
+    if (entry === undefined || entry === null) return null;
+    if (typeof entry === 'string' || typeof entry === 'number') {
+      const text = String(entry).trim();
+      return text ? { command: text, enabled: true } : null;
+    }
+    if (typeof entry === 'object') {
+      if (Array.isArray(entry)) {
+        const nested = [];
+        for (const sub of entry) {
+          const normalized = normalizeCommand(sub);
+          if (normalized) nested.push(normalized);
+        }
+        return nested.length ? nested : null;
+      }
+      if (entry.command instanceof Object && Array.isArray(entry.command)) {
+        const nested = [];
+        for (const sub of entry.command) {
+          const normalized = normalizeCommand(sub);
+          if (normalized) nested.push(normalized);
+        }
+        return nested.length ? nested : null;
+      }
+      const textSource = entry.command ?? entry.cmd ?? entry.value ?? entry.text;
+      const text = textSource === undefined || textSource === null ? '' : String(textSource).trim();
+      if (!text) return null;
+      let enabled = entry.enabled;
+      if (enabled === undefined && entry.disabled !== undefined) {
+        enabled = !entry.disabled;
+      }
+      return { command: text, enabled: toBool(enabled, true) };
+    }
+    const fallback = String(entry).trim();
+    return fallback ? { command: fallback, enabled: true } : null;
+  };
+
+  const coerceDelay = (raw) => {
+    try {
+      let val = Number(raw || 0);
+      if (!Number.isFinite(val) || val < 0) val = 0;
+      return Math.round(val * 1000) / 1000;
+    } catch {
+      return 0;
+    }
+  };
+
+  const clean = [];
+  for (const rawStep of steps) {
+    if (!rawStep) continue;
+    const commandsSource = Array.isArray(rawStep.commands)
+      ? rawStep.commands
+      : Array.isArray(rawStep.cmds)
+        ? rawStep.cmds
+        : Array.isArray(rawStep.command)
+          ? rawStep.command
+          : Array.isArray(rawStep.parallel)
+            ? rawStep.parallel
+            : null;
+    const commands = [];
+    const ingest = (value) => {
+      const normalized = normalizeCommand(value);
+      if (!normalized) return;
+      if (Array.isArray(normalized)) {
+        normalized.forEach(cmd => commands.push({ command: cmd.command, enabled: cmd.enabled !== false }));
+      } else {
+        commands.push({ command: normalized.command, enabled: normalized.enabled !== false });
+      }
+    };
+    if (commandsSource) {
+      for (const cmd of commandsSource) ingest(cmd);
+    } else {
+      const single = rawStep.command ?? rawStep.cmd ?? rawStep.value ?? rawStep.text;
+      ingest(single);
+    }
+    if (!commands.length) continue;
+    let delayRaw = rawStep.delaySeconds;
+    if (delayRaw == null) delayRaw = rawStep.delay_seconds;
+    if (delayRaw == null) delayRaw = rawStep.delay;
+    if (delayRaw == null) delayRaw = rawStep.wait;
+    if (delayRaw == null) delayRaw = rawStep.pause;
+    const delay = coerceDelay(delayRaw);
+    clean.push({ delaySeconds: delay, commands });
+  }
+  return clean;
+}
+
+function normalizeStartCommandSteps(raw) {
+  if (Array.isArray(raw)) {
+    const steps = [];
+    for (const item of raw) {
+      if (typeof item === 'string') {
+        const value = item.trim();
+        if (value) steps.push({ delaySeconds: 0, commands: [value] });
+        continue;
+      }
+      if (Array.isArray(item)) {
+        const commands = [];
+        for (const cmd of item) {
+          const value = cmd == null ? '' : String(cmd).trim();
+          if (value) commands.push(value);
+        }
+        if (commands.length) steps.push({ delaySeconds: 0, commands });
+        continue;
+      }
+      if (item && typeof item === 'object') {
+        steps.push(item);
+      }
+    }
+    return sanitizeStartCommandSteps(steps);
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    return sanitizeStartCommandSteps(lines.map(cmd => ({ delaySeconds: 0, commands: [cmd] })));
+  }
+  return [];
+}
+
+function stepsToServerPayload(steps) {
+  return sanitizeStartCommandSteps(steps).map(step => ({
+    delay_seconds: step.delaySeconds,
+    commands: step.commands.map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+  }));
+}
+
+function encodeStartCommandsValue(steps) {
+  try {
+    return JSON.stringify(stepsToServerPayload(steps));
+  } catch {
+    return '[]';
+  }
+}
+
+function parseStartCommandsValue(raw) {
+  if (!raw) return [];
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return normalizeStartCommandSteps(parsed);
+    } catch {
+      return normalizeStartCommandSteps(raw);
+    }
+  }
+  return normalizeStartCommandSteps(raw);
+}
+
+function formatStartCommandsSummary(steps) {
+  const clean = sanitizeStartCommandSteps(steps);
+  const stepCount = clean.length;
+  let totalCommands = 0;
+  let enabledCommands = 0;
+  for (const step of clean) {
+    const stepTotal = Array.isArray(step.commands) ? step.commands.length : 0;
+    const stepEnabled = step.commands.filter(cmd => cmd && cmd.enabled !== false).length;
+    totalCommands += stepTotal;
+    enabledCommands += stepEnabled;
+  }
+  if (!totalCommands) return 'No commands configured';
+  const disabledCommands = totalCommands - enabledCommands;
+  if (stepCount === 1) {
+    const first = clean[0];
+    const firstTotal = first.commands.length;
+    const firstEnabled = first.commands.filter(cmd => cmd && cmd.enabled !== false).length;
+    const firstDisabled = firstTotal - firstEnabled;
+    if (firstTotal === 1) {
+      if (!firstEnabled) return '1 command (disabled)';
+      return first.delaySeconds ? `1 command (delay ${first.delaySeconds}s)` : '1 command configured';
+    }
+    if (!firstEnabled) return `${firstTotal} commands (all disabled)`;
+    if (!firstDisabled) return `${firstTotal} commands (parallel)`;
+    return `${firstTotal} commands (${firstEnabled} enabled, ${firstDisabled} disabled)`;
+  }
+  if (!disabledCommands) return `${stepCount} steps / ${enabledCommands} commands`;
+  return `${stepCount} steps / ${enabledCommands} enabled / ${disabledCommands} disabled`;
+}
+
+function formatStartCommandsTooltip(steps) {
+  const clean = sanitizeStartCommandSteps(steps);
+  if (!clean.length) return 'No commands configured';
+  return clean.map((step, idx) => {
+    const delay = step.delaySeconds ? `${step.delaySeconds}s` : '0s';
+    const joined = step.commands.map(cmd => {
+      if (!cmd) return '';
+      const text = cmd.command || '';
+      return cmd.enabled === false ? `[disabled] ${text}` : text;
+    }).filter(Boolean).join(' || ');
+    return `Step ${idx + 1} (delay ${delay}): ${joined || '[no enabled commands]'}`;
+  }).join('\n');
+}
+
+function getStartCommandsFromDom(pid, idx) {
+  const hidden = document.getElementById(`vm-${pid}-${idx}-start-data`);
+  if (!hidden) return [];
+  return parseStartCommandsValue(hidden.value);
+}
+
+function updateStartCommandsDomState(pid, idx, steps) {
+  const clean = sanitizeStartCommandSteps(steps);
+  const hidden = document.getElementById(`vm-${pid}-${idx}-start-data`);
+  if (hidden) hidden.value = encodeStartCommandsValue(clean);
+  const summary = document.getElementById(`vm-${pid}-${idx}-start-summary`);
+  if (summary) {
+    summary.textContent = formatStartCommandsSummary(clean);
+    summary.title = formatStartCommandsTooltip(clean);
+  }
+  return clean;
+}
+
+function updateStartCommandsCache(pid, vmName, steps, idxHint) {
+  const clean = sanitizeStartCommandSteps(steps);
+  const payload = stepsToServerPayload(clean);
+  try {
+    const proj = (window.PROJ_CACHE || {})[pid];
+    const list = proj && Array.isArray(proj.vms) ? proj.vms : null;
+    if (list) {
+      let targetIdx = typeof idxHint === 'number' ? idxHint : -1;
+      if (targetIdx < 0 || !list[targetIdx] || list[targetIdx].name !== vmName) {
+        targetIdx = list.findIndex(vm => vm && vm.name === vmName);
+      }
+      if (targetIdx >= 0 && list[targetIdx]) {
+        list[targetIdx] = { ...list[targetIdx], start_commands: payload.slice() };
+      }
+    }
+  } catch {}
+  return clean;
+}
+
+function getStoredCommandsFromDom(pid, idx) {
+  const hidden = document.getElementById(`vm-${pid}-${idx}-stored-data`);
+  if (!hidden) return [];
+  return parseStartCommandsValue(hidden.value);
+}
+
+function updateStoredCommandsDomState(pid, idx, steps) {
+  const clean = sanitizeStartCommandSteps(steps);
+  const hidden = document.getElementById(`vm-${pid}-${idx}-stored-data`);
+  if (hidden) hidden.value = encodeStartCommandsValue(clean);
+  const summary = document.getElementById(`vm-${pid}-${idx}-stored-summary`);
+  if (summary) {
+    summary.textContent = formatStartCommandsSummary(clean);
+    summary.title = formatStartCommandsTooltip(clean);
+  }
+  return clean;
+}
+
+function updateStoredCommandsCache(pid, vmName, steps, idxHint) {
+  const clean = sanitizeStartCommandSteps(steps);
+  const payload = stepsToServerPayload(clean);
+  try {
+    const proj = (window.PROJ_CACHE || {})[pid];
+    const list = proj && Array.isArray(proj.vms) ? proj.vms : null;
+    if (list) {
+      let targetIdx = typeof idxHint === 'number' ? idxHint : -1;
+      if (targetIdx < 0 || !list[targetIdx] || list[targetIdx].name !== vmName) {
+        targetIdx = list.findIndex(vm => vm && vm.name === vmName);
+      }
+      if (targetIdx >= 0 && list[targetIdx]) {
+        list[targetIdx] = { ...list[targetIdx], stored_commands: payload.slice() };
+      }
+    }
+  } catch {}
+  return clean;
+}
+
 // Basic HTTP helper (restored after refactor removed it inadvertently)
 async function http(method, url, body) {
   const opts = { method, headers: {}, credentials: 'same-origin' };
@@ -1168,6 +1450,9 @@ async function saveSettingsInternal(){
 }
 window.saveSettings = saveSettingsInternal;
 window.importProject = importProject;
+window.openStartCommandsManager = openStartCommandsManager;
+window.addEventListener('DOMContentLoaded', wireStartCommandsModal);
+window.addEventListener('DOMContentLoaded', wireStoredCommandsModal);
 
 async function loadProjects() {
   const container = document.getElementById('projects');
@@ -1388,13 +1673,15 @@ async function autoSaveVm(pid, idx) {
     }
   }
   const collectValues = (selector) => Array.from(document.querySelectorAll(selector)).map(input => (input.value || '').trim()).filter(v => v !== '');
-  const startCommands = collectValues(`#vm-${pid}-${idx}-start-list input`);
-  const storedCommands = collectValues(`#vm-${pid}-${idx}-stored-list input`);
+  const startSteps = getStartCommandsFromDom(pid, idx);
+  const startCommands = stepsToServerPayload(startSteps);
+  const storedSteps = getStoredCommandsFromDom(pid, idx);
+  const storedCommands = stepsToServerPayload(storedSteps);
   const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z]/g, '').slice(0, 8)).filter(Boolean);
   const payload = {
     vmid: vmid,
     start_commands: startCommands,
-    stored_commands: storedCommands,
+  stored_commands: storedCommands,
     internal_network_adaptors: adaptors
   };
   try {
@@ -1426,6 +1713,590 @@ async function autoSaveVm(pid, idx) {
     setVmStatus(pid, idx, 'Save failed', 'text-danger');
     try { console.error('Auto-save VM failed', pid, name, e); } catch {}
   }
+}
+
+function renderStartCommandsModal() {
+  const modalTitle = document.getElementById('startCommandsModalLabel');
+  if (modalTitle) {
+    const name = START_COMMAND_MODAL_STATE.vmName ? ` — ${START_COMMAND_MODAL_STATE.vmName}` : '';
+    modalTitle.textContent = `Manage Start Commands${name}`;
+  }
+  const stepsEl = document.getElementById('start-commands-steps');
+  const emptyEl = document.getElementById('start-commands-empty');
+  if (!stepsEl) return;
+  const steps = START_COMMAND_MODAL_STATE.steps || [];
+  if (!steps.length) {
+    stepsEl.innerHTML = '';
+    if (emptyEl) emptyEl.classList.remove('d-none');
+    return;
+  }
+  const html = steps.map((step, stepIdx) => {
+    const commands = Array.isArray(step.commands) ? step.commands : [];
+    const delayValue = Number(step.delaySeconds || 0);
+    const delayInput = Number.isFinite(delayValue)
+      ? (Math.abs(delayValue - Math.round(delayValue)) < 1e-6 ? String(Math.round(delayValue)) : String(delayValue))
+      : '0';
+    const stepUpDisabled = stepIdx === 0 ? 'disabled' : '';
+    const stepDownDisabled = stepIdx === steps.length - 1 ? 'disabled' : '';
+    const commandsMarkup = commands.length ? commands.map((cmd, cmdIdx) => {
+      const commandObj = cmd && typeof cmd === 'object' ? cmd : { command: cmd, enabled: true };
+      const commandText = escHtml((commandObj.command ?? '').toString());
+      const isEnabled = commandObj.enabled !== false;
+      const toggleTitle = isEnabled ? 'Disable command' : 'Enable command';
+      const cmdUpDisabled = cmdIdx === 0 ? 'disabled' : '';
+      const cmdDownDisabled = cmdIdx === commands.length - 1 ? 'disabled' : '';
+      const inputClasses = ['form-control', 'form-control-sm'];
+      if (!isEnabled) {
+        inputClasses.push('text-decoration-line-through', 'opacity-50');
+      }
+      return `<div class="d-flex align-items-center gap-2 mb-2" data-cmd-index="${cmdIdx}" data-enabled="${isEnabled ? '1' : '0'}">
+        <span class="badge bg-secondary flex-shrink-0">Cmd ${cmdIdx + 1}</span>
+        <div class="form-check form-switch m-0 flex-shrink-0">
+          <input class="form-check-input" type="checkbox" data-role="cmd-toggle" ${isEnabled ? 'checked' : ''} title="${toggleTitle}" aria-label="${toggleTitle}">
+        </div>
+        <input type="text" class="${inputClasses.join(' ')}" data-role="cmd-input" placeholder="Command" value="${commandText}">
+        <div class="btn-group btn-group-sm flex-shrink-0">
+          <button type="button" class="btn btn-outline-secondary" data-role="cmd-up" ${cmdUpDisabled} title="Move command up">
+            <span aria-hidden="true">&#8593;</span><span class="visually-hidden">Move command up</span>
+          </button>
+          <button type="button" class="btn btn-outline-secondary" data-role="cmd-down" ${cmdDownDisabled} title="Move command down">
+            <span aria-hidden="true">&#8595;</span><span class="visually-hidden">Move command down</span>
+          </button>
+          <button type="button" class="btn btn-outline-danger" data-role="cmd-delete">Remove</button>
+        </div>
+      </div>`;
+    }).join('') : '<div class="text-muted small" data-role="empty-step">No commands in this step.</div>';
+    return `<div class="list-group-item" data-step-index="${stepIdx}">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div class="d-flex align-items-center gap-2">
+          <span class="badge bg-primary">Step ${stepIdx + 1}</span>
+          <span class="small text-muted">Commands in this step run together after the delay.</span>
+        </div>
+        <div class="btn-group btn-group-sm">
+          <button type="button" class="btn btn-outline-secondary" data-role="step-up" ${stepUpDisabled} title="Move step up">
+            <span aria-hidden="true">&#9650;</span><span class="visually-hidden">Move step up</span>
+          </button>
+          <button type="button" class="btn btn-outline-secondary" data-role="step-down" ${stepDownDisabled} title="Move step down">
+            <span aria-hidden="true">&#9660;</span><span class="visually-hidden">Move step down</span>
+          </button>
+          <button type="button" class="btn btn-outline-danger" data-role="step-delete">Remove</button>
+        </div>
+      </div>
+      <div class="row g-2 align-items-center mt-2 mb-3">
+        <div class="col-sm-6 col-md-4">
+          <label class="form-label small mb-1">Delay before step (seconds)</label>
+          <input type="number" min="0" step="0.1" class="form-control form-control-sm" data-role="step-delay" value="${delayInput}">
+        </div>
+      </div>
+      <div data-role="command-wrapper">
+        ${commandsMarkup}
+      </div>
+      <button type="button" class="btn btn-outline-secondary btn-sm mt-2" data-role="cmd-add">Add Command</button>
+    </div>`;
+  }).join('');
+  stepsEl.innerHTML = html;
+  if (emptyEl) emptyEl.classList.add('d-none');
+}
+
+function focusStartCommandInput(stepIdx, cmdIdx) {
+  setTimeout(() => {
+    const selector = `#start-commands-steps [data-step-index="${stepIdx}"] [data-cmd-index="${cmdIdx}"] input[data-role="cmd-input"]`;
+    const input = document.querySelector(selector);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }, 60);
+}
+
+function resetStartCommandsModal() {
+  START_COMMAND_MODAL_STATE.pid = null;
+  START_COMMAND_MODAL_STATE.idx = null;
+  START_COMMAND_MODAL_STATE.vmName = '';
+  START_COMMAND_MODAL_STATE.steps = [];
+  renderStartCommandsModal();
+}
+
+function openStartCommandsManager(pid, idx) {
+  try { wireStartCommandsModal(); } catch {}
+  const proj = (window.PROJ_CACHE || {})[pid];
+  const vmList = proj && Array.isArray(proj.vms) ? proj.vms : [];
+  const vm = vmList[idx] || vmList.find(entry => entry && entry.id === idx);
+  const fallback = getStartCommandsFromDom(pid, idx);
+  const rawSteps = Array.isArray(vm?.start_commands) ? vm.start_commands : fallback;
+  const steps = normalizeStartCommandSteps(rawSteps);
+  START_COMMAND_MODAL_STATE.pid = pid;
+  START_COMMAND_MODAL_STATE.idx = idx;
+  START_COMMAND_MODAL_STATE.vmName = vm?.name || '';
+  START_COMMAND_MODAL_STATE.steps = steps.map(step => ({
+    delaySeconds: step.delaySeconds,
+    commands: (Array.isArray(step.commands) ? step.commands : []).map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+  }));
+  renderStartCommandsModal();
+  const modalEl = document.getElementById('startCommandsModal');
+  if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+  } else {
+    alert('Start command manager unavailable.');
+  }
+}
+
+async function saveStartCommandsFromModal() {
+  const { pid, idx, vmName } = START_COMMAND_MODAL_STATE;
+  if (!pid || idx === null || !vmName) return;
+  const saveBtn = document.getElementById('start-commands-save');
+  if (saveBtn) saveBtn.disabled = true;
+  setVmStatus(pid, idx, 'Saving…', 'text-muted');
+  const sanitized = sanitizeStartCommandSteps(START_COMMAND_MODAL_STATE.steps);
+  const payload = stepsToServerPayload(sanitized);
+  try {
+    await saveVM(pid, vmName, { start_commands: payload }, { silent: true });
+    updateStartCommandsCache(pid, vmName, sanitized, idx);
+    updateStartCommandsDomState(pid, idx, sanitized);
+    START_COMMAND_MODAL_STATE.steps = sanitized.map(step => ({
+      delaySeconds: step.delaySeconds,
+      commands: step.commands.map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+    }));
+    setVmStatus(pid, idx, 'Saved', 'text-success');
+    setTimeout(() => {
+      const el = document.getElementById(`vm-save-status-${pid}-${idx}`);
+      if (el && el.textContent === 'Saved') {
+        el.textContent = '';
+        el.className = 'small text-muted';
+      }
+    }, 1600);
+    try { showToast('Start commands updated.', 'success'); } catch {}
+    const modalEl = document.getElementById('startCommandsModal');
+    if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
+      const modal = bootstrap.Modal.getInstance(modalEl);
+      if (modal) modal.hide();
+    }
+  } catch (e) {
+    try { showToast('Failed to save start commands: ' + (e?.message || e), 'danger'); } catch { alert('Failed to save start commands: ' + (e?.message || e)); }
+    setVmStatus(pid, idx, 'Save failed', 'text-danger');
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+function wireStartCommandsModal() {
+  const modalEl = document.getElementById('startCommandsModal');
+  if (!modalEl || modalEl._startCommandsBound) return;
+  modalEl._startCommandsBound = true;
+  const addStepBtn = document.getElementById('start-commands-add-step');
+  if (addStepBtn) {
+    addStepBtn.addEventListener('click', () => {
+      const steps = START_COMMAND_MODAL_STATE.steps;
+      const newStep = { delaySeconds: 0, commands: [{ command: '', enabled: true }] };
+      steps.push(newStep);
+      renderStartCommandsModal();
+      focusStartCommandInput(steps.length - 1, 0);
+    });
+  }
+  const stepsEl = document.getElementById('start-commands-steps');
+  if (stepsEl) {
+    stepsEl.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!target) return;
+      const stepEl = target.closest && target.closest('[data-step-index]');
+      if (!stepEl) return;
+      const stepIdx = Number(stepEl.dataset.stepIndex);
+      if (Number.isNaN(stepIdx) || !START_COMMAND_MODAL_STATE.steps[stepIdx]) return;
+      const role = target.getAttribute('data-role');
+      if (role === 'cmd-input') {
+        const cmdEl = target.closest('[data-cmd-index]');
+        if (!cmdEl) return;
+        const cmdIdx = Number(cmdEl.dataset.cmdIndex);
+        if (Number.isNaN(cmdIdx)) return;
+        const commands = START_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(START_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? START_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
+        if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
+          commands[cmdIdx] = { command: '', enabled: true };
+        }
+        commands[cmdIdx].command = target.value;
+      } else if (role === 'step-delay') {
+        const raw = target.value;
+        let parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) parsed = 0;
+        START_COMMAND_MODAL_STATE.steps[stepIdx].delaySeconds = parsed;
+      }
+    });
+    stepsEl.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!target) return;
+      if (target.getAttribute('data-role') !== 'cmd-toggle') return;
+      const stepEl = target.closest('[data-step-index]');
+      const cmdEl = target.closest('[data-cmd-index]');
+      if (!stepEl || !cmdEl) return;
+      const stepIdx = Number(stepEl.dataset.stepIndex);
+      const cmdIdx = Number(cmdEl.dataset.cmdIndex);
+      if (Number.isNaN(stepIdx) || Number.isNaN(cmdIdx)) return;
+      const commands = START_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(START_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? START_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
+      if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
+        commands[cmdIdx] = { command: '', enabled: true };
+      }
+      commands[cmdIdx].enabled = !!target.checked;
+      const input = cmdEl.querySelector('input[data-role="cmd-input"]');
+      if (input) {
+        input.classList.toggle('text-decoration-line-through', !target.checked);
+        input.classList.toggle('opacity-50', !target.checked);
+      }
+      target.title = target.checked ? 'Disable command' : 'Enable command';
+      target.setAttribute('aria-label', target.title);
+      cmdEl.dataset.enabled = target.checked ? '1' : '0';
+    });
+    stepsEl.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-role]') : null;
+      if (!btn) return;
+      const stepEl = btn.closest('[data-step-index]');
+      if (!stepEl) return;
+      const stepIdx = Number(stepEl.dataset.stepIndex);
+      if (Number.isNaN(stepIdx)) return;
+      const steps = START_COMMAND_MODAL_STATE.steps;
+      const step = steps[stepIdx];
+      if (!step) return;
+      const role = btn.dataset.role;
+      if (role === 'cmd-add') {
+        step.commands = Array.isArray(step.commands) ? step.commands : [];
+        step.commands.push({ command: '', enabled: true });
+        renderStartCommandsModal();
+        focusStartCommandInput(stepIdx, step.commands.length - 1);
+        return;
+      }
+      if (role === 'step-delete') {
+        steps.splice(stepIdx, 1);
+        renderStartCommandsModal();
+        return;
+      }
+      if (role === 'step-up' && stepIdx > 0) {
+        [steps[stepIdx - 1], steps[stepIdx]] = [steps[stepIdx], steps[stepIdx - 1]];
+        renderStartCommandsModal();
+        focusStartCommandInput(stepIdx - 1, 0);
+        return;
+      }
+      if (role === 'step-down' && stepIdx < steps.length - 1) {
+        [steps[stepIdx + 1], steps[stepIdx]] = [steps[stepIdx], steps[stepIdx + 1]];
+        renderStartCommandsModal();
+        focusStartCommandInput(stepIdx + 1, 0);
+        return;
+      }
+      const cmdContainer = btn.closest('[data-cmd-index]');
+      if (!cmdContainer) return;
+      const cmdIdx = Number(cmdContainer.dataset.cmdIndex);
+      if (Number.isNaN(cmdIdx)) return;
+      step.commands = Array.isArray(step.commands) ? step.commands : [];
+      if (role === 'cmd-delete') {
+        step.commands.splice(cmdIdx, 1);
+        if (!step.commands.length) {
+          steps.splice(stepIdx, 1);
+        }
+        renderStartCommandsModal();
+        return;
+      }
+      if (role === 'cmd-up' && cmdIdx > 0) {
+        [step.commands[cmdIdx - 1], step.commands[cmdIdx]] = [step.commands[cmdIdx], step.commands[cmdIdx - 1]];
+        renderStartCommandsModal();
+        focusStartCommandInput(stepIdx, cmdIdx - 1);
+        return;
+      }
+      if (role === 'cmd-down' && cmdIdx < step.commands.length - 1) {
+        [step.commands[cmdIdx + 1], step.commands[cmdIdx]] = [step.commands[cmdIdx], step.commands[cmdIdx + 1]];
+        renderStartCommandsModal();
+        focusStartCommandInput(stepIdx, cmdIdx + 1);
+      }
+    });
+  }
+  const saveBtn = document.getElementById('start-commands-save');
+  if (saveBtn) saveBtn.addEventListener('click', saveStartCommandsFromModal);
+  modalEl.addEventListener('hidden.bs.modal', resetStartCommandsModal);
+}
+
+function renderStoredCommandsModal() {
+  const modalTitle = document.getElementById('storedCommandsModalLabel');
+  if (modalTitle) {
+    const name = STORED_COMMAND_MODAL_STATE.vmName ? ` — ${STORED_COMMAND_MODAL_STATE.vmName}` : '';
+    modalTitle.textContent = `Manage Stored Commands${name}`;
+  }
+  const stepsEl = document.getElementById('stored-commands-steps');
+  const emptyEl = document.getElementById('stored-commands-empty');
+  if (!stepsEl) return;
+  const steps = STORED_COMMAND_MODAL_STATE.steps || [];
+  if (!steps.length) {
+    stepsEl.innerHTML = '';
+    if (emptyEl) emptyEl.classList.remove('d-none');
+    return;
+  }
+  const html = steps.map((step, stepIdx) => {
+    const commands = Array.isArray(step.commands) ? step.commands : [];
+    const delayValue = Number(step.delaySeconds || 0);
+    const delayInput = Number.isFinite(delayValue)
+      ? (Math.abs(delayValue - Math.round(delayValue)) < 1e-6 ? String(Math.round(delayValue)) : String(delayValue))
+      : '0';
+    const stepUpDisabled = stepIdx === 0 ? 'disabled' : '';
+    const stepDownDisabled = stepIdx === steps.length - 1 ? 'disabled' : '';
+    const commandsMarkup = commands.length ? commands.map((cmd, cmdIdx) => {
+      const commandObj = cmd && typeof cmd === 'object' ? cmd : { command: cmd, enabled: true };
+      const commandText = escHtml((commandObj.command ?? '').toString());
+      const isEnabled = commandObj.enabled !== false;
+      const toggleTitle = isEnabled ? 'Disable command' : 'Enable command';
+      const cmdUpDisabled = cmdIdx === 0 ? 'disabled' : '';
+      const cmdDownDisabled = cmdIdx === commands.length - 1 ? 'disabled' : '';
+      const inputClasses = ['form-control', 'form-control-sm'];
+      if (!isEnabled) {
+        inputClasses.push('text-decoration-line-through', 'opacity-50');
+      }
+      return `<div class="d-flex align-items-center gap-2 mb-2" data-cmd-index="${cmdIdx}" data-enabled="${isEnabled ? '1' : '0'}">
+        <span class="badge bg-secondary flex-shrink-0">Cmd ${cmdIdx + 1}</span>
+        <div class="form-check form-switch m-0 flex-shrink-0">
+          <input class="form-check-input" type="checkbox" data-role="cmd-toggle" ${isEnabled ? 'checked' : ''} title="${toggleTitle}" aria-label="${toggleTitle}">
+        </div>
+        <input type="text" class="${inputClasses.join(' ')}" data-role="cmd-input" placeholder="Command" value="${commandText}">
+        <div class="btn-group btn-group-sm flex-shrink-0">
+          <button type="button" class="btn btn-outline-secondary" data-role="cmd-up" ${cmdUpDisabled} title="Move command up"><span aria-hidden="true">&#8593;</span><span class="visually-hidden">Move command up</span></button>
+          <button type="button" class="btn btn-outline-secondary" data-role="cmd-down" ${cmdDownDisabled} title="Move command down"><span aria-hidden="true">&#8595;</span><span class="visually-hidden">Move command down</span></button>
+          <button type="button" class="btn btn-outline-danger" data-role="cmd-delete">Remove</button>
+        </div>
+      </div>`;
+    }).join('') : '<div class="text-muted small" data-role="empty-step">No commands in this step.</div>';
+    return `<div class="list-group-item" data-step-index="${stepIdx}">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div class="d-flex align-items-center gap-2">
+          <span class="badge bg-primary">Step ${stepIdx + 1}</span>
+          <span class="small text-muted">Commands in this step run together after the delay.</span>
+        </div>
+        <div class="btn-group btn-group-sm">
+          <button type="button" class="btn btn-outline-secondary" data-role="step-up" ${stepUpDisabled} title="Move step up"><span aria-hidden="true">&#9650;</span><span class="visually-hidden">Move step up</span></button>
+          <button type="button" class="btn btn-outline-secondary" data-role="step-down" ${stepDownDisabled} title="Move step down"><span aria-hidden="true">&#9660;</span><span class="visually-hidden">Move step down</span></button>
+          <button type="button" class="btn btn-outline-danger" data-role="step-delete">Remove</button>
+        </div>
+      </div>
+      <div class="row g-2 align-items-center mt-2 mb-3">
+        <div class="col-sm-6 col-md-4">
+          <label class="form-label small mb-1">Delay before step (seconds)</label>
+          <input type="number" min="0" step="0.1" class="form-control form-control-sm" data-role="step-delay" value="${delayInput}">
+        </div>
+      </div>
+      <div data-role="command-wrapper">
+        ${commandsMarkup}
+      </div>
+      <button type="button" class="btn btn-outline-secondary btn-sm mt-2" data-role="cmd-add">Add Command</button>
+    </div>`;
+  }).join('');
+  stepsEl.innerHTML = html;
+  if (emptyEl) emptyEl.classList.add('d-none');
+}
+
+function focusStoredCommandInput(stepIdx, cmdIdx) {
+  setTimeout(() => {
+    const selector = `#stored-commands-steps [data-step-index="${stepIdx}"] [data-cmd-index="${cmdIdx}"] input[data-role="cmd-input"]`;
+    const input = document.querySelector(selector);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }, 60);
+}
+
+function resetStoredCommandsModal() {
+  STORED_COMMAND_MODAL_STATE.pid = null;
+  STORED_COMMAND_MODAL_STATE.idx = null;
+  STORED_COMMAND_MODAL_STATE.vmName = '';
+  STORED_COMMAND_MODAL_STATE.steps = [];
+  renderStoredCommandsModal();
+}
+
+function openStoredCommandsManager(pid, idx) {
+  try { wireStoredCommandsModal(); } catch {}
+  const proj = (window.PROJ_CACHE || {})[pid];
+  const vmList = proj && Array.isArray(proj.vms) ? proj.vms : [];
+  const vm = vmList[idx] || vmList.find(entry => entry && entry.id === idx);
+  const fallback = getStoredCommandsFromDom(pid, idx);
+  const rawSteps = Array.isArray(vm?.stored_commands) ? vm.stored_commands : fallback;
+  const steps = normalizeStartCommandSteps(rawSteps);
+  STORED_COMMAND_MODAL_STATE.pid = pid;
+  STORED_COMMAND_MODAL_STATE.idx = idx;
+  STORED_COMMAND_MODAL_STATE.vmName = vm?.name || '';
+  STORED_COMMAND_MODAL_STATE.steps = steps.map(step => ({
+    delaySeconds: step.delaySeconds,
+    commands: (Array.isArray(step.commands) ? step.commands : []).map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+  }));
+  renderStoredCommandsModal();
+  const modalEl = document.getElementById('storedCommandsModal');
+  if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+  } else {
+    alert('Stored command manager unavailable.');
+  }
+}
+
+async function saveStoredCommandsFromModal() {
+  const { pid, idx, vmName } = STORED_COMMAND_MODAL_STATE;
+  if (!pid || idx === null || !vmName) return;
+  const saveBtn = document.getElementById('stored-commands-save');
+  if (saveBtn) saveBtn.disabled = true;
+  setVmStatus(pid, idx, 'Saving…', 'text-muted');
+  const sanitized = sanitizeStartCommandSteps(STORED_COMMAND_MODAL_STATE.steps);
+  const payload = stepsToServerPayload(sanitized);
+  try {
+    await saveVM(pid, vmName, { stored_commands: payload }, { silent: true });
+    updateStoredCommandsCache(pid, vmName, sanitized, idx);
+    updateStoredCommandsDomState(pid, idx, sanitized);
+    STORED_COMMAND_MODAL_STATE.steps = sanitized.map(step => ({
+      delaySeconds: step.delaySeconds,
+      commands: step.commands.map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+    }));
+    setVmStatus(pid, idx, 'Saved', 'text-success');
+    setTimeout(() => {
+      const el = document.getElementById(`vm-save-status-${pid}-${idx}`);
+      if (el && el.textContent === 'Saved') {
+        el.textContent = '';
+        el.className = 'small text-muted';
+      }
+    }, 1600);
+    try { showToast('Stored commands updated.', 'success'); } catch {}
+    const modalEl = document.getElementById('storedCommandsModal');
+    if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
+      const modal = bootstrap.Modal.getInstance(modalEl);
+      if (modal) modal.hide();
+    }
+  } catch (e) {
+    try { showToast('Failed to save stored commands: ' + (e?.message || e), 'danger'); } catch { alert('Failed to save stored commands: ' + (e?.message || e)); }
+    setVmStatus(pid, idx, 'Save failed', 'text-danger');
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+function wireStoredCommandsModal() {
+  const modalEl = document.getElementById('storedCommandsModal');
+  if (!modalEl || modalEl._storedCommandsBound) return;
+  modalEl._storedCommandsBound = true;
+  const addStepBtn = document.getElementById('stored-commands-add-step');
+  if (addStepBtn) {
+    addStepBtn.addEventListener('click', () => {
+      const steps = STORED_COMMAND_MODAL_STATE.steps;
+      const newStep = { delaySeconds: 0, commands: [{ command: '', enabled: true }] };
+      steps.push(newStep);
+      renderStoredCommandsModal();
+      focusStoredCommandInput(steps.length - 1, 0);
+    });
+  }
+  const stepsEl = document.getElementById('stored-commands-steps');
+  if (stepsEl) {
+    stepsEl.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!target) return;
+      const stepEl = target.closest && target.closest('[data-step-index]');
+      if (!stepEl) return;
+      const stepIdx = Number(stepEl.dataset.stepIndex);
+      if (Number.isNaN(stepIdx) || !STORED_COMMAND_MODAL_STATE.steps[stepIdx]) return;
+      const role = target.getAttribute('data-role');
+      if (role === 'cmd-input') {
+        const cmdEl = target.closest('[data-cmd-index]');
+        if (!cmdEl) return;
+        const cmdIdx = Number(cmdEl.dataset.cmdIndex);
+        if (Number.isNaN(cmdIdx)) return;
+        const commands = STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
+        if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
+          commands[cmdIdx] = { command: '', enabled: true };
+        }
+        commands[cmdIdx].command = target.value;
+      } else if (role === 'step-delay') {
+        const raw = target.value;
+        let parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) parsed = 0;
+        STORED_COMMAND_MODAL_STATE.steps[stepIdx].delaySeconds = parsed;
+      }
+    });
+    stepsEl.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!target) return;
+      if (target.getAttribute('data-role') !== 'cmd-toggle') return;
+      const stepEl = target.closest('[data-step-index]');
+      const cmdEl = target.closest('[data-cmd-index]');
+      if (!stepEl || !cmdEl) return;
+      const stepIdx = Number(stepEl.dataset.stepIndex);
+      const cmdIdx = Number(cmdEl.dataset.cmdIndex);
+      if (Number.isNaN(stepIdx) || Number.isNaN(cmdIdx)) return;
+      const commands = STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
+      if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
+        commands[cmdIdx] = { command: '', enabled: true };
+      }
+      commands[cmdIdx].enabled = !!target.checked;
+      const input = cmdEl.querySelector('input[data-role="cmd-input"]');
+      if (input) {
+        input.classList.toggle('text-decoration-line-through', !target.checked);
+        input.classList.toggle('opacity-50', !target.checked);
+      }
+      target.title = target.checked ? 'Disable command' : 'Enable command';
+      target.setAttribute('aria-label', target.title);
+      cmdEl.dataset.enabled = target.checked ? '1' : '0';
+    });
+    stepsEl.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-role]') : null;
+      if (!btn) return;
+      const stepEl = btn.closest('[data-step-index]');
+      if (!stepEl) return;
+      const stepIdx = Number(stepEl.dataset.stepIndex);
+      if (Number.isNaN(stepIdx)) return;
+      const steps = STORED_COMMAND_MODAL_STATE.steps;
+      const step = steps[stepIdx];
+      if (!step) return;
+      const role = btn.dataset.role;
+      if (role === 'cmd-add') {
+        step.commands = Array.isArray(step.commands) ? step.commands : [];
+        step.commands.push({ command: '', enabled: true });
+        renderStoredCommandsModal();
+        focusStoredCommandInput(stepIdx, step.commands.length - 1);
+        return;
+      }
+      if (role === 'step-delete') {
+        steps.splice(stepIdx, 1);
+        renderStoredCommandsModal();
+        return;
+      }
+      if (role === 'step-up' && stepIdx > 0) {
+        [steps[stepIdx - 1], steps[stepIdx]] = [steps[stepIdx], steps[stepIdx - 1]];
+        renderStoredCommandsModal();
+        focusStoredCommandInput(stepIdx - 1, 0);
+        return;
+      }
+      if (role === 'step-down' && stepIdx < steps.length - 1) {
+        [steps[stepIdx + 1], steps[stepIdx]] = [steps[stepIdx], steps[stepIdx + 1]];
+        renderStoredCommandsModal();
+        focusStoredCommandInput(stepIdx + 1, 0);
+        return;
+      }
+      const cmdContainer = btn.closest('[data-cmd-index]');
+      if (!cmdContainer) return;
+      const cmdIdx = Number(cmdContainer.dataset.cmdIndex);
+      if (Number.isNaN(cmdIdx)) return;
+      step.commands = Array.isArray(step.commands) ? step.commands : [];
+      if (role === 'cmd-delete') {
+        step.commands.splice(cmdIdx, 1);
+        if (!step.commands.length) {
+          steps.splice(stepIdx, 1);
+        }
+        renderStoredCommandsModal();
+        return;
+      }
+      if (role === 'cmd-up' && cmdIdx > 0) {
+        [step.commands[cmdIdx - 1], step.commands[cmdIdx]] = [step.commands[cmdIdx], step.commands[cmdIdx - 1]];
+        renderStoredCommandsModal();
+        focusStoredCommandInput(stepIdx, cmdIdx - 1);
+        return;
+      }
+      if (role === 'cmd-down' && cmdIdx < step.commands.length - 1) {
+        [step.commands[cmdIdx + 1], step.commands[cmdIdx]] = [step.commands[cmdIdx], step.commands[cmdIdx + 1]];
+        renderStoredCommandsModal();
+        focusStoredCommandInput(stepIdx, cmdIdx + 1);
+      }
+    });
+  }
+  const saveBtn = document.getElementById('stored-commands-save');
+  if (saveBtn) saveBtn.addEventListener('click', saveStoredCommandsFromModal);
+  modalEl.addEventListener('hidden.bs.modal', resetStoredCommandsModal);
 }
 
 function showStatusDot(pid, state) {
@@ -1467,25 +2338,43 @@ function renderProjectCard(p) {
           <label class="form-label" title="Optional explicit VMID for the template">VM ID (optional)</label>
           <input type="number" min="0" id="vm-${p.id}-${i}-vmid" class="form-control form-control-sm" value="${(v.vmid ?? '')}" placeholder="e.g., 101" title="Explicit VMID to clone from (optional)" aria-label="VM ID" oninput="debounceVmSave('${p.id}', ${i})" />
         </div>
+        ${(function(){
+          const startSteps = normalizeStartCommandSteps(v.start_commands || []);
+          const startSummary = formatStartCommandsSummary(startSteps);
+          const startTooltip = formatStartCommandsTooltip(startSteps);
+          const startTitleAttr = escHtml(startTooltip).replace(/\n/g, '&#10;');
+          const startDataValue = escHtml(encodeStartCommandsValue(startSteps));
+          const pidLiteral = JSON.stringify(String(p.id));
+          return `
         <div class="col-md-4">
           <label class="form-label">Start Commands</label>
-          <div class="d-flex gap-2 mb-2">
-            <input class="form-control form-control-sm" id="vm-${p.id}-${i}-start-input" placeholder="Add command" title="Command run during startup" onkeydown="vmListKey('${p.id}',${i},'start',event)" />
-            <button class="btn btn-sm btn-outline-primary" onclick="addListItem('vm-${p.id}-${i}-start-list','vm-${p.id}-${i}-start-input')">Add</button>
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <div class="flex-grow-1">
+              <div id="vm-${p.id}-${i}-start-summary" class="small text-muted" title="${startTitleAttr}">${escHtml(startSummary)}</div>
+            </div>
+            <button class="btn btn-sm btn-outline-primary" type="button" onclick='openStartCommandsManager(${pidLiteral},${i})'>Manage</button>
           </div>
-          <ul class="list-group list-group-sm" id="vm-${p.id}-${i}-start-list">
-            ${(v.start_commands||[]).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-start-list`, c, idx)).join('')}
-          </ul>
-        </div>
+          <input type="hidden" id="vm-${p.id}-${i}-start-data" value="${startDataValue}">
+        </div>`;
+        })()}
         <div class="col-md-4">
           <label class="form-label">Stored Commands</label>
-          <div class="d-flex gap-2 mb-2">
-            <input class="form-control form-control-sm" id="vm-${p.id}-${i}-stored-input" placeholder="Add stored command" title="Reusable command to run later" onkeydown="vmListKey('${p.id}',${i},'stored',event)" />
-            <button class="btn btn-sm btn-outline-primary" onclick="addListItem('vm-${p.id}-${i}-stored-list','vm-${p.id}-${i}-stored-input')">Add</button>
+          ${(function(){
+            const storedSteps = normalizeStartCommandSteps(v.stored_commands || []);
+            const storedSummary = formatStartCommandsSummary(storedSteps);
+            const storedTooltip = formatStartCommandsTooltip(storedSteps);
+            const storedTitleAttr = escHtml(storedTooltip).replace(/\n/g, '&#10;');
+            const storedDataValue = escHtml(encodeStartCommandsValue(storedSteps));
+            const pidLiteralStored = JSON.stringify(String(p.id));
+            return `
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <div class="flex-grow-1">
+              <div id="vm-${p.id}-${i}-stored-summary" class="small text-muted" title="${storedTitleAttr}">${escHtml(storedSummary)}</div>
+            </div>
+            <button class="btn btn-sm btn-outline-primary" type="button" onclick='openStoredCommandsManager(${pidLiteralStored},${i})'>Manage</button>
           </div>
-          <ul class="list-group list-group-sm" id="vm-${p.id}-${i}-stored-list">
-            ${(v.stored_commands||[]).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-stored-list`, c, idx)).join('')}
-          </ul>
+          <input type="hidden" id="vm-${p.id}-${i}-stored-data" value="${storedDataValue}">`;
+          })()}
         </div>
     <div class="col-md-4">
           <label class="form-label">Internal Network Adaptors</label>

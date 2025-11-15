@@ -1,8 +1,13 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import requests
 import time
 import logging
+
+
+class GuestAgentUnavailableError(RuntimeError):
+    """Raised when the QEMU guest agent is not installed or not reachable."""
+    pass
 
 
 @dataclass
@@ -13,6 +18,7 @@ class ProxmoxClient:
     username: Optional[str] = None
     password: Optional[str] = None
     _session: Optional[requests.Session] = None
+    _logger: logging.Logger = field(default_factory=lambda: logging.getLogger(__name__), init=False, repr=False)
 
     def _ensure_session(self) -> requests.Session:
         if self._session is not None:
@@ -294,33 +300,157 @@ class ProxmoxClient:
         s = self._ensure_session()
         exec_url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/agent/exec"
         status_url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/agent/exec-status"
-        # Use /bin/sh -lc to interpret the command when shell=True
+        logger = self._logger
         if shell:
-            data = { 'command': '/bin/sh', 'args[0]': '-lc', 'args[1]': command }
+            cmd_text = '' if command is None else str(command)
+            command_list = ['/bin/sh', '-lc', cmd_text]
         else:
-            data = { 'command': command }
-        r = s.post(exec_url, data=data, timeout=10)
+            if isinstance(command, (list, tuple)):
+                command_list = [str(item) for item in command]
+            else:
+                command_list = [str(command)]
+        payload: Dict[str, Any] = {'command': command_list}
+        if isinstance(command, (list, tuple)):
+            preview_src = ' '.join(str(item) for item in command)
+        else:
+            preview_src = '' if command is None else str(command)
+        cmd_preview = preview_src.replace('\n', ' ').strip()
+        if len(cmd_preview) > 240:
+            cmd_preview = f"{cmd_preview[:236]} ..."
+        logger.info("guest agent exec start node=%s vmid=%s shell=%s cmd=%s", node, vmid, shell, cmd_preview)
+        r = s.post(exec_url, json=payload, timeout=10)
         if r.status_code >= 400:
             raise RuntimeError(f"Proxmox guest agent exec error {r.status_code}: {r.text}")
         pid = (r.json().get('data') or {}).get('pid')
         if pid is None:
             raise RuntimeError("agent exec: no pid returned (is guest agent running?)")
+        logger.debug("guest agent exec pid=%s node=%s vmid=%s", pid, node, vmid)
         import time as _t
         start = _t.time()
+
+        def _coerce_bool(value: Any, default: bool = False) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value != 0
+            if isinstance(value, str):
+                norm = value.strip().lower()
+                if not norm:
+                    return default
+                if norm in {'1', 'true', 'yes', 'running', 'ok', 'success', 'up'}:
+                    return True
+                if norm in {'0', 'false', 'no', 'stopped', 'stop', 'stopping', 'done', 'finished', 'complete', 'completed', 'exited', 'inactive', 'failed', 'error'}:
+                    return False
+            return bool(value)
+
         while True:
-            rs = s.get(status_url, params={ 'pid': pid }, timeout=10)
+            elapsed = _t.time() - start
+            if elapsed > timeout:
+                raise RuntimeError("agent exec timed out")
+            remaining = max(1, timeout - int(elapsed))
+            wait_secs = min(remaining, 15)
+            params = {'pid': pid}
+            try:
+                rs = s.get(status_url, params=params, timeout=wait_secs + 5)
+            except requests.RequestException as exc:
+                raise RuntimeError(f"agent exec-status request failed: {exc}") from exc
             if rs.status_code >= 400:
                 raise RuntimeError(f"agent exec-status error {rs.status_code}: {rs.text}")
-            st = rs.json().get('data', {})
-            if st.get('exited'):
+            st = rs.json().get('data', {}) if rs.content else {}
+
+            exited_raw = st.get('exited')
+            exited = _coerce_bool(exited_raw, default=False)
+            status = ''
+            try:
+                status = str(st.get('status') or '').strip().lower()
+            except Exception:
+                status = ''
+            running_flag = _coerce_bool(st.get('running'), default=True)
+            exitcode_raw = st.get('exitcode')
+            exitcode = None
+            if exitcode_raw not in (None, ''):
+                try:
+                    exitcode = int(str(exitcode_raw).strip())
+                except Exception:
+                    try:
+                        exitcode = int(float(str(exitcode_raw).strip()))
+                    except Exception:
+                        exitcode = None
+
+            done = exited or not running_flag
+            if status and status not in {'', 'running'}:
+                done = True
+            if exitcode is not None and status in {'success', 'error', 'failed', 'stopped', 'done'}:
+                done = True
+
+            if done:
+                stdout = st.get('out-data') or ''
+                stderr = st.get('err-data') or ''
+                try:
+                    stdout = stdout if isinstance(stdout, str) else str(stdout)
+                except Exception:
+                    stdout = ''
+                try:
+                    stderr = stderr if isinstance(stderr, str) else str(stderr)
+                except Exception:
+                    stderr = ''
+                logger.info(
+                    "guest agent exec complete node=%s vmid=%s pid=%s status=%s exitcode=%s",
+                    node,
+                    vmid,
+                    pid,
+                    status or '',
+                    exitcode,
+                )
                 return {
-                    'exitcode': st.get('exitcode'),
-                    'stdout': st.get('out-data') or '',
-                    'stderr': st.get('err-data') or ''
+                    'exitcode': exitcode,
+                    'stdout': stdout,
+                    'stderr': stderr
                 }
-            if _t.time() - start > timeout:
-                raise RuntimeError("agent exec timed out")
+
             _t.sleep(1)
+
+    def ensure_guest_agent_ready(self, node: str, vmid: int, timeout: int = 10) -> None:
+        """Verify that the QEMU guest agent is available for the VM.
+
+        Raises GuestAgentUnavailableError when the agent is not installed or reachable,
+        and RuntimeError for other HTTP or transport failures.
+        """
+        logger = self._logger
+        logger.info("guest agent readiness exec start node=%s vmid=%s", node, vmid)
+        try:
+            result = self.agent_exec(
+                node=node,
+                vmid=vmid,
+                command=['ping', '-c', '1', '127.0.0.1'],
+                shell=False,
+                timeout=max(5, timeout)
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if any(token in lowered for token in ('guest agent', 'not running', 'not available', 'not implemented', '501')):
+                logger.warning("guest agent exec readiness failed node=%s vmid=%s message=%s", node, vmid, message)
+                raise GuestAgentUnavailableError(message or "Guest agent is not available") from exc
+            logger.error("guest agent exec readiness error node=%s vmid=%s error=%s", node, vmid, exc)
+            raise
+
+        exitcode = result.get('exitcode')
+        if exitcode not in (0, None):
+            stderr_txt = (result.get('stderr') or '').strip()
+            logger.warning(
+                "guest agent exec readiness ping exitcode=%s node=%s vmid=%s stderr=%s",
+                exitcode,
+                node,
+                vmid,
+                stderr_txt,
+            )
+            raise GuestAgentUnavailableError(
+                f"Guest agent ping command exited with {exitcode}: {stderr_txt or 'no output'}"
+            )
+        logger.info("guest agent readiness exec success node=%s vmid=%s", node, vmid)
 
     # --- Users and Pools ---
     def get_user(self, userid: str) -> Optional[Dict[str, Any]]:
