@@ -302,6 +302,17 @@
       </div>
       <div class="modal-body">
         <p class="small text-muted">Create steps to run commands. Each step waits for its delay, then runs its commands at the same time.</p>
+        <div class="mb-3">
+          <a class="small fw-semibold" data-bs-toggle="collapse" href="#start-commands-sample" role="button" aria-expanded="false" aria-controls="start-commands-sample">Sample Commands</a>
+          <div class="collapse mt-2" id="start-commands-sample">
+            <div class="bg-light border rounded p-2 small">
+              <p class="mb-1 text-muted text-uppercase">Last login</p>
+              <pre class="mb-2"><code>lastlog -u &lt;username&gt;</code></pre>
+              <p class="mb-1 text-muted text-uppercase">Notify user</p>
+              <pre class="mb-0"><code>su &lt;username&gt; -c 'notify-send -u critical "FROM ADMIN" "HELLO"'</code></pre>
+            </div>
+          </div>
+        </div>
         <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
           <div class="list-group list-group-flush" id="start-commands-steps"></div>
           <div id="start-commands-empty" class="text-muted small text-center py-3 d-none">No commands configured.</div>
@@ -326,6 +337,17 @@
         </div>
         <div class="modal-body">
           <p class="small text-muted">Create steps for stored commands just like startup commands. Each step waits for its delay, then runs its commands together.</p>
+          <div class="mb-3">
+            <a class="small fw-semibold" data-bs-toggle="collapse" href="#stored-commands-sample" role="button" aria-expanded="false" aria-controls="stored-commands-sample">Sample Commands</a>
+            <div class="collapse mt-2" id="stored-commands-sample">
+              <div class="bg-light border rounded p-2 small">
+                <p class="mb-1 text-muted text-uppercase">Last login</p>
+                <pre class="mb-2"><code>lastlog -u &lt;username&gt;</code></pre>
+                <p class="mb-1 text-muted text-uppercase">Notify user</p>
+                <pre class="mb-0"><code>su &lt;username&gt; -c 'notify-send -u critical "FROM ADMIN" "HELLO"'</code></pre>
+              </div>
+            </div>
+          </div>
           <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
             <div class="list-group list-group-flush" id="stored-commands-steps"></div>
             <div id="stored-commands-empty" class="text-muted small text-center py-3 d-none">No stored commands configured.</div>

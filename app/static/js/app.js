@@ -6,6 +6,87 @@ window.MATERIAL_PENDING = window.MATERIAL_PENDING || {};
 
 const START_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
 const STORED_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
+const DEFAULT_COMMAND_TIMEOUT_SECONDS = 300;
+
+function normalizeCommandTimeout(rawValue, defaultValue = DEFAULT_COMMAND_TIMEOUT_SECONDS) {
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return defaultValue;
+  }
+  let value = Number(rawValue);
+  if (!Number.isFinite(value) || value <= 0) {
+    return defaultValue;
+  }
+  value = Math.round(value);
+  if (value > 86400) {
+    return 86400;
+  }
+  return value;
+}
+
+function createEmptyCommandEntry() {
+  return { command: '', enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS };
+}
+
+function applyCommandLongRunningState(cmdElement, isLongRunning) {
+  if (!cmdElement || !cmdElement.querySelector) return;
+  const longRunning = !!isLongRunning;
+  const timeoutInput = cmdElement.querySelector('input[data-role="cmd-timeout"]');
+  if (timeoutInput) {
+    timeoutInput.disabled = longRunning;
+    timeoutInput.setAttribute('aria-disabled', longRunning ? 'true' : 'false');
+    timeoutInput.classList.toggle('bg-light', longRunning);
+    timeoutInput.classList.toggle('text-muted', longRunning);
+  }
+  const hint = cmdElement.querySelector('[data-role="timeout-hint"]');
+  if (hint) {
+    hint.classList.toggle('d-none', !longRunning);
+  }
+  if (cmdElement.dataset) {
+    cmdElement.dataset.longRunning = longRunning ? '1' : '0';
+  }
+}
+
+function stepHasLongRunningCommands(step) {
+  if (!step || !Array.isArray(step.commands)) return false;
+  return step.commands.some(cmd => cmd && (cmd.longRunning === true || cmd.long_running === true));
+}
+
+function stepDelayIsBlocked(steps, index) {
+  if (!Array.isArray(steps) || index <= 0) return false;
+  return stepHasLongRunningCommands(steps[index - 1]);
+}
+
+function syncStepDelayBlockedStates(kind = 'start') {
+  const state = kind === 'stored' ? STORED_COMMAND_MODAL_STATE : START_COMMAND_MODAL_STATE;
+  const containerId = kind === 'stored' ? 'stored-commands-steps' : 'start-commands-steps';
+  const container = document.getElementById(containerId);
+  const steps = Array.isArray(state.steps) ? state.steps : [];
+  if (!container || !steps.length) return;
+  steps.forEach((_, idx) => {
+    const blocked = stepDelayIsBlocked(steps, idx);
+    const stepEl = container.querySelector(`[data-step-index="${idx}"]`);
+    if (!stepEl) return;
+    const delayInput = stepEl.querySelector('input[data-role="step-delay"]');
+    const hint = stepEl.querySelector('[data-role="delay-hint"]');
+    if (delayInput) {
+      delayInput.disabled = blocked;
+      if (blocked) {
+        delayInput.setAttribute('aria-disabled', 'true');
+      } else {
+        delayInput.removeAttribute('aria-disabled');
+      }
+      delayInput.classList.toggle('bg-light', blocked);
+      delayInput.classList.toggle('text-muted', blocked);
+    }
+    if (hint) {
+      hint.classList.toggle('d-none', !blocked);
+    }
+  });
+}
+
+if (typeof window !== 'undefined') {
+  window.DEFAULT_COMMAND_TIMEOUT_SECONDS = DEFAULT_COMMAND_TIMEOUT_SECONDS;
+}
 
 function sanitizeStartCommandSteps(steps) {
   if (!Array.isArray(steps)) return [];
@@ -27,7 +108,7 @@ function sanitizeStartCommandSteps(steps) {
     if (entry === undefined || entry === null) return null;
     if (typeof entry === 'string' || typeof entry === 'number') {
       const text = String(entry).trim();
-      return text ? { command: text, enabled: true } : null;
+      return text ? { command: text, enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS } : null;
     }
     if (typeof entry === 'object') {
       if (Array.isArray(entry)) {
@@ -53,10 +134,22 @@ function sanitizeStartCommandSteps(steps) {
       if (enabled === undefined && entry.disabled !== undefined) {
         enabled = !entry.disabled;
       }
-      return { command: text, enabled: toBool(enabled, true) };
+      let longRunning = entry.longRunning;
+      if (longRunning === undefined) longRunning = entry.long_running;
+      if (longRunning === undefined) longRunning = entry.longRun ?? entry.long ?? entry.isLongRunning;
+      let timeoutHint = entry.timeoutSeconds;
+      if (timeoutHint === undefined) timeoutHint = entry.timeout_seconds;
+      if (timeoutHint === undefined) timeoutHint = entry.timeout_sec;
+      if (timeoutHint === undefined) timeoutHint = entry.timeout;
+      return {
+        command: text,
+        enabled: toBool(enabled, true),
+        longRunning: toBool(longRunning, false),
+        timeoutSeconds: normalizeCommandTimeout(timeoutHint, DEFAULT_COMMAND_TIMEOUT_SECONDS),
+      };
     }
     const fallback = String(entry).trim();
-    return fallback ? { command: fallback, enabled: true } : null;
+    return fallback ? { command: fallback, enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS } : null;
   };
 
   const coerceDelay = (raw) => {
@@ -86,9 +179,9 @@ function sanitizeStartCommandSteps(steps) {
       const normalized = normalizeCommand(value);
       if (!normalized) return;
       if (Array.isArray(normalized)) {
-        normalized.forEach(cmd => commands.push({ command: cmd.command, enabled: cmd.enabled !== false }));
+        normalized.forEach(cmd => commands.push(cmd));
       } else {
-        commands.push({ command: normalized.command, enabled: normalized.enabled !== false });
+        commands.push(normalized);
       }
     };
     if (commandsSource) {
@@ -104,7 +197,18 @@ function sanitizeStartCommandSteps(steps) {
     if (delayRaw == null) delayRaw = rawStep.wait;
     if (delayRaw == null) delayRaw = rawStep.pause;
     const delay = coerceDelay(delayRaw);
-    clean.push({ delaySeconds: delay, commands });
+    const cleanedCommands = commands
+      .map(cmd => {
+        const text = (cmd?.command ?? '').toString().trim();
+        if (!text) return null;
+        const enabled = toBool(cmd?.enabled, true);
+        const longRunning = toBool(cmd?.longRunning ?? cmd?.long_running, false);
+        const timeoutSeconds = normalizeCommandTimeout(cmd?.timeoutSeconds ?? cmd?.timeout_seconds ?? cmd?.timeout);
+        return { command: text, enabled, longRunning, timeoutSeconds };
+      })
+      .filter(Boolean);
+    if (!cleanedCommands.length) continue;
+    clean.push({ delaySeconds: delay, commands: cleanedCommands });
   }
   return clean;
 }
@@ -143,7 +247,12 @@ function normalizeStartCommandSteps(raw) {
 function stepsToServerPayload(steps) {
   return sanitizeStartCommandSteps(steps).map(step => ({
     delay_seconds: step.delaySeconds,
-    commands: step.commands.map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+    commands: step.commands.map(cmd => ({
+      command: cmd.command,
+      enabled: cmd.enabled !== false,
+      long_running: cmd.longRunning === true,
+      timeout_seconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+    }))
   }));
 }
 
@@ -1736,6 +1845,13 @@ function renderStartCommandsModal() {
     const delayInput = Number.isFinite(delayValue)
       ? (Math.abs(delayValue - Math.round(delayValue)) < 1e-6 ? String(Math.round(delayValue)) : String(delayValue))
       : '0';
+    const delayBlocked = stepDelayIsBlocked(steps, stepIdx);
+    const delayInputClasses = ['form-control', 'form-control-sm'];
+    if (delayBlocked) delayInputClasses.push('bg-light', 'text-muted');
+    const delayHintClasses = ['text-muted', 'small', 'mt-1'];
+    if (!delayBlocked) delayHintClasses.push('d-none');
+    const delayHintId = `start-step-${stepIdx}-delay-hint`;
+    const delayDisabledAttr = delayBlocked ? 'disabled aria-disabled="true"' : '';
     const stepUpDisabled = stepIdx === 0 ? 'disabled' : '';
     const stepDownDisabled = stepIdx === steps.length - 1 ? 'disabled' : '';
     const commandsMarkup = commands.length ? commands.map((cmd, cmdIdx) => {
@@ -1749,20 +1865,47 @@ function renderStartCommandsModal() {
       if (!isEnabled) {
         inputClasses.push('text-decoration-line-through', 'opacity-50');
       }
-      return `<div class="d-flex align-items-center gap-2 mb-2" data-cmd-index="${cmdIdx}" data-enabled="${isEnabled ? '1' : '0'}">
-        <span class="badge bg-secondary flex-shrink-0">Cmd ${cmdIdx + 1}</span>
-        <div class="form-check form-switch m-0 flex-shrink-0">
-          <input class="form-check-input" type="checkbox" data-role="cmd-toggle" ${isEnabled ? 'checked' : ''} title="${toggleTitle}" aria-label="${toggleTitle}">
+      const longRunning = commandObj.longRunning === true;
+      const timeoutValue = normalizeCommandTimeout(commandObj.timeoutSeconds);
+      const timeoutText = escHtml(String(timeoutValue));
+      const longId = `start-cmd-${stepIdx}-${cmdIdx}-long`;
+      const timeoutId = `start-cmd-${stepIdx}-${cmdIdx}-timeout`;
+      const timeoutHintId = `start-cmd-${stepIdx}-${cmdIdx}-timeout-hint`;
+      const longTitle = 'Mark if this command may exceed the guest agent timeout or run indefinitely';
+      const timeoutDisabledAttr = longRunning ? 'disabled aria-disabled="true"' : '';
+      const timeoutInputClasses = ['form-control', 'form-control-sm'];
+      if (longRunning) timeoutInputClasses.push('bg-light', 'text-muted');
+      const timeoutHintClasses = ['text-muted', 'small', 'mt-1'];
+      if (!longRunning) timeoutHintClasses.push('d-none');
+      return `<div class="mb-3" data-cmd-index="${cmdIdx}" data-enabled="${isEnabled ? '1' : '0'}">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <span class="badge bg-secondary flex-shrink-0">Cmd ${cmdIdx + 1}</span>
+          <div class="form-check form-switch m-0 flex-shrink-0">
+            <input class="form-check-input" type="checkbox" data-role="cmd-toggle" ${isEnabled ? 'checked' : ''} title="${toggleTitle}" aria-label="${toggleTitle}">
+          </div>
+          <input type="text" class="${inputClasses.join(' ')}" data-role="cmd-input" placeholder="Command" value="${commandText}">
+          <div class="btn-group btn-group-sm flex-shrink-0">
+            <button type="button" class="btn btn-outline-secondary" data-role="cmd-up" ${cmdUpDisabled} title="Move command up">
+              <span aria-hidden="true">&#8593;</span><span class="visually-hidden">Move command up</span>
+            </button>
+            <button type="button" class="btn btn-outline-secondary" data-role="cmd-down" ${cmdDownDisabled} title="Move command down">
+              <span aria-hidden="true">&#8595;</span><span class="visually-hidden">Move command down</span>
+            </button>
+            <button type="button" class="btn btn-outline-danger" data-role="cmd-delete">Remove</button>
+          </div>
         </div>
-        <input type="text" class="${inputClasses.join(' ')}" data-role="cmd-input" placeholder="Command" value="${commandText}">
-        <div class="btn-group btn-group-sm flex-shrink-0">
-          <button type="button" class="btn btn-outline-secondary" data-role="cmd-up" ${cmdUpDisabled} title="Move command up">
-            <span aria-hidden="true">&#8593;</span><span class="visually-hidden">Move command up</span>
-          </button>
-          <button type="button" class="btn btn-outline-secondary" data-role="cmd-down" ${cmdDownDisabled} title="Move command down">
-            <span aria-hidden="true">&#8595;</span><span class="visually-hidden">Move command down</span>
-          </button>
-          <button type="button" class="btn btn-outline-danger" data-role="cmd-delete">Remove</button>
+        <div class="row g-2 align-items-center ms-4 mt-1" data-role="cmd-meta-row">
+          <div class="col-sm-6 col-md-4">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="${escHtml(longId)}" data-role="cmd-long" ${longRunning ? 'checked' : ''} title="${longTitle}" aria-label="${longTitle}">
+              <label class="form-check-label small" for="${escHtml(longId)}">Long-running</label>
+            </div>
+          </div>
+          <div class="col-sm-6 col-md-4">
+            <label class="form-label small mb-1" for="${escHtml(timeoutId)}">Timeout (seconds)</label>
+            <input type="number" min="1" step="1" class="${timeoutInputClasses.join(' ')}" id="${escHtml(timeoutId)}" data-role="cmd-timeout" value="${timeoutText}" aria-label="Timeout in seconds" aria-describedby="${escHtml(timeoutHintId)}" ${timeoutDisabledAttr}>
+            <small id="${escHtml(timeoutHintId)}" class="${timeoutHintClasses.join(' ')}" data-role="timeout-hint">Timeout is ignored while long-running is enabled.</small>
+          </div>
         </div>
       </div>`;
     }).join('') : '<div class="text-muted small" data-role="empty-step">No commands in this step.</div>';
@@ -1784,8 +1927,9 @@ function renderStartCommandsModal() {
       </div>
       <div class="row g-2 align-items-center mt-2 mb-3">
         <div class="col-sm-6 col-md-4">
-          <label class="form-label small mb-1">Delay before step (seconds)</label>
-          <input type="number" min="0" step="0.1" class="form-control form-control-sm" data-role="step-delay" value="${delayInput}">
+          <label class="form-label small mb-1" for="start-step-delay-${stepIdx}">Delay before step (seconds)</label>
+          <input type="number" min="0" step="0.1" id="start-step-delay-${stepIdx}" class="${delayInputClasses.join(' ')}" data-role="step-delay" value="${delayInput}" aria-describedby="${escHtml(delayHintId)}" ${delayDisabledAttr}>
+          <small id="${escHtml(delayHintId)}" class="${delayHintClasses.join(' ')}" data-role="delay-hint">Delays after a long-running command are ignored.</small>
         </div>
       </div>
       <div data-role="command-wrapper">
@@ -1795,6 +1939,7 @@ function renderStartCommandsModal() {
     </div>`;
   }).join('');
   stepsEl.innerHTML = html;
+  syncStepDelayBlockedStates('start');
   if (emptyEl) emptyEl.classList.add('d-none');
 }
 
@@ -1830,7 +1975,12 @@ function openStartCommandsManager(pid, idx) {
   START_COMMAND_MODAL_STATE.vmName = vm?.name || '';
   START_COMMAND_MODAL_STATE.steps = steps.map(step => ({
     delaySeconds: step.delaySeconds,
-    commands: (Array.isArray(step.commands) ? step.commands : []).map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+    commands: (Array.isArray(step.commands) ? step.commands : []).map(cmd => ({
+      command: cmd.command,
+      enabled: cmd.enabled !== false,
+      longRunning: cmd.longRunning === true,
+      timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+    }))
   }));
   renderStartCommandsModal();
   const modalEl = document.getElementById('startCommandsModal');
@@ -1856,7 +2006,12 @@ async function saveStartCommandsFromModal() {
     updateStartCommandsDomState(pid, idx, sanitized);
     START_COMMAND_MODAL_STATE.steps = sanitized.map(step => ({
       delaySeconds: step.delaySeconds,
-      commands: step.commands.map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+      commands: step.commands.map(cmd => ({
+        command: cmd.command,
+        enabled: cmd.enabled !== false,
+        longRunning: cmd.longRunning === true,
+        timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+      }))
     }));
     setVmStatus(pid, idx, 'Saved', 'text-success');
     setTimeout(() => {
@@ -1888,7 +2043,7 @@ function wireStartCommandsModal() {
   if (addStepBtn) {
     addStepBtn.addEventListener('click', () => {
       const steps = START_COMMAND_MODAL_STATE.steps;
-      const newStep = { delaySeconds: 0, commands: [{ command: '', enabled: true }] };
+      const newStep = { delaySeconds: 0, commands: [createEmptyCommandEntry()] };
       steps.push(newStep);
       renderStartCommandsModal();
       focusStartCommandInput(steps.length - 1, 0);
@@ -1911,9 +2066,26 @@ function wireStartCommandsModal() {
         if (Number.isNaN(cmdIdx)) return;
         const commands = START_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(START_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? START_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
         if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
-          commands[cmdIdx] = { command: '', enabled: true };
+          commands[cmdIdx] = createEmptyCommandEntry();
         }
         commands[cmdIdx].command = target.value;
+      } else if (role === 'cmd-timeout') {
+        const cmdEl = target.closest('[data-cmd-index]');
+        if (!cmdEl) return;
+        const cmdIdx = Number(cmdEl.dataset.cmdIndex);
+        if (Number.isNaN(cmdIdx)) return;
+        const commands = START_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(START_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? START_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
+        if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
+          commands[cmdIdx] = createEmptyCommandEntry();
+        }
+        let timeoutVal = Number(target.value);
+        if (!Number.isFinite(timeoutVal) || timeoutVal <= 0) {
+          timeoutVal = DEFAULT_COMMAND_TIMEOUT_SECONDS;
+        } else {
+          timeoutVal = Math.round(timeoutVal);
+        }
+        commands[cmdIdx].timeoutSeconds = timeoutVal;
+        target.value = String(timeoutVal);
       } else if (role === 'step-delay') {
         const raw = target.value;
         let parsed = Number(raw);
@@ -1924,7 +2096,8 @@ function wireStartCommandsModal() {
     stepsEl.addEventListener('change', (ev) => {
       const target = ev.target;
       if (!target) return;
-      if (target.getAttribute('data-role') !== 'cmd-toggle') return;
+      const role = target.getAttribute('data-role');
+      if (role !== 'cmd-toggle' && role !== 'cmd-long') return;
       const stepEl = target.closest('[data-step-index]');
       const cmdEl = target.closest('[data-cmd-index]');
       if (!stepEl || !cmdEl) return;
@@ -1933,7 +2106,16 @@ function wireStartCommandsModal() {
       if (Number.isNaN(stepIdx) || Number.isNaN(cmdIdx)) return;
       const commands = START_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(START_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? START_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
       if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
-        commands[cmdIdx] = { command: '', enabled: true };
+        commands[cmdIdx] = createEmptyCommandEntry();
+      }
+      if (role === 'cmd-long') {
+        commands[cmdIdx].longRunning = !!target.checked;
+        const title = target.checked ? 'Marked as long-running' : 'Not marked as long-running';
+        target.title = title;
+        target.setAttribute('aria-label', title);
+        applyCommandLongRunningState(cmdEl, target.checked);
+        syncStepDelayBlockedStates('start');
+        return;
       }
       commands[cmdIdx].enabled = !!target.checked;
       const input = cmdEl.querySelector('input[data-role="cmd-input"]');
@@ -1958,7 +2140,7 @@ function wireStartCommandsModal() {
       const role = btn.dataset.role;
       if (role === 'cmd-add') {
         step.commands = Array.isArray(step.commands) ? step.commands : [];
-        step.commands.push({ command: '', enabled: true });
+        step.commands.push(createEmptyCommandEntry());
         renderStartCommandsModal();
         focusStartCommandInput(stepIdx, step.commands.length - 1);
         return;
@@ -2032,6 +2214,13 @@ function renderStoredCommandsModal() {
     const delayInput = Number.isFinite(delayValue)
       ? (Math.abs(delayValue - Math.round(delayValue)) < 1e-6 ? String(Math.round(delayValue)) : String(delayValue))
       : '0';
+    const delayBlocked = stepDelayIsBlocked(steps, stepIdx);
+    const delayInputClasses = ['form-control', 'form-control-sm'];
+    if (delayBlocked) delayInputClasses.push('bg-light', 'text-muted');
+    const delayHintClasses = ['text-muted', 'small', 'mt-1'];
+    if (!delayBlocked) delayHintClasses.push('d-none');
+    const delayHintId = `stored-step-${stepIdx}-delay-hint`;
+    const delayDisabledAttr = delayBlocked ? 'disabled aria-disabled="true"' : '';
     const stepUpDisabled = stepIdx === 0 ? 'disabled' : '';
     const stepDownDisabled = stepIdx === steps.length - 1 ? 'disabled' : '';
     const commandsMarkup = commands.length ? commands.map((cmd, cmdIdx) => {
@@ -2045,16 +2234,43 @@ function renderStoredCommandsModal() {
       if (!isEnabled) {
         inputClasses.push('text-decoration-line-through', 'opacity-50');
       }
-      return `<div class="d-flex align-items-center gap-2 mb-2" data-cmd-index="${cmdIdx}" data-enabled="${isEnabled ? '1' : '0'}">
-        <span class="badge bg-secondary flex-shrink-0">Cmd ${cmdIdx + 1}</span>
-        <div class="form-check form-switch m-0 flex-shrink-0">
-          <input class="form-check-input" type="checkbox" data-role="cmd-toggle" ${isEnabled ? 'checked' : ''} title="${toggleTitle}" aria-label="${toggleTitle}">
+      const longRunning = commandObj.longRunning === true;
+      const timeoutValue = normalizeCommandTimeout(commandObj.timeoutSeconds);
+      const timeoutText = escHtml(String(timeoutValue));
+      const longId = `stored-cmd-${stepIdx}-${cmdIdx}-long`;
+      const timeoutId = `stored-cmd-${stepIdx}-${cmdIdx}-timeout`;
+      const timeoutHintId = `stored-cmd-${stepIdx}-${cmdIdx}-timeout-hint`;
+      const longTitle = 'Mark if this command may exceed the guest agent timeout or run indefinitely';
+      const timeoutDisabledAttr = longRunning ? 'disabled aria-disabled="true"' : '';
+      const timeoutInputClasses = ['form-control', 'form-control-sm'];
+      if (longRunning) timeoutInputClasses.push('bg-light', 'text-muted');
+      const timeoutHintClasses = ['text-muted', 'small', 'mt-1'];
+      if (!longRunning) timeoutHintClasses.push('d-none');
+      return `<div class="mb-3" data-cmd-index="${cmdIdx}" data-enabled="${isEnabled ? '1' : '0'}">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <span class="badge bg-secondary flex-shrink-0">Cmd ${cmdIdx + 1}</span>
+          <div class="form-check form-switch m-0 flex-shrink-0">
+            <input class="form-check-input" type="checkbox" data-role="cmd-toggle" ${isEnabled ? 'checked' : ''} title="${toggleTitle}" aria-label="${toggleTitle}">
+          </div>
+          <input type="text" class="${inputClasses.join(' ')}" data-role="cmd-input" placeholder="Command" value="${commandText}">
+          <div class="btn-group btn-group-sm flex-shrink-0">
+            <button type="button" class="btn btn-outline-secondary" data-role="cmd-up" ${cmdUpDisabled} title="Move command up"><span aria-hidden="true">&#8593;</span><span class="visually-hidden">Move command up</span></button>
+            <button type="button" class="btn btn-outline-secondary" data-role="cmd-down" ${cmdDownDisabled} title="Move command down"><span aria-hidden="true">&#8595;</span><span class="visually-hidden">Move command down</span></button>
+            <button type="button" class="btn btn-outline-danger" data-role="cmd-delete">Remove</button>
+          </div>
         </div>
-        <input type="text" class="${inputClasses.join(' ')}" data-role="cmd-input" placeholder="Command" value="${commandText}">
-        <div class="btn-group btn-group-sm flex-shrink-0">
-          <button type="button" class="btn btn-outline-secondary" data-role="cmd-up" ${cmdUpDisabled} title="Move command up"><span aria-hidden="true">&#8593;</span><span class="visually-hidden">Move command up</span></button>
-          <button type="button" class="btn btn-outline-secondary" data-role="cmd-down" ${cmdDownDisabled} title="Move command down"><span aria-hidden="true">&#8595;</span><span class="visually-hidden">Move command down</span></button>
-          <button type="button" class="btn btn-outline-danger" data-role="cmd-delete">Remove</button>
+        <div class="row g-2 align-items-center ms-4 mt-1" data-role="cmd-meta-row">
+          <div class="col-sm-6 col-md-4">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="${escHtml(longId)}" data-role="cmd-long" ${longRunning ? 'checked' : ''} title="${longTitle}" aria-label="${longTitle}">
+              <label class="form-check-label small" for="${escHtml(longId)}">Long-running</label>
+            </div>
+          </div>
+          <div class="col-sm-6 col-md-4">
+            <label class="form-label small mb-1" for="${escHtml(timeoutId)}">Timeout (seconds)</label>
+            <input type="number" min="1" step="1" class="${timeoutInputClasses.join(' ')}" id="${escHtml(timeoutId)}" data-role="cmd-timeout" value="${timeoutText}" aria-label="Timeout in seconds" aria-describedby="${escHtml(timeoutHintId)}" ${timeoutDisabledAttr}>
+            <small id="${escHtml(timeoutHintId)}" class="${timeoutHintClasses.join(' ')}" data-role="timeout-hint">Timeout is ignored while long-running is enabled.</small>
+          </div>
         </div>
       </div>`;
     }).join('') : '<div class="text-muted small" data-role="empty-step">No commands in this step.</div>';
@@ -2072,8 +2288,9 @@ function renderStoredCommandsModal() {
       </div>
       <div class="row g-2 align-items-center mt-2 mb-3">
         <div class="col-sm-6 col-md-4">
-          <label class="form-label small mb-1">Delay before step (seconds)</label>
-          <input type="number" min="0" step="0.1" class="form-control form-control-sm" data-role="step-delay" value="${delayInput}">
+          <label class="form-label small mb-1" for="stored-step-delay-${stepIdx}">Delay before step (seconds)</label>
+          <input type="number" min="0" step="0.1" id="stored-step-delay-${stepIdx}" class="${delayInputClasses.join(' ')}" data-role="step-delay" value="${delayInput}" aria-describedby="${escHtml(delayHintId)}" ${delayDisabledAttr}>
+          <small id="${escHtml(delayHintId)}" class="${delayHintClasses.join(' ')}" data-role="delay-hint">Delays after a long-running command are ignored.</small>
         </div>
       </div>
       <div data-role="command-wrapper">
@@ -2083,6 +2300,7 @@ function renderStoredCommandsModal() {
     </div>`;
   }).join('');
   stepsEl.innerHTML = html;
+  syncStepDelayBlockedStates('stored');
   if (emptyEl) emptyEl.classList.add('d-none');
 }
 
@@ -2118,7 +2336,12 @@ function openStoredCommandsManager(pid, idx) {
   STORED_COMMAND_MODAL_STATE.vmName = vm?.name || '';
   STORED_COMMAND_MODAL_STATE.steps = steps.map(step => ({
     delaySeconds: step.delaySeconds,
-    commands: (Array.isArray(step.commands) ? step.commands : []).map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+    commands: (Array.isArray(step.commands) ? step.commands : []).map(cmd => ({
+      command: cmd.command,
+      enabled: cmd.enabled !== false,
+      longRunning: cmd.longRunning === true,
+      timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+    }))
   }));
   renderStoredCommandsModal();
   const modalEl = document.getElementById('storedCommandsModal');
@@ -2144,7 +2367,12 @@ async function saveStoredCommandsFromModal() {
     updateStoredCommandsDomState(pid, idx, sanitized);
     STORED_COMMAND_MODAL_STATE.steps = sanitized.map(step => ({
       delaySeconds: step.delaySeconds,
-      commands: step.commands.map(cmd => ({ command: cmd.command, enabled: cmd.enabled !== false }))
+      commands: step.commands.map(cmd => ({
+        command: cmd.command,
+        enabled: cmd.enabled !== false,
+        longRunning: cmd.longRunning === true,
+        timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+      }))
     }));
     setVmStatus(pid, idx, 'Saved', 'text-success');
     setTimeout(() => {
@@ -2176,7 +2404,7 @@ function wireStoredCommandsModal() {
   if (addStepBtn) {
     addStepBtn.addEventListener('click', () => {
       const steps = STORED_COMMAND_MODAL_STATE.steps;
-      const newStep = { delaySeconds: 0, commands: [{ command: '', enabled: true }] };
+      const newStep = { delaySeconds: 0, commands: [createEmptyCommandEntry()] };
       steps.push(newStep);
       renderStoredCommandsModal();
       focusStoredCommandInput(steps.length - 1, 0);
@@ -2199,9 +2427,26 @@ function wireStoredCommandsModal() {
         if (Number.isNaN(cmdIdx)) return;
         const commands = STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
         if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
-          commands[cmdIdx] = { command: '', enabled: true };
+          commands[cmdIdx] = createEmptyCommandEntry();
         }
         commands[cmdIdx].command = target.value;
+      } else if (role === 'cmd-timeout') {
+        const cmdEl = target.closest('[data-cmd-index]');
+        if (!cmdEl) return;
+        const cmdIdx = Number(cmdEl.dataset.cmdIndex);
+        if (Number.isNaN(cmdIdx)) return;
+        const commands = STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
+        if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
+          commands[cmdIdx] = createEmptyCommandEntry();
+        }
+        let timeoutVal = Number(target.value);
+        if (!Number.isFinite(timeoutVal) || timeoutVal <= 0) {
+          timeoutVal = DEFAULT_COMMAND_TIMEOUT_SECONDS;
+        } else {
+          timeoutVal = Math.round(timeoutVal);
+        }
+        commands[cmdIdx].timeoutSeconds = timeoutVal;
+        target.value = String(timeoutVal);
       } else if (role === 'step-delay') {
         const raw = target.value;
         let parsed = Number(raw);
@@ -2212,7 +2457,8 @@ function wireStoredCommandsModal() {
     stepsEl.addEventListener('change', (ev) => {
       const target = ev.target;
       if (!target) return;
-      if (target.getAttribute('data-role') !== 'cmd-toggle') return;
+      const role = target.getAttribute('data-role');
+      if (role !== 'cmd-toggle' && role !== 'cmd-long') return;
       const stepEl = target.closest('[data-step-index]');
       const cmdEl = target.closest('[data-cmd-index]');
       if (!stepEl || !cmdEl) return;
@@ -2221,7 +2467,16 @@ function wireStoredCommandsModal() {
       if (Number.isNaN(stepIdx) || Number.isNaN(cmdIdx)) return;
       const commands = STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
       if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
-        commands[cmdIdx] = { command: '', enabled: true };
+        commands[cmdIdx] = createEmptyCommandEntry();
+      }
+      if (role === 'cmd-long') {
+        commands[cmdIdx].longRunning = !!target.checked;
+        const title = target.checked ? 'Marked as long-running' : 'Not marked as long-running';
+        target.title = title;
+        target.setAttribute('aria-label', title);
+        applyCommandLongRunningState(cmdEl, target.checked);
+        syncStepDelayBlockedStates('stored');
+        return;
       }
       commands[cmdIdx].enabled = !!target.checked;
       const input = cmdEl.querySelector('input[data-role="cmd-input"]');
@@ -2246,7 +2501,7 @@ function wireStoredCommandsModal() {
       const role = btn.dataset.role;
       if (role === 'cmd-add') {
         step.commands = Array.isArray(step.commands) ? step.commands : [];
-        step.commands.push({ command: '', enabled: true });
+        step.commands.push(createEmptyCommandEntry());
         renderStoredCommandsModal();
         focusStoredCommandInput(stepIdx, step.commands.length - 1);
         return;
@@ -2349,10 +2604,8 @@ function renderProjectCard(p) {
         <div class="col-md-4">
           <label class="form-label">Start Commands</label>
           <div class="d-flex align-items-center gap-2 mb-2">
-            <div class="flex-grow-1">
-              <div id="vm-${p.id}-${i}-start-summary" class="small text-muted" title="${startTitleAttr}">${escHtml(startSummary)}</div>
-            </div>
-            <button class="btn btn-sm btn-outline-primary" type="button" onclick='openStartCommandsManager(${pidLiteral},${i})'>Manage</button>
+            <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button" onclick='openStartCommandsManager(${pidLiteral},${i})'>Manage</button>
+            <div id="vm-${p.id}-${i}-start-summary" class="small text-muted flex-grow-1" title="${startTitleAttr}">${escHtml(startSummary)}</div>
           </div>
           <input type="hidden" id="vm-${p.id}-${i}-start-data" value="${startDataValue}">
         </div>`;
@@ -2368,10 +2621,8 @@ function renderProjectCard(p) {
             const pidLiteralStored = JSON.stringify(String(p.id));
             return `
           <div class="d-flex align-items-center gap-2 mb-2">
-            <div class="flex-grow-1">
-              <div id="vm-${p.id}-${i}-stored-summary" class="small text-muted" title="${storedTitleAttr}">${escHtml(storedSummary)}</div>
-            </div>
-            <button class="btn btn-sm btn-outline-primary" type="button" onclick='openStoredCommandsManager(${pidLiteralStored},${i})'>Manage</button>
+            <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button" onclick='openStoredCommandsManager(${pidLiteralStored},${i})'>Manage</button>
+            <div id="vm-${p.id}-${i}-stored-summary" class="small text-muted flex-grow-1" title="${storedTitleAttr}">${escHtml(storedSummary)}</div>
           </div>
           <input type="hidden" id="vm-${p.id}-${i}-stored-data" value="${storedDataValue}">`;
           })()}
@@ -3697,6 +3948,24 @@ async function uploadMaterial(id) {
   if (!files.length) {
     try { showToast('Select files or a folder first.', 'warning'); } catch { alert('Select files or a folder first.'); }
     return;
+  }
+  const folderFiles = files.filter(file => file && (file.webkitRelativePath || '').length);
+  if (folderFiles.length) {
+    const folderNames = [];
+    folderFiles.forEach(file => {
+      const rel = (file.webkitRelativePath || '').replace(/\\/g, '/');
+      const top = rel.split('/').filter(Boolean)[0];
+      if (top && !folderNames.includes(top)) folderNames.push(top);
+    });
+    const preview = folderNames.slice(0, 3).join(', ');
+    const extra = folderNames.length > 3 ? folderNames.length - 3 : 0;
+    const suffix = preview ? ` (${preview}${extra ? `, +${extra} more` : ''})` : '';
+    const confirmMsg = `Upload all files from the selected folder${folderNames.length === 1 ? '' : 's'}${suffix}? This will include every file inside each folder.`;
+    const proceed = window.confirm(confirmMsg);
+    if (!proceed) {
+      try { showToast('Folder upload canceled.', 'info'); } catch { alert('Folder upload canceled.'); }
+      return;
+    }
   }
   const proj = (window.PROJ_CACHE||{})[id] || {};
   const label = files.length === 1 ? `Uploading 1 material` : `Uploading ${files.length} materials`;

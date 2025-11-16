@@ -4,11 +4,16 @@ import base64
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
 
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
+MAX_COMMAND_TIMEOUT_SECONDS = 86400
+
 
 @dataclass
 class StartCommand:
     command: str
     enabled: bool = True
+    long_running: bool = False
+    timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -43,6 +48,22 @@ def _coerce_enabled(value: Any, default: bool = True) -> bool:
     return bool(value)
 
 
+def _coerce_timeout(value: Any, default: int = DEFAULT_COMMAND_TIMEOUT_SECONDS) -> int:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    if num <= 0:
+        return default
+    try:
+        num = int(round(num))
+    except Exception:
+        num = int(num)
+    if num > MAX_COMMAND_TIMEOUT_SECONDS:
+        num = MAX_COMMAND_TIMEOUT_SECONDS
+    return num
+
+
 def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
     steps: List[StartCommandStep] = []
 
@@ -60,7 +81,12 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
         if isinstance(entry, StartCommand):
             text = _clean_start_command(entry.command)
             if text:
-                normalized.append(StartCommand(command=text, enabled=_coerce_enabled(entry.enabled)))
+                normalized.append(StartCommand(
+                    command=text,
+                    enabled=_coerce_enabled(entry.enabled),
+                    long_running=_coerce_enabled(getattr(entry, 'long_running', False), False),
+                    timeout_seconds=_coerce_timeout(getattr(entry, 'timeout_seconds', DEFAULT_COMMAND_TIMEOUT_SECONDS)),
+                ))
             return normalized
         if isinstance(entry, dict):
             nested = entry.get("commands") or entry.get("cmds") or entry.get("parallel")
@@ -84,7 +110,24 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
             enabled_hint = entry.get("enabled")
             if enabled_hint is None and entry.get("disabled") is not None:
                 enabled_hint = not entry.get("disabled")
-            normalized.append(StartCommand(command=text, enabled=_coerce_enabled(enabled_hint)))
+            long_hint = entry.get("long_running")
+            if long_hint is None:
+                for alt in ("longRunning", "longrun", "long", "isLongRunning"):
+                    if entry.get(alt) is not None:
+                        long_hint = entry.get(alt)
+                        break
+            timeout_hint = entry.get("timeout_seconds")
+            if timeout_hint is None:
+                for alt in ("timeoutSeconds", "timeout", "timeout_sec", "timeoutSec"):
+                    if entry.get(alt) is not None:
+                        timeout_hint = entry.get(alt)
+                        break
+            normalized.append(StartCommand(
+                command=text,
+                enabled=_coerce_enabled(enabled_hint),
+                long_running=_coerce_enabled(long_hint, False),
+                timeout_seconds=_coerce_timeout(timeout_hint),
+            ))
             return normalized
         if isinstance(entry, (list, tuple, set)):
             for item in entry:
@@ -92,7 +135,7 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
             return normalized
         text = _clean_start_command(entry)
         if text:
-            normalized.append(StartCommand(command=text, enabled=True))
+            normalized.append(StartCommand(command=text, enabled=True, long_running=False, timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS))
         return normalized
 
     def append_step(delay: Any, commands_source: Any):
@@ -105,8 +148,54 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
         if not commands:
             return
         delay_val = coerce_delay(delay)
-        cleaned_commands = [StartCommand(command=_clean_start_command(cmd.command), enabled=_coerce_enabled(cmd.enabled))
-                            for cmd in commands if _clean_start_command(cmd.command)]
+        cleaned_commands: List[StartCommand] = []
+        for cmd in commands:
+            if isinstance(cmd, StartCommand):
+                text = _clean_start_command(cmd.command)
+                if not text:
+                    continue
+                cleaned_commands.append(StartCommand(
+                    command=text,
+                    enabled=_coerce_enabled(cmd.enabled),
+                    long_running=_coerce_enabled(getattr(cmd, 'long_running', False), False),
+                    timeout_seconds=_coerce_timeout(getattr(cmd, 'timeout_seconds', DEFAULT_COMMAND_TIMEOUT_SECONDS)),
+                ))
+                continue
+            if isinstance(cmd, dict):
+                text = _clean_start_command(cmd.get('command') or cmd.get('cmd') or cmd.get('value') or cmd.get('text'))
+                if not text:
+                    continue
+                enabled_hint = cmd.get('enabled')
+                if enabled_hint is None and cmd.get('disabled') is not None:
+                    enabled_hint = not cmd.get('disabled')
+                long_hint = cmd.get('long_running')
+                if long_hint is None:
+                    for alt in ("longRunning", "longrun", "long", "isLongRunning"):
+                        if cmd.get(alt) is not None:
+                            long_hint = cmd.get(alt)
+                            break
+                timeout_hint = cmd.get('timeout_seconds')
+                if timeout_hint is None:
+                    for alt in ("timeoutSeconds", "timeout", "timeout_sec", "timeoutSec"):
+                        if cmd.get(alt) is not None:
+                            timeout_hint = cmd.get(alt)
+                            break
+                cleaned_commands.append(StartCommand(
+                    command=text,
+                    enabled=_coerce_enabled(enabled_hint),
+                    long_running=_coerce_enabled(long_hint, False),
+                    timeout_seconds=_coerce_timeout(timeout_hint),
+                ))
+                continue
+            text = _clean_start_command(cmd)
+            if not text:
+                continue
+            cleaned_commands.append(StartCommand(
+                command=text,
+                enabled=True,
+                long_running=False,
+                timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            ))
         if not cleaned_commands:
             return
         steps.append(StartCommandStep(delay_seconds=delay_val, commands=cleaned_commands))

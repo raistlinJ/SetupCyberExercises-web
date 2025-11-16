@@ -13,7 +13,7 @@ import logging
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set
 import re
 import hashlib
 import mimetypes
@@ -21,9 +21,14 @@ from urllib.parse import urlparse, urlunparse
 from werkzeug.utils import secure_filename
 from urllib.parse import urlsplit
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 import time
+from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
+from ..connectors.ctfd import CTFdClient, CTFdError
+from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps
+
+api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
 def _safe_sleep(sec: float):
     try:
@@ -36,6 +41,164 @@ AGEING_LOCK = threading.Lock()
 AGEING_APPLIED = {}  # key: node -> set of bridge names ensured in interfaces.new
 
 SECURE_IFACE_RE = re.compile(r'^[A-Za-z0-9_-]{1,15}$')
+
+
+def _validate_iface(value: str) -> str:
+    """Validate a Linux bridge/interface name using a tight allowlist."""
+    try:
+        iface = str(value or '').strip()
+    except Exception:
+        iface = ''
+    if not iface:
+        raise ValueError("interface name required")
+    if not SECURE_IFACE_RE.match(iface):
+        raise ValueError(f"invalid interface name: {iface}")
+    return iface
+
+
+def _safe_file_stem(value: str, default: str = "project") -> str:
+    """Return a filesystem-friendly stem for export file names."""
+    try:
+        text = str(value or '').strip()
+    except Exception:
+        text = ''
+    if not text:
+        text = default
+    safe = secure_filename(text) or ''
+    safe = safe.strip('._')
+    if not safe:
+        safe = re.sub(r'[^A-Za-z0-9_-]+', '_', text).strip('._')
+    return safe or default
+
+
+def _format_ymdhms(dt_obj: datetime) -> str:
+    """Format datetime as YYYYMMDD_HHMMSS in UTC."""
+    if not isinstance(dt_obj, datetime):
+        raise TypeError("dt_obj must be datetime")
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+    else:
+        dt_obj = dt_obj.astimezone(timezone.utc)
+    return dt_obj.strftime("%Y%m%d_%H%M%S")
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse flexible ISO-8601-ish timestamps into datetime objects."""
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+    except Exception:
+        text = ''
+    if not text:
+        return None
+    candidate = text
+    if candidate.endswith('Z'):
+        candidate = candidate[:-1] + '+00:00'
+    try:
+        return datetime.fromisoformat(candidate)
+    except Exception:
+        pass
+    # Fallback formats commonly seen in logs/exports
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.utcfromtimestamp(float(text))
+    except Exception:
+        return None
+
+
+def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project) -> int:
+    """Embed audio clips into the provided ZipFile, returning number of clips written."""
+    audio = getattr(proj, 'audio', {}) or {}
+    if not isinstance(audio, dict) or not audio:
+        return 0
+    manifest = {
+        "generated": datetime.utcnow().isoformat() + "Z",
+        "events": [],
+    }
+    total_written = 0
+    for idx, (raw_key, entry) in enumerate(audio.items(), start=1):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            event_key = str(raw_key or '').strip()
+        except Exception:
+            event_key = ''
+        if not event_key:
+            event_key = f"event_{idx}"
+        safe_key = _safe_file_stem(event_key, default=f"event_{idx}")
+        sounds = entry.get('sounds') or []
+        if not sounds and entry.get('dataUrl'):
+            sounds = [{
+                'dataUrl': entry.get('dataUrl'),
+                'name': entry.get('name'),
+                'size': entry.get('size'),
+                'type': entry.get('type'),
+                'updated': entry.get('updated'),
+            }]
+        if not isinstance(sounds, list):
+            continue
+        clip_entries = []
+        for clip_idx, sound in enumerate(sounds, start=1):
+            if not isinstance(sound, dict):
+                continue
+            data_url = sound.get('dataUrl')
+            if not isinstance(data_url, str) or not data_url.startswith('data:'):
+                continue
+            mime, raw_bytes = ProjectStore._decode_data_url(data_url)
+            if not raw_bytes:
+                continue
+            ext = ''
+            if mime:
+                try:
+                    ext = mimetypes.guess_extension(mime) or ''
+                except Exception:
+                    ext = ''
+            if not ext and mime and '/' in mime:
+                ext = f".{mime.split('/')[-1]}"
+            if not ext:
+                ext = '.bin'
+            clip_name = sound.get('name') or f"clip_{clip_idx}"
+            clip_stem = secure_filename(str(clip_name)) or f"clip_{clip_idx}"
+            arc_path = f"audio/{safe_key}/{clip_stem}{ext}"
+            try:
+                zf.writestr(arc_path, raw_bytes)
+            except Exception as exc:
+                LOG.warning("Failed to add audio clip %s to export: %s", arc_path, exc)
+                continue
+            total_written += 1
+            clip_entries.append({
+                'name': clip_name,
+                'filename': arc_path,
+                'size': len(raw_bytes),
+                'mime': mime or 'application/octet-stream',
+                'updated': sound.get('updated'),
+            })
+        if clip_entries:
+            manifest['events'].append({
+                'key': event_key,
+                'safeKey': safe_key,
+                'clipCount': len(clip_entries),
+                'clips': clip_entries,
+                'speakTemplates': entry.get('speakTemplates') or [],
+            })
+    if total_written:
+        try:
+            zf.writestr('audio/manifest.json', json.dumps(manifest, indent=2))
+        except Exception as exc:
+            LOG.warning("Failed to write audio manifest: %s", exc)
+    return total_written
 
 # VM refresh performance caching
 _VM_CONFIG_CACHE = {}  # {f"{node}:{vmid}": (timestamp, config_dict)}
@@ -67,124 +230,199 @@ def _clear_vm_cache(project_id=None):
         _VM_CONFIG_CACHE.clear()
         _POOL_CACHE.clear()
 
-# --- Simple in-process job tracking helpers (re-added after cleanup) ---
-# Several endpoints call _start_job/_end_job and allow cancellation via a shared
-# _ACTIVE_JOBS registry. Earlier refactors removed these helpers which caused
-# NameError exceptions. We restore lightweight, thread-safe versions here.
-_ACTIVE_JOBS = {}
+# Simple in-process job tracking so long-running actions can show progress/cancellation
 _JOB_LOCK = threading.Lock()
+_ACTIVE_JOBS: Dict[str, Dict[str, Any]] = {}
+
 
 def _job_key(pid: str) -> str:
-    return f"job:{pid}"
+    return f"project:{pid}"
 
-def _start_job(pid: str, action: str):
-    """Register a new job for a project. If a prior job exists, mark it finished.
-    Only a single active job per pid is tracked (simple model)."""
-    try:
-        with _JOB_LOCK:
-            key = _job_key(pid)
-            prev = _ACTIVE_JOBS.get(key)
-            if prev and prev.get('status') not in ('completed','cancelled','error'):
-                prev['status'] = 'completed'
-            _ACTIVE_JOBS[key] = {
-                'id': uuid.uuid4().hex,
-                'action': action,
-                'status': 'running',
-                'started': time.time(),
-                'progress': 0,
-                'cancel': False,
-                'log': [],
-                # Extended progress metadata for richer UI progress bars
-                'phase': 'init',           # high-level phase label (e.g., preflight, cloning, networking, exporting)
-                'step': 0,                 # current step number within phase
-                'total_steps': 0,          # total steps expected in current phase
-                'current': '',             # current item name (vm, file, bridge, etc.)
-                'message': 'Starting…',    # human readable status line
-                'eta': None,               # optional estimated seconds remaining (float)
-            }
-    except Exception:
-        pass
+
+def _start_job(pid: str, name: str, total_steps: Optional[int] = None):
+    rec = {
+        'project': pid,
+        'name': name,
+        'action': name,
+        'status': 'running',
+        'started': time.time(),
+        'progress': 0,
+        'total_steps': total_steps,
+        'detail': {},
+        'cancel': False,
+    }
+    with _JOB_LOCK:
+        _ACTIVE_JOBS[_job_key(pid)] = rec
+
 
 def _update_job_detail(pid: str, **fields):
-    """Lightweight helper to atomically update extended job detail fields.
-    Accepts keys: phase, step, total_steps, current, message, progress, eta.
-    Silently ignores unknown fields or errors."""
-    allowed = {'phase','step','total_steps','current','message','progress','eta'}
-    try:
-        with _JOB_LOCK:
-            rec = _ACTIVE_JOBS.get(_job_key(pid))
-            if not rec:
-                return
-            for k,v in fields.items():
-                if k in allowed and v is not None:
-                    rec[k] = v
-            _ACTIVE_JOBS[_job_key(pid)] = rec
-    except Exception:
-        pass
+    if not fields:
+        return
+    with _JOB_LOCK:
+        rec = _ACTIVE_JOBS.get(_job_key(pid))
+        if not rec:
+            return
+        rec.update(fields)
+
 
 def _end_job(pid: str, status: str = 'completed'):
-    try:
-        with _JOB_LOCK:
-            rec = _ACTIVE_JOBS.get(_job_key(pid))
-            if rec and not rec.get('cancel'):
-                if rec.get('status') == 'running':
-                    rec['status'] = status
-    except Exception:
-        pass
+    with _JOB_LOCK:
+        rec = _ACTIVE_JOBS.get(_job_key(pid))
+        if rec:
+            rec['status'] = status
+            rec['ended'] = time.time()
+
 
 def _cancel_job(pid: str):
-    try:
-        with _JOB_LOCK:
-            rec = _ACTIVE_JOBS.get(_job_key(pid))
-            if rec:
-                rec['cancel'] = True
-                rec['status'] = 'cancelled'
-    except Exception:
-        pass
+    with _JOB_LOCK:
+        rec = _ACTIVE_JOBS.get(_job_key(pid))
+        if rec:
+            rec['cancel'] = True
+            rec['status'] = 'cancelled'
+
 
 def _is_cancelled(pid: str) -> bool:
-    try:
+    with _JOB_LOCK:
         rec = _ACTIVE_JOBS.get(_job_key(pid))
         return bool(rec and rec.get('cancel'))
+
+
+def _format_vm_label(entry: Any) -> str:
+    try:
+        name = str((entry or {}).get('name', '')).strip()
     except Exception:
-        return False
+        name = ''
+    idx = None
+    try:
+        idx_value = (entry or {}).get('index')
+        if idx_value is not None and idx_value != '':
+            idx = int(idx_value)
+    except Exception:
+        idx = None
+    if name and idx is not None:
+        return f"{name} (instance {idx})"
+    if name:
+        return name
+    if idx is not None:
+        return f"Instance {idx}"
+    return 'VM'
 
-def _validate_iface(name: str) -> str:
-    n = str(name or '').strip()
-    if not SECURE_IFACE_RE.fullmatch(n):
-        raise ValueError(f'invalid iface name: {n!r}')
-    return n
 
-from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
-from ..connectors.ctfd import CTFdClient, CTFdError
-from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps
+def _shorten_command_text(command_text: Any, limit: int = 96) -> str:
+    try:
+        text = str(command_text or '')
+    except Exception:
+        text = ''
+    text = text.replace('\r\n', '\n').replace('\r', '\n').strip()
+    if '\n' in text:
+        text = text.split('\n', 1)[0]
+    if len(text) > limit:
+        return text[: limit - 1] + '…'
+    return text
 
-api_bp = Blueprint("api", __name__)
 
-"""Security helpers:
-_secure_route now layers (1) session auth (if enabled) and (2) optional API key for mutating requests.
-For authorization, an optional roles list can be provided; user must have at least one required role.
-"""
+def _format_delay_label(delay_seconds: Any) -> Optional[str]:
+    try:
+        num = float(delay_seconds)
+    except (TypeError, ValueError):
+        return None
+    if num <= 0:
+        return '0s'
+    if num >= 10:
+        return f"{int(round(num))}s"
+    if num >= 1:
+        return f"{num:.1f}s"
+    return f"{num:.3f}s"
+
+
+def _job_emit_delay_status(pid: str, entry: Any, step: int, delay_seconds: Any):
+    label = _format_vm_label(entry)
+    delay_label = _format_delay_label(delay_seconds)
+    message = (
+        f"Waiting {delay_label} before step {step} on {label}"
+        if delay_label
+        else f"Waiting before step {step} on {label}"
+    )
+    detail = {
+        'kind': 'delay',
+        'vm': label,
+        'step': step,
+        'delay_seconds': delay_seconds,
+        'delay_label': delay_label,
+    }
+    _update_job_detail(pid, phase='delay', current=label, step=step, message=message, detail=detail)
+
+
+def _job_emit_command_status(
+    pid: str,
+    entry: Any,
+    step: Optional[int],
+    command_idx: Optional[int],
+    command_text: Any,
+    *,
+    command_number: Optional[int] = None,
+    command_total: Optional[int] = None,
+    step_command_total: Optional[int] = None,
+    phase: str = 'command',
+):
+    label = _format_vm_label(entry)
+    short_cmd = _shorten_command_text(command_text)
+    seq_label = ''
+    if command_number is not None:
+        seq_label = f"command {command_number}"
+        if command_total:
+            seq_label += f"/{command_total}"
+    elif step is not None:
+        seq_label = 'command'
+    idx_part = ''
+    if step is not None and command_idx:
+        idx_part = f" #{command_idx}"
+    step_part = f" (step {step}{idx_part})" if step is not None else ''
+    if seq_label:
+        seq_part = f" {seq_label}"
+    else:
+        seq_part = ' command'
+    if short_cmd:
+        message = f"Running{seq_part}{step_part} on {label}: {short_cmd}"
+    else:
+        message = f"Running{seq_part}{step_part} on {label}"
+    detail = {
+        'kind': phase,
+        'vm': label,
+        'step': step,
+        'command_index': command_idx,
+        'command': short_cmd,
+        'command_number': command_number,
+        'command_total': command_total,
+        'step_command_total': step_command_total,
+    }
+    _update_job_detail(pid, phase=phase, current=label, step=step, message=message, detail=detail)
+
+# --- Simple in-process job tracking helpers (re-added after cleanup) ---
+# Several endpoints call _start_job/_end_job and allow cancellation via a shared
 def _secure_route(required_roles=None, api_key=True):
     from functools import wraps
-    required_roles = set([r.lower() for r in (required_roles or [])])
+    required_roles = {str(r).lower() for r in (required_roles or [])}
+
     def deco(func):
         @wraps(func)
         def inner(*args, **kwargs):
-            # Session auth first (if enabled)
+            # Session authentication layer
             try:
                 app = current_app._get_current_object()
-                if app.config.get('AUTH_ENABLE'):
-                    cur = getattr(app, 'current_user', lambda: None)() if hasattr(app, 'current_user') else None
-                    if not cur:
-                        return jsonify({'error': 'authentication required'}), 401
-                    if required_roles:
-                        have = {r.lower() for r in cur.get('roles', [])}
-                        if not (have & required_roles):
-                            return jsonify({'error': 'forbidden'}), 403
             except Exception:
-                pass
-            # API key enforcement (legacy quick-win) – only if configured and flag enabled
+                app = None
+
+            if app and app.config.get('AUTH_ENABLE'):
+                current_user = getattr(app, 'current_user', lambda: None)() if hasattr(app, 'current_user') else None
+                if not current_user:
+                    return jsonify({'error': 'authentication required'}), 401
+                if required_roles:
+                    have_roles = {str(r).lower() for r in current_user.get('roles', [])}
+                    if not (have_roles & required_roles):
+                        return jsonify({'error': 'forbidden'}), 403
+
+            # API key enforcement layer (if enabled)
             if api_key:
                 try:
                     key = current_app.config.get('API_KEY')
@@ -194,199 +432,11 @@ def _secure_route(required_roles=None, api_key=True):
                     supplied = request.headers.get('X-API-Key') or request.args.get('api_key')
                     if supplied != key:
                         return jsonify({'error': 'invalid or missing API key'}), 401
+
             return func(*args, **kwargs)
+
         return inner
     return deco
-@api_bp.after_request
-def _api_no_store(resp):
-    try:
-        # Extra safety against stale caches on API responses
-        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        resp.headers['Pragma'] = 'no-cache'
-        resp.headers['Expires'] = '0'
-    except Exception:
-        pass
-    return resp
-
-
-def _safe_file_stem(name: str) -> str:
-    """Return a filesystem-safe stem from a display name: letters, numbers, _, - only."""
-    try:
-        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(name or "").strip())
-        stem = re.sub(r"_+", "_", stem).strip('_')
-        return stem or "project"
-    except Exception:
-        return "project"
-
-def _format_ymdhms(dt):
-    try:
-        return dt.strftime('%Y%m%d_%H%M%S')
-    except Exception:
-        return '00000000_000000'
-
-def _parse_iso_datetime(s: str):
-    try:
-        import datetime as _dt
-        if s.endswith('Z'):
-            s = s.replace('Z', '+00:00')
-        return _dt.datetime.fromisoformat(s)
-    except Exception:
-        return None
-
-
-def _iter_project_audio_clips(proj: Project):
-    """Yield (key, index, name, bytes, mime) for each valid audio clip on the project."""
-    try:
-        audio_map = getattr(proj, 'audio', {}) or {}
-    except Exception:
-        audio_map = {}
-    if not isinstance(audio_map, dict):
-        return
-    for raw_key, entry in audio_map.items():
-        if not isinstance(entry, dict):
-            continue
-        sounds = entry.get('sounds')
-        if not isinstance(sounds, list):
-            continue
-        for idx, sound in enumerate(sounds):
-            if not isinstance(sound, dict):
-                continue
-            data_url = sound.get('dataUrl')
-            if not isinstance(data_url, str):
-                continue
-            mime, raw_bytes = ProjectStore._decode_data_url(data_url)
-            if not raw_bytes:
-                continue
-            try:
-                name = str(sound.get('name') or '').strip()
-            except Exception:
-                name = ''
-            yield (raw_key, idx, name, raw_bytes, mime)
-
-
-def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project) -> int:
-    """Write audio clips (if any) to the provided zip file. Returns clips written."""
-    written = set()
-    total = 0
-    try:
-        raw_pid = getattr(proj, 'id', '') or 'project'
-    except Exception:
-        raw_pid = 'project'
-    safe_pid = secure_filename(str(raw_pid)) or 'project'
-    for raw_key, idx, display_name, raw_bytes, mime in _iter_project_audio_clips(proj):
-        try:
-            safe_key = secure_filename(str(raw_key or 'event')) or 'event'
-        except Exception:
-            safe_key = 'event'
-        try:
-            safe_name = secure_filename(str(display_name or ''))
-        except Exception:
-            safe_name = ''
-        base_root, ext = os.path.splitext(safe_name) if safe_name else ('', '')
-        if not base_root:
-            base_root = f"clip_{idx + 1}"
-        if not ext:
-            guessed = mimetypes.guess_extension(mime or '') or ''
-            if guessed == '.jpe':  # normalize common alias
-                guessed = '.jpg'
-            ext = guessed
-        if ext and not ext.startswith('.'):
-            ext = f".{ext}"
-        if not ext:
-            ext = '.bin'
-        base_root = secure_filename(base_root) or f"clip_{idx + 1}"
-        arc_dir = f"materials/audio/{safe_pid}/{safe_key}"
-        filename = f"{base_root}{ext}"
-        arcname = f"{arc_dir}/{filename}"
-        suffix = 2
-        while arcname in written:
-            arcname = f"{arc_dir}/{base_root}_{suffix}{ext}"
-            suffix += 1
-        zf.writestr(arcname, raw_bytes)
-        written.add(arcname)
-        total += 1
-    return total
-@api_bp.route("/proxmox/verify", methods=["POST"])
-@_secure_route()
-def proxmox_verify_global():
-    """Verify Proxmox API and SSH with provided credentials, without tying to a project.
-    Request JSON: { baseUrl, apiPort, sshPort, verifySSL, username, password }
-    Response JSON: { ok, proxmox_ok, ssh_ok, proxmox_error?, ssh_error? }
-    """
-    try:
-        body = request.get_json(force=True) or {}
-    except Exception:
-        body = {}
-    base_url = (body.get('baseUrl') or '').strip()
-    api_port = body.get('apiPort')
-    ssh_port = body.get('sshPort', 22)
-    verify_ssl = bool(body.get('verifySSL')) if ('verifySSL' in body) else True
-    username = body.get('username') or None
-    password = body.get('password') or None
-    # Normalize baseUrl with apiPort
-    try:
-        if api_port is not None and str(api_port).strip() != '':
-            p = urlparse(base_url)
-            host = p.hostname or ''
-            scheme = p.scheme or 'https'
-            netloc = host
-            if p.username:
-                auth = p.username
-                if p.password:
-                    auth += f":{p.password}"
-                netloc = f"{auth}@{netloc}"
-            netloc = f"{netloc}:{int(api_port)}"
-            base_url = urlunparse((scheme, netloc, '', '', '', ''))
-    except Exception:
-        pass
-    prox_ok = False
-    ssh_ok = False
-    prox_err = None
-    ssh_err = None
-    # API
-    try:
-        token = None
-        client = ProxmoxClient(base_url=base_url, token=token, username=username, password=password, verify=verify_ssl)
-        _ = client.list_nodes()
-        prox_ok = True
-    except Exception as e:
-        prox_err = f"{e}"
-    # SSH
-    try:
-        host = ''
-        try:
-            host = urlparse(base_url).hostname or ''
-        except Exception:
-            host = ''
-        ssh_user = None
-        try:
-            if username:
-                ssh_user = str(username).split('@')[0]
-        except Exception:
-            ssh_user = username
-        ssh_port_i = int(ssh_port or 22)
-        if not (host and ssh_user and password):
-            raise RuntimeError("missing host/user/password for ssh test")
-        import paramiko  # type: ignore
-        c = paramiko.SSHClient()
-        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        c.connect(hostname=host, port=ssh_port_i, username=ssh_user, password=password, timeout=8, allow_agent=False, look_for_keys=False)
-        try:
-            _stdin, stdout, _stderr = c.exec_command('pwd', timeout=5)
-            _ = stdout.read()
-            ssh_ok = True
-        finally:
-            try:
-                c.close()
-            except Exception:
-                pass
-    except Exception as e:
-        ssh_err = f"{e}"
-    ok = bool(prox_ok and ssh_ok)
-    resp = { 'ok': ok, 'proxmox_ok': bool(prox_ok), 'ssh_ok': bool(ssh_ok) }
-    if prox_err: resp['proxmox_error'] = prox_err
-    if ssh_err: resp['ssh_error'] = ssh_err
-    return jsonify(resp)
 
 
 @api_bp.route("/projects/<pid>/proxmox/verify", methods=["POST"])
@@ -1980,6 +2030,108 @@ def instances_create_preflight(pid: str):
     except Exception:
         pass
     targets = body.get('targets') or []
+    DEFAULT_CMD_TIMEOUT = 300
+    MAX_CMD_TIMEOUT = 86400
+
+    def _coerce_timeout(value: Any) -> int:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_CMD_TIMEOUT
+        if num <= 0:
+            return DEFAULT_CMD_TIMEOUT
+        try:
+            num = int(round(num))
+        except Exception:
+            num = int(num)
+        if num > MAX_CMD_TIMEOUT:
+            num = MAX_CMD_TIMEOUT
+        return num
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            if not norm:
+                return default
+            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
+                return True
+            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
+                return False
+        return bool(value)
+    DEFAULT_CMD_TIMEOUT = 300
+    MAX_CMD_TIMEOUT = 86400
+
+    def _coerce_timeout(value: Any) -> int:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_CMD_TIMEOUT
+        if num <= 0:
+            return DEFAULT_CMD_TIMEOUT
+        try:
+            num = int(round(num))
+        except Exception:
+            num = int(num)
+        if num > MAX_CMD_TIMEOUT:
+            num = MAX_CMD_TIMEOUT
+        return num
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            if not norm:
+                return default
+            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
+                return True
+            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
+                return False
+        return bool(value)
+    DEFAULT_CMD_TIMEOUT = 300
+    MAX_CMD_TIMEOUT = 86400
+
+    def _coerce_timeout(value: Any) -> int:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_CMD_TIMEOUT
+        if num <= 0:
+            return DEFAULT_CMD_TIMEOUT
+        try:
+            num = int(round(num))
+        except Exception:
+            num = int(num)
+        if num > MAX_CMD_TIMEOUT:
+            num = MAX_CMD_TIMEOUT
+        return num
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            if not norm:
+                return default
+            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
+                return True
+            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
+                return False
+        return bool(value)
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
@@ -2195,6 +2347,41 @@ def instances_fix_ageing(pid: str):
     except Exception:
         pass
     targets = body.get('targets') or []
+    DEFAULT_CMD_TIMEOUT = 300
+    MAX_CMD_TIMEOUT = 86400
+
+    def _coerce_timeout(value: Any) -> int:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_CMD_TIMEOUT
+        if num <= 0:
+            return DEFAULT_CMD_TIMEOUT
+        try:
+            num = int(round(num))
+        except Exception:
+            num = int(num)
+        if num > MAX_CMD_TIMEOUT:
+            num = MAX_CMD_TIMEOUT
+        return num
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            if not norm:
+                return default
+            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
+                return True
+            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
+                return False
+        return bool(value)
+
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
@@ -3916,6 +4103,41 @@ def instances_run_startup_cmds(pid: str):
     except Exception:
         pass
     targets = body.get('targets') or []
+    DEFAULT_CMD_TIMEOUT = 300
+    MAX_CMD_TIMEOUT = 86400
+
+    def _coerce_timeout(value: Any) -> int:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_CMD_TIMEOUT
+        if num <= 0:
+            return DEFAULT_CMD_TIMEOUT
+        try:
+            num = int(round(num))
+        except Exception:
+            num = int(num)
+        if num > MAX_CMD_TIMEOUT:
+            num = MAX_CMD_TIMEOUT
+        return num
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            if not norm:
+                return default
+            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
+                return True
+            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
+                return False
+        return bool(value)
+
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
@@ -3947,12 +4169,32 @@ def instances_run_startup_cmds(pid: str):
             for cmd_obj in getattr(step_obj, 'commands', []) or []:
                 enabled = True
                 command_text = ''
+                long_running = False
+                timeout_seconds = DEFAULT_CMD_TIMEOUT
                 if hasattr(cmd_obj, 'command'):
                     command_text = getattr(cmd_obj, 'command', '')
                     enabled = getattr(cmd_obj, 'enabled', True)
+                    long_running = _coerce_bool_flag(getattr(cmd_obj, 'long_running', False), False)
+                    timeout_seconds = _coerce_timeout(getattr(cmd_obj, 'timeout_seconds', DEFAULT_CMD_TIMEOUT))
                 elif isinstance(cmd_obj, dict):
                     command_text = cmd_obj.get('command') or cmd_obj.get('cmd') or ''
                     enabled = cmd_obj.get('enabled', True)
+                    if enabled is None and cmd_obj.get('disabled') is not None:
+                        enabled = not cmd_obj.get('disabled')
+                    long_hint = cmd_obj.get('long_running')
+                    if long_hint is None:
+                        for key in ('longRunning', 'longrun', 'long', 'isLongRunning'):
+                            if key in cmd_obj:
+                                long_hint = cmd_obj.get(key)
+                                break
+                    timeout_hint = cmd_obj.get('timeout_seconds')
+                    if timeout_hint is None:
+                        for key in ('timeoutSeconds', 'timeout', 'timeout_sec', 'timeoutSec'):
+                            if key in cmd_obj:
+                                timeout_hint = cmd_obj.get(key)
+                                break
+                    long_running = _coerce_bool_flag(long_hint, False)
+                    timeout_seconds = _coerce_timeout(timeout_hint)
                 else:
                     command_text = cmd_obj
                 try:
@@ -3963,7 +4205,11 @@ def instances_run_startup_cmds(pid: str):
                     continue
                 if enabled is False:
                     continue
-                commands_out.append(command_text)
+                commands_out.append({
+                    'text': command_text,
+                    'long_running': bool(long_running),
+                    'timeout_seconds': timeout_seconds,
+                })
             return commands_out
 
         total_commands = sum(len(extract_enabled_commands(step)) for step in steps)
@@ -3996,6 +4242,25 @@ def instances_run_startup_cmds(pid: str):
             m.get('index'),
             m.get('name'),
         )
+
+        preview_limit = 1000
+
+        def _make_preview(raw_value: Any):
+            text = ''
+            trimmed = False
+            try:
+                if raw_value is None:
+                    text = ''
+                elif isinstance(raw_value, str):
+                    text = raw_value
+                else:
+                    text = str(raw_value)
+            except Exception:
+                text = ''
+            if len(text) > preview_limit:
+                trimmed = True
+                text = text[:preview_limit] + f"... [trimmed to {preview_limit} chars; see ZIP for full output]"
+            return text, trimmed
 
         def record_zip_entry(step_idx: int, cmd_idx: int, step_delay: float, result_dict: Dict[str, Any], err_msg: Optional[str]):
             stdout_full = result_dict.pop('stdout_full', '') if isinstance(result_dict, dict) else ''
@@ -4032,35 +4297,68 @@ def instances_run_startup_cmds(pid: str):
                 'exitcode': result_dict.get('exitcode') if isinstance(result_dict, dict) else None,
                 'stdout': stdout_full or '',
                 'stderr': stderr_full or '',
-                'error': error_text
+                'error': error_text,
+                'timeout_seconds': result_dict.get('timeout_seconds') if isinstance(result_dict, dict) else None,
+                'long_running': bool(result_dict.get('long_running')) if isinstance(result_dict, dict) else False,
             })
 
-        def execute_single(command: str):
-            tail_n = 300
+        def execute_single(command_entry: Dict[str, Any], meta: Optional[Dict[str, Any]] = None):
+            if meta:
+                _job_emit_command_status(
+                    pid,
+                    entry=m,
+                    step=meta.get('step'),
+                    command_idx=meta.get('command_index'),
+                    command_text=meta.get('command_text'),
+                    command_number=meta.get('command_number'),
+                    command_total=meta.get('command_total'),
+                    step_command_total=meta.get('step_command_total'),
+                )
+            command_text = command_entry.get('text') if isinstance(command_entry, dict) else command_entry
+            if command_text is None:
+                command_text = ''
+            timeout_override = command_entry.get('timeout_seconds') if isinstance(command_entry, dict) else None
+            timeout_value = _coerce_timeout(timeout_override)
+            long_running_flag = bool(command_entry.get('long_running')) if isinstance(command_entry, dict) else False
             try:
-                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command))
+                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command_text), timeout=timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
+                out_preview, out_trimmed = _make_preview(out)
+                err_preview, err_trimmed = _make_preview(err)
                 return {
-                    'cmd': str(command),
+                    'cmd': str(command_text),
                     'exitcode': exitcode,
                     'stdout_full': out,
                     'stderr_full': err,
-                    'out_tail': out[-tail_n:],
-                    'err_tail': err[-tail_n:]
+                    'stdout_preview': out_preview,
+                    'stderr_preview': err_preview,
+                    'stdout_trimmed': out_trimmed,
+                    'stderr_trimmed': err_trimmed,
+                    'preview_limit': preview_limit,
+                    'timeout_seconds': timeout_value,
+                    'long_running': long_running_flag,
                 }, None
             except Exception as exc:
+                err_text = str(exc)
+                err_preview, err_trimmed = _make_preview(err_text)
                 return {
-                    'cmd': str(command),
+                    'cmd': str(command_text),
                     'exitcode': None,
                     'stdout_full': '',
-                    'stderr_full': str(exc),
-                    'out_tail': '',
-                    'err_tail': str(exc)[:300]
-                }, f'cmd error ({command}): {exc}'
+                    'stderr_full': err_text,
+                    'stdout_preview': '',
+                    'stderr_preview': err_preview,
+                    'stdout_trimmed': False,
+                    'stderr_trimmed': err_trimmed,
+                    'preview_limit': preview_limit,
+                    'timeout_seconds': timeout_value,
+                    'long_running': long_running_flag,
+                }, f'cmd error ({command_text}): {exc}'
 
         cmd_results = []
+        executed_commands = 0
         cancelled = False
         for step_idx, step in enumerate(steps):
             if _is_cancelled(pid):
@@ -4068,53 +4366,93 @@ def instances_run_startup_cmds(pid: str):
                 break
             delay = float(step.delay_seconds or 0.0)
             if delay > 0:
+                _job_emit_delay_status(pid, m, step_idx + 1, delay)
                 _safe_sleep(delay)
             commands = extract_enabled_commands(step)
             if not commands:
                 continue
             if len(commands) == 1:
-                result, err_msg = execute_single(commands[0])
-                result.update({'step': step_idx + 1, 'delay': delay})
+                cmd_meta = commands[0]
+                meta_info = {
+                    'step': step_idx + 1,
+                    'command_index': 1,
+                    'command_text': cmd_meta.get('text') if isinstance(cmd_meta, dict) else cmd_meta,
+                    'command_number': executed_commands + 1,
+                    'command_total': total_commands,
+                    'step_command_total': len(commands),
+                }
+                result, err_msg = execute_single(cmd_meta, meta_info)
+                result.update({
+                    'step': step_idx + 1,
+                    'delay': delay,
+                    'normalized': cmd_meta.get('normalized'),
+                    'long_running': bool(cmd_meta.get('long_running')),
+                    'timeout_seconds': cmd_meta.get('timeout_seconds'),
+                })
                 record_zip_entry(step_idx, 0, delay, result, err_msg)
                 cmd_results.append(result)
-                cmd_label = result.get('cmd', str(commands[0]))
+                cmd_label = result.get('cmd', str(cmd_meta.get('text', '')))
                 if err_msg:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
                 elif result.get('exitcode') not in (0, None):
-                    reason = f"cmd failed ({cmd_label}): {result.get('err_tail','')}"
+                    reason = f"cmd failed ({cmd_label}): {result.get('stderr_preview','')}"
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+                executed_commands += 1
                 continue
 
             parallel_results = []
             with ThreadPoolExecutor(max_workers=len(commands)) as pool:
                 futures = []
-                for order, command in enumerate(commands):
-                    futures.append((order, command, pool.submit(execute_single, command)))
-                for order, command, future in futures:
+                base_seq = executed_commands
+                step_command_total = len(commands)
+                for order, command_meta in enumerate(commands):
+                    meta_info = {
+                        'step': step_idx + 1,
+                        'command_index': order + 1,
+                        'command_text': command_meta.get('text') if isinstance(command_meta, dict) else command_meta,
+                        'command_number': base_seq + order + 1,
+                        'command_total': total_commands,
+                        'step_command_total': step_command_total,
+                    }
+                    futures.append((order, command_meta, pool.submit(execute_single, command_meta, meta_info)))
+                for order, command_meta, future in futures:
                     try:
                         res_data, err_msg = future.result()
                     except Exception as exc:
+                        err_text = str(exc)
+                        err_preview, err_trimmed = _make_preview(err_text)
                         res_data = {
-                            'cmd': str(command),
+                            'cmd': str(command_meta.get('text')),
                             'exitcode': None,
-                            'out_tail': '',
-                            'err_tail': str(exc)[:300]
+                            'stdout_full': '',
+                            'stderr_full': err_text,
+                            'stdout_preview': '',
+                            'stderr_preview': err_preview,
+                            'stdout_trimmed': False,
+                            'stderr_trimmed': err_trimmed,
+                            'preview_limit': preview_limit,
+                            'timeout_seconds': command_meta.get('timeout_seconds'),
+                            'long_running': bool(command_meta.get('long_running')),
                         }
-                        err_msg = f'cmd error ({command}): {exc}'
+                        err_msg = f"cmd error ({command_meta.get('text')}): {exc}"
                     res_data['order'] = order
                     parallel_results.append((res_data, err_msg))
             parallel_results.sort(key=lambda entry: entry[0]['order'])
             for res_data, err_msg in parallel_results:
                 order_idx = res_data.pop('order', 0)
-                res_data.update({'step': step_idx + 1, 'delay': delay})
+                res_data.update({
+                    'step': step_idx + 1,
+                    'delay': delay,
+                })
                 record_zip_entry(step_idx, order_idx, delay, res_data, err_msg)
                 cmd_results.append(res_data)
                 cmd_label = res_data.get('cmd') or ''
                 if err_msg:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
                 elif res_data.get('exitcode') not in (0, None):
-                    reason = f"cmd failed ({cmd_label}): {res_data.get('err_tail','')}"
+                    reason = f"cmd failed ({cmd_label}): {res_data.get('stderr_preview','')}"
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+            executed_commands += len(commands)
 
         if cancelled:
             errors.append({ 'index': m['index'], 'name': m['name'], 'reason': 'cancelled' })
@@ -4175,7 +4513,9 @@ def instances_run_startup_cmds(pid: str):
                     'exitcode': exitcode,
                     'error': entry.get('error'),
                     'stdout_chars': len(entry.get('stdout') or ''),
-                    'stderr_chars': len(entry.get('stderr') or '')
+                    'stderr_chars': len(entry.get('stderr') or ''),
+                    'timeout_seconds': entry.get('timeout_seconds'),
+                    'long_running': bool(entry.get('long_running')), 
                 })
             summary_doc = {
                 'project_id': proj.id,
@@ -4258,13 +4598,70 @@ def instances_run_stored_cmds(pid: str):
     except Exception:
         pass
     targets = body.get('targets') or []
+    def _normalize_command_text(raw: Any) -> str:
+        try:
+            text = str(raw or '')
+        except Exception:
+            text = ''
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        return text.strip()
+    DEFAULT_CMD_TIMEOUT = 300
+    MAX_CMD_TIMEOUT = 86400
+
+    def _coerce_timeout(value: Any) -> int:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_CMD_TIMEOUT
+        if num <= 0:
+            return DEFAULT_CMD_TIMEOUT
+        try:
+            num = int(round(num))
+        except Exception:
+            num = int(num)
+        if num > MAX_CMD_TIMEOUT:
+            num = MAX_CMD_TIMEOUT
+        return num
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            if not norm:
+                return default
+            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
+                return True
+            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
+                return False
+        return bool(value)
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
+    raw_commands = body.get('commands')
+    selected_commands: List[str] = []
+
+    def _append_selected(raw_value: Any):
+        normalized = _normalize_command_text(raw_value)
+        if normalized and normalized not in selected_commands:
+            selected_commands.append(normalized)
+
+    if isinstance(raw_commands, (list, tuple, set)):
+        for entry in raw_commands:
+            _append_selected(entry)
+    elif raw_commands is not None:
+        _append_selected(raw_commands)
+    _append_selected(body.get('command'))
+    selected_commands_filter: Optional[Set[str]] = set(selected_commands) if selected_commands else None
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     ran = []
+    zip_entries: List[Dict[str, Any]] = []
     for m in mapped:
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
@@ -4282,17 +4679,37 @@ def instances_run_stored_cmds(pid: str):
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
         steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
 
-        def extract_enabled_commands(step_obj):
+        def extract_enabled_commands(step_obj, match_commands: Optional[Set[str]] = None):
             commands_out = []
             for cmd_obj in getattr(step_obj, 'commands', []) or []:
                 enabled = True
                 command_text = ''
+                long_running = False
+                timeout_seconds = DEFAULT_CMD_TIMEOUT
                 if hasattr(cmd_obj, 'command'):
                     command_text = getattr(cmd_obj, 'command', '')
                     enabled = getattr(cmd_obj, 'enabled', True)
+                    long_running = _coerce_bool_flag(getattr(cmd_obj, 'long_running', False), False)
+                    timeout_seconds = _coerce_timeout(getattr(cmd_obj, 'timeout_seconds', DEFAULT_CMD_TIMEOUT))
                 elif isinstance(cmd_obj, dict):
                     command_text = cmd_obj.get('command') or cmd_obj.get('cmd') or ''
                     enabled = cmd_obj.get('enabled', True)
+                    if enabled is None and cmd_obj.get('disabled') is not None:
+                        enabled = not cmd_obj.get('disabled')
+                    long_hint = cmd_obj.get('long_running')
+                    if long_hint is None:
+                        for key in ('longRunning', 'longrun', 'long', 'isLongRunning'):
+                            if key in cmd_obj:
+                                long_hint = cmd_obj.get(key)
+                                break
+                    timeout_hint = cmd_obj.get('timeout_seconds')
+                    if timeout_hint is None:
+                        for key in ('timeoutSeconds', 'timeout', 'timeout_sec', 'timeoutSec'):
+                            if key in cmd_obj:
+                                timeout_hint = cmd_obj.get(key)
+                                break
+                    long_running = _coerce_bool_flag(long_hint, False)
+                    timeout_seconds = _coerce_timeout(timeout_hint)
                 else:
                     command_text = cmd_obj
                 try:
@@ -4303,35 +4720,149 @@ def instances_run_stored_cmds(pid: str):
                     continue
                 if enabled is False:
                     continue
-                commands_out.append(command_text)
+                normalized_text = _normalize_command_text(command_text)
+                if not normalized_text:
+                    continue
+                if match_commands and normalized_text not in match_commands:
+                    continue
+                commands_out.append({
+                    'text': command_text,
+                    'normalized': normalized_text,
+                    'long_running': bool(long_running),
+                    'timeout_seconds': timeout_seconds,
+                })
             return commands_out
 
-        total_commands = sum(len(extract_enabled_commands(step)) for step in steps)
+        total_commands = sum(len(extract_enabled_commands(step, selected_commands_filter)) for step in steps)
         if not total_commands:
-            skipped.append({ 'index': m['index'], 'name': m['name'], 'reason': 'no stored commands configured' })
+            reason = 'no stored commands configured'
+            if selected_commands:
+                joined = ', '.join(selected_commands)
+                if len(selected_commands) == 1:
+                    reason = f'stored command not configured: {joined}'
+                else:
+                    reason = f'stored commands not configured: {joined}'
+            skipped.append({ 'index': m['index'], 'name': m['name'], 'reason': reason })
             continue
-        def execute_single(command: str):
-            tail_n = 300
+        preview_limit = 1000
+
+        def _make_preview(raw_value: Any):
+            text = ''
+            trimmed = False
             try:
-                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command))
+                if raw_value is None:
+                    text = ''
+                elif isinstance(raw_value, str):
+                    text = raw_value
+                else:
+                    text = str(raw_value)
+            except Exception:
+                text = ''
+            if len(text) > preview_limit:
+                trimmed = True
+                text = text[:preview_limit] + f"... [trimmed to {preview_limit} chars; see ZIP for full output]"
+            return text, trimmed
+
+        def record_zip_entry(step_idx: int, cmd_idx: int, step_delay: float, result_dict: Dict[str, Any], err_msg: Optional[str]):
+            stdout_full = ''
+            stderr_full = ''
+            if isinstance(result_dict, dict):
+                stdout_full = result_dict.pop('stdout_full', '')
+                stderr_full = result_dict.pop('stderr_full', '')
+            if not isinstance(stdout_full, str):
+                try:
+                    stdout_full = str(stdout_full)
+                except Exception:
+                    stdout_full = ''
+            if not isinstance(stderr_full, str):
+                try:
+                    stderr_full = str(stderr_full)
+                except Exception:
+                    stderr_full = ''
+            try:
+                command_text = str(result_dict.get('cmd', '') if isinstance(result_dict, dict) else '')
+            except Exception:
+                command_text = ''
+            error_text = ''
+            if err_msg:
+                try:
+                    error_text = str(err_msg).strip()
+                except Exception:
+                    error_text = str(err_msg)
+            zip_entries.append({
+                'vm_name': m.get('name'),
+                'vm_index': m.get('index'),
+                'node': m.get('node'),
+                'vmid': m.get('vmid'),
+                'step': int(step_idx) + 1,
+                'command_index': int(cmd_idx) + 1,
+                'delay': float(step_delay or 0.0),
+                'command': command_text,
+                'exitcode': result_dict.get('exitcode') if isinstance(result_dict, dict) else None,
+                'stdout': stdout_full or '',
+                'stderr': stderr_full or '',
+                'error': error_text,
+                'timeout_seconds': result_dict.get('timeout_seconds') if isinstance(result_dict, dict) else None,
+                'long_running': bool(result_dict.get('long_running')) if isinstance(result_dict, dict) else False,
+            })
+
+        def execute_single(command_entry: Dict[str, Any], meta: Optional[Dict[str, Any]] = None):
+            if meta:
+                _job_emit_command_status(
+                    pid,
+                    entry=m,
+                    step=meta.get('step'),
+                    command_idx=meta.get('command_index'),
+                    command_text=meta.get('command_text'),
+                    command_number=meta.get('command_number'),
+                    command_total=meta.get('command_total'),
+                    step_command_total=meta.get('step_command_total'),
+                )
+            command_text = command_entry.get('text') if isinstance(command_entry, dict) else command_entry
+            if command_text is None:
+                command_text = ''
+            timeout_override = command_entry.get('timeout_seconds') if isinstance(command_entry, dict) else None
+            timeout_value = _coerce_timeout(timeout_override)
+            long_running_flag = bool(command_entry.get('long_running')) if isinstance(command_entry, dict) else False
+            try:
+                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command_text), timeout=timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
+                out_preview, out_trimmed = _make_preview(out)
+                err_preview, err_trimmed = _make_preview(err)
                 return {
-                    'cmd': str(command),
+                    'cmd': str(command_text),
                     'exitcode': exitcode,
-                    'out_tail': out[-tail_n:],
-                    'err_tail': err[-tail_n:]
+                    'stdout_full': out,
+                    'stderr_full': err,
+                    'stdout_preview': out_preview,
+                    'stderr_preview': err_preview,
+                    'stdout_trimmed': out_trimmed,
+                    'stderr_trimmed': err_trimmed,
+                    'preview_limit': preview_limit,
+                    'timeout_seconds': timeout_value,
+                    'long_running': long_running_flag,
                 }, None
             except Exception as exc:
+                err_text = str(exc)
+                err_preview, err_trimmed = _make_preview(err_text)
                 return {
-                    'cmd': str(command),
+                    'cmd': str(command_text),
                     'exitcode': None,
-                    'out_tail': '',
-                    'err_tail': str(exc)[:300]
-                }, f'cmd error ({command}): {exc}'
+                    'stdout_full': '',
+                    'stderr_full': err_text,
+                    'stdout_preview': '',
+                    'stderr_preview': err_preview,
+                    'stdout_trimmed': False,
+                    'stderr_trimmed': err_trimmed,
+                    'preview_limit': preview_limit,
+                    'timeout_seconds': timeout_value,
+                    'long_running': long_running_flag,
+                }, f'cmd error ({command_text}): {exc}'
 
         cmd_results = []
+        executed_commands = 0
         cancelled = False
         for step_idx, step in enumerate(steps):
             if _is_cancelled(pid):
@@ -4339,56 +4870,94 @@ def instances_run_stored_cmds(pid: str):
                 break
             delay = float(step.delay_seconds or 0.0)
             if delay > 0:
+                _job_emit_delay_status(pid, m, step_idx + 1, delay)
                 _safe_sleep(delay)
-            commands = extract_enabled_commands(step)
+            commands = extract_enabled_commands(step, selected_commands_filter)
             if not commands:
                 continue
             if len(commands) == 1:
-                result, err_msg = execute_single(commands[0])
-                result.update({'step': step_idx + 1, 'delay': delay})
+                cmd_meta = commands[0]
+                meta_info = {
+                    'step': step_idx + 1,
+                    'command_index': 1,
+                    'command_text': cmd_meta.get('text') if isinstance(cmd_meta, dict) else cmd_meta,
+                    'command_number': executed_commands + 1,
+                    'command_total': total_commands,
+                    'step_command_total': len(commands),
+                }
+                result, err_msg = execute_single(cmd_meta, meta_info)
+                result.update({
+                    'step': step_idx + 1,
+                    'delay': delay,
+                    'long_running': bool(cmd_meta.get('long_running')),
+                    'timeout_seconds': cmd_meta.get('timeout_seconds'),
+                })
+                record_zip_entry(step_idx, 0, delay, result, err_msg)
                 cmd_results.append(result)
-                cmd_label = result.get('cmd', str(commands[0]))
+                cmd_label = result.get('cmd', str(cmd_meta.get('text', '')))
                 if err_msg:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
                 elif result.get('exitcode') not in (0, None):
-                    reason = f"cmd failed ({cmd_label}): {result.get('err_tail','')}"
+                    reason = f"cmd failed ({cmd_label}): {result.get('stderr_preview','')}"
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+                executed_commands += 1
                 continue
 
             parallel_results = []
             with ThreadPoolExecutor(max_workers=len(commands)) as pool:
                 futures = []
-                for order, command in enumerate(commands):
-                    futures.append((order, command, pool.submit(execute_single, command)))
-                for order, command, future in futures:
+                base_seq = executed_commands
+                step_command_total = len(commands)
+                for order, command_meta in enumerate(commands):
+                    meta_info = {
+                        'step': step_idx + 1,
+                        'command_index': order + 1,
+                        'command_text': command_meta.get('text') if isinstance(command_meta, dict) else command_meta,
+                        'command_number': base_seq + order + 1,
+                        'command_total': total_commands,
+                        'step_command_total': step_command_total,
+                    }
+                    futures.append((order, command_meta, pool.submit(execute_single, command_meta, meta_info)))
+                for order, command_meta, future in futures:
                     try:
                         res_data, err_msg = future.result()
                     except Exception as exc:
+                        err_text = str(exc)
+                        err_preview, err_trimmed = _make_preview(err_text)
                         res_data = {
-                            'cmd': str(command),
+                            'cmd': str(command_meta.get('text')),
                             'exitcode': None,
-                            'out_tail': '',
-                            'err_tail': str(exc)[:300]
+                            'stdout_full': '',
+                            'stderr_full': err_text,
+                            'stdout_preview': '',
+                            'stderr_preview': err_preview,
+                            'stdout_trimmed': False,
+                            'stderr_trimmed': err_trimmed,
+                            'preview_limit': preview_limit,
+                            'timeout_seconds': command_meta.get('timeout_seconds'),
+                            'long_running': bool(command_meta.get('long_running')),
                         }
-                        err_msg = f'cmd error ({command}): {exc}'
+                        err_msg = f"cmd error ({command_meta.get('text')}): {exc}"
                     res_data['order'] = order
                     parallel_results.append((res_data, err_msg))
             parallel_results.sort(key=lambda entry: entry[0]['order'])
             for res_data, err_msg in parallel_results:
-                res_data.pop('order', None)
+                order_idx = res_data.pop('order', 0)
                 res_data.update({'step': step_idx + 1, 'delay': delay})
+                record_zip_entry(step_idx, order_idx, delay, res_data, err_msg)
                 cmd_results.append(res_data)
                 cmd_label = res_data.get('cmd') or ''
                 if err_msg:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': err_msg })
                 elif res_data.get('exitcode') not in (0, None):
-                    reason = f"cmd failed ({cmd_label}): {res_data.get('err_tail','')}"
+                    reason = f"cmd failed ({cmd_label}): {res_data.get('stderr_preview','')}"
                     errors.append({ 'index': m['index'], 'name': m['name'], 'step': step_idx + 1, 'command': cmd_label, 'reason': reason })
+            executed_commands += len(commands)
 
         if cancelled:
             errors.append({ 'index': m['index'], 'name': m['name'], 'reason': 'cancelled' })
             break
-        ran.append({
+        ran_entry = {
             'index': m['index'],
             'name': m['name'],
             'vmid': m['vmid'],
@@ -4397,9 +4966,92 @@ def instances_run_stored_cmds(pid: str):
             'count': len(cmd_results),
             'planned_count': total_commands,
             'cmds': cmd_results
-        })
+        }
+        if selected_commands:
+            ran_entry['selected_commands'] = selected_commands
+            if len(selected_commands) == 1:
+                ran_entry['selected_command'] = selected_commands[0]
+        ran.append(ran_entry)
+    zip_payload: Optional[Dict[str, Any]] = None
+    if zip_entries:
+        now = datetime.utcnow()
+        timestamp = _format_ymdhms(now)
+        safe_proj = _safe_file_stem(getattr(proj, 'name', '') or proj.id)
+        filename = f"stored_cmd_outputs_{safe_proj}_{timestamp}.zip"
+        buf = io.BytesIO()
+        summary_entries = []
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for entry in zip_entries:
+                vm_label = entry.get('vm_name') or f"vm_{entry.get('vm_index')}"
+                safe_vm = _safe_file_stem(vm_label) or f"vm_{entry.get('vm_index') or 'unknown'}"
+                step_dir = f"step_{int(entry.get('step', 0)):02d}"
+                cmd_file = f"cmd_{int(entry.get('command_index', 0)):02d}.txt"
+                file_path = f"{safe_vm}/{step_dir}/{cmd_file}"
+                exitcode = entry.get('exitcode')
+                lines = [
+                    f"VM Name: {vm_label}",
+                    f"VM Index: {entry.get('vm_index')}",
+                    f"Node: {entry.get('node')}",
+                    f"VMID: {entry.get('vmid')}",
+                    f"Step: {entry.get('step')}",
+                    f"Command Index: {entry.get('command_index')}",
+                    f"Delay Before Step: {entry.get('delay')}",
+                    f"Command: {entry.get('command')}",
+                    f"Timeout (s): {entry.get('timeout_seconds')}",
+                    f"Long-running: {'yes' if entry.get('long_running') else 'no'}",
+                    f"Exit Code: {'' if exitcode is None else exitcode}"
+                ]
+                if entry.get('error'):
+                    lines.append(f"Error: {entry.get('error')}")
+                lines.extend([
+                    '',
+                    'STDOUT:',
+                    entry.get('stdout') or '',
+                    '',
+                    'STDERR:',
+                    entry.get('stderr') or ''
+                ])
+                zf.writestr(file_path, "\n".join(lines))
+                summary_entries.append({
+                    'vm_name': vm_label,
+                    'step': entry.get('step'),
+                    'command_index': entry.get('command_index'),
+                    'command': entry.get('command'),
+                    'exitcode': exitcode,
+                    'error': entry.get('error'),
+                    'stdout_chars': len(entry.get('stdout') or ''),
+                    'stderr_chars': len(entry.get('stderr') or '')
+                })
+            summary_doc = {
+                'project_id': proj.id,
+                'project_name': getattr(proj, 'name', ''),
+                'generated_at': now.replace(microsecond=0).isoformat() + 'Z',
+                'ran_hosts': len(ran),
+                'skipped': skipped,
+                'errors': errors,
+                'commands': summary_entries
+            }
+            if selected_commands:
+                summary_doc['requested_commands'] = selected_commands
+                if len(selected_commands) == 1:
+                    summary_doc['requested_command'] = selected_commands[0]
+            zf.writestr('summary.json', json.dumps(summary_doc, indent=2))
+        zip_bytes = buf.getvalue()
+        zip_payload = {
+            'filename': filename,
+            'size': len(zip_bytes),
+            'base64': base64.b64encode(zip_bytes).decode('ascii')
+        }
+
     _end_job(pid)
-    return jsonify({ 'ran': ran, 'skipped': skipped, 'errors': errors })
+    response_payload: Dict[str, Any] = { 'ran': ran, 'skipped': skipped, 'errors': errors }
+    if zip_payload:
+        response_payload['outputs_zip'] = zip_payload
+    if selected_commands:
+        response_payload['requested_commands'] = selected_commands
+        if len(selected_commands) == 1:
+            response_payload['requested_command'] = selected_commands[0]
+    return jsonify(response_payload)
 
 
 @api_bp.route('/projects/<pid>/instances/actions/cancel', methods=['POST'])
@@ -4427,6 +5079,7 @@ def instances_actions_status(pid: str):
         'current': rec.get('current'),
         'message': rec.get('message'),
         'eta': rec.get('eta'),
+        'detail': rec.get('detail'),
         'log': rec.get('log', [])[-30:],  # cap to last 30 lines
     })
 

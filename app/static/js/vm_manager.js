@@ -22,6 +22,18 @@ let ACTION_RUN_ID = 0;
 let FIX_CREDS_IN_PROGRESS = false;
 
 const VM_SCROLL_KEY = 'toolhub.vmManager.scrollTop';
+const STORED_CMD_SAMPLE_LIMIT = 3;
+const VM_DEFAULT_COMMAND_TIMEOUT_SECONDS = (() => {
+  try {
+    if (typeof window !== 'undefined' && window && window.DEFAULT_COMMAND_TIMEOUT_SECONDS !== undefined) {
+      const candidate = Number(window.DEFAULT_COMMAND_TIMEOUT_SECONDS);
+      if (Number.isFinite(candidate) && candidate > 0) {
+        return candidate;
+      }
+    }
+  } catch {}
+  return 300;
+})();
 
 function vmScrollContainer(){
   try { return document.getElementById('vm-table'); } catch { return null; }
@@ -91,6 +103,115 @@ var http = (typeof window !== 'undefined' && typeof window.http === 'function')
       if (ct.includes('application/json')) return res.json();
       return res.text();
     });
+
+function deriveStatusDetailMessage(status){
+  if (!status) return '';
+  const base = typeof status.message === 'string' ? status.message.trim() : '';
+  const detail = (status && status.detail) || {};
+  const kind = typeof detail.kind === 'string' ? detail.kind.toLowerCase() : '';
+  const vmLabel = detail.vm || status.current || '';
+  if (kind === 'delay') {
+    const delayLabel = detail.delay_label || (detail.delay_seconds != null ? `${detail.delay_seconds}s` : '');
+    if (delayLabel && vmLabel) return `Waiting ${delayLabel} before step ${detail.step || ''} on ${vmLabel}`.trim();
+    if (delayLabel) return `Waiting ${delayLabel}`;
+  }
+  if (kind === 'command') {
+    const cmd = detail.command || '';
+    const seqBits = [];
+    const commandNumber = Number(detail.command_number);
+    if (Number.isFinite(commandNumber) && commandNumber > 0) {
+      const total = Number(detail.command_total);
+      let seq = `command ${commandNumber}`;
+      if (Number.isFinite(total) && total > 0) seq += `/${total}`;
+      seqBits.push(seq);
+    }
+    const stepNum = Number(detail.step);
+    if (Number.isFinite(stepNum) && stepNum > 0) {
+      let stepLabel = `step ${stepNum}`;
+      const cmdIndex = Number(detail.command_index);
+      if (Number.isFinite(cmdIndex) && cmdIndex > 0) {
+        const stepTotal = Number(detail.step_command_total);
+        if (Number.isFinite(stepTotal) && stepTotal > 0) {
+          stepLabel += ` #${cmdIndex}/${stepTotal}`;
+        } else {
+          stepLabel += ` #${cmdIndex}`;
+        }
+      }
+      seqBits.push(stepLabel);
+    }
+    const prefix = seqBits.length ? `Running ${seqBits.join(' · ')}` : 'Running';
+    if (cmd && vmLabel) return `${prefix} on ${vmLabel}: ${cmd}`;
+    if (cmd) return `${prefix} ${cmd}`.trim();
+    if (vmLabel) return `${prefix} on ${vmLabel}`;
+    return prefix;
+  }
+  if (base) return base;
+  return '';
+}
+
+function startVmActionStatusPolling(pid, options = {}){
+  const projectId = String(pid ?? '').trim();
+  if (!projectId || typeof http !== 'function') return () => {};
+  const interval = Math.max(600, Number(options.interval) || 1200);
+  const setProgress = typeof options.setProgress === 'function' ? options.setProgress : null;
+  const initialDelay = Math.max(0, Number(options.initialDelay) || 0);
+  let stopped = false;
+  let timer = null;
+  let seenActive = false;
+
+  const clearTimer = () => { if (timer) { try { clearTimeout(timer); } catch {} timer = null; } };
+  const stop = () => { stopped = true; clearTimer(); };
+
+  const schedule = () => {
+    if (stopped) return;
+    clearTimer();
+    timer = setTimeout(run, interval);
+  };
+
+  const applyStatus = (status) => {
+    if (!setProgress) return;
+    const message = deriveStatusDetailMessage(status);
+    if (!message) return;
+    seenActive = true;
+    const prev = (typeof getActionProgressState === 'function') ? getActionProgressState() : null;
+    const pct = prev && typeof prev.percent === 'number' ? prev.percent : 60;
+    try { setProgress(pct, undefined, message); } catch {}
+  };
+
+  const handleNoActive = () => {
+    if (seenActive) {
+      stop();
+      return true;
+    }
+    return false;
+  };
+
+  const run = async () => {
+    if (stopped) return;
+    try {
+      const status = await http('GET', `/api/projects/${encodeURIComponent(projectId)}/instances/actions/status`);
+      if (status && !status.error) {
+        applyStatus(status);
+        const normalized = String(status.status || '').toLowerCase();
+        if (normalized && normalized !== 'running') { stop(); return; }
+      } else if (status && status.error) {
+        const errText = String(status.error || '').toLowerCase();
+        if (errText.includes('no active job') && handleNoActive()) { return; }
+      }
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : '').toLowerCase();
+      if (msg.includes('no active job') && handleNoActive()) { return; }
+    }
+    schedule();
+  };
+
+  if (initialDelay > 0) {
+    timer = setTimeout(run, initialDelay);
+  } else {
+    run();
+  }
+  return stop;
+}
 
 function normalizeProject(p){
   if (!p || typeof p !== 'object') return null;
@@ -266,7 +387,7 @@ function mapProxmoxPowerState(raw) {
 
 async function vmLoadProject() {
   const inputEl = document.getElementById('vm-proj-id');
-  const pid = canonicalPid(inputEl ? inputEl.value : '');
+    const pid = canonicalPid(inputEl ? inputEl.value : '');
   if (!pid) { alert('Enter a Project ID'); return; }
   try {
     const data = await http('GET', '/api/projects');
@@ -293,7 +414,7 @@ async function vmLoadProject() {
 
 async function vmLoadProjectById(pid) {
   const id = canonicalPid(pid);
-  if (!id) throw new Error('Missing project id');
+    if (!id) throw new Error('Missing project id');
   const data = await http('GET', '/api/projects');
   const list = normalizeProjects(data.projects);
   ALL_PROJECTS = list;
@@ -1008,6 +1129,23 @@ async function vmRefresh() {
 function emitActionLogs(actionName, resp) {
   try {
     const name = String(actionName || 'Action');
+    const requestedList = (() => {
+      const raw = Array.isArray(resp?.requested_commands) ? resp.requested_commands : [];
+      const normalized = normalizeSelectedCommands(raw);
+      if (normalized.length) return normalized;
+      const single = typeof resp?.requested_command === 'string' ? resp.requested_command.trim() : '';
+      return single ? [single] : [];
+    })();
+    if (requestedList.length === 1) {
+      try { shell.logInfo(`${name}: command filter — ${requestedList[0]}`); } catch {}
+    } else if (requestedList.length > 1) {
+      try { shell.logInfo(`${name}: command filters (${requestedList.length}) — ${requestedList.join(', ')}`); } catch {}
+    }
+    const outputsZip = resp?.outputs_zip;
+    if (outputsZip && outputsZip.filename) {
+      const sizeLabel = Number(outputsZip.size || 0) > 0 ? `${outputsZip.filename} (${outputsZip.size} bytes)` : outputsZip.filename;
+      try { shell.logInfo(`${name}: output archive ready — ${sizeLabel}`); } catch {}
+    }
   const created = Array.isArray(resp?.created) ? resp.created : [];
     const deleted = Array.isArray(resp?.deleted) ? resp.deleted : [];
     const skipped = Array.isArray(resp?.skipped) ? resp.skipped : [];
@@ -1064,6 +1202,7 @@ function emitActionLogs(actionName, resp) {
 function renderVmTable(proj) {
   const host = document.getElementById('vm-table');
   if (!proj) { host.innerHTML = ''; return; }
+  const projectKey = String(proj?.id ?? '__project__');
   const inst = Number(proj.instances || 0);
   const tag = String(proj.tag || '').trim();
   const vms = proj.vms || [];
@@ -1084,7 +1223,7 @@ function renderVmTable(proj) {
     for (const v of vms) {
       const vmName = `${v.name}${suffix}`;
       const d = detailMap.get(vmName) || null;
-      const key = `${i}|${vmName}`;
+      const key = `${projectKey}|${i}|${vmName}`;
       // Before first refresh, default to N/A; afterwards, show created/missing
       const rowStatus = hasAnyStatus ? (d ? 'created' : 'missing') : 'n/a';
       rows.push({ key, index: i, vmName, uname, pword, status: rowStatus, detail: d });
@@ -2038,7 +2177,9 @@ function updateRefreshState() {
   } catch {}
   // Enable/disable Actions toolbar groups depending on selection and login state
   try {
-    const anySelected = SELECTED_ROWS && SELECTED_ROWS.size > 0;
+    const multiMode = vmIsMulti && vmIsMulti();
+    const scopedSelections = multiMode ? listSelectedEntries() : (PROJ ? listSelectedEntriesForPid(PROJ.id) : []);
+    const anySelected = scopedSelections.length > 0;
     const disable = !(loggedIn && anySelected);
   ['act-startup','act-stop','act-nets','act-state','act-control','act-users'].forEach(id => {
       const el = document.getElementById(id);
@@ -2094,6 +2235,41 @@ function hasAuthForAllSelected(){
   } catch { return false; }
 }
 
+function listSelectedEntries(){
+  const entries = [];
+  const selection = SELECTED_ROWS;
+  if (!selection || typeof selection.forEach !== 'function') return entries;
+  selection.forEach(key => {
+    const info = parseKeyMulti(key);
+    if (!info) return;
+    const providedPid = info.pid !== undefined && info.pid !== null ? String(info.pid) : '';
+    const fallbackPid = providedPid || (PROJ && PROJ.id !== undefined && PROJ.id !== null ? String(PROJ.id) : '');
+    const pidCanonical = canonicalPid(fallbackPid);
+    const index = Number(info.index);
+    const name = String(info.name || '');
+    if (!pidCanonical || !Number.isFinite(index) || !name) return;
+    const pidValue = providedPid || fallbackPid;
+    entries.push({ key: String(key), pid: pidValue, pidCanonical, index, name });
+  });
+  return entries;
+}
+
+function listSelectedEntriesForPid(pid){
+  const target = canonicalPid(pid);
+  if (!target) return [];
+  return listSelectedEntries().filter(entry => entry.pidCanonical === target);
+}
+
+function getActionableSelections(){
+  if (vmIsMulti && vmIsMulti()) {
+    return listSelectedEntries();
+  }
+  if (PROJ && PROJ.id) {
+    return listSelectedEntriesForPid(PROJ.id);
+  }
+  return [];
+}
+
 function friendlyActionName(action){
   const map = {
     nets_assign: 'Assign Network Interfaces',
@@ -2108,24 +2284,487 @@ function friendlyActionName(action){
   return action.split('_').map(part => part ? part.charAt(0).toUpperCase() + part.slice(1) : '').join(' ').trim();
 }
 
-// Dispatch VM actions (queued wrapper)
-async function vmAction(action) {
+function getProjectSnapshot(pid){
+  const target = canonicalPid(pid);
+  if (!target) return null;
+  if (PROJ && canonicalPid(PROJ.id) === target) return PROJ;
+  const cache = window.PROJ_CACHE || {};
+  if (cache[pid]) return cache[pid];
+  for (const key of Object.keys(cache)) {
+    if (canonicalPid(key) === target) return cache[key];
+  }
+  const match = (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === target);
+  return match || null;
+}
+
+function deriveBaseVmName(proj, generatedName, index){
+  const vmList = Array.isArray(proj?.vms) ? proj.vms : [];
+  const tag = String(proj?.tag || '').trim();
+  const idx = Number(index);
+  const suffix = Number.isFinite(idx) ? `${tag}${idx}` : '';
+  let baseName = String(generatedName || '');
+  if (suffix && baseName.endsWith(suffix)) {
+    baseName = baseName.slice(0, baseName.length - suffix.length);
+  }
+  if (!vmList.some(v => String(v?.name || '') === baseName)) {
+    for (const vm of vmList) {
+      const name = String(vm?.name || '');
+      if (suffix && `${name}${suffix}` === String(generatedName || '')) {
+        baseName = name;
+        break;
+      }
+    }
+  }
+  return baseName || String(generatedName || '');
+}
+
+function findVmConfigByBaseName(proj, baseName){
+  const vmList = Array.isArray(proj?.vms) ? proj.vms : [];
+  return vmList.find(v => String(v?.name || '') === String(baseName || '')) || null;
+}
+
+function formatVmSelectionLabel(proj, generatedName, baseName, index, multi){
+  const projectName = proj ? (proj.name || proj.id || '') : '';
+  const idx = Number(index);
+  const idxLabel = Number.isFinite(idx) ? ` (instance ${idx})` : '';
+  const display = String(generatedName || baseName || '').trim() || `VM${Number.isFinite(idx) ? ` ${idx}` : ''}`;
+  if (multi && projectName) {
+    return `[${projectName}] ${display}${idxLabel}`.trim();
+  }
+  return `${display}${idxLabel}`.trim();
+}
+
+function collectStoredCommandOptions(){
   const multi = (vmIsMulti && vmIsMulti());
-  const selCount = Array.isArray(SELECTED_ROWS) ? SELECTED_ROWS.size : (SELECTED_ROWS ? SELECTED_ROWS.size : 0);
+  if (!multi && !PROJ) {
+    return {
+      options: [],
+      missing: [],
+      totalSelected: 0,
+      hostsWithCommands: 0,
+      multi,
+      error: 'Select a project first.',
+    };
+  }
+  const baseEntries = listSelectedEntries();
+  const targetPid = canonicalPid(PROJ?.id);
+  const scopedEntries = multi ? baseEntries : baseEntries.filter(entry => entry.pidCanonical === targetPid);
+  const result = {
+    options: [],
+    missing: [],
+    totalSelected: scopedEntries.length,
+    hostsWithCommands: 0,
+    multi,
+    error: null,
+  };
+  if (!scopedEntries.length) {
+    result.error = multi ? 'Select at least one VM row.' : 'Select at least one VM row in this project.';
+    return result;
+  }
+  if (typeof normalizeStartCommandSteps !== 'function') {
+    result.error = 'Stored commands are unavailable on this page.';
+    return result;
+  }
+
+  const optionMap = new Map();
+  const hostsWithCommands = new Set();
+
+  const registerCommand = (commandText, hostKey, hostLabel, meta = {}) => {
+    const command = String(commandText || '').trim();
+    if (!command) return;
+    const stepIndex = Number.isFinite(meta.stepIndex) ? Number(meta.stepIndex) : null;
+    const commandIndex = Number.isFinite(meta.commandIndex) ? Number(meta.commandIndex) : null;
+    const delayValue = Number.isFinite(meta.delaySeconds) ? Number(meta.delaySeconds) : null;
+    const longRunningFlag = meta.longRunning;
+    const timeoutValue = Number.isFinite(meta.timeoutSeconds) && meta.timeoutSeconds > 0 ? Number(meta.timeoutSeconds) : null;
+    const key = `${stepIndex ?? 'x'}|${commandIndex ?? 'x'}|${command}`;
+    let entry = optionMap.get(key);
+    if (!entry) {
+      entry = {
+        command,
+        stepIndex,
+        commandIndex,
+        delaySeconds: delayValue && delayValue > 0 ? delayValue : null,
+        delaySamples: new Set(),
+        timeoutSamples: new Set(),
+        longRunningStates: new Set(),
+        hostKeys: new Set(),
+        sampleLabels: [],
+        allLabels: [],
+      };
+      optionMap.set(key, entry);
+    }
+    if (delayValue && delayValue > 0) {
+      entry.delaySamples.add(delayValue);
+      if (!Number.isFinite(entry.delaySeconds) || entry.delaySeconds <= 0) {
+        entry.delaySeconds = delayValue;
+      } else {
+        entry.delaySeconds = Math.min(entry.delaySeconds, delayValue);
+      }
+    }
+    if (timeoutValue) {
+      entry.timeoutSamples.add(timeoutValue);
+    }
+    if (longRunningFlag === true) {
+      entry.longRunningStates.add('true');
+    } else if (longRunningFlag === false) {
+      entry.longRunningStates.add('false');
+    }
+    if (entry.hostKeys.has(hostKey)) return;
+    entry.hostKeys.add(hostKey);
+    entry.allLabels.push(hostLabel);
+    if (entry.sampleLabels.length < STORED_CMD_SAMPLE_LIMIT) {
+      entry.sampleLabels.push(hostLabel);
+    }
+  };
+
+  const ingestHost = (proj, generatedName, index) => {
+    const hostKey = `${canonicalPid(proj?.id)}|${index}`;
+    const baseName = deriveBaseVmName(proj, generatedName, index);
+    const vmCfg = findVmConfigByBaseName(proj, baseName);
+    const label = formatVmSelectionLabel(proj, generatedName, baseName, index, multi);
+    if (!vmCfg) {
+      result.missing.push(`${label}: not found in project configuration`);
+      return;
+    }
+    let steps;
+    try {
+      steps = normalizeStartCommandSteps(vmCfg.stored_commands || []);
+    } catch (err) {
+      steps = [];
+    }
+    let hostHasCommand = false;
+    const stepList = Array.isArray(steps) ? steps : [];
+    for (let stepIdx = 0; stepIdx < stepList.length; stepIdx += 1) {
+      const step = stepList[stepIdx] || {};
+      const commands = Array.isArray(step?.commands) ? step.commands : [];
+      for (let cmdIdx = 0; cmdIdx < commands.length; cmdIdx += 1) {
+        const entry = commands[cmdIdx];
+        const text = typeof entry === 'string' ? String(entry).trim() : String(entry?.command || '').trim();
+        const enabled = typeof entry === 'object' ? entry.enabled !== false : true;
+        if (!text || !enabled) continue;
+        const longRunning = typeof entry === 'object' ? entry.longRunning === true : false;
+        let timeoutSeconds = typeof entry === 'object' ? Number(entry.timeoutSeconds) : VM_DEFAULT_COMMAND_TIMEOUT_SECONDS;
+        if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+          timeoutSeconds = VM_DEFAULT_COMMAND_TIMEOUT_SECONDS;
+        }
+        registerCommand(text, hostKey, label, {
+          stepIndex: stepIdx + 1,
+          commandIndex: cmdIdx + 1,
+          delaySeconds: Number(step?.delaySeconds) || 0,
+          longRunning,
+          timeoutSeconds,
+        });
+        hostHasCommand = true;
+      }
+    }
+    if (hostHasCommand) {
+      hostsWithCommands.add(hostKey);
+    } else {
+      result.missing.push(`${label}: no enabled stored commands`);
+    }
+  };
+
+  if (multi) {
+    for (const entry of scopedEntries) {
+      if (!entry.pid || !entry.name || !Number.isFinite(entry.index)) continue;
+      const proj = getProjectSnapshot(entry.pid);
+      if (!proj) {
+        result.missing.push(`${entry.pid}: project data unavailable`);
+        continue;
+      }
+      ingestHost(proj, entry.name, entry.index);
+    }
+  } else {
+    const proj = PROJ;
+    for (const entry of scopedEntries) {
+      if (!Number.isFinite(entry.index)) continue;
+      ingestHost(proj, entry.name, entry.index);
+    }
+  }
+
+  result.hostsWithCommands = hostsWithCommands.size;
+  const options = Array.from(optionMap.values()).map(entry => {
+    const longStateSize = entry.longRunningStates.size;
+    const longRunningState = longStateSize === 0
+      ? null
+      : longStateSize === 1
+        ? entry.longRunningStates.has('true')
+        : null;
+    const timeoutSamples = Array.from(entry.timeoutSamples || []);
+    return {
+      command: entry.command,
+      hostCount: entry.hostKeys.size,
+      sampleHosts: entry.sampleLabels.slice(),
+      allHosts: entry.allLabels.slice(),
+      stepIndex: entry.stepIndex,
+      commandIndex: entry.commandIndex,
+      delaySeconds: entry.delaySeconds,
+      delaySamples: Array.from(entry.delaySamples || []),
+      timeoutSamples,
+      longRunning: longRunningState,
+      longRunningStates: Array.from(entry.longRunningStates || []),
+    };
+  });
+  const safeNumber = (value) => (Number.isFinite(value) ? Number(value) : Number.POSITIVE_INFINITY);
+  options.sort((a, b) => {
+    const stepDiff = safeNumber(a.stepIndex) - safeNumber(b.stepIndex);
+    if (stepDiff !== 0) return stepDiff;
+    const cmdDiff = safeNumber(a.commandIndex) - safeNumber(b.commandIndex);
+    if (cmdDiff !== 0) return cmdDiff;
+    if (b.hostCount !== a.hostCount) return b.hostCount - a.hostCount;
+    const delayDiff = safeNumber(a.delaySeconds) - safeNumber(b.delaySeconds);
+    if (delayDiff !== 0) return delayDiff;
+    return a.command.localeCompare(b.command);
+  });
+  result.options = options;
+  if (!options.length && !result.error) {
+    result.error = 'No enabled stored commands are configured for the current selection.';
+  }
+  return result;
+}
+
+async function promptStoredCommandSelection(){
+  const info = collectStoredCommandOptions();
+  if (!info.options.length) {
+    if (info.error) {
+      alert(info.error);
+    } else {
+      alert('No stored commands are available for the current selection.');
+    }
+    return null;
+  }
+  const modalEl = document.getElementById('storedCmdPickerModal');
+  if (!modalEl || !(window.bootstrap && typeof bootstrap.Modal === 'function')) {
+    alert('Stored command picker is unavailable in this view.');
+    return null;
+  }
+  const summaryEl = document.getElementById('stored-cmd-picker-summary');
+  const missingEl = document.getElementById('stored-cmd-picker-missing');
+  const listEl = document.getElementById('stored-cmd-picker-list');
+  const emptyEl = document.getElementById('stored-cmd-picker-empty');
+  const errorEl = document.getElementById('stored-cmd-picker-error');
+  const runBtn = document.getElementById('stored-cmd-picker-run');
+  const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c] || c));
+
+  if (summaryEl) {
+    summaryEl.textContent = `${info.totalSelected} VM${info.totalSelected === 1 ? '' : 's'} selected • ${info.hostsWithCommands} with stored commands`;
+  }
+  if (missingEl) {
+    if (info.missing.length) {
+      missingEl.classList.remove('d-none');
+      const items = info.missing.map(label => `<li>${esc(label)}</li>`).join('');
+      missingEl.innerHTML = `<strong>Not runnable:</strong><ul class="mb-0">${items}</ul>`;
+    } else {
+      missingEl.classList.add('d-none');
+      missingEl.innerHTML = '';
+    }
+  }
+  if (listEl) {
+    listEl.innerHTML = '';
+    info.options.forEach((opt, idx) => {
+      const label = document.createElement('label');
+      label.className = 'list-group-item d-flex align-items-start gap-2';
+      if (Array.isArray(opt.allHosts) && opt.allHosts.length) {
+        label.title = `Configured on: ${opt.allHosts.join(', ')}`;
+      }
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.name = `stored-cmd-picker-${idx}`;
+      input.className = 'form-check-input mt-1';
+      input.value = opt.command;
+      input.setAttribute('data-host-count', String(opt.hostCount));
+      input.setAttribute('data-stored-cmd', 'true');
+      const wrapper = document.createElement('div');
+      const heading = document.createElement('div');
+      heading.className = 'd-flex flex-column flex-sm-row gap-1 mb-1';
+      const metaLine = document.createElement('div');
+      metaLine.className = 'd-flex flex-wrap align-items-center gap-2';
+      const structuralChips = [];
+      if (Number.isFinite(opt.stepIndex)) structuralChips.push(`Step ${opt.stepIndex}`);
+      if (Number.isFinite(opt.commandIndex)) structuralChips.push(`Command ${opt.commandIndex}`);
+      const delayValues = Array.isArray(opt.delaySamples) ? opt.delaySamples.slice().filter(Number.isFinite) : [];
+      delayValues.sort((a, b) => a - b);
+      if (delayValues.length === 1) {
+        const roundedDelay = Math.round(delayValues[0] * 1000) / 1000;
+        structuralChips.push(`Delay ${roundedDelay}s`);
+      } else if (delayValues.length > 1) {
+        const roundedDelay = Math.round(delayValues[0] * 1000) / 1000;
+        structuralChips.push(`Delay varies (e.g., ${roundedDelay}s)`);
+      } else if (Number.isFinite(opt.delaySeconds) && opt.delaySeconds > 0) {
+        const roundedDelay = Math.round(Number(opt.delaySeconds) * 1000) / 1000;
+        structuralChips.push(`Delay ${roundedDelay}s`);
+      }
+      const badges = [];
+      if (structuralChips.length) {
+        badges.push({ className: 'badge bg-light text-dark border', text: structuralChips.join(' • ') });
+      }
+      const timeoutValues = Array.isArray(opt.timeoutSamples) ? opt.timeoutSamples.slice().filter(Number.isFinite) : [];
+      timeoutValues.sort((a, b) => a - b);
+      if (timeoutValues.length === 1) {
+        badges.push({ className: 'badge bg-light text-dark border', text: `Timeout ${timeoutValues[0]}s` });
+      } else if (timeoutValues.length > 1) {
+        badges.push({ className: 'badge bg-light text-dark border', text: `Timeout varies (e.g., ${timeoutValues[0]}s)` });
+      }
+      if (opt.longRunning === true) {
+        badges.push({ className: 'badge bg-warning text-dark', text: 'Long-running' });
+      } else if (opt.longRunning === null && Array.isArray(opt.longRunningStates) && opt.longRunningStates.length > 1) {
+        badges.push({ className: 'badge bg-warning text-dark', text: 'Long-running varies' });
+      }
+      badges.forEach(cfg => {
+        const badge = document.createElement('span');
+        badge.className = cfg.className;
+        badge.textContent = cfg.text;
+        metaLine.appendChild(badge);
+      });
+      const title = document.createElement('code');
+      title.className = 'text-wrap flex-grow-1';
+      title.textContent = opt.command;
+      heading.appendChild(title);
+      if (badges.length) heading.appendChild(metaLine);
+      wrapper.appendChild(heading);
+      const meta = document.createElement('div');
+      meta.className = 'small text-muted';
+      const countLabel = `${opt.hostCount} of ${info.totalSelected} selected VM${info.totalSelected === 1 ? '' : 's'}`;
+      const samples = Array.isArray(opt.sampleHosts) && opt.sampleHosts.length
+        ? ` (e.g., ${opt.sampleHosts.join(', ')})`
+        : '';
+      meta.textContent = `Configured on ${countLabel}${samples}`;
+      wrapper.appendChild(meta);
+      label.appendChild(input);
+      label.appendChild(wrapper);
+      listEl.appendChild(label);
+    });
+  }
+  if (emptyEl) {
+    emptyEl.classList.toggle('d-none', info.options.length > 0);
+  }
+  if (errorEl) {
+    errorEl.classList.add('d-none');
+    errorEl.textContent = '';
+  }
+  const collectSelections = () => {
+    if (!listEl) return [];
+    return Array.from(listEl.querySelectorAll('input[type="checkbox"][data-stored-cmd]'))
+      .filter(input => input.checked)
+      .map(input => input.value)
+      .filter(Boolean);
+  };
+  const updateRunState = () => {
+    if (!runBtn) return;
+    runBtn.disabled = collectSelections().length === 0;
+  };
+  updateRunState();
+
+  return new Promise((resolve) => {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    let resolved = false;
+    let selectedValues = null;
+
+    const cleanup = () => {
+      if (listEl) listEl.removeEventListener('change', onChange);
+      if (runBtn) runBtn.removeEventListener('click', onRun);
+      modalEl.removeEventListener('hidden.bs.modal', onHidden);
+      modalEl.removeEventListener('shown.bs.modal', onShown);
+    };
+
+    const finish = (value) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const onChange = () => {
+      updateRunState();
+      if (errorEl) {
+        errorEl.classList.add('d-none');
+        errorEl.textContent = '';
+      }
+    };
+
+    const onRun = () => {
+      const chosenValues = collectSelections();
+      if (!chosenValues.length) {
+        if (errorEl) {
+          errorEl.textContent = 'Select at least one command to run.';
+          errorEl.classList.remove('d-none');
+        }
+        return;
+      }
+      selectedValues = chosenValues;
+      modal.hide();
+    };
+
+    const onHidden = () => {
+      finish(selectedValues && selectedValues.length ? selectedValues : null);
+    };
+
+    const onShown = () => {
+      const first = modalEl.querySelector('input[type="checkbox"][data-stored-cmd]');
+      if (first) {
+        try { first.focus(); } catch {}
+      }
+    };
+
+    if (listEl) listEl.addEventListener('change', onChange);
+    if (runBtn) runBtn.addEventListener('click', onRun);
+    modalEl.addEventListener('hidden.bs.modal', onHidden, { once: true });
+    modalEl.addEventListener('shown.bs.modal', onShown, { once: true });
+    modal.show();
+  });
+}
+
+function normalizeSelectedCommands(value) {
+  const rawArray = Array.isArray(value) ? value : (value ? [value] : []);
+  const seen = new Set();
+  const out = [];
+  rawArray.forEach(item => {
+    const text = typeof item === 'string' ? item : (item == null ? '' : String(item));
+    const trimmed = text.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    out.push(trimmed);
+  });
+  return out;
+}
+
+// Dispatch VM actions (queued wrapper)
+async function vmAction(action, opts) {
+  const options = opts ? { ...opts } : {};
+  if (action === 'run_stored_cmds') {
+    let selectedCommands = normalizeSelectedCommands(options.selectedCommands || options.selectedCommand);
+    if (!selectedCommands.length) {
+      const picked = await promptStoredCommandSelection();
+      selectedCommands = normalizeSelectedCommands(picked);
+      if (!selectedCommands.length) return;
+    }
+    options.selectedCommands = selectedCommands;
+  }
+  const multi = (vmIsMulti && vmIsMulti());
+  const selCount = getActionableSelections().length;
   const labelName = friendlyActionName(action) || action;
-  const label = multi ? `Multi ${labelName}` : `${labelName} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
-  await runQueued(label, async () => { await vmActionExec(action); }, { projectId: PROJ?.id });
+  const commandSuffix = (() => {
+    const cmds = Array.isArray(options.selectedCommands) ? options.selectedCommands : [];
+    if (!cmds.length) return '';
+    if (cmds.length === 1) return ` — ${cmds[0]}`;
+    return ` — ${cmds.length} cmds`;
+  })();
+  const label = multi
+    ? `Multi ${labelName}${commandSuffix}`
+    : `${labelName}${commandSuffix} (${selCount || 0} item${(selCount || 0) === 1 ? '' : 's'})`;
+  await runQueued(label, async () => { await vmActionExec(action, options); }, { projectId: PROJ?.id });
 }
 
 // Original implementation moved to vmActionExec
-async function vmActionExec(action) {
-  if (vmIsMulti && vmIsMulti()) { return vmActionMultiExec(action); }
+async function vmActionExec(action, opts = {}) {
+  if (vmIsMulti && vmIsMulti()) { return vmActionMultiExec(action, opts); }
   if (!PROJ) { alert('Select a project first.'); return; }
   if (!hasAuth()) { alert('Please log in to Proxmox (or configure an API token) to run actions.'); return; }
-  const selected = Array.from(SELECTED_ROWS || []);
-  if (!selected.length) { alert('Select at least one VM row.'); return; }
+  const selected = listSelectedEntriesForPid(PROJ.id);
+  if (!selected.length) { alert('Select at least one VM row in this project.'); return; }
   // Build targets; for 'create' we must use the base VM name from Configuration (without tag/index suffix)
-  let targets = selected.map(k => { const [idx, name] = String(k).split('|'); return { index: Number(idx), name }; });
+  let targets = selected.map(entry => ({ index: Number(entry.index), name: entry.name }));
   const sess = readProxCreds(PROJ.id) || {};
   // Show top progress bar for any action
   let topProg = null;
@@ -2353,14 +2992,36 @@ async function vmActionExec(action) {
       // No snapshot/restore prompt: handled server-side (timestamp name; restore latest)
       const path = `/api/projects/${PROJ.id}/instances/actions/${action}`;
       try { shell.step('Submitting action'); } catch {}
-      let resp = await http('POST', path, {
+      const payload = {
         username: sess.username || undefined,
         password: sess.password || undefined,
         baseUrl: PROJ.proxmox_url || undefined,
         apiPort: PROJ.proxmox_api_port || undefined,
         verifySSL: PROJ.proxmox_verify_ssl !== false,
         targets,
-      });
+      };
+      if (Array.isArray(opts.selectedCommands) && opts.selectedCommands.length) {
+        payload.commands = opts.selectedCommands.slice();
+        if (opts.selectedCommands.length === 1) {
+          payload.command = opts.selectedCommands[0];
+        }
+      } else if (opts.selectedCommand) {
+        payload.command = opts.selectedCommand;
+      }
+      const requestPromise = http('POST', path, payload);
+      const shouldPollDetail = action === 'run_startup_cmds' || action === 'run_stored_cmds';
+      let stopStatusPoll = null;
+      if (shouldPollDetail && typeof startVmActionStatusPolling === 'function') {
+        try { stopStatusPoll = startVmActionStatusPolling(PROJ.id, { setProgress: setProg, initialDelay: 200 }); } catch {}
+      }
+      let resp;
+      try {
+        resp = await requestPromise;
+      } finally {
+        if (typeof stopStatusPoll === 'function') {
+          try { stopStatusPoll(); } catch {}
+        }
+      }
       try { shell.step('Action response'); } catch {}
       // Special handling: if snapshot failed for some VMs, ask user if they want to retry just those
       if (action === 'snapshot') {
@@ -2524,20 +3185,41 @@ async function vmActionExec(action) {
 }
 
 // Multi-project action orchestrator (queued wrapper)
-async function vmActionMulti(action){
-  const selCount = Array.isArray(SELECTED_ROWS) ? SELECTED_ROWS.size : (SELECTED_ROWS ? SELECTED_ROWS.size : 0);
-  const label = `Multi ${friendlyActionName(action) || action} (${selCount||0} item${(selCount||0)===1?'':'s'})`;
-  await runQueued(label, async () => { await vmActionMultiExec(action); });
+async function vmActionMulti(action, opts){
+  const options = opts ? { ...opts } : {};
+  if (action === 'run_stored_cmds') {
+    let selectedCommands = normalizeSelectedCommands(options.selectedCommands || options.selectedCommand);
+    if (!selectedCommands.length) {
+      const picked = await promptStoredCommandSelection();
+      selectedCommands = normalizeSelectedCommands(picked);
+      if (!selectedCommands.length) return;
+    }
+    options.selectedCommands = selectedCommands;
+  }
+  const selCount = listSelectedEntries().length;
+  const labelName = friendlyActionName(action) || action;
+  const commandSuffix = (() => {
+    const cmds = Array.isArray(options.selectedCommands) ? options.selectedCommands : [];
+    if (!cmds.length) return '';
+    if (cmds.length === 1) return ` — ${cmds[0]}`;
+    return ` — ${cmds.length} cmds`;
+  })();
+  const label = `Multi ${labelName}${commandSuffix} (${selCount || 0} item${(selCount || 0) === 1 ? '' : 's'})`;
+  await runQueued(label, async () => { await vmActionMultiExec(action, options); });
 }
 
 // Original implementation moved to vmActionMultiExec
-async function vmActionMultiExec(action){
+async function vmActionMultiExec(action, opts = {}){
   try { shell.beginActionContext(`Multi ${friendlyActionName(action) || action}`); } catch {}
-  const selected = Array.from(SELECTED_ROWS||[]);
+  const selected = listSelectedEntries();
   if (!selected.length) { alert('Select at least one VM row.'); return; }
   // Group selections by project id
   const byPid = new Map();
-  for (const k of selected){ const o = parseKeyMulti(k); if (!o.pid || !Number.isFinite(o.index) || !o.name) continue; if (!byPid.has(o.pid)) byPid.set(o.pid, []); byPid.get(o.pid).push({ index: o.index, name: o.name }); }
+  for (const entry of selected){
+    if (!entry.pid || !Number.isFinite(entry.index) || !entry.name) continue;
+    if (!byPid.has(entry.pid)) byPid.set(entry.pid, []);
+    byPid.get(entry.pid).push({ index: Number(entry.index), name: entry.name });
+  }
   if (byPid.size===0) { alert('No valid selections.'); return; }
   // Validate auth for all involved projects
   for (const pid of byPid.keys()) { if (!hasAuthForPid(pid)) { alert('Some selected projects are missing Proxmox credentials or token. Fix credentials and try again.'); return; } }
@@ -2551,6 +3233,21 @@ async function vmActionMultiExec(action){
   ACTION_IN_FLIGHT = true; CURRENT_ACTION = action; ACTION_RUN_ID += 1; updateRefreshState();
   // Aggregate results across projects
   const agg = {};
+  const initialCommands = Array.isArray(opts.selectedCommands)
+    ? normalizeSelectedCommands(opts.selectedCommands)
+    : normalizeSelectedCommands(opts.selectedCommand);
+  if (initialCommands.length) {
+    agg.requested_commands = initialCommands.slice();
+  } else if (opts.selectedCommand) {
+    agg.requested_command = opts.selectedCommand;
+  }
+  const mergeRequestedCommands = (list) => {
+    const normalized = normalizeSelectedCommands(list);
+    if (!normalized.length) return;
+    const existing = new Set(Array.isArray(agg.requested_commands) ? agg.requested_commands : []);
+    normalized.forEach(cmd => existing.add(cmd));
+    agg.requested_commands = Array.from(existing);
+  };
   const addArr = (key, arr, project) => {
     if (!Array.isArray(arr) || arr.length===0) return;
     if (!Array.isArray(agg[key])) agg[key] = [];
@@ -2580,6 +3277,14 @@ async function vmActionMultiExec(action){
     try { (window.shell && shell.logInfo) ? shell.logInfo(`${action}: ${projName}`) : console.log(action, projName); } catch {}
     const sess = readProxCreds(pid) || {};
     const baseBody = { username: sess.username || undefined, password: sess.password || undefined, baseUrl: proj.proxmox_url || undefined, apiPort: proj.proxmox_api_port || undefined, verifySSL: proj.proxmox_verify_ssl !== false };
+    if (Array.isArray(opts.selectedCommands) && opts.selectedCommands.length) {
+      baseBody.commands = opts.selectedCommands.slice();
+      if (opts.selectedCommands.length === 1) {
+        baseBody.command = opts.selectedCommands[0];
+      }
+    } else if (opts.selectedCommand) {
+      baseBody.command = opts.selectedCommand;
+    }
     let targets = (byPid.get(pid) || []).map(t => ({ index: Number(t.index), name: String(t.name) }));
     // For create/delete: convert to base names per project config
     const tag = String(proj.tag||'').trim();
@@ -2663,7 +3368,30 @@ async function vmActionMultiExec(action){
       }
       if (action === 'start' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
         setAp(Math.max(20,pct), 'Working…', `${action} in ${projName}…`);
-        let resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
+        const shouldPollDetail = action === 'run_startup_cmds' || action === 'run_stored_cmds';
+        const requestPromise = makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
+        let stopStatusPoll = null;
+        if (shouldPollDetail && typeof startVmActionStatusPolling === 'function') {
+          try { stopStatusPoll = startVmActionStatusPolling(pid, { setProgress: setAp, initialDelay: 200 }); } catch {}
+        }
+        let resp;
+        try {
+          resp = await requestPromise;
+        } finally {
+          if (typeof stopStatusPoll === 'function') {
+            try { stopStatusPoll(); } catch {}
+          }
+        }
+        if (resp && (Array.isArray(resp.requested_commands) || resp?.requested_command)) {
+          if (Array.isArray(resp.requested_commands) && resp.requested_commands.length) {
+            mergeRequestedCommands(resp.requested_commands);
+          } else if (typeof resp?.requested_command === 'string' && resp.requested_command.trim()) {
+            mergeRequestedCommands([resp.requested_command.trim()]);
+          }
+        }
+        if (!agg.outputs_zip && resp?.outputs_zip) {
+          agg.outputs_zip = resp.outputs_zip;
+        }
         if (action === 'snapshot') {
           try {
             const errs = Array.isArray(resp.errors) ? resp.errors : [];
@@ -2687,7 +3415,7 @@ async function vmActionMultiExec(action){
             }
           } catch {}
         }
-        ['started','resumed','suspended','powered_off','snapshotted','restored','skipped','errors','notices','ran'].forEach(k=> addArr(k, resp[k], projName));
+  ['started','resumed','suspended','powered_off','snapshotted','restored','skipped','errors','notices','ran'].forEach(k=> addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'delete') {
@@ -2704,6 +3432,9 @@ async function vmActionMultiExec(action){
       try { (window.shell && shell.logError) ? shell.logError(`${action} failed in ${projName}: ${e?.message||e}`) : console.error(action,'failed in',projName,e); } catch {}
       addArr('errors', [{ name: projName, reason: e?.message||String(e) }], projName);
     }
+  }
+  if (!agg.requested_command && Array.isArray(agg.requested_commands) && agg.requested_commands.length === 1) {
+    agg.requested_command = agg.requested_commands[0];
   }
   // Show summary
   const summaryName = friendlyActionName(action) || action;
@@ -2910,9 +3641,23 @@ function showActionSummary(actionName, resp) {
     const list = (items, fmt) => items && items.length ? `<ul class="small">${items.map(fmt).join('')}</ul>` : '<div class="text-muted small">None</div>';
 
     const sections = [];
-  if (!ran.length && Array.isArray(resp.error_summary) && resp.error_summary.length) {
-    sections.unshift(`<div class="alert alert-danger py-1 small">${resp.error_summary.map(line => esc(line)).join('<br>')}</div>`);
-  }
+    const leadSections = [];
+    if (!ran.length && Array.isArray(resp.error_summary) && resp.error_summary.length) {
+      leadSections.push(`<div class="alert alert-danger py-1 small">${resp.error_summary.map(line => esc(line)).join('<br>')}</div>`);
+    }
+    const requestedList = (() => {
+      if (Array.isArray(resp.requested_commands) && resp.requested_commands.length) {
+        return resp.requested_commands.map(c => String(c || '').trim()).filter(Boolean);
+      }
+      const single = typeof resp.requested_command === 'string' ? resp.requested_command.trim() : '';
+      return single ? [single] : [];
+    })();
+    if (requestedList.length === 1) {
+      leadSections.push(`<div class="alert alert-info py-1 small">Command filter: <code>${esc(requestedList[0])}</code></div>`);
+    } else if (requestedList.length > 1) {
+      const items = requestedList.map(cmd => `<li><code>${esc(cmd)}</code></li>`).join('');
+      leadSections.push(`<div class="alert alert-info py-1 small">Command filters (${requestedList.length}):<ul class="mb-0">${items}</ul></div>`);
+    }
   if (created.length) sections.push(`<h6>Created</h6>${list(created, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   if (deleted.length) sections.push(`<h6>Deleted</h6>${list(deleted, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   const started = Array.isArray(resp.started) ? resp.started : [];
@@ -2943,12 +3688,17 @@ function showActionSummary(actionName, resp) {
   if (errors.length) sections.push(`<h6 class="text-danger">Errors</h6>${list(errors, e => `<li>${esc(e.name||e.node||'')} — ${esc(e.reason||'')}</li>`)}`);
   if (ran.length) sections.push(`<h6>Commands Run</h6>${list(ran, i => {
     const cmds = Array.isArray(i.cmds) ? i.cmds : [];
-    const cmdList = cmds.length ? `<ul class="small">${cmds.map(c => `<li><code>${esc(c.cmd||'')}</code> — exit ${c.exitcode===null?'?':String(c.exitcode)}${(c.out_tail||c.err_tail)?`<pre class=\"mt-1 mb-2 small bg-light p-2 overflow-auto\" style=\"max-height:8rem\">${esc(c.out_tail||c.err_tail||'')}</pre>`:''}</li>`).join('')}</ul>` : '<div class="text-muted small">No commands</div>';
+    const cmdList = cmds.length ? `<ul class="small">${cmds.map(c => {
+      const exitLabel = c.exitcode === null ? '?' : String(c.exitcode);
+      const preview = c.stdout_preview || c.stderr_preview || '';
+      const previewBlock = preview ? `<pre class=\"mt-1 mb-2 small bg-light p-2 overflow-auto\" style=\"max-height:8rem\">${esc(preview)}</pre>` : '';
+      return `<li><code>${esc(c.cmd||'')}</code> — exit ${exitLabel}${previewBlock}</li>`;
+    }).join('')}</ul>` : '<div class="text-muted small">No commands</div>';
     return `<li>${esc(i.name)} — ${i.count||0} cmd(s)${cmds.length?':':''}${cmdList}</li>`;
-    })}`);
-  if (resp.notice && typeof resp.notice === 'string') {
-    sections.unshift(`<div class="alert alert-warning py-1 small">${esc(resp.notice)}</div>`);
-  }
+  })}`);
+    if (resp.notice && typeof resp.notice === 'string') {
+      leadSections.unshift(`<div class="alert alert-warning py-1 small">${esc(resp.notice)}</div>`);
+    }
   if (appliedNodes.length || applyErrors.length) {
       if (appliedNodes.length) sections.push(`<h6>Network Apply</h6><div class="small">Applied on node(s): ${appliedNodes.map(esc).join(', ')}</div>`);
       if (applyErrors.length) sections.push(`<h6 class="text-danger">Network Apply Errors</h6>${list(applyErrors, e => `<li>${esc(e.node||'')} — ${esc(e.reason||'')}</li>`)}`);
@@ -2977,7 +3727,8 @@ function showActionSummary(actionName, resp) {
       applyErrors.length ? `${applyErrors.length} network apply errors` : null
     ].filter(Boolean).join(' · ');
 
-    body.innerHTML = `<div class="mb-2 text-muted">${esc(summaryCounts || 'No changes')}</div>${sections.join('\n') || '<div class="text-muted small">No results to display.</div>'}`;
+  const contentSections = leadSections.concat(sections);
+  body.innerHTML = `<div class="mb-2 text-muted">${esc(summaryCounts || 'No changes')}</div>${contentSections.join('\n') || '<div class="text-muted small">No results to display.</div>'}`;
     const modalEl = document.getElementById('actionSummaryModal');
     if (outputsZipInfo) {
       try {

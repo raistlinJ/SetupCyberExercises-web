@@ -398,6 +398,29 @@
     </div>
   </div>
 </div>
+<!-- Stored Command Picker Modal -->
+<div class="modal fade" id="storedCmdPickerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Run Stored Command</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="stored-cmd-picker-summary" class="small text-muted mb-2"></div>
+        <div class="text-muted small mb-2">Select one or more stored commands to run on every selected VM.</div>
+        <div id="stored-cmd-picker-missing" class="alert alert-warning py-2 px-3 small d-none" role="alert"></div>
+        <div id="stored-cmd-picker-list" class="list-group mb-2" role="group" aria-label="Stored commands"></div>
+        <div id="stored-cmd-picker-empty" class="text-muted small d-none">No stored commands are enabled for the current selection.</div>
+        <div id="stored-cmd-picker-error" class="text-danger small d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" id="stored-cmd-picker-run" class="btn btn-primary" disabled>Run Commands</button>
+      </div>
+    </div>
+  </div>
+</div>
 <script>
   document.addEventListener('DOMContentLoaded', async () => {
     await shell.initShell('vm');
