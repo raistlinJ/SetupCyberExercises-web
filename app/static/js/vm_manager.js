@@ -2368,6 +2368,48 @@ function collectStoredCommandOptions(){
 
   const optionMap = new Map();
   const hostsWithCommands = new Set();
+  const hostMap = new Map();
+  const hostGroups = [];
+  let hostCommandSerial = 0;
+
+  const templateMap = new Map();
+  const templateGroups = [];
+
+  const ensureTemplateGroup = (templateKey, templateLabel) => {
+    if (!templateKey) return null;
+    if (templateMap.has(templateKey)) {
+      const existing = templateMap.get(templateKey);
+      if (templateLabel && !existing.label) existing.label = templateLabel;
+      return existing;
+    }
+    const entry = {
+      key: templateKey,
+      label: templateLabel || `Template ${templateGroups.length + 1}`,
+      commands: [],
+      hosts: [],
+      _commandMap: new Map(),
+    };
+    templateMap.set(templateKey, entry);
+    templateGroups.push(entry);
+    return entry;
+  };
+
+  const ensureHostGroup = (hostKey, hostLabel) => {
+    if (!hostKey) return null;
+    if (hostMap.has(hostKey)) {
+      const existing = hostMap.get(hostKey);
+      if (hostLabel && !existing.label) existing.label = hostLabel;
+      return existing;
+    }
+    const entry = {
+      key: hostKey,
+      label: hostLabel || `VM ${hostGroups.length + 1}`,
+      commands: [],
+    };
+    hostMap.set(hostKey, entry);
+    hostGroups.push(entry);
+    return entry;
+  };
 
   const registerCommand = (commandText, hostKey, hostLabel, meta = {}) => {
     const command = String(commandText || '').trim();
@@ -2377,6 +2419,8 @@ function collectStoredCommandOptions(){
     const delayValue = Number.isFinite(meta.delaySeconds) ? Number(meta.delaySeconds) : null;
     const longRunningFlag = meta.longRunning;
     const timeoutValue = Number.isFinite(meta.timeoutSeconds) && meta.timeoutSeconds > 0 ? Number(meta.timeoutSeconds) : null;
+    const templateKey = meta.templateKey;
+    const templateLabel = meta.templateLabel;
     const key = `${stepIndex ?? 'x'}|${commandIndex ?? 'x'}|${command}`;
     let entry = optionMap.get(key);
     if (!entry) {
@@ -2416,11 +2460,50 @@ function collectStoredCommandOptions(){
     if (entry.sampleLabels.length < STORED_CMD_SAMPLE_LIMIT) {
       entry.sampleLabels.push(hostLabel);
     }
+    const hostEntry = ensureHostGroup(hostKey, hostLabel);
+    if (hostEntry) {
+      hostEntry.commands.push({
+        id: `stored-cmd-${hostCommandSerial += 1}`,
+        command,
+        stepIndex,
+        commandIndex,
+        delaySeconds: delayValue && delayValue > 0 ? delayValue : null,
+        timeoutSeconds: timeoutValue,
+        longRunning: longRunningFlag === true,
+      });
+    }
+    if (templateKey) {
+      const templateEntry = ensureTemplateGroup(templateKey, templateLabel);
+      if (templateEntry) {
+        const templateCmdKey = [
+          command,
+          stepIndex || 'x',
+          commandIndex || 'x',
+          delayValue || 'x',
+          timeoutValue || 'x',
+          longRunningFlag === true ? '1' : (longRunningFlag === false ? '0' : 'x')
+        ].join('|');
+        if (!templateEntry._commandMap.has(templateCmdKey)) {
+          const cmdEntry = {
+            id: `stored-cmd-template-${templateEntry.commands.length + 1}`,
+            command,
+            stepIndex,
+            commandIndex,
+            delaySeconds: delayValue && delayValue > 0 ? delayValue : null,
+            timeoutSeconds: timeoutValue,
+            longRunning: longRunningFlag === true,
+          };
+          templateEntry._commandMap.set(templateCmdKey, cmdEntry);
+          templateEntry.commands.push(cmdEntry);
+        }
+      }
+    }
   };
 
   const ingestHost = (proj, generatedName, index) => {
-    const hostKey = `${canonicalPid(proj?.id)}|${index}`;
     const baseName = deriveBaseVmName(proj, generatedName, index);
+    const baseKey = String(baseName || generatedName || '');
+    const hostKey = `${canonicalPid(proj?.id)}|${baseKey}|${index}`;
     const vmCfg = findVmConfigByBaseName(proj, baseName);
     const label = formatVmSelectionLabel(proj, generatedName, baseName, index, multi);
     if (!vmCfg) {
@@ -2432,6 +2515,17 @@ function collectStoredCommandOptions(){
       steps = normalizeStartCommandSteps(vmCfg.stored_commands || []);
     } catch (err) {
       steps = [];
+    }
+    const tmplName = vmCfg.template_name || vmCfg.template || vmCfg.name || baseName || generatedName;
+    const tmplId = vmCfg.template_id || vmCfg.templateId || vmCfg.template_vmid;
+    const templateLabelParts = [];
+    if (tmplName) templateLabelParts.push(tmplName);
+    if (tmplId !== undefined && tmplId !== null && tmplId !== '') templateLabelParts.push(`#${tmplId}`);
+    const templateLabel = templateLabelParts.join(' ').trim() || `Template ${templateGroups.length + 1}`;
+    const templateKey = `${canonicalPid(proj?.id)}|${tmplName || baseName}|${tmplId ?? ''}`;
+    const templateEntry = ensureTemplateGroup(templateKey, templateLabel);
+    if (templateEntry) {
+      templateEntry.hosts.push({ hostKey, label });
     }
     let hostHasCommand = false;
     const stepList = Array.isArray(steps) ? steps : [];
@@ -2454,6 +2548,8 @@ function collectStoredCommandOptions(){
           delaySeconds: Number(step?.delaySeconds) || 0,
           longRunning,
           timeoutSeconds,
+          templateKey,
+          templateLabel,
         });
         hostHasCommand = true;
       }
@@ -2517,7 +2613,13 @@ function collectStoredCommandOptions(){
     if (delayDiff !== 0) return delayDiff;
     return a.command.localeCompare(b.command);
   });
+  templateGroups.forEach(tGroup => {
+    if (!Array.isArray(tGroup.commands)) tGroup.commands = [];
+    delete tGroup._commandMap;
+  });
   result.options = options;
+  result.hostGroups = hostGroups;
+  result.templateGroups = templateGroups;
   if (!options.length && !result.error) {
     result.error = 'No enabled stored commands are configured for the current selection.';
   }
@@ -2551,90 +2653,95 @@ async function promptStoredCommandSelection(){
     summaryEl.textContent = `${info.totalSelected} VM${info.totalSelected === 1 ? '' : 's'} selected • ${info.hostsWithCommands} with stored commands`;
   }
   if (missingEl) {
-    if (info.missing.length) {
-      missingEl.classList.remove('d-none');
-      const items = info.missing.map(label => `<li>${esc(label)}</li>`).join('');
-      missingEl.innerHTML = `<strong>Not runnable:</strong><ul class="mb-0">${items}</ul>`;
-    } else {
-      missingEl.classList.add('d-none');
-      missingEl.innerHTML = '';
-    }
+    missingEl.classList.add('d-none');
+    missingEl.innerHTML = '';
   }
   if (listEl) {
     listEl.innerHTML = '';
-    info.options.forEach((opt, idx) => {
-      const label = document.createElement('label');
-      label.className = 'list-group-item d-flex align-items-start gap-2';
-      if (Array.isArray(opt.allHosts) && opt.allHosts.length) {
-        label.title = `Configured on: ${opt.allHosts.join(', ')}`;
-      }
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.name = `stored-cmd-picker-${idx}`;
-      input.className = 'form-check-input mt-1';
-      input.value = opt.command;
-      input.setAttribute('data-host-count', String(opt.hostCount));
-      input.setAttribute('data-stored-cmd', 'true');
-      const wrapper = document.createElement('div');
-      const heading = document.createElement('div');
-      heading.className = 'd-flex flex-column flex-sm-row gap-1 mb-1';
-      const metaLine = document.createElement('div');
-      metaLine.className = 'd-flex flex-wrap align-items-center gap-2';
-      const structuralChips = [];
-      if (Number.isFinite(opt.stepIndex)) structuralChips.push(`Step ${opt.stepIndex}`);
-      if (Number.isFinite(opt.commandIndex)) structuralChips.push(`Command ${opt.commandIndex}`);
-      const delayValues = Array.isArray(opt.delaySamples) ? opt.delaySamples.slice().filter(Number.isFinite) : [];
-      delayValues.sort((a, b) => a - b);
-      if (delayValues.length === 1) {
-        const roundedDelay = Math.round(delayValues[0] * 1000) / 1000;
-        structuralChips.push(`Delay ${roundedDelay}s`);
-      } else if (delayValues.length > 1) {
-        const roundedDelay = Math.round(delayValues[0] * 1000) / 1000;
-        structuralChips.push(`Delay varies (e.g., ${roundedDelay}s)`);
-      } else if (Number.isFinite(opt.delaySeconds) && opt.delaySeconds > 0) {
-        const roundedDelay = Math.round(Number(opt.delaySeconds) * 1000) / 1000;
-        structuralChips.push(`Delay ${roundedDelay}s`);
-      }
-      const badges = [];
-      if (structuralChips.length) {
-        badges.push({ className: 'badge bg-light text-dark border', text: structuralChips.join(' • ') });
-      }
-      const timeoutValues = Array.isArray(opt.timeoutSamples) ? opt.timeoutSamples.slice().filter(Number.isFinite) : [];
-      timeoutValues.sort((a, b) => a - b);
-      if (timeoutValues.length === 1) {
-        badges.push({ className: 'badge bg-light text-dark border', text: `Timeout ${timeoutValues[0]}s` });
-      } else if (timeoutValues.length > 1) {
-        badges.push({ className: 'badge bg-light text-dark border', text: `Timeout varies (e.g., ${timeoutValues[0]}s)` });
-      }
-      if (opt.longRunning === true) {
-        badges.push({ className: 'badge bg-warning text-dark', text: 'Long-running' });
-      } else if (opt.longRunning === null && Array.isArray(opt.longRunningStates) && opt.longRunningStates.length > 1) {
-        badges.push({ className: 'badge bg-warning text-dark', text: 'Long-running varies' });
-      }
-      badges.forEach(cfg => {
-        const badge = document.createElement('span');
-        badge.className = cfg.className;
-        badge.textContent = cfg.text;
-        metaLine.appendChild(badge);
+    const groups = Array.isArray(info.templateGroups)
+      ? info.templateGroups.filter(group => Array.isArray(group.commands) && group.commands.length)
+      : [];
+    if (!groups.length) {
+      const fallback = document.createElement('div');
+      fallback.className = 'text-muted small';
+      fallback.textContent = 'No stored commands available for the current selection.';
+      listEl.appendChild(fallback);
+    } else {
+      groups.forEach((group, groupIdx) => {
+        const section = document.createElement('section');
+        section.className = 'stored-cmd-template mb-4';
+        const header = document.createElement('div');
+        header.className = 'stored-cmd-template-header mb-2';
+        const headerName = document.createElement('div');
+        headerName.className = 'stored-cmd-template-name';
+        headerName.textContent = group.label || `Template ${groupIdx + 1}`;
+        header.appendChild(headerName);
+        if (Array.isArray(group.hosts) && group.hosts.length) {
+          const hostList = document.createElement('div');
+          hostList.className = 'stored-cmd-template-hosts text-muted small d-flex flex-wrap gap-1';
+          group.hosts.forEach((host, hostIdx) => {
+            const hostChip = document.createElement('span');
+            hostChip.className = 'badge bg-light text-dark border';
+            hostChip.textContent = host?.label || `Host ${hostIdx + 1}`;
+            hostChip.title = 'Runs when this VM is selected';
+            hostList.appendChild(hostChip);
+          });
+          header.appendChild(hostList);
+        }
+        section.appendChild(header);
+        const groupList = document.createElement('div');
+        groupList.className = 'list-group list-group-flush';
+        group.commands.forEach((cmd, idx) => {
+          const item = document.createElement('label');
+          item.className = 'list-group-item d-flex align-items-start gap-2';
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.name = `stored-cmd-template-${groupIdx}-${idx}`;
+          input.className = 'form-check-input mt-1';
+          input.value = cmd.command;
+          input.setAttribute('data-stored-cmd', 'true');
+          const wrapper = document.createElement('div');
+          const heading = document.createElement('div');
+          heading.className = 'd-flex flex-column flex-sm-row gap-1 mb-1';
+          const metaLine = document.createElement('div');
+          metaLine.className = 'd-flex flex-wrap align-items-center gap-2';
+          const structuralChips = [];
+          if (Number.isFinite(cmd.stepIndex)) structuralChips.push(`Step ${cmd.stepIndex}`);
+          if (Number.isFinite(cmd.commandIndex)) structuralChips.push(`Command ${cmd.commandIndex}`);
+          if (Number.isFinite(cmd.delaySeconds) && cmd.delaySeconds > 0) {
+            const roundedDelay = Math.round(Number(cmd.delaySeconds) * 1000) / 1000;
+            structuralChips.push(`Delay ${roundedDelay}s`);
+          }
+          const badges = [];
+          if (structuralChips.length) {
+            badges.push({ className: 'badge bg-light text-dark border', text: structuralChips.join(' • ') });
+          }
+          if (Number.isFinite(cmd.timeoutSeconds) && cmd.timeoutSeconds > 0) {
+            badges.push({ className: 'badge bg-light text-dark border', text: `Timeout ${cmd.timeoutSeconds}s` });
+          }
+          if (cmd.longRunning) {
+            badges.push({ className: 'badge bg-warning text-dark', text: 'Long-running' });
+          }
+          badges.forEach(cfg => {
+            const badge = document.createElement('span');
+            badge.className = cfg.className;
+            badge.textContent = cfg.text;
+            metaLine.appendChild(badge);
+          });
+          const title = document.createElement('code');
+          title.className = 'text-wrap flex-grow-1';
+          title.textContent = cmd.command;
+          heading.appendChild(title);
+          if (badges.length) heading.appendChild(metaLine);
+          wrapper.appendChild(heading);
+          item.appendChild(input);
+          item.appendChild(wrapper);
+          groupList.appendChild(item);
+        });
+        section.appendChild(groupList);
+        listEl.appendChild(section);
       });
-      const title = document.createElement('code');
-      title.className = 'text-wrap flex-grow-1';
-      title.textContent = opt.command;
-      heading.appendChild(title);
-      if (badges.length) heading.appendChild(metaLine);
-      wrapper.appendChild(heading);
-      const meta = document.createElement('div');
-      meta.className = 'small text-muted';
-      const countLabel = `${opt.hostCount} of ${info.totalSelected} selected VM${info.totalSelected === 1 ? '' : 's'}`;
-      const samples = Array.isArray(opt.sampleHosts) && opt.sampleHosts.length
-        ? ` (e.g., ${opt.sampleHosts.join(', ')})`
-        : '';
-      meta.textContent = `Configured on ${countLabel}${samples}`;
-      wrapper.appendChild(meta);
-      label.appendChild(input);
-      label.appendChild(wrapper);
-      listEl.appendChild(label);
-    });
+    }
   }
   if (emptyEl) {
     emptyEl.classList.toggle('d-none', info.options.length > 0);

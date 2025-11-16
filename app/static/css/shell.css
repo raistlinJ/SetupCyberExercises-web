@@ -399,6 +399,64 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	padding: .55rem .85rem;
 }
 .console-dock .queue-item.queue-item-blocked { border-style: dashed; opacity: .75; }
+
+/* Stored command picker sections */
+.stored-cmd-host {
+	border: 1px solid rgba(13, 110, 253, .25);
+	border-left: 4px solid rgba(13, 110, 253, .85);
+	border-radius: .75rem;
+	padding: .85rem .9rem;
+	background: rgba(13, 110, 253, .05);
+}
+.stored-cmd-host + .stored-cmd-host { margin-top: 1rem; }
+.stored-cmd-host-header {
+	display: flex;
+	align-items: center;
+	gap: .5rem;
+	font-size: .85rem;
+	font-weight: 600;
+}
+.stored-cmd-host-chip {
+	text-transform: uppercase;
+	font-size: .7rem;
+	letter-spacing: .08em;
+	color: rgba(33, 37, 41, .65);
+	background: rgba(255, 255, 255, .75);
+	border: 1px solid rgba(13, 110, 253, .35);
+	border-radius: 999px;
+	padding: .1rem .5rem;
+}
+.stored-cmd-host-name {
+	color: #0b5ed7;
+	font-size: .95rem;
+}
+.stored-cmd-template {
+	border: 1px solid rgba(13, 110, 253, .2);
+	border-left: 4px solid rgba(13, 110, 253, .65);
+	border-radius: .85rem;
+	padding: 1rem 1rem .85rem;
+	background: rgba(13, 110, 253, .04);
+}
+.stored-cmd-template + .stored-cmd-template { margin-top: 1.25rem; }
+.stored-cmd-template-header {
+	display: flex;
+	flex-direction: column;
+	gap: .35rem;
+}
+.stored-cmd-template-name {
+	font-weight: 600;
+	color: #0b5ed7;
+	font-size: 1rem;
+}
+.stored-cmd-template-hosts .badge {
+	font-size: .7rem;
+	background: rgba(255, 255, 255, .85);
+	border-color: rgba(13, 110, 253, .35);
+}
+.stored-cmd-template .list-group-item {
+	border-left: none;
+	border-right: none;
+}
 .console-dock .queue-item .queue-meta { font-size: .75rem; color: rgba(203, 213, 225, .8); margin-left: .5rem; }
 .console-dock .queue-item .queue-blocked { font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
 .console-dock .queue-index {
