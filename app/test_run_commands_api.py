@@ -1,5 +1,8 @@
 import base64
+import io
+import json
 import unittest
+import zipfile
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
@@ -37,6 +40,13 @@ class RunCommandsApiTests(unittest.TestCase):
         self.project = Project(id='proj-run', name='Run Project', tag='-lab-', vms=[vm])
         self.template_key = f"{self.project.id}|{vm.template_name}|{vm.template_id}"
         self.target_name = f"{vm.name}{self.project.tag}1"
+
+    def _decode_outputs_zip(self, zip_info: dict):
+        self.assertIsInstance(zip_info, dict)
+        raw = base64.b64decode(zip_info['base64'])
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            summary_bytes = zf.read('summary.json')
+        return json.loads(summary_bytes.decode('utf-8'))
 
     def _common_patches(self, project: Project = None):
         project = project or self.project
@@ -86,6 +96,11 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertIsNotNone(zip_info, 'expected outputs_zip in response')
             self.assertTrue(zip_info['filename'].startswith('startup_cmd_outputs_'))
             self.assertGreater(len(base64.b64decode(zip_info['base64'])), 0)
+            summary = self._decode_outputs_zip(zip_info)
+            self.assertEqual(summary.get('ran_hosts'), 1)
+            command_list = summary.get('commands') or []
+            self.assertEqual(len(command_list), 2)
+            self.assertCountEqual([c.get('command') for c in command_list], ['echo start', 'hostname'])
 
     def test_run_stored_cmds_honors_selection_and_overrides(self):
         override_text = 'sudo echo override'
@@ -131,6 +146,11 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertIsNotNone(zip_info, 'expected outputs_zip in response')
             self.assertTrue(zip_info['filename'].startswith('stored_cmd_outputs_'))
             self.assertGreater(len(base64.b64decode(zip_info['base64'])), 0)
+            summary = self._decode_outputs_zip(zip_info)
+            self.assertEqual(summary.get('requested_command'), 'echo ready')
+            command_list = summary.get('commands') or []
+            self.assertEqual(len(command_list), 1)
+            self.assertEqual(command_list[0].get('command'), override_text)
 
     def test_run_startup_cmds_reports_skipped_when_no_commands(self):
         vm = VMConfig(name='alpha', start_commands=[], stored_commands=[])
