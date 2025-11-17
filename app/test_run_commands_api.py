@@ -132,6 +132,69 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertTrue(zip_info['filename'].startswith('stored_cmd_outputs_'))
             self.assertGreater(len(base64.b64decode(zip_info['base64'])), 0)
 
+    def test_run_startup_cmds_reports_skipped_when_no_commands(self):
+        vm = VMConfig(name='alpha', start_commands=[], stored_commands=[])
+        project = Project(id='proj-run', name='Run Project', tag='-lab-', vms=[vm])
+        with ExitStack() as stack:
+            for ctx in self._common_patches(project):
+                stack.enter_context(ctx)
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client.ensure_guest_agent_ready.return_value = None
+            mock_client.agent_exec.return_value = {'exitcode': 0, 'stdout': '', 'stderr': ''}
+            mock_client_cls.return_value = mock_client
+
+            resp = self.client.post(
+                f'/api/projects/{project.id}/instances/actions/run_startup_cmds',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json()
+            self.assertEqual(payload.get('ran'), [])
+            skipped = payload.get('skipped') or []
+            self.assertEqual(len(skipped), 1)
+            self.assertIn('no startup commands', skipped[0].get('reason', ''))
+            self.assertNotIn('outputs_zip', payload)
+            mock_client.agent_exec.assert_not_called()
+
+    def test_run_stored_cmds_flags_missing_selected_command(self):
+        missing_command = 'echo missing'
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client.agent_exec.return_value = {'exitcode': 0, 'stdout': 'ok', 'stderr': ''}
+            mock_client_cls.return_value = mock_client
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                    'commands': [missing_command],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json()
+            self.assertEqual(payload.get('ran'), [])
+            skipped = payload.get('skipped') or []
+            self.assertEqual(len(skipped), 1)
+            self.assertIn('stored command not configured', skipped[0].get('reason', ''))
+            self.assertEqual(payload.get('requested_commands'), [missing_command])
+            self.assertEqual(payload.get('requested_command'), missing_command)
+            self.assertNotIn('outputs_zip', payload)
+            mock_client.agent_exec.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
