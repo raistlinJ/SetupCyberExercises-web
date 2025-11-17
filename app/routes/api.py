@@ -7739,6 +7739,29 @@ def export_project_start(pid: str):
                 except Exception:
                     return ''
 
+            def _extract_readonly_signal(*chunks) -> str:
+                keywords = ('not a writable', 'not writable', 'read-only')
+                for chunk in chunks:
+                    if not chunk:
+                        continue
+                    try:
+                        text = str(chunk)
+                    except Exception:
+                        text = ''
+                    if not text:
+                        continue
+                    for line in text.splitlines() or [text]:
+                        line_text = line.strip()
+                        if not line_text:
+                            continue
+                        try:
+                            lowered = line_text.lower()
+                        except Exception:
+                            lowered = line_text
+                        if any(keyword in lowered for keyword in keywords):
+                            return line_text
+                return ''
+
             def _maybe_clear_readonly_volume(message: str) -> bool:
                 try:
                     msg_lc = (message or '').lower()
@@ -7856,7 +7879,7 @@ def export_project_start(pid: str):
                                 _ACTIVE_JOBS[key]['progress'] = int(((idx + vmrec['progress']/100.0) / max(total, 1)) * 80)
                             except Exception:
                                 pass
-                        _ssh_run_stream(
+                        stdout_text, stderr_text = _ssh_run_stream(
                             c,
                             cmd,
                             sudo=use_sudo,
@@ -7865,6 +7888,9 @@ def export_project_start(pid: str):
                             on_stdout_line=on_line,
                             cmd_prefix="[CMD]",
                         )
+                        readonly_line = _extract_readonly_signal(stdout_text, stderr_text)
+                        if readonly_line:
+                            raise RuntimeError(readonly_line)
 
                     success = False
                     last_error = None
