@@ -2323,6 +2323,50 @@ function findVmConfigByBaseName(proj, baseName){
   return vmList.find(v => String(v?.name || '') === String(baseName || '')) || null;
 }
 
+const STORED_CMD_CORE = (typeof window !== 'undefined' && window.StoredCommandCore) ? window.StoredCommandCore : null;
+
+const findVmConfigIndex = (STORED_CMD_CORE && typeof STORED_CMD_CORE.findVmConfigIndex === 'function')
+  ? (proj, baseName) => STORED_CMD_CORE.findVmConfigIndex(proj, baseName)
+  : function findVmConfigIndex(proj, baseName){
+      const vmList = Array.isArray(proj?.vms) ? proj.vms : [];
+      const target = String(baseName || '').trim();
+      if (!target) return null;
+      for (let i = 0; i < vmList.length; i += 1) {
+        const name = String(vmList[i]?.name || '').trim();
+        if (name === target) return i;
+      }
+      return null;
+    };
+
+const createHostContext = (STORED_CMD_CORE && typeof STORED_CMD_CORE.createHostContext === 'function')
+  ? (proj, vmCfg, generatedName, baseName, index, label) => STORED_CMD_CORE.createHostContext(proj, vmCfg, generatedName, baseName, index, label)
+  : function createHostContext(proj, vmCfg, generatedName, baseName, index, label){
+      const vmIndex = findVmConfigIndex(proj, baseName);
+      return {
+        pid: canonicalPid(proj?.id),
+        pidRaw: proj?.id,
+        vmIndex: Number.isInteger(vmIndex) && vmIndex >= 0 ? vmIndex : null,
+        vmName: vmCfg?.name || baseName || generatedName || '',
+        hostLabel: label,
+        projectName: proj?.name || proj?.id || '',
+      };
+    };
+
+const resolveStoredCommandContextIndex = (STORED_CMD_CORE && typeof STORED_CMD_CORE.resolveStoredCommandContextIndex === 'function')
+  ? (ctx) => STORED_CMD_CORE.resolveStoredCommandContextIndex(ctx, { getProjectSnapshot })
+  : function resolveStoredCommandContextIndex(ctx){
+      if (!ctx) return null;
+      if (Number.isInteger(ctx.vmIndex) && ctx.vmIndex >= 0) {
+        return ctx.vmIndex;
+      }
+      const pid = canonicalPid(ctx.pid || ctx.pidRaw || '');
+      if (!pid) return null;
+      const proj = getProjectSnapshot(pid);
+      if (!proj) return null;
+      const idx = findVmConfigIndex(proj, ctx.vmName || '');
+      return Number.isInteger(idx) && idx >= 0 ? idx : null;
+    };
+
 function formatVmSelectionLabel(proj, generatedName, baseName, index, multi){
   const projectName = proj ? (proj.name || proj.id || '') : '';
   const idx = Number(index);
@@ -2375,7 +2419,7 @@ function collectStoredCommandOptions(){
   const templateMap = new Map();
   const templateGroups = [];
 
-  const ensureTemplateGroup = (templateKey, templateLabel) => {
+  const ensureTemplateGroup = (templateKey, templateLabel, proj) => {
     if (!templateKey) return null;
     if (templateMap.has(templateKey)) {
       const existing = templateMap.get(templateKey);
@@ -2385,9 +2429,13 @@ function collectStoredCommandOptions(){
     const entry = {
       key: templateKey,
       label: templateLabel || `Template ${templateGroups.length + 1}`,
+      projectPid: canonicalPid(proj?.id),
+      projectPidRaw: proj?.id || canonicalPid(proj?.id),
+      projectName: proj?.name || proj?.id || '',
       commands: [],
       hosts: [],
       _commandMap: new Map(),
+      _hostKeySet: new Set(),
     };
     templateMap.set(templateKey, entry);
     templateGroups.push(entry);
@@ -2418,9 +2466,11 @@ function collectStoredCommandOptions(){
     const commandIndex = Number.isFinite(meta.commandIndex) ? Number(meta.commandIndex) : null;
     const delayValue = Number.isFinite(meta.delaySeconds) ? Number(meta.delaySeconds) : null;
     const longRunningFlag = meta.longRunning;
+    const projectRef = meta.projectRef || null;
     const timeoutValue = Number.isFinite(meta.timeoutSeconds) && meta.timeoutSeconds > 0 ? Number(meta.timeoutSeconds) : null;
     const templateKey = meta.templateKey;
     const templateLabel = meta.templateLabel;
+    const hostContext = meta.hostContext || null;
     const key = `${stepIndex ?? 'x'}|${commandIndex ?? 'x'}|${command}`;
     let entry = optionMap.get(key);
     if (!entry) {
@@ -2473,8 +2523,33 @@ function collectStoredCommandOptions(){
       });
     }
     if (templateKey) {
-      const templateEntry = ensureTemplateGroup(templateKey, templateLabel);
+      const templateEntry = ensureTemplateGroup(templateKey, templateLabel, projectRef);
       if (templateEntry) {
+        if (!templateEntry._hostKeySet) templateEntry._hostKeySet = new Set();
+        if (!templateEntry._hostKeySet.has(hostKey)) {
+          templateEntry._hostKeySet.add(hostKey);
+          const ctx = hostContext || {};
+          let ctxPid = canonicalPid(ctx.pid || ctx.pidRaw || templateEntry.projectPid || '');
+          if (!ctxPid && templateEntry.projectPid) ctxPid = templateEntry.projectPid;
+          const hostKeyParts = String(hostKey || '').split('|');
+          let ctxIdx = Number.isInteger(ctx.vmIndex) ? ctx.vmIndex : null;
+          if (ctxIdx === null) {
+            const idxCandidate = Number(hostKeyParts[hostKeyParts.length - 1]);
+            if (Number.isFinite(idxCandidate)) ctxIdx = idxCandidate;
+          }
+          let ctxName = ctx.vmName || '';
+          if (!ctxName && hostKeyParts.length >= 2) ctxName = hostKeyParts[1] || '';
+          templateEntry.hosts.push({
+            hostKey,
+            label: hostLabel,
+            hostLabel,
+            pid: ctxPid,
+            pidRaw: ctx.pidRaw || ctx.pid || templateEntry.projectPidRaw || ctxPid,
+            vmIndex: ctxIdx,
+            vmName: ctxName,
+            projectName: ctx.projectName || templateEntry.projectName || '',
+          });
+        }
         const templateCmdKey = [
           command,
           stepIndex || 'x',
@@ -2483,8 +2558,9 @@ function collectStoredCommandOptions(){
           timeoutValue || 'x',
           longRunningFlag === true ? '1' : (longRunningFlag === false ? '0' : 'x')
         ].join('|');
-        if (!templateEntry._commandMap.has(templateCmdKey)) {
-          const cmdEntry = {
+        let cmdEntry = templateEntry._commandMap.get(templateCmdKey);
+        if (!cmdEntry) {
+          cmdEntry = {
             id: `stored-cmd-template-${templateEntry.commands.length + 1}`,
             command,
             stepIndex,
@@ -2492,9 +2568,37 @@ function collectStoredCommandOptions(){
             delaySeconds: delayValue && delayValue > 0 ? delayValue : null,
             timeoutSeconds: timeoutValue,
             longRunning: longRunningFlag === true,
+            contexts: [],
           };
           templateEntry._commandMap.set(templateCmdKey, cmdEntry);
           templateEntry.commands.push(cmdEntry);
+        }
+        if (hostContext) {
+          if (!cmdEntry._contextHostKeys) cmdEntry._contextHostKeys = new Set();
+          const ctxPid = canonicalPid(hostContext.pid || hostContext.pidRaw || '');
+          let ctxIdx = Number.isInteger(hostContext.vmIndex) ? hostContext.vmIndex : null;
+          let ctxName = hostContext.vmName || '';
+          if ((ctxIdx === null || !ctxName) && hostKey) {
+            const parts = String(hostKey).split('|');
+            if (ctxIdx === null) {
+              const idxCandidate = Number(parts[parts.length - 1]);
+              if (Number.isFinite(idxCandidate)) ctxIdx = idxCandidate;
+            }
+            if (!ctxName && parts.length >= 2) ctxName = parts[1] || '';
+          }
+          const ctxKey = `${ctxPid}|${ctxIdx ?? 'x'}|${ctxName}`;
+          if (!cmdEntry._contextHostKeys.has(ctxKey)) {
+            cmdEntry._contextHostKeys.add(ctxKey);
+            cmdEntry.contexts.push({
+              pid: ctxPid || templateEntry.projectPid,
+              pidDisplay: hostContext.pidRaw || hostContext.pid || templateEntry.projectPidRaw || ctxPid,
+              vmIndex: ctxIdx,
+              vmName: ctxName,
+              hostLabel: hostContext.hostLabel || hostLabel,
+              projectName: hostContext.projectName || templateEntry.projectName || '',
+              hostKey,
+            });
+          }
         }
       }
     }
@@ -2510,6 +2614,7 @@ function collectStoredCommandOptions(){
       result.missing.push(`${label}: not found in project configuration`);
       return;
     }
+    const hostContext = createHostContext(proj, vmCfg, generatedName, baseName, index, label);
     let steps;
     try {
       steps = normalizeStartCommandSteps(vmCfg.stored_commands || []);
@@ -2523,10 +2628,7 @@ function collectStoredCommandOptions(){
     if (tmplId !== undefined && tmplId !== null && tmplId !== '') templateLabelParts.push(`#${tmplId}`);
     const templateLabel = templateLabelParts.join(' ').trim() || `Template ${templateGroups.length + 1}`;
     const templateKey = `${canonicalPid(proj?.id)}|${tmplName || baseName}|${tmplId ?? ''}`;
-    const templateEntry = ensureTemplateGroup(templateKey, templateLabel);
-    if (templateEntry) {
-      templateEntry.hosts.push({ hostKey, label });
-    }
+    ensureTemplateGroup(templateKey, templateLabel, proj);
     let hostHasCommand = false;
     const stepList = Array.isArray(steps) ? steps : [];
     for (let stepIdx = 0; stepIdx < stepList.length; stepIdx += 1) {
@@ -2550,6 +2652,8 @@ function collectStoredCommandOptions(){
           timeoutSeconds,
           templateKey,
           templateLabel,
+          projectRef: proj,
+          hostContext,
         });
         hostHasCommand = true;
       }
@@ -2615,7 +2719,11 @@ function collectStoredCommandOptions(){
   });
   templateGroups.forEach(tGroup => {
     if (!Array.isArray(tGroup.commands)) tGroup.commands = [];
+    tGroup.commands.forEach(cmd => {
+      if (cmd && cmd._contextHostKeys) delete cmd._contextHostKeys;
+    });
     delete tGroup._commandMap;
+    delete tGroup._hostKeySet;
   });
   result.options = options;
   result.hostGroups = hostGroups;
@@ -2626,8 +2734,32 @@ function collectStoredCommandOptions(){
   return result;
 }
 
+function openStoredCommandsManagerForContext(ctx){
+  try {
+    if (!ctx) return;
+    const pid = canonicalPid(ctx.pid || ctx.pidRaw || '');
+    if (!pid) {
+      alert('Project data for the selected stored command is unavailable.');
+      return;
+    }
+    const idx = resolveStoredCommandContextIndex(ctx);
+    if (idx === null) {
+      alert('VM configuration for this stored command could not be found.');
+      return;
+    }
+    if (typeof openStoredCommandsManager === 'function') {
+      openStoredCommandsManager(pid, idx);
+    } else {
+      alert('Stored command editor is unavailable on this page.');
+    }
+  } catch (err) {
+    console.error('Failed to open stored command editor', err);
+    alert('Unable to open the stored command editor.');
+  }
+}
+
 async function promptStoredCommandSelection(){
-  const info = collectStoredCommandOptions();
+  let info = collectStoredCommandOptions();
   if (!info.options.length) {
     if (info.error) {
       alert(info.error);
@@ -2648,120 +2780,607 @@ async function promptStoredCommandSelection(){
   const errorEl = document.getElementById('stored-cmd-picker-error');
   const runBtn = document.getElementById('stored-cmd-picker-run');
   const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c] || c));
+  let relevantPidSet = new Set();
 
-  if (summaryEl) {
-    summaryEl.textContent = `${info.totalSelected} VM${info.totalSelected === 1 ? '' : 's'} selected • ${info.hostsWithCommands} with stored commands`;
-  }
-  if (missingEl) {
-    missingEl.classList.add('d-none');
-    missingEl.innerHTML = '';
-  }
-  if (listEl) {
-    listEl.innerHTML = '';
-    const groups = Array.isArray(info.templateGroups)
-      ? info.templateGroups.filter(group => Array.isArray(group.commands) && group.commands.length)
-      : [];
-    if (!groups.length) {
-      const fallback = document.createElement('div');
-      fallback.className = 'text-muted small';
-      fallback.textContent = 'No stored commands available for the current selection.';
-      listEl.appendChild(fallback);
-    } else {
-      groups.forEach((group, groupIdx) => {
-        const section = document.createElement('section');
-        section.className = 'stored-cmd-template mb-4';
-        const header = document.createElement('div');
-        header.className = 'stored-cmd-template-header mb-2';
-        const headerName = document.createElement('div');
-        headerName.className = 'stored-cmd-template-name';
-        headerName.textContent = group.label || `Template ${groupIdx + 1}`;
-        header.appendChild(headerName);
-        if (Array.isArray(group.hosts) && group.hosts.length) {
-          const hostList = document.createElement('div');
-          hostList.className = 'stored-cmd-template-hosts text-muted small d-flex flex-wrap gap-1';
-          group.hosts.forEach((host, hostIdx) => {
-            const hostChip = document.createElement('span');
-            hostChip.className = 'badge bg-light text-dark border';
-            hostChip.textContent = host?.label || `Host ${hostIdx + 1}`;
-            hostChip.title = 'Runs when this VM is selected';
-            hostList.appendChild(hostChip);
-          });
-          header.appendChild(hostList);
-        }
-        section.appendChild(header);
-        const groupList = document.createElement('div');
-        groupList.className = 'list-group list-group-flush';
-        group.commands.forEach((cmd, idx) => {
-          const item = document.createElement('label');
-          item.className = 'list-group-item d-flex align-items-start gap-2';
-          const input = document.createElement('input');
-          input.type = 'checkbox';
-          input.name = `stored-cmd-template-${groupIdx}-${idx}`;
-          input.className = 'form-check-input mt-1';
-          input.value = cmd.command;
-          input.setAttribute('data-stored-cmd', 'true');
-          const wrapper = document.createElement('div');
-          const heading = document.createElement('div');
-          heading.className = 'd-flex flex-column flex-sm-row gap-1 mb-1';
-          const metaLine = document.createElement('div');
-          metaLine.className = 'd-flex flex-wrap align-items-center gap-2';
-          const structuralChips = [];
-          if (Number.isFinite(cmd.stepIndex)) structuralChips.push(`Step ${cmd.stepIndex}`);
-          if (Number.isFinite(cmd.commandIndex)) structuralChips.push(`Command ${cmd.commandIndex}`);
-          if (Number.isFinite(cmd.delaySeconds) && cmd.delaySeconds > 0) {
-            const roundedDelay = Math.round(Number(cmd.delaySeconds) * 1000) / 1000;
-            structuralChips.push(`Delay ${roundedDelay}s`);
-          }
-          const badges = [];
-          if (structuralChips.length) {
-            badges.push({ className: 'badge bg-light text-dark border', text: structuralChips.join(' • ') });
-          }
-          if (Number.isFinite(cmd.timeoutSeconds) && cmd.timeoutSeconds > 0) {
-            badges.push({ className: 'badge bg-light text-dark border', text: `Timeout ${cmd.timeoutSeconds}s` });
-          }
-          if (cmd.longRunning) {
-            badges.push({ className: 'badge bg-warning text-dark', text: 'Long-running' });
-          }
-          badges.forEach(cfg => {
-            const badge = document.createElement('span');
-            badge.className = cfg.className;
-            badge.textContent = cfg.text;
-            metaLine.appendChild(badge);
-          });
-          const title = document.createElement('code');
-          title.className = 'text-wrap flex-grow-1';
-          title.textContent = cmd.command;
-          heading.appendChild(title);
-          if (badges.length) heading.appendChild(metaLine);
-          wrapper.appendChild(heading);
-          item.appendChild(input);
-          item.appendChild(wrapper);
-          groupList.appendChild(item);
-        });
-        section.appendChild(groupList);
-        listEl.appendChild(section);
-      });
+  const INLINE_CMD_MAX_ROWS = 12;
+
+  const normalizeInlineCommandText = (value) => {
+    if (value === null || value === undefined) return '';
+    const normalized = String(value).replace(/\r\n/g, '\n');
+    return normalized.trim();
+  };
+
+  const calcTextareaRows = (value) => {
+    const lines = String(value || '').split('\n').length;
+    return Math.max(2, Math.min(INLINE_CMD_MAX_ROWS, lines));
+  };
+
+  const resolveInlinePersistTarget = (meta = {}) => {
+    const contexts = Array.isArray(meta.contexts) ? meta.contexts : [];
+    const fallbackHosts = Array.isArray(meta.fallbackHosts) ? meta.fallbackHosts : [];
+    const groupPid = canonicalPid(meta.projectPid || meta.projectPidRaw || '');
+    const groupPidRaw = meta.projectPidRaw || meta.projectPid || '';
+    const pick = (ctx = {}) => {
+      const pid = canonicalPid(ctx.pid || ctx.pidRaw || groupPid || '');
+      if (!pid) return null;
+      let vmIndex = Number.isInteger(ctx.vmIndex) ? ctx.vmIndex : null;
+      if (vmIndex === null) {
+        const resolved = resolveStoredCommandContextIndex ? resolveStoredCommandContextIndex(ctx) : null;
+        if (Number.isInteger(resolved)) vmIndex = resolved;
+      }
+      if (vmIndex === null && Number.isInteger(meta.vmIndex)) {
+        vmIndex = Number(meta.vmIndex);
+      }
+      if (!Number.isInteger(vmIndex) || vmIndex < 0) return null;
+      const vmName = ctx.vmName || meta.vmName || '';
+      return {
+        pid,
+        pidRaw: ctx.pidRaw || ctx.pid || groupPidRaw || pid,
+        vmIndex,
+        vmName,
+      };
+    };
+    for (const ctx of contexts) {
+      const resolved = pick(ctx);
+      if (resolved) return resolved;
     }
-  }
-  if (emptyEl) {
-    emptyEl.classList.toggle('d-none', info.options.length > 0);
-  }
-  if (errorEl) {
-    errorEl.classList.add('d-none');
-    errorEl.textContent = '';
-  }
+    for (const host of fallbackHosts) {
+      const resolved = pick(host);
+      if (resolved) return resolved;
+    }
+    if (groupPid && Number.isInteger(meta.vmIndex)) {
+      return {
+        pid: groupPid,
+        pidRaw: groupPidRaw || groupPid,
+        vmIndex: Number(meta.vmIndex),
+        vmName: meta.vmName || '',
+      };
+    }
+    return null;
+  };
+
+  const persistInlineCommandChange = async (meta, newCommandText) => {
+    const target = resolveInlinePersistTarget(meta);
+    if (!target) {
+      throw new Error('Unable to locate the stored command template for this edit. Refresh the page and try again.');
+    }
+    const { pid, pidRaw, vmIndex, vmName } = target;
+    const stepIndex = Number(meta?.stepIndex);
+    const commandIndex = Number(meta?.commandIndex);
+    if (!Number.isInteger(stepIndex) || stepIndex <= 0 || !Number.isInteger(commandIndex) || commandIndex <= 0) {
+      throw new Error('Command metadata is incomplete; reopen the picker and try again.');
+    }
+    const project = getProjectSnapshot(pid) || getProjectSnapshot(pidRaw);
+    if (!project) {
+      throw new Error('Project data unavailable; refresh and try again.');
+    }
+    const vmList = Array.isArray(project?.vms) ? project.vms : [];
+    let cfgIdx = Number(vmIndex);
+    let cfg = vmList[cfgIdx];
+    if (!cfg || (vmName && cfg?.name && cfg.name !== vmName)) {
+      cfgIdx = vmList.findIndex(vm => vm && vm.name === vmName);
+      cfg = cfgIdx >= 0 ? vmList[cfgIdx] : cfg;
+    }
+    if (!cfg) {
+      throw new Error('VM template for this stored command was not found.');
+    }
+    const rawStored = cfg.stored_commands || [];
+    const steps = normalizeStartCommandSteps(rawStored);
+    if (!Array.isArray(steps) || !steps.length) {
+      throw new Error('No stored commands are configured for this template.');
+    }
+    const step = steps[stepIndex - 1];
+    if (!step || !Array.isArray(step.commands) || !step.commands.length) {
+      throw new Error('The referenced step could not be found in the template.');
+    }
+    if (!step.commands[commandIndex - 1]) {
+      throw new Error('The referenced command could not be found in the template.');
+    }
+    step.commands[commandIndex - 1] = {
+      ...step.commands[commandIndex - 1],
+      command: newCommandText,
+    };
+    const sanitized = sanitizeStartCommandSteps ? sanitizeStartCommandSteps(steps) : steps;
+    const payload = stepsToServerPayload ? stepsToServerPayload(sanitized) : sanitized;
+    if (typeof saveVM !== 'function') {
+      throw new Error('Saving stored commands is unavailable on this page.');
+    }
+    await saveVM(project.id, cfg.name || vmName, { stored_commands: payload }, { silent: true });
+    try { updateStoredCommandsCache && updateStoredCommandsCache(project.id, cfg.name || vmName, sanitized, cfgIdx); } catch {}
+    try { updateStoredCommandsDomState && updateStoredCommandsDomState(project.id, cfgIdx, sanitized); } catch {}
+    try {
+      if (PROJ && canonicalPid(PROJ.id) === canonicalPid(project.id) && Array.isArray(PROJ.vms)) {
+        if (cfgIdx >= 0 && PROJ.vms[cfgIdx]) {
+          PROJ.vms[cfgIdx] = { ...PROJ.vms[cfgIdx], stored_commands: payload.slice ? payload.slice() : payload };
+        }
+      }
+    } catch {}
+    try {
+      document.dispatchEvent(new CustomEvent('stored-commands-updated', { detail: { pid: project.id } }));
+    } catch {}
+  };
+
+  const getCommandRowMeta = (input) => {
+    if (!input) return null;
+    const item = input.closest('label.list-group-item');
+    if (!item) return null;
+    const original = item.dataset.originalCommand || input.value || '';
+    const normalizedOriginal = normalizeInlineCommandText(original);
+    if (!normalizedOriginal) return null;
+    const override = item.dataset.override ? normalizeInlineCommandText(item.dataset.override) : '';
+    const templateKey = item.dataset.templateKey || '';
+    const stepIndex = item.dataset.stepIndex ? Number(item.dataset.stepIndex) : null;
+    const commandIndex = item.dataset.commandIndex ? Number(item.dataset.commandIndex) : null;
+    return {
+      original,
+      normalizedOriginal,
+      override,
+      templateKey,
+      stepIndex,
+      commandIndex,
+      element: item,
+    };
+  };
+
   const collectSelections = () => {
     if (!listEl) return [];
     return Array.from(listEl.querySelectorAll('input[type="checkbox"][data-stored-cmd]'))
       .filter(input => input.checked)
-      .map(input => input.value)
+      .map(getCommandRowMeta)
       .filter(Boolean);
   };
+
+  const serializeSelectionResult = (entries) => {
+    if (!Array.isArray(entries) || !entries.length) return null;
+    const seen = new Set();
+    const commands = [];
+    const overrides = [];
+    entries.forEach(entry => {
+      if (!entry || !entry.normalizedOriginal) return;
+      if (!seen.has(entry.normalizedOriginal)) {
+        seen.add(entry.normalizedOriginal);
+        commands.push(entry.original);
+      }
+      if (entry.override && Number.isFinite(entry.stepIndex) && Number.isFinite(entry.commandIndex)) {
+        overrides.push({
+          templateKey: entry.templateKey || '',
+          stepIndex: entry.stepIndex,
+          commandIndex: entry.commandIndex,
+          text: entry.override,
+        });
+      }
+    });
+    if (!commands.length) return null;
+    if (!overrides.length) return commands;
+    return { commands, overrides };
+  };
+
   const updateRunState = () => {
     if (!runBtn) return;
     runBtn.disabled = collectSelections().length === 0;
   };
-  updateRunState();
+
+  const stopEvent = (ev) => {
+    if (!ev) return;
+    if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+    if (typeof ev.preventDefault === 'function') ev.preventDefault();
+  };
+
+  const buildInlineEditElements = ({ cmd, inputEl, displayEl, itemEl, editedBadge, persistMeta }) => {
+    if (!inputEl || !displayEl || !itemEl) return null;
+    const inlineWrap = document.createElement('div');
+    inlineWrap.className = 'stored-cmd-inline-editor border rounded bg-light p-2 mt-2 d-none';
+    inlineWrap.setAttribute('data-role', 'stored-cmd-inline-editor');
+    const note = document.createElement('div');
+    note.className = 'small text-muted mb-2';
+    note.textContent = 'Inline edits immediately update the stored command template.';
+    inlineWrap.appendChild(note);
+
+    const getResolvedText = () => itemEl.dataset.override || itemEl.dataset.originalCommand || inputEl.value || cmd?.command || '';
+    const textarea = document.createElement('textarea');
+    textarea.className = 'form-control form-control-sm font-monospace';
+    textarea.value = getResolvedText();
+    textarea.rows = calcTextareaRows(textarea.value);
+    textarea.setAttribute('aria-label', 'Edit command inline');
+    textarea.spellcheck = false;
+    inlineWrap.appendChild(textarea);
+
+    const errorEl = document.createElement('div');
+    errorEl.className = 'text-danger small mt-2 d-none';
+    inlineWrap.appendChild(errorEl);
+
+    const actionRow = document.createElement('div');
+    actionRow.className = 'd-flex flex-wrap gap-2 mt-2';
+    const applyBtn = document.createElement('button');
+    applyBtn.type = 'button';
+    applyBtn.className = 'btn btn-primary btn-sm';
+    applyBtn.textContent = 'Apply';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn btn-outline-secondary btn-sm';
+    cancelBtn.textContent = 'Cancel';
+    actionRow.appendChild(applyBtn);
+    actionRow.appendChild(cancelBtn);
+    inlineWrap.appendChild(actionRow);
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'btn btn-outline-secondary btn-sm stored-cmd-inline-btn d-flex align-items-center gap-1';
+    toggleBtn.innerHTML = '<i class="bi bi-pencil-square"></i><span>Inline edit</span>';
+    toggleBtn.setAttribute('aria-expanded', 'false');
+
+    const persistTargetMeta = persistMeta && typeof persistMeta === 'object' ? persistMeta : null;
+    const initialApplyLabel = applyBtn.textContent;
+
+    const clearError = () => {
+      errorEl.textContent = '';
+      errorEl.classList.add('d-none');
+    };
+
+    const showError = (msg) => {
+      errorEl.textContent = msg;
+      errorEl.classList.remove('d-none');
+    };
+
+    const setSaving = (state) => {
+      if (state) {
+        applyBtn.disabled = true;
+        applyBtn.textContent = 'Saving…';
+        cancelBtn.disabled = true;
+        toggleBtn.disabled = true;
+      } else {
+        applyBtn.disabled = false;
+        applyBtn.textContent = initialApplyLabel;
+        cancelBtn.disabled = false;
+        toggleBtn.disabled = false;
+      }
+    };
+
+    const updateRows = () => {
+      textarea.rows = calcTextareaRows(textarea.value);
+    };
+
+    const updateEditedBadge = () => {
+      if (!editedBadge) return;
+      const original = normalizeInlineCommandText(itemEl.dataset.originalCommand || '');
+      const override = normalizeInlineCommandText(itemEl.dataset.override || '');
+      if (override && override !== original) {
+        editedBadge.classList.remove('d-none');
+      } else {
+        editedBadge.classList.add('d-none');
+      }
+    };
+
+    const buildPersistPayload = () => {
+      const numericVmIndex = Number.isFinite(Number(itemEl.dataset.vmIndex)) ? Number(itemEl.dataset.vmIndex) : null;
+      return {
+        ...(persistTargetMeta || {}),
+        projectPid: persistTargetMeta?.projectPid || itemEl.dataset.projectPid,
+        projectPidRaw: persistTargetMeta?.projectPidRaw || itemEl.dataset.projectPidRaw,
+        vmIndex: (persistTargetMeta && persistTargetMeta.vmIndex != null) ? persistTargetMeta.vmIndex : numericVmIndex,
+        vmName: persistTargetMeta?.vmName || itemEl.dataset.vmName || '',
+        stepIndex: persistTargetMeta?.stepIndex || Number(itemEl.dataset.stepIndex),
+        commandIndex: persistTargetMeta?.commandIndex || Number(itemEl.dataset.commandIndex),
+      };
+    };
+
+    const showEditor = () => {
+      inlineWrap.classList.remove('d-none');
+      toggleBtn.setAttribute('aria-expanded', 'true');
+      setTimeout(() => {
+        try {
+          textarea.focus();
+          textarea.select();
+        } catch {}
+      }, 50);
+    };
+
+    const hideEditor = () => {
+      inlineWrap.classList.add('d-none');
+      toggleBtn.setAttribute('aria-expanded', 'false');
+    };
+
+    const applyInlineUpdate = async () => {
+      clearError();
+      const normalized = normalizeInlineCommandText(textarea.value);
+      if (!normalized) {
+        showError('Command text cannot be empty.');
+        return;
+      }
+      const original = normalizeInlineCommandText(itemEl.dataset.originalCommand || '');
+      if (normalized === original) {
+        delete itemEl.dataset.override;
+        textarea.value = itemEl.dataset.originalCommand || '';
+        displayEl.textContent = itemEl.dataset.originalCommand || '';
+        updateRows();
+        updateEditedBadge();
+        hideEditor();
+        return;
+      }
+
+      const previousDisplay = displayEl.textContent;
+      itemEl.dataset.override = normalized;
+      displayEl.textContent = normalized;
+      updateEditedBadge();
+      setSaving(true);
+
+      try {
+        await persistInlineCommandChange(buildPersistPayload(), normalized);
+        itemEl.dataset.originalCommand = normalized;
+        delete itemEl.dataset.override;
+        inputEl.value = normalized;
+        inputEl.setAttribute('value', normalized);
+        displayEl.textContent = normalized;
+        textarea.value = normalized;
+        updateRows();
+        clearError();
+        updateEditedBadge();
+        hideEditor();
+      } catch (err) {
+        delete itemEl.dataset.override;
+        displayEl.textContent = previousDisplay || (itemEl.dataset.originalCommand || '');
+        updateEditedBadge();
+        showError(err?.message || 'Failed to save inline edit.');
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    toggleBtn.addEventListener('click', (ev) => {
+      stopEvent(ev);
+      const isHidden = inlineWrap.classList.contains('d-none');
+      textarea.value = getResolvedText();
+      updateRows();
+      clearError();
+      if (isHidden) {
+        showEditor();
+      } else {
+        hideEditor();
+      }
+    });
+
+    applyBtn.addEventListener('click', (ev) => {
+      stopEvent(ev);
+      applyInlineUpdate();
+    });
+
+    cancelBtn.addEventListener('click', (ev) => {
+      stopEvent(ev);
+      delete itemEl.dataset.override;
+      textarea.value = itemEl.dataset.originalCommand || '';
+      displayEl.textContent = itemEl.dataset.originalCommand || displayEl.textContent;
+      clearError();
+      updateRows();
+      updateEditedBadge();
+      hideEditor();
+    });
+
+    textarea.addEventListener('input', () => {
+      updateRows();
+      clearError();
+    });
+
+    textarea.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+        ev.preventDefault();
+        applyInlineUpdate();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        hideEditor();
+      }
+    });
+
+    ['click', 'mousedown', 'mouseup'].forEach(evt => {
+      inlineWrap.addEventListener(evt, stopEvent);
+    });
+
+    displayEl.textContent = getResolvedText();
+    updateEditedBadge();
+
+    return {
+      button: toggleBtn,
+      container: inlineWrap,
+      updateEditedBadge,
+    };
+  };
+
+  const buildHostButton = (host, idx) => {
+    const label = host?.label || host?.hostLabel || `Host ${idx + 1}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-light btn-sm border stored-cmd-host-btn d-flex align-items-center gap-1';
+    btn.innerHTML = `<span>${esc(label)}</span><i class="bi bi-pencil"></i>`;
+    btn.title = `Edit stored commands for ${label}`;
+    btn.addEventListener('click', (ev) => {
+      stopEvent(ev);
+      openStoredCommandsManagerForContext({
+        pid: host?.pid || host?.pidRaw,
+        pidRaw: host?.pidRaw || host?.pid,
+        vmIndex: Number.isInteger(host?.vmIndex) ? host.vmIndex : null,
+        vmName: host?.vmName || '',
+        hostLabel: label,
+        projectName: host?.projectName || '',
+      });
+    });
+    return btn;
+  };
+
+  const applyInfoToDom = (data, preserveSelections) => {
+    info = data;
+    const preserveSet = preserveSelections instanceof Set ? preserveSelections : null;
+    relevantPidSet = new Set();
+    (data.templateGroups || []).forEach(group => {
+      (group.hosts || []).forEach(host => {
+        const pid = canonicalPid(host?.pid || host?.pidRaw || '');
+        if (pid) relevantPidSet.add(pid);
+      });
+    });
+    if (summaryEl) {
+      summaryEl.textContent = `${data.totalSelected} VM${data.totalSelected === 1 ? '' : 's'} selected • ${data.hostsWithCommands} with stored commands`;
+    }
+    if (missingEl) {
+      const missing = Array.isArray(data.missing) ? data.missing.filter(Boolean) : [];
+      if (missing.length) {
+        missingEl.classList.remove('d-none');
+        const list = missing.map(item => `<li>${esc(item)}</li>`).join('');
+        missingEl.innerHTML = `<ul class="mb-0 ps-3">${list}</ul>`;
+      } else {
+        missingEl.classList.add('d-none');
+        missingEl.innerHTML = '';
+      }
+    }
+    if (listEl) {
+      listEl.innerHTML = '';
+      const groups = Array.isArray(data.templateGroups)
+        ? data.templateGroups.filter(group => Array.isArray(group.commands) && group.commands.length)
+        : [];
+      if (!groups.length) {
+        const fallback = document.createElement('div');
+        fallback.className = 'text-muted small';
+        fallback.textContent = 'No stored commands available for the current selection.';
+        listEl.appendChild(fallback);
+      } else {
+        groups.forEach((group, groupIdx) => {
+          const section = document.createElement('section');
+          section.className = 'stored-cmd-template mb-4';
+          const header = document.createElement('div');
+          header.className = 'stored-cmd-template-header mb-2';
+          const headerName = document.createElement('div');
+          headerName.className = 'stored-cmd-template-name';
+          headerName.textContent = group.label || `Template ${groupIdx + 1}`;
+          header.appendChild(headerName);
+          if (Array.isArray(group.hosts) && group.hosts.length) {
+            const hostList = document.createElement('div');
+            hostList.className = 'stored-cmd-template-hosts text-muted small d-flex flex-wrap gap-2';
+            group.hosts.forEach((host, hostIdx) => {
+              try {
+                hostList.appendChild(buildHostButton(host, hostIdx));
+              } catch {}
+            });
+            header.appendChild(hostList);
+          }
+          section.appendChild(header);
+          const groupList = document.createElement('div');
+          groupList.className = 'list-group list-group-flush';
+          group.commands.forEach((cmd, idx) => {
+            const item = document.createElement('label');
+            item.className = 'list-group-item d-flex align-items-start gap-2 flex-column flex-sm-row';
+            item.dataset.originalCommand = cmd.command || '';
+            if (group.key) item.dataset.templateKey = group.key;
+            if (Number.isFinite(cmd.stepIndex)) item.dataset.stepIndex = String(cmd.stepIndex);
+            if (Number.isFinite(cmd.commandIndex)) item.dataset.commandIndex = String(cmd.commandIndex);
+            const primaryHost = Array.isArray(group.hosts) && group.hosts.length ? (group.hosts.find(host => Number.isInteger(host.vmIndex)) || group.hosts[0]) : null;
+            if (primaryHost) {
+              const hostPid = canonicalPid(primaryHost.pid || primaryHost.pidRaw || group.projectPid || group.projectPidRaw || '');
+              if (hostPid) item.dataset.projectPid = hostPid;
+              if (primaryHost.pidRaw || group.projectPidRaw) item.dataset.projectPidRaw = primaryHost.pidRaw || group.projectPidRaw;
+              if (Number.isInteger(primaryHost.vmIndex)) item.dataset.vmIndex = String(primaryHost.vmIndex);
+              if (primaryHost.vmName) item.dataset.vmName = primaryHost.vmName;
+            }
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.name = `stored-cmd-template-${groupIdx}-${idx}`;
+            input.className = 'form-check-input mt-1';
+            input.value = cmd.command;
+            input.checked = preserveSet ? preserveSet.has(cmd.command) : false;
+            input.setAttribute('data-stored-cmd', 'true');
+            const wrapper = document.createElement('div');
+            wrapper.className = 'flex-grow-1 w-100';
+            const row = document.createElement('div');
+            row.className = 'd-flex flex-column flex-sm-row gap-2 align-items-start w-100';
+            const headingWrap = document.createElement('div');
+            headingWrap.className = 'flex-grow-1';
+            const metaLine = document.createElement('div');
+            metaLine.className = 'd-flex flex-wrap align-items-center gap-2 mt-1';
+            const structuralChips = [];
+            if (Number.isFinite(cmd.stepIndex)) structuralChips.push(`Step ${cmd.stepIndex}`);
+            if (Number.isFinite(cmd.commandIndex)) structuralChips.push(`Command ${cmd.commandIndex}`);
+            if (Number.isFinite(cmd.delaySeconds) && cmd.delaySeconds > 0) {
+              const roundedDelay = Math.round(Number(cmd.delaySeconds) * 1000) / 1000;
+              structuralChips.push(`Delay ${roundedDelay}s`);
+            }
+            const badges = [];
+            if (structuralChips.length) {
+              badges.push({ className: 'badge bg-light text-dark border', text: structuralChips.join(' • ') });
+            }
+            if (Number.isFinite(cmd.timeoutSeconds) && cmd.timeoutSeconds > 0) {
+              badges.push({ className: 'badge bg-light text-dark border', text: `Timeout ${cmd.timeoutSeconds}s` });
+            }
+            if (cmd.longRunning) {
+              badges.push({ className: 'badge bg-warning text-dark', text: 'Long-running' });
+            }
+            const title = document.createElement('code');
+            title.className = 'text-wrap flex-grow-1';
+            title.textContent = cmd.command;
+            headingWrap.appendChild(title);
+            const editedBadge = document.createElement('span');
+            editedBadge.className = 'badge bg-info text-dark ms-2 stored-cmd-inline-edited d-none';
+            editedBadge.textContent = 'Edited';
+            headingWrap.appendChild(editedBadge);
+            if (badges.length) {
+              badges.forEach(cfg => {
+                const badge = document.createElement('span');
+                badge.className = cfg.className;
+                badge.textContent = cfg.text;
+                metaLine.appendChild(badge);
+              });
+              headingWrap.appendChild(metaLine);
+            }
+            row.appendChild(headingWrap);
+            const inlineEdit = buildInlineEditElements({
+              cmd,
+              inputEl: input,
+              displayEl: title,
+              itemEl: item,
+              editedBadge,
+              persistMeta: {
+                templateKey: group.key || '',
+                projectPid: group.projectPid,
+                projectPidRaw: group.projectPidRaw,
+                contexts: Array.isArray(cmd.contexts) ? cmd.contexts : [],
+                fallbackHosts: group.hosts || [],
+                vmIndex: primaryHost && Number.isInteger(primaryHost.vmIndex) ? primaryHost.vmIndex : null,
+                vmName: primaryHost?.vmName || '',
+                stepIndex: cmd.stepIndex,
+                commandIndex: cmd.commandIndex,
+              },
+            });
+            if (inlineEdit && inlineEdit.button) {
+              row.appendChild(inlineEdit.button);
+            }
+            wrapper.appendChild(row);
+            if (inlineEdit && inlineEdit.container) {
+              wrapper.appendChild(inlineEdit.container);
+            }
+            item.appendChild(input);
+            item.appendChild(wrapper);
+            groupList.appendChild(item);
+          });
+          section.appendChild(groupList);
+          listEl.appendChild(section);
+        });
+      }
+    }
+    if (emptyEl) {
+      emptyEl.classList.toggle('d-none', data.options.length > 0);
+    }
+    if (errorEl) {
+      errorEl.classList.add('d-none');
+      errorEl.textContent = '';
+    }
+    updateRunState();
+  };
+
+  applyInfoToDom(info);
+
+  const handleStoredCommandsUpdated = (event) => {
+    const eventPid = canonicalPid(event?.detail?.pid);
+    if (eventPid && relevantPidSet.size && !relevantPidSet.has(eventPid)) return;
+    const preserve = new Set(collectSelections().map(entry => entry.original));
+    applyInfoToDom(collectStoredCommandOptions(), preserve);
+  };
+  document.addEventListener('stored-commands-updated', handleStoredCommandsUpdated);
 
   return new Promise((resolve) => {
     const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
@@ -2773,6 +3392,7 @@ async function promptStoredCommandSelection(){
       if (runBtn) runBtn.removeEventListener('click', onRun);
       modalEl.removeEventListener('hidden.bs.modal', onHidden);
       modalEl.removeEventListener('shown.bs.modal', onShown);
+      document.removeEventListener('stored-commands-updated', handleStoredCommandsUpdated);
     };
 
     const finish = (value) => {
@@ -2799,12 +3419,20 @@ async function promptStoredCommandSelection(){
         }
         return;
       }
-      selectedValues = chosenValues;
+      const serialized = serializeSelectionResult(chosenValues);
+      if (!serialized) {
+        if (errorEl) {
+          errorEl.textContent = 'Unable to prepare selected commands. Please try again.';
+          errorEl.classList.remove('d-none');
+        }
+        return;
+      }
+      selectedValues = serialized;
       modal.hide();
     };
 
     const onHidden = () => {
-      finish(selectedValues && selectedValues.length ? selectedValues : null);
+      finish(selectedValues || null);
     };
 
     const onShown = () => {
@@ -2836,17 +3464,70 @@ function normalizeSelectedCommands(value) {
   return out;
 }
 
+function normalizeOverrideText(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/\r\n/g, '\n').trim();
+}
+
+function coerceStoredCommandOverrides(value) {
+  if (!Array.isArray(value)) return null;
+  const out = [];
+  value.forEach(entry => {
+    if (!entry || typeof entry !== 'object') return;
+    const templateKey = String(entry.templateKey || '').trim();
+    const stepIndex = Number(entry.stepIndex);
+    const commandIndex = Number(entry.commandIndex);
+    const text = normalizeOverrideText(entry.text ?? entry.command ?? entry.override);
+    if (!text || !Number.isFinite(stepIndex) || !Number.isFinite(commandIndex)) return;
+    out.push({ templateKey, stepIndex, commandIndex, text });
+  });
+  return out.length ? out : null;
+}
+
+function interpretStoredCommandSelection(value) {
+  if (!value) {
+    return { commands: [], overrides: null };
+  }
+  if (Array.isArray(value)) {
+    return { commands: normalizeSelectedCommands(value), overrides: null };
+  }
+  if (typeof value === 'object') {
+    if (Array.isArray(value.commands)) {
+      return {
+        commands: normalizeSelectedCommands(value.commands),
+        overrides: coerceStoredCommandOverrides(value.overrides),
+      };
+    }
+    if (Array.isArray(value.values)) {
+      return {
+        commands: normalizeSelectedCommands(value.values),
+        overrides: coerceStoredCommandOverrides(value.overrides),
+      };
+    }
+  }
+  return { commands: normalizeSelectedCommands(value), overrides: null };
+}
+
 // Dispatch VM actions (queued wrapper)
 async function vmAction(action, opts) {
   const options = opts ? { ...opts } : {};
   if (action === 'run_stored_cmds') {
-    let selectedCommands = normalizeSelectedCommands(options.selectedCommands || options.selectedCommand);
+    const initial = interpretStoredCommandSelection(options.selectedCommands || options.selectedCommand);
+    let selectedCommands = initial.commands;
+    let overridePayload = initial.overrides || coerceStoredCommandOverrides(options.storedCommandOverrides);
     if (!selectedCommands.length) {
       const picked = await promptStoredCommandSelection();
-      selectedCommands = normalizeSelectedCommands(picked);
+      const interpreted = interpretStoredCommandSelection(picked);
+      selectedCommands = interpreted.commands;
+      overridePayload = interpreted.overrides || null;
       if (!selectedCommands.length) return;
     }
     options.selectedCommands = selectedCommands;
+    if (overridePayload && overridePayload.length) {
+      options.storedCommandOverrides = overridePayload;
+    } else {
+      delete options.storedCommandOverrides;
+    }
   }
   const multi = (vmIsMulti && vmIsMulti());
   const selCount = getActionableSelections().length;
@@ -3115,6 +3796,14 @@ async function vmActionExec(action, opts = {}) {
       } else if (opts.selectedCommand) {
         payload.command = opts.selectedCommand;
       }
+      if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
+        payload.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({
+          templateKey: entry.templateKey || '',
+          stepIndex: entry.stepIndex,
+          commandIndex: entry.commandIndex,
+          text: entry.text,
+        }));
+      }
       const requestPromise = http('POST', path, payload);
       const shouldPollDetail = action === 'run_startup_cmds' || action === 'run_stored_cmds';
       let stopStatusPoll = null;
@@ -3295,13 +3984,22 @@ async function vmActionExec(action, opts = {}) {
 async function vmActionMulti(action, opts){
   const options = opts ? { ...opts } : {};
   if (action === 'run_stored_cmds') {
-    let selectedCommands = normalizeSelectedCommands(options.selectedCommands || options.selectedCommand);
+    const initial = interpretStoredCommandSelection(options.selectedCommands || options.selectedCommand);
+    let selectedCommands = initial.commands;
+    let overridePayload = initial.overrides || coerceStoredCommandOverrides(options.storedCommandOverrides);
     if (!selectedCommands.length) {
       const picked = await promptStoredCommandSelection();
-      selectedCommands = normalizeSelectedCommands(picked);
+      const interpreted = interpretStoredCommandSelection(picked);
+      selectedCommands = interpreted.commands;
+      overridePayload = interpreted.overrides || null;
       if (!selectedCommands.length) return;
     }
     options.selectedCommands = selectedCommands;
+    if (overridePayload && overridePayload.length) {
+      options.storedCommandOverrides = overridePayload;
+    } else {
+      delete options.storedCommandOverrides;
+    }
   }
   const selCount = listSelectedEntries().length;
   const labelName = friendlyActionName(action) || action;
@@ -3391,6 +4089,14 @@ async function vmActionMultiExec(action, opts = {}){
       }
     } else if (opts.selectedCommand) {
       baseBody.command = opts.selectedCommand;
+    }
+    if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
+      baseBody.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({
+        templateKey: entry.templateKey || '',
+        stepIndex: entry.stepIndex,
+        commandIndex: entry.commandIndex,
+        text: entry.text,
+      }));
     }
     let targets = (byPid.get(pid) || []).map(t => ({ index: Number(t.index), name: String(t.name) }));
     // For create/delete: convert to base names per project config

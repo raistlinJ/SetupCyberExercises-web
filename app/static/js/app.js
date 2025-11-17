@@ -4459,7 +4459,8 @@ async function exportProxLoginSave(){
   const next = window.__EXPORT_NEXT__;
   if (!next) return;
   const { pid, opts } = next;
-  // Read fields
+  const saveBtn = document.getElementById('btn-prox-save');
+  const setBusy = (flag) => { if (saveBtn) saveBtn.disabled = !!flag; };
   const urlEl = document.getElementById('prox-url');
   const apiEl = document.getElementById('prox-api-port');
   const sshEl = document.getElementById('prox-ssh-port');
@@ -4467,56 +4468,63 @@ async function exportProxLoginSave(){
   const passEl = document.getElementById('prox-password');
   const vsslEl = document.getElementById('prox-verify-ssl');
   const feedback = document.getElementById('prox-login-feedback');
-  const data = await http('GET', '/api/projects');
-  const proj = (data.projects || []).find(p => p.id === pid);
-  if (!proj) { alert('Project not found.'); return; }
-  const ensure = (s)=>{ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; };
-  const url = ensure((urlEl?.value||proj.proxmox_url||'').trim());
-  const apiPort = Number((apiEl?.value||proj.proxmox_api_port||8006));
-  const sshPort = Number((sshEl?.value||proj.proxmox_ssh_port||22));
-  const username = (userEl?.value||'').trim();
-  const password = passEl?.value || '';
-  const verifySSL = !!(vsslEl?.checked);
-  if (!url){ if (feedback){ feedback.textContent='Enter Proxmox URL'; feedback.className='me-auto small text-danger'; } return; }
-  if (!username || !password){ if (feedback){ feedback.textContent='Enter username and password'; feedback.className='me-auto small text-danger'; } return; }
-  // Persist project connection params if changed
+  setBusy(true);
   try {
-    await http('PATCH', `/api/projects/${encodeURIComponent(pid)}`, {
-      proxmox_url: url, proxmox_api_port: apiPort, proxmox_ssh_port: sshPort, proxmox_verify_ssl: verifySSL
-    });
-  } catch {}
-  // Cache session creds
-  try { sessionStorage.setItem(`toolhub.session.proxmox.${pid}`, JSON.stringify({ username, password })); } catch {}
-  // Verify (queued)
-  let verify;
-  try {
-    await runQueued(`Verify Proxmox login for ${proj?.name || pid}`, async () => {
-      verify = await http('POST', `/api/projects/${encodeURIComponent(pid)}/proxmox/verify`, {
-        baseUrl: url, apiPort, sshPort, username, password, verifySSL
+    const data = await http('GET', '/api/projects');
+    const proj = (data.projects || []).find(p => p.id === pid);
+    if (!proj) { alert('Project not found.'); return; }
+    const ensure = (s)=>{ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; };
+    const url = ensure((urlEl?.value||proj.proxmox_url||'').trim());
+    const apiPort = Number((apiEl?.value||proj.proxmox_api_port||8006));
+    const sshPort = Number((sshEl?.value||proj.proxmox_ssh_port||22));
+    const username = (userEl?.value||'').trim();
+    const password = passEl?.value || '';
+    const verifySSL = !!(vsslEl?.checked);
+    if (!url){ if (feedback){ feedback.textContent='Enter Proxmox URL'; feedback.className='me-auto small text-danger'; } return; }
+    if (!username || !password){ if (feedback){ feedback.textContent='Enter username and password'; feedback.className='me-auto small text-danger'; } return; }
+    try {
+      await http('PATCH', `/api/projects/${encodeURIComponent(pid)}`, {
+        proxmox_url: url, proxmox_api_port: apiPort, proxmox_ssh_port: sshPort, proxmox_verify_ssl: verifySSL
       });
-    }, { projectId: pid });
-  } catch(e) {
-    verify = { ok:false, proxmox_ok:false, ssh_ok:false, proxmox_error: e?.message || 'verify failed' };
+    } catch {}
+    try { sessionStorage.setItem(`toolhub.session.proxmox.${pid}`, JSON.stringify({ username, password })); } catch {}
+    let verify;
+    try {
+      await runQueued(`Verify Proxmox login for ${proj?.name || pid}`, async () => {
+        verify = await http('POST', `/api/projects/${encodeURIComponent(pid)}/proxmox/verify`, {
+          baseUrl: url, apiPort, sshPort, username, password, verifySSL
+        });
+      }, { projectId: pid });
+    } catch(e) {
+      verify = { ok:false, proxmox_ok:false, ssh_ok:false, proxmox_error: e?.message || 'verify failed' };
+    }
+    if (!verify || !verify.ok){
+      const apiOk = !!(verify && verify.proxmox_ok);
+      const sshOk = !!(verify && verify.ssh_ok);
+      const apiErr = (verify && verify.proxmox_error) ? String(verify.proxmox_error) : '';
+      const sshErr = (verify && verify.ssh_error) ? String(verify.ssh_error) : '';
+      const details = [apiErr, sshErr].filter(Boolean).join(' | ');
+      const msg = (!apiOk && !sshOk) ? 'Neither Proxmox API nor SSH could be reached.' : (!apiOk ? 'Proxmox API could not be reached.' : 'SSH could not be reached.');
+      if (feedback){ feedback.textContent = `${msg} ${details}`.trim(); feedback.className='me-auto small text-danger'; }
+      try { sessionStorage.removeItem(`toolhub.session.proxmox.${pid}`); } catch {}
+      return;
+    }
+    try {
+      const modalEl = document.getElementById('proxLoginModal');
+      const m = window.bootstrap && modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+      if (m) m.hide();
+    } catch {}
+    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Proxmox login verified (API + SSH)') : console.log('Proxmox login verified'); } catch {}
+    await startExportJob(pid, opts);
+  } catch (err) {
+    if (feedback){
+      feedback.textContent = 'Login failed: ' + (err && err.message ? err.message : 'Unknown error');
+      feedback.className = 'me-auto small text-danger';
+    }
+    try { (window.shell && shell.logError) ? shell.logError('Proxmox login failed: ' + (err && err.message ? err.message : err)) : console.error('Proxmox login failed:', err); } catch {}
+  } finally {
+    setBusy(false);
   }
-  if (!verify || !verify.ok){
-    const apiOk = !!(verify && verify.proxmox_ok);
-    const sshOk = !!(verify && verify.ssh_ok);
-    const apiErr = (verify && verify.proxmox_error) ? String(verify.proxmox_error) : '';
-    const sshErr = (verify && verify.ssh_error) ? String(verify.ssh_error) : '';
-    const details = [apiErr, sshErr].filter(Boolean).join(' | ');
-    const msg = (!apiOk && !sshOk) ? 'Neither Proxmox API nor SSH could be reached.' : (!apiOk ? 'Proxmox API could not be reached.' : 'SSH could not be reached.');
-    if (feedback){ feedback.textContent = `${msg} ${details}`; feedback.className='me-auto small text-danger'; }
-    try { sessionStorage.removeItem(`toolhub.session.proxmox.${pid}`); } catch {}
-    return;
-  }
-  // Success: close modal and start export
-  try {
-    const modalEl = document.getElementById('proxLoginModal');
-    const m = window.bootstrap && modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
-    if (m) m.hide();
-  } catch {}
-  try { (window.shell && shell.logSuccess) ? shell.logSuccess('Proxmox login verified (API + SSH)') : console.log('Proxmox login verified'); } catch {}
-  await startExportJob(pid, opts);
 }
 
 // Toast helper for this page

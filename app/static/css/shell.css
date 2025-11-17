@@ -443,6 +443,14 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	flex-direction: column;
 	gap: .35rem;
 }
+.stored-cmd-edit-control {
+	display: inline-flex;
+	gap: .35rem;
+	flex-shrink: 0;
+}
+.stored-cmd-edit-control .btn {
+	white-space: nowrap;
+}
 .stored-cmd-template-name {
 	font-weight: 600;
 	color: #0b5ed7;
@@ -456,6 +464,17 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 .stored-cmd-template .list-group-item {
 	border-left: none;
 	border-right: none;
+}
+.stored-cmd-modal {
+	max-width: min(1100px, 96vw);
+}
+#storedCmdPickerModal .modal-body {
+	max-height: min(80vh, 720px);
+	overflow-y: auto;
+}
+#stored-cmd-picker-list {
+	max-height: min(65vh, 520px);
+	overflow: auto;
 }
 .console-dock .queue-item .queue-meta { font-size: .75rem; color: rgba(203, 213, 225, .8); margin-left: .5rem; }
 .console-dock .queue-item .queue-blocked { font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }

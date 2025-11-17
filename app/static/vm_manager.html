@@ -232,7 +232,7 @@
         <!-- Filled dynamically -->
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
       </div>
     </div>
   </div>
@@ -274,12 +274,13 @@
   </div>
 </div>
 <!-- Settings modal injected via creds.js -->
-<script src="/static/js/creds.js"></script>
-<script src="/static/js/auth.js"></script>
-<script src="/static/js/shell.js"></script>
-<script src="/static/js/app.js"></script>
+<script src="/static/js/creds.js?v=20251116b"></script>
+<script src="/static/js/auth.js?v=20251116b"></script>
+<script src="/static/js/shell.js?v=20251116b"></script>
+<script src="/static/js/app.js?v=20251116b"></script>
+<script src="/static/js/stored_command_core.js?v=20251116b"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/js/vm_manager.js"></script>
+<script src="/static/js/vm_manager.js?v=20251116b"></script>
 <!-- Proxmox Login Modal (session-only, top-level) -->
 <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
@@ -400,7 +401,7 @@
 </div>
 <!-- Stored Command Picker Modal -->
 <div class="modal fade" id="storedCmdPickerModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg">
+  <div class="modal-dialog modal-xl stored-cmd-modal">
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title">Run Stored Command</h5>
@@ -409,14 +410,49 @@
       <div class="modal-body">
         <div id="stored-cmd-picker-summary" class="small text-muted mb-2"></div>
         <div class="text-muted small mb-2">Select one or more stored commands to run on every selected VM.</div>
-        <div id="stored-cmd-picker-missing" class="alert alert-warning py-2 px-3 small d-none" role="alert"></div>
-  <div id="stored-cmd-picker-list" class="mb-2" role="group" aria-label="Stored commands" style="max-height: 360px; overflow:auto;"></div>
+  <div id="stored-cmd-picker-missing" class="alert alert-warning py-2 px-3 small d-none" role="alert"></div>
+	<div id="stored-cmd-picker-list" class="mb-2" role="group" aria-label="Stored commands"></div>
         <div id="stored-cmd-picker-empty" class="text-muted small d-none">No stored commands are enabled for the current selection.</div>
         <div id="stored-cmd-picker-error" class="text-danger small d-none"></div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
         <button type="button" id="stored-cmd-picker-run" class="btn btn-primary" disabled>Run Commands</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Stored Commands Manager Modal -->
+<div class="modal fade" id="storedCommandsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="storedCommandsModalLabel">Manage Stored Commands</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted">Create steps for stored commands just like startup commands. Each step waits for its delay, then runs its commands together.</p>
+        <div class="mb-3">
+          <a class="small fw-semibold" data-bs-toggle="collapse" href="#stored-commands-sample" role="button" aria-expanded="false" aria-controls="stored-commands-sample">Sample Commands</a>
+          <div class="collapse mt-2" id="stored-commands-sample">
+            <div class="bg-light border rounded p-2 small">
+              <p class="mb-1 text-muted text-uppercase">Last login</p>
+              <pre class="mb-2"><code>lastlog -u &lt;username&gt;</code></pre>
+              <p class="mb-1 text-muted text-uppercase">Notify user</p>
+              <pre class="mb-0"><code>su &lt;username&gt; -c 'notify-send -u critical "FROM ADMIN" "HELLO"'</code></pre>
+            </div>
+          </div>
+        </div>
+        <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
+          <div class="list-group list-group-flush" id="stored-commands-steps"></div>
+          <div id="stored-commands-empty" class="text-muted small text-center py-3 d-none">No stored commands configured.</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="stored-commands-add-step">Add Step</button>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="stored-commands-save">Save</button>
       </div>
     </div>
   </div>

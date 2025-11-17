@@ -76,6 +76,37 @@ const CTFD_AUDIO_FALLBACKS = {
   ]
 };
 
+function setButtonBusyState(btn, busy, label){
+  if (!btn) return;
+  if (busy) {
+    if (btn.dataset.busyState === '1') return;
+    btn.dataset.busyState = '1';
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    if (label) {
+      if (!btn.dataset.busyOriginal) btn.dataset.busyOriginal = btn.innerHTML;
+      btn.innerHTML = label;
+    }
+  } else {
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    if (btn.dataset.busyOriginal !== undefined) {
+      btn.innerHTML = btn.dataset.busyOriginal;
+      delete btn.dataset.busyOriginal;
+    }
+    delete btn.dataset.busyState;
+  }
+}
+function setCtfdLoginBusy(busy){
+  setButtonBusyState(document.getElementById('btn-ctfd-save'), busy, 'Saving…');
+}
+function setCtfdMultiLoginBusy(busy){
+  setButtonBusyState(document.getElementById('btn-ctfd-multi-save'), busy, 'Saving…');
+}
+function isCtfdLoginBusy(){
+  const btn = document.getElementById('btn-ctfd-save');
+  return !!(btn && btn.dataset.busyState === '1');
+}
 const CTFD_COUNTDOWN_DEFAULT_SECONDS = 5;
 let CTFD_COUNTDOWN_TIMER = null;
 let CTFD_COUNTDOWN_REMAINING = 0;
@@ -3509,13 +3540,14 @@ function openCtfdLoginModal(){ const el = document.getElementById('ctfdLoginModa
 }
 async function saveCtfdCredsFromModal(){
   try {
+    if (isCtfdLoginBusy()) return;
     const url = document.getElementById('ctfd-url')?.value.trim();
     const port = Number(document.getElementById('ctfd-port')?.value || 443);
     const token = document.getElementById('ctfd-token')?.value.trim() || '';
     const verify = !!document.getElementById('ctfd-verify-ssl')?.checked;
     const fb = document.getElementById('ctfd-login-feedback');
-    const saveBtn = document.getElementById('btn-ctfd-save');
     if(PROJ){
+      setCtfdLoginBusy(true);
       // Save project-side URL/port if changed
       const norm = normalizeUrl(url);
       const patch = {};
@@ -3533,9 +3565,8 @@ async function saveCtfdCredsFromModal(){
         }
       } catch {}
       updateCtfdControlsEnabled();
-      // Provide status feedback and attempt a server-side token "login" (validation)
+  // Provide status feedback and attempt a server-side token "login" (validation)
       if (fb) { fb.textContent = 'Validating API token…'; fb.className = 'me-auto small text-muted'; }
-      if (saveBtn) saveBtn.disabled = true;
       try {
         let res;
         await runQueued(`CTFd login for ${PROJ?.name || PROJ?.id || ''}`, async () => {
@@ -3591,7 +3622,7 @@ async function saveCtfdCredsFromModal(){
               if(el && window.bootstrap){ const m=bootstrap.Modal.getInstance(el); if(m) m.hide(); }
             } catch {}
             if (fb) { fb.textContent = ''; fb.className = 'me-auto small'; }
-            if (saveBtn) saveBtn.disabled = false;
+            setCtfdLoginBusy(false);
           }, 500);
           return; // exit after success
         } else {
@@ -3600,7 +3631,7 @@ async function saveCtfdCredsFromModal(){
           // Clear stored session creds on failure
           try { sessionStorage.removeItem(ctfdCredKey(PROJ.id)); } catch {}
           updateCtfdControlsEnabled();
-          if (saveBtn) saveBtn.disabled = false;
+          setCtfdLoginBusy(false);
           return;
         }
       } catch (e) {
@@ -3614,12 +3645,19 @@ async function saveCtfdCredsFromModal(){
         if (fb) { fb.textContent = 'Login failed: ' + msg; fb.className = 'me-auto small text-danger'; }
         try { deleteCtfdCreds(PROJ.id); } catch {}
         updateCtfdControlsEnabled();
-        if (saveBtn) saveBtn.disabled = false;
+        setCtfdLoginBusy(false);
         return;
       }
     }
     const el = document.getElementById('ctfdLoginModal'); if(el && window.bootstrap){ const m=bootstrap.Modal.getInstance(el); if(m) m.hide(); }
-  } catch(e){ console.error('Failed to save CTFd creds', e); try { const fb=document.getElementById('ctfd-login-feedback'); if(fb){ fb.textContent='Save failed'; fb.className='me-auto small text-danger'; } } catch{} }
+  } catch(e){
+    console.error('Failed to save CTFd creds', e);
+    try {
+      const fb=document.getElementById('ctfd-login-feedback');
+      if(fb){ fb.textContent='Save failed'; fb.className='me-auto small text-danger'; }
+    } catch{}
+    setCtfdLoginBusy(false);
+  }
 }
 
 // --- Multi-project CTFd login modal ---
@@ -3668,72 +3706,82 @@ function openCtfdLoginMultiForPids(pids){
     if (btn && !btn._bound) {
       btn._bound = true;
       btn.addEventListener('click', async ()=>{
+        if (btn.dataset.busyState === '1') return;
+        setCtfdMultiLoginBusy(true);
         const fb = document.getElementById('ctfd-multi-login-feedback');
-        try { if (fb) { fb.textContent = 'Validating…'; fb.className = 'me-auto small text-muted'; } } catch {}
-        const persist = !!document.getElementById('ctfd-multi-save-creds')?.checked;
-        const cards = Array.from(document.querySelectorAll('#ctfd-multi-creds-list [data-pid][data-field]'));
-        // Build map pid -> {url, port, token}
-        const map = new Map();
-        cards.forEach(inp => {
-          const pid = String(inp.getAttribute('data-pid'));
-          const field = String(inp.getAttribute('data-field'));
-          const val = inp.value || '';
-          if (!map.has(pid)) map.set(pid, { url:'', port:443, token:'' });
-          const obj = map.get(pid);
-          if (field==='url') obj.url = val;
-          else if (field==='port') obj.port = Number(val||443);
-          else if (field==='token') obj.token = val;
-        });
-        // Validate each via backend login
-        let okCount = 0; let failCount = 0;
-        for (const [pid, obj] of map.entries()){
-          try {
-            // Save URL/port to the project if changed
-            const proj = (CTFD_ALL_PROJECTS||[]).find(p=> String(p.id)===String(pid));
-            const normUrl = normalizeUrl(obj.url||'');
-            const patch = {};
-            if (proj) {
-              if (normUrl && normUrl !== (proj.challenge_url||'')) patch['challenge_url'] = normUrl;
-              if (obj.port && obj.port !== Number(proj.challenge_port||0)) patch['challenge_port'] = obj.port;
-            }
-            if (proj && Object.keys(patch).length) {
-              await http('PATCH', `/api/projects/${pid}`, patch);
-            }
-            // Optimistically write creds then validate
-            writeCtfdCreds(String(pid), { username:'', password:'', token: obj.token||'', validated:false });
-            let res;
-            await runQueued(`CTFd multi-login for project ${pid}`, async () => {
-              res = await http('POST', `/api/projects/${pid}/ctfd/login`, { baseUrl: normUrl, port: Number(obj.port||443), token: obj.token||'', verifySSL: true });
-            }, { projectId: pid });
-            if (res && res.ok) {
-              writeCtfdCreds(String(pid), { username:'', password:'', token: obj.token||'', validated:true });
-              okCount += 1;
-              try { if (persist) localStorage.setItem(`toolhub.ctfd.persist.${pid}`, JSON.stringify({ token: obj.token||'' })); else localStorage.removeItem(`toolhub.ctfd.persist.${pid}`); } catch {}
-            } else { failCount += 1; }
-          } catch { failCount += 1; }
-        }
         try {
-          if (fb) {
-            if (failCount===0) { fb.textContent = `Saved ${okCount} token(s)`; fb.className = 'me-auto small text-success'; }
-            else { fb.textContent = `Saved ${okCount}, ${failCount} failed`; fb.className = 'me-auto small text-warning'; }
+          if (fb) { fb.textContent = 'Validating…'; fb.className = 'me-auto small text-muted'; }
+          const persist = !!document.getElementById('ctfd-multi-save-creds')?.checked;
+          const cards = Array.from(document.querySelectorAll('#ctfd-multi-creds-list [data-pid][data-field]'));
+          // Build map pid -> {url, port, token}
+          const map = new Map();
+          cards.forEach(inp => {
+            const pid = String(inp.getAttribute('data-pid'));
+            const field = String(inp.getAttribute('data-field'));
+            const val = inp.value || '';
+            if (!map.has(pid)) map.set(pid, { url:'', port:443, token:'' });
+            const obj = map.get(pid);
+            if (field==='url') obj.url = val;
+            else if (field==='port') obj.port = Number(val||443);
+            else if (field==='token') obj.token = val;
+          });
+          // Validate each via backend login
+          let okCount = 0; let failCount = 0;
+          for (const [pid, obj] of map.entries()){
+            try {
+              // Save URL/port to the project if changed
+              const proj = (CTFD_ALL_PROJECTS||[]).find(p=> String(p.id)===String(pid));
+              const normUrl = normalizeUrl(obj.url||'');
+              const patch = {};
+              if (proj) {
+                if (normUrl && normUrl !== (proj.challenge_url||'')) patch['challenge_url'] = normUrl;
+                if (obj.port && obj.port !== Number(proj.challenge_port||0)) patch['challenge_port'] = obj.port;
+              }
+              if (proj && Object.keys(patch).length) {
+                await http('PATCH', `/api/projects/${pid}`, patch);
+              }
+              // Optimistically write creds then validate
+              writeCtfdCreds(String(pid), { username:'', password:'', token: obj.token||'', validated:false });
+              let res;
+              await runQueued(`CTFd multi-login for project ${pid}`, async () => {
+                res = await http('POST', `/api/projects/${pid}/ctfd/login`, { baseUrl: normUrl, port: Number(obj.port||443), token: obj.token||'', verifySSL: true });
+              }, { projectId: pid });
+              if (res && res.ok) {
+                writeCtfdCreds(String(pid), { username:'', password:'', token: obj.token||'', validated:true });
+                okCount += 1;
+                try { if (persist) localStorage.setItem(`toolhub.ctfd.persist.${pid}`, JSON.stringify({ token: obj.token||'' })); else localStorage.removeItem(`toolhub.ctfd.persist.${pid}`); } catch {}
+              } else { failCount += 1; }
+            } catch { failCount += 1; }
           }
-        } catch {}
-        // Re-evaluate control enablement (Stats, Users, Download, Refresh) now that tokens may be validated
-        try { updateCtfdControlsEnabled(); } catch {}
-        // Auto-retry: if multi selection, run multi refresh
-        try {
-          if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
-            CTFD_ALLOW_LOAD = true;
-            await ctfdRefreshMulti();
-          }
-        } catch {}
-        // Close after short delay
-        setTimeout(()=>{
           try {
-            const el = document.getElementById('ctfdLoginMultiModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el); if (m) m.hide(); }
+            if (fb) {
+              if (failCount===0) { fb.textContent = `Saved ${okCount} token(s)`; fb.className = 'me-auto small text-success'; }
+              else { fb.textContent = `Saved ${okCount}, ${failCount} failed`; fb.className = 'me-auto small text-warning'; }
+            }
           } catch {}
-          try { if (fb) { fb.textContent=''; fb.className='me-auto small'; } } catch {}
-        }, 500);
+          // Re-evaluate control enablement (Stats, Users, Download, Refresh) now that tokens may be validated
+          try { updateCtfdControlsEnabled(); } catch {}
+          // Auto-retry: if multi selection, run multi refresh
+          try {
+            if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
+              CTFD_ALLOW_LOAD = true;
+              await ctfdRefreshMulti();
+            }
+          } catch {}
+          // Close after short delay
+          setTimeout(()=>{
+            try {
+              const el = document.getElementById('ctfdLoginMultiModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el); if (m) m.hide(); }
+            } catch {}
+            try { if (fb) { fb.textContent=''; fb.className='me-auto small'; } } catch {}
+            setCtfdMultiLoginBusy(false);
+          }, 500);
+        } catch (err) {
+          try {
+            if (fb) { fb.textContent = `Save failed: ${err?.message || err || 'Unknown error'}`; fb.className = 'me-auto small text-danger'; }
+          } catch {}
+          setCtfdMultiLoginBusy(false);
+        }
       });
     }
   } catch {}

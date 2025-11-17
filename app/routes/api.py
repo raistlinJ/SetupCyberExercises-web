@@ -13,7 +13,7 @@ import logging
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 import re
 import hashlib
 import mimetypes
@@ -4605,6 +4605,15 @@ def instances_run_stored_cmds(pid: str):
             text = ''
         text = text.replace('\r\n', '\n').replace('\r', '\n')
         return text.strip()
+    def _canonical_pid(value: Any) -> str:
+        try:
+            return str(value or '').strip()
+        except Exception:
+            return ''
+    def _make_template_key(project_obj, vm_cfg_obj, base_name: str, generated_name: str) -> str:
+        tmpl_name = getattr(vm_cfg_obj, 'template_name', None) or getattr(vm_cfg_obj, 'template', None) or getattr(vm_cfg_obj, 'name', None) or base_name or generated_name
+        tmpl_id = getattr(vm_cfg_obj, 'template_id', None) or getattr(vm_cfg_obj, 'templateId', None) or getattr(vm_cfg_obj, 'template_vmid', None)
+        return f"{_canonical_pid(getattr(project_obj, 'id', ''))}|{tmpl_name or base_name or generated_name}|{tmpl_id or ''}"
     DEFAULT_CMD_TIMEOUT = 300
     MAX_CMD_TIMEOUT = 86400
 
@@ -4639,6 +4648,22 @@ def instances_run_stored_cmds(pid: str):
             if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
                 return False
         return bool(value)
+    raw_override_list = body.get('storedCommandOverrides')
+    override_lookup: Dict[Tuple[str, int, int], str] = {}
+    if isinstance(raw_override_list, list):
+        for entry in raw_override_list:
+            if not isinstance(entry, dict):
+                continue
+            template_key = _canonical_pid(entry.get('templateKey'))
+            try:
+                step_idx = int(entry.get('stepIndex'))
+                cmd_idx = int(entry.get('commandIndex'))
+            except (TypeError, ValueError):
+                continue
+            override_text = _normalize_command_text(entry.get('text') or entry.get('command') or entry.get('override'))
+            if not override_text:
+                continue
+            override_lookup[(template_key, step_idx, cmd_idx)] = override_text
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
@@ -4678,10 +4703,11 @@ def instances_run_stored_cmds(pid: str):
             pass
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
         steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
+        template_key = _make_template_key(proj, vcfg, base, m.get('name'))
 
         def extract_enabled_commands(step_obj, match_commands: Optional[Set[str]] = None):
             commands_out = []
-            for cmd_obj in getattr(step_obj, 'commands', []) or []:
+            for cmd_index, cmd_obj in enumerate(getattr(step_obj, 'commands', []) or [], start=1):
                 enabled = True
                 command_text = ''
                 long_running = False
@@ -4730,6 +4756,7 @@ def instances_run_stored_cmds(pid: str):
                     'normalized': normalized_text,
                     'long_running': bool(long_running),
                     'timeout_seconds': timeout_seconds,
+                    'command_index': cmd_index,
                 })
             return commands_out
 
@@ -4873,6 +4900,17 @@ def instances_run_stored_cmds(pid: str):
                 _job_emit_delay_status(pid, m, step_idx + 1, delay)
                 _safe_sleep(delay)
             commands = extract_enabled_commands(step, selected_commands_filter)
+            if commands and override_lookup:
+                adjusted_commands = []
+                for cmd_meta in commands:
+                    cmd_entry = dict(cmd_meta)
+                    cmd_idx_value = cmd_entry.get('command_index')
+                    if isinstance(cmd_idx_value, int):
+                        override_key = (template_key, step_idx + 1, cmd_idx_value)
+                        if override_key in override_lookup:
+                            cmd_entry['text'] = override_lookup[override_key]
+                    adjusted_commands.append(cmd_entry)
+                commands = adjusted_commands
             if not commands:
                 continue
             if len(commands) == 1:
