@@ -3146,6 +3146,50 @@ function setAfsLoading(isLoading){
   if (label) label.textContent = isLoading ? 'Fetching...' : 'Fetch';
 }
 
+function setAfsFeedback(kind, message){
+  const el = document.getElementById('afs-feedback');
+  if (!el) return;
+  const base = 'alert small py-2 px-3';
+  if (!message) {
+    el.textContent = '';
+    el.className = `${base} d-none`;
+    el.removeAttribute('role');
+    return;
+  }
+  const clsMap = {
+    info: 'alert-info',
+    success: 'alert-success',
+    warning: 'alert-warning text-dark',
+    error: 'alert-danger',
+  };
+  const cls = clsMap[kind] || clsMap.info;
+  el.textContent = message;
+  el.className = `${base} ${cls}`;
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+}
+
+function describeAfsError(err){
+  if (!err) return 'Request failed. Check the credentials and try again.';
+  const raw = (err && err.message) ? String(err.message) : String(err);
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return 'Request failed. Check the credentials and try again.';
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && parsed.error) {
+        return String(parsed.error).trim() || 'Request failed. Check the credentials and try again.';
+      }
+    } catch {}
+  }
+  if (/401|unauthorized|permission/i.test(trimmed)) {
+    return 'Authentication failed. Confirm the username, password, and Proxmox realm.';
+  }
+  if (/ssl/i.test(trimmed)) {
+    return 'SSL verification failed. Try disabling Verify SSL if using a self-signed certificate.';
+  }
+  return trimmed;
+}
+
 let AFS_CTX = { pid: null, templates: [], selected: new Set(), currentNode: '' };
 
 function openAddFromServer(pid){
@@ -3163,6 +3207,7 @@ function openAddFromServer(pid){
   const addBtn = document.getElementById('afs-add');
   const filterEl = document.getElementById('afs-filter');
   const filterGroup = document.getElementById('afs-filter-group');
+  setAfsFeedback();
   if (urlEl) urlEl.value = p.proxmox_url || '';
   if (portEl) portEl.value = (p.proxmox_api_port ?? 8006);
   if (verEl) verEl.checked = (p.proxmox_verify_ssl !== false);
@@ -3199,31 +3244,59 @@ async function fetchTemplatesForAFS(){
   const filterGroup = document.getElementById('afs-filter-group');
   const urlBase = normalizeUrl((urlEl?.value||'').trim());
   const apiPort = Number(portEl?.value||8006)||8006;
-  if (!urlBase){ try { showToast('Enter Proxmox URL', 'warning'); } catch { alert('Enter Proxmox URL'); } return; }
+  if (!urlBase){
+    setAfsFeedback('warning', 'Enter the Proxmox URL before fetching.');
+    try { showToast('Enter Proxmox URL', 'warning'); } catch { alert('Enter Proxmox URL'); }
+    return;
+  }
   const baseUrl = urlBase.replace(/\/$/, '') + (apiPort ? '' : '') ; // API endpoints include /api2/json internally
   const body = { baseUrl, apiPort, verifySSL: !!(verEl?.checked), username: (uEl?.value||'').trim() || undefined, password: (pwEl?.value||'') || undefined };
   setAfsLoading(true);
+  setAfsFeedback('info', 'Connecting to Proxmox…');
+  let fetchError = null;
   if (list) {
     list.style.display = '';
     list.innerHTML = '<div class="text-muted small p-2"><span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Fetching templates...</div>';
   }
   try {
     await runQueued(`Fetch templates for ${pid}`, async () => {
-      const resp = await http('POST', '/api/proxmox/templates', body);
-      const items = Array.isArray(resp?.templates) ? resp.templates : [];
-      AFS_CTX.templates = items.map(t => ({ node: String(t.node||''), vmid: Number(t.vmid||0), name: String(t.name||''), bridges: Array.isArray(t.bridges)? t.bridges.map(b=>String(b||'')) : [] }));
-      AFS_CTX.currentNode = deriveAfsCurrentNode(pid, AFS_CTX.templates, urlBase);
-      // persist creds and meta for VM Manager prefill
-      writeProxCreds(pid, { username: body.username||'', password: body.password||'' });
-      writeProxMeta(pid, { url: urlBase, apiPort: apiPort, sshPort: Number(p.proxmox_ssh_port||22)||22 });
-      if (filterGroup) filterGroup.style.display = '';
-      if (list) list.style.display = '';
-      renderAFSList();
+      try {
+        const resp = await http('POST', '/api/proxmox/templates', body);
+        const items = Array.isArray(resp?.templates) ? resp.templates : [];
+        AFS_CTX.templates = items.map(t => ({ node: String(t.node||''), vmid: Number(t.vmid||0), name: String(t.name||''), bridges: Array.isArray(t.bridges)? t.bridges.map(b=>String(b||'')) : [] }));
+        AFS_CTX.currentNode = deriveAfsCurrentNode(pid, AFS_CTX.templates, urlBase);
+        // persist creds and meta for VM Manager prefill
+        writeProxCreds(pid, { username: body.username||'', password: body.password||'' });
+        writeProxMeta(pid, { url: urlBase, apiPort: apiPort, sshPort: Number(p.proxmox_ssh_port||22)||22 });
+        if (filterGroup) filterGroup.style.display = '';
+        if (list) list.style.display = '';
+        renderAFSList();
+        const count = AFS_CTX.templates.length;
+        if (count > 0) {
+          setAfsFeedback('success', `Fetched ${count} template${count === 1 ? '' : 's'} successfully.`);
+        } else {
+          setAfsFeedback('warning', 'Connected successfully, but no templates were returned.');
+        }
+      } catch (err) {
+        fetchError = err;
+        throw err;
+      }
     }, { projectId: pid });
   } catch (e){
-  if (list) { list.innerHTML = `<div class="text-danger small p-2">Fetch failed: ${e.message}</div>`; list.style.display = ''; }
+    fetchError = fetchError || e;
   } finally {
     setAfsLoading(false);
+  }
+  if (fetchError) {
+    const msg = describeAfsError(fetchError);
+    if (list) {
+      list.innerHTML = `<div class="text-danger small p-2">${escHtml(msg)}</div>`;
+      list.style.display = '';
+    }
+    if (filterGroup) filterGroup.style.display = 'none';
+    const addBtn = document.getElementById('afs-add');
+    if (addBtn) addBtn.disabled = true;
+    setAfsFeedback('error', msg);
   }
 }
 
