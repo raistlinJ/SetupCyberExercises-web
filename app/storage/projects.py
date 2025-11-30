@@ -297,7 +297,7 @@ class Project:
     proxmox_pvesh_path: str = "pvesh"
     proxmox_qmrestore_path: str = "qmrestore"
     proxmox_storage_volume: str = "local-lvm"
-    proxmox_max_create_jobs: int = 20
+    proxmox_max_create_jobs: int = 5
     proxmox_snapshot_delay_seconds: float = 5.0
     proxmox_use_linked_clones: bool = True
     proxmox_clone_timeout_seconds: int = 1800

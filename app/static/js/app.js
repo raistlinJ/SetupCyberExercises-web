@@ -2848,7 +2848,7 @@ function renderProjectCard(p) {
             </div>
             <div class="col-md-3">
               <label class="form-label" title="Limit concurrent create jobs">Max Create Jobs</label>
-              <input id="cfg-${p.id}-proxmox_max_create_jobs" type="number" class="form-control form-control-sm" value="${p.proxmox_max_create_jobs ?? 20}" oninput="debounceProjectSave('${p.id}','proxmox_max_create_jobs')" />
+              <input id="cfg-${p.id}-proxmox_max_create_jobs" type="number" class="form-control form-control-sm" value="${p.proxmox_max_create_jobs ?? 5}" oninput="debounceProjectSave('${p.id}','proxmox_max_create_jobs')" />
             </div>
             <div class="col-md-3">
               <label class="form-label" title="Delay between snapshot operations">Snapshot Delay (seconds)</label>

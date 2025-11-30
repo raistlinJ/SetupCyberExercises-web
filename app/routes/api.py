@@ -118,6 +118,30 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _project_max_jobs(proj: Optional[Project], default: int = 5) -> int:
+    """Return the configured per-project max job count (>=1)."""
+    try:
+        value = int(getattr(proj, 'proxmox_max_create_jobs', default) or default)
+    except Exception:
+        value = default
+    if value < 1:
+        value = 1
+    return value
+
+
+def _pool_workers_for(proj: Optional[Project], item_count: int, hard_cap: int = 16) -> int:
+    """Clamp worker pools to the project max jobs and optional hard cap."""
+    try:
+        count = int(item_count)
+    except Exception:
+        count = 0
+    max_jobs = _project_max_jobs(proj)
+    limit = hard_cap if (hard_cap and hard_cap > 0) else max_jobs
+    usable_cap = limit if limit > 0 else max_jobs
+    workers = min(count, max_jobs, usable_cap) if count > 0 else 1
+    return max(1, workers)
+
+
 def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project) -> int:
     """Embed audio clips into the provided ZipFile, returning number of clips written."""
     audio = getattr(proj, 'audio', {}) or {}
@@ -1448,7 +1472,7 @@ def instances_create(pid: str):
         pass
 
     # Concurrency control for create jobs
-    max_jobs = int(getattr(proj, 'proxmox_max_create_jobs', 20) or 1)
+    max_jobs = int(getattr(proj, 'proxmox_max_create_jobs', 5) or 1)
     if max_jobs < 1:
         max_jobs = 1
     # Schedule clones in parallel with a cap
@@ -2691,7 +2715,8 @@ def instances_delete(pid: str):
             _record_bridge_for_cleanup(node, idx, a, gen_name)
         return ({ 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node })
 
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 16) or 1) as pool:
+    pool_workers = _pool_workers_for(proj, len(tasks))
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_delete, t): t for t in tasks }
         for fut in as_completed(future_map):
             t = future_map[fut]
@@ -3064,13 +3089,7 @@ def instances_start(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     started = []
     resumed = []
-    try:
-        max_jobs = int(getattr(proj, 'proxmox_max_create_jobs', 20) or 1)
-    except Exception:
-        max_jobs = 1
-    if max_jobs < 1:
-        max_jobs = 1
-    pool_workers = max(1, min(len(mapped), max_jobs, 16)) if mapped else 1
+    pool_workers = _pool_workers_for(proj, len(mapped))
     # Run in parallel with a reasonable pool size
     def do_start(m):
         if _is_cancelled(pid):
@@ -3141,6 +3160,7 @@ def instances_suspend(pid: str):
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     suspended = []
+    pool_workers = _pool_workers_for(proj, len(mapped))
     def do_suspend(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
@@ -3148,7 +3168,7 @@ def instances_suspend(pid: str):
         client._wait_task(m['node'], upid, timeout=600)
         return { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] }
 
-    with ThreadPoolExecutor(max_workers=min(len(mapped), 16) or 1) as pool:
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_suspend, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
@@ -3201,6 +3221,7 @@ def instances_poweroff(pid: str):
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     powered_off = []
+    pool_workers = _pool_workers_for(proj, len(mapped))
     def do_poweroff(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
@@ -3208,7 +3229,7 @@ def instances_poweroff(pid: str):
         client._wait_task(m['node'], upid, timeout=600)
         return { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] }
 
-    with ThreadPoolExecutor(max_workers=min(len(mapped), 16) or 1) as pool:
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_poweroff, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
@@ -3341,7 +3362,8 @@ def instances_restore(pid: str):
         client._wait_task(m['node'], upid, timeout=900)
         return ('restored', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'], 'snapname': snapname, 'started': start_after, 'latest': True })
 
-    with ThreadPoolExecutor(max_workers=min(len(mapped), 16) or 1) as pool:
+    pool_workers = _pool_workers_for(proj, len(mapped))
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_restore, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
@@ -3464,7 +3486,8 @@ def instances_nets_assign(pid: str):
         except Exception as e:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': f'set nets failed: {e}' })
 
-    with ThreadPoolExecutor(max_workers=min(len(mapped), 16) or 1) as pool:
+    pool_workers = _pool_workers_for(proj, len(mapped))
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_apply, m): m for m in mapped }
         for fut in as_completed(future_map):
             try:
@@ -3546,7 +3569,8 @@ def instances_nets_clear(pid: str):
         except Exception as e:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': f'clear nets failed: {e}' })
 
-    with ThreadPoolExecutor(max_workers=min(len(mapped), 16) or 1) as pool:
+    pool_workers = _pool_workers_for(proj, len(mapped))
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_clear, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
