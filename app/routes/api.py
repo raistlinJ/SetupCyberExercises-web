@@ -7605,7 +7605,28 @@ def export_project_start(pid: str):
     if not username or not password:
         return jsonify({"error": "Missing Proxmox credentials"}), 400
 
-    base_url = getattr(proj, 'proxmox_url', '') or ''
+    base_url = (data.get('baseUrl') or getattr(proj, 'proxmox_url', '') or '').strip()
+    api_port = data.get('apiPort')
+    if api_port is None:
+        api_port = getattr(proj, 'proxmox_api_port', None)
+    try:
+        if api_port is not None:
+            port_int = int(api_port)
+            if port_int > 0 and base_url:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                if hostname:
+                    netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
     prox_host = _parse_host_from_url(base_url) or ''
     verify_ssl = getattr(proj, 'proxmox_verify_ssl', True)
 
