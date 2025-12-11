@@ -33,5 +33,23 @@ def _pick_port():
 
 if __name__ == "__main__":
     p = _pick_port()
-    app.logger.info("Starting Waitress on port %s", p)
-    serve(app, host="0.0.0.0", port=p)
+    def _env_int(name: str, default: int) -> int:
+        try:
+            value = os.environ.get(name)
+            if value is None:
+                return default
+            parsed = int(value)
+            return parsed if parsed > 0 else default
+        except Exception:
+            return default
+
+    waitress_params = {
+        "host": "0.0.0.0",
+        "port": p,
+        # Allow large imports/exports unless overridden via env vars
+        "max_request_body_size": _env_int("WAITRESS_MAX_REQUEST_BODY", 8 * 1024 * 1024 * 1024),  # 8 GiB
+        "inbuf_overflow": _env_int("WAITRESS_INBUF_OVERFLOW", 64 * 1024 * 1024),  # 64 MiB
+        "outbuf_overflow": _env_int("WAITRESS_OUTBUF_OVERFLOW", 64 * 1024 * 1024),
+    }
+    app.logger.info("Starting Waitress on port %s (body cap=%s bytes)", p, waitress_params["max_request_body_size"])
+    serve(app, **waitress_params)
