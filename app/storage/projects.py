@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import base64
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
@@ -463,10 +464,27 @@ class ProjectStore:
             return json.load(f)
 
     def _write_all(self, data: Dict[str, Dict]):
-        tmp = self.db_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, sort_keys=True)
-        os.replace(tmp, self.db_path)
+        # Use a unique tmp file per write to avoid collisions between concurrent writers
+        os.makedirs(self.data_dir, exist_ok=True)
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(self.db_path),
+                prefix=os.path.basename(self.db_path) + ".",
+                suffix=".tmp",
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.db_path)
+        except Exception:
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
 
     def _coerce_vm(self, v: Any) -> VMConfig:
         if isinstance(v, str):

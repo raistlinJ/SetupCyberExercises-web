@@ -148,7 +148,7 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project) -> int:
     if not isinstance(audio, dict) or not audio:
         return 0
     manifest = {
-        "generated": datetime.utcnow().isoformat() + "Z",
+        "generated": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "events": [],
     }
     total_written = 0
@@ -3278,7 +3278,7 @@ def instances_snapshot(pid: str):
     snapname = (body.get('snapname') or '').strip()
     if not snapname:
         import datetime as _dt
-        snapname = 'manual-' + _dt.datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+        snapname = 'manual-' + _dt.datetime.now(_dt.timezone.utc).strftime('%Y%m%d-%H%M%S')
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
@@ -4493,7 +4493,7 @@ def instances_run_startup_cmds(pid: str):
         })
     zip_payload = None
     if zip_entries:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         timestamp = _format_ymdhms(now)
         safe_proj = _safe_file_stem(getattr(proj, 'name', '') or proj.id)
         filename = f"startup_cmd_outputs_{safe_proj}_{timestamp}.zip"
@@ -5036,7 +5036,7 @@ def instances_run_stored_cmds(pid: str):
         ran.append(ran_entry)
     zip_payload: Optional[Dict[str, Any]] = None
     if zip_entries:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         timestamp = _format_ymdhms(now)
         safe_proj = _safe_file_stem(getattr(proj, 'name', '') or proj.id)
         filename = f"stored_cmd_outputs_{safe_proj}_{timestamp}.zip"
@@ -5650,7 +5650,7 @@ def ctfd_users_check(pid: str):
             'user': [],
             'team': [],
             'errors': [],
-            'generated_at': datetime.utcnow().isoformat() + 'Z'
+            'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         }
         best_user = {}
         best_team = {}
@@ -5997,7 +5997,7 @@ def ctfd_users_check(pid: str):
                 'user': [],
                 'team': [],
                 'errors': [f'category_firsts: {exc}'],
-                'generated_at': datetime.utcnow().isoformat() + 'Z'
+                'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             }
     response_payload = {
         'users': out,
@@ -6465,7 +6465,7 @@ def export_project(pid: str):
         import datetime as _dt
         proj_name = getattr(proj, 'name', '') or pid
         stem = _safe_file_stem(proj_name)
-        stamp = _format_ymdhms(_dt.datetime.utcnow())
+        stamp = _format_ymdhms(_dt.datetime.now(_dt.timezone.utc))
         fname = f"{stem}_{stamp}.zip"
     except Exception:
         fname = f"project_{pid}.zip"
@@ -7436,7 +7436,7 @@ def export_projects():
     try:
         import datetime as _dt
         stem = _safe_file_stem(getattr(proj, 'name', '') or proj.id)
-        fname = f"{stem}_{_format_ymdhms(_dt.datetime.utcnow())}.zip"
+        fname = f"{stem}_{_format_ymdhms(_dt.datetime.now(_dt.timezone.utc))}.zip"
     except Exception:
         fname = f"project_{proj.id}.zip"
     return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=fname)
@@ -8176,7 +8176,7 @@ def export_project_start(pid: str):
                             size = 0
                         rec = {
                             'id': job_id,
-                            'timestamp': datetime_module.datetime.utcnow().isoformat() + 'Z',
+                            'timestamp': datetime_module.datetime.now(datetime_module.timezone.utc).isoformat().replace('+00:00', 'Z'),
                             'include_creds': bool(include_creds),
                             'include_vms': True,
                             'local_path': local_zip,
@@ -8281,7 +8281,7 @@ def export_project_download(pid: str):
     proj_name = getattr(proj, 'name', '') if proj else ''
     stem = _safe_file_stem(proj_name or pid)
     import datetime as _dt
-    fname = f"{stem}_{_format_ymdhms(_dt.datetime.utcnow())}.zip"
+    fname = f"{stem}_{_format_ymdhms(_dt.datetime.now(_dt.timezone.utc))}.zip"
     return send_file(zip_path, mimetype="application/zip", as_attachment=True, download_name=fname)
 
 
@@ -8541,7 +8541,7 @@ def download_export_by_id(pid: str, export_id: str):
     dt = _parse_iso_datetime(ts)
     if dt is None:
         import datetime as _dt
-        dt = _dt.datetime.utcnow()
+        dt = _dt.datetime.now(_dt.timezone.utc)
     fname = f"{stem}_{_format_ymdhms(dt)}.zip"
     return send_file(lp, mimetype="application/zip", as_attachment=True, download_name=fname)
 
