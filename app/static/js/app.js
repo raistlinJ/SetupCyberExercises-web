@@ -4257,11 +4257,22 @@ function openExportOptions(pid) {
           try { m.hide(); } catch {}
           await gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms });
         } else {
+          try {
+            if (typeof window.showActionProgress === 'function') {
+              window.showActionProgress('Export', 'Preparing download…');
+              if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
+            }
+          } catch {}
           const a = document.createElement('a');
           a.href = `/api/projects/${encodeURIComponent(EXPORT_CONTEXT.pid)}/export?includeCreds=${includeCreds}&includeVms=${includeVms}`;
-          a.click();
+          // Give the modal a moment to render before starting the download
+          setTimeout(() => { try { a.click(); } catch {} }, 50);
           try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: export started') : console.log('Export started'); } catch {}
           try { m.hide(); } catch {}
+          // Best-effort: hide progress shortly after initiating download
+          setTimeout(() => {
+            try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+          }, 1200);
         }
       } finally {
         if (!includeVms || proceed) {
@@ -4285,12 +4296,20 @@ async function performProjectImport(options = {}) {
   if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
   const label = `Import project: ${file.name}`;
   try {
+    if (typeof window.showActionProgress === 'function') {
+      window.showActionProgress('Import', 'Uploading…');
+      if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
+    }
+  } catch {}
+  try {
     if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(true);
   } catch {}
   let resp = null;
   try {
     await runQueued(label, async () => {
+      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(35, 'Importing…', 'Sending archive to server…'); } catch {}
       resp = await http('POST', '/api/projects/import', fd);
+      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch {}
     }, { projectId: options.queueKey || 'import' });
   } catch (err) {
     try { showToast('Failed to import project: ' + (err?.message || err), 'danger'); } catch {}
@@ -4304,6 +4323,7 @@ async function performProjectImport(options = {}) {
     try {
       if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(false);
     } catch {}
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
   }
   if (!resp) return false;
   try { input.value = ''; } catch {}

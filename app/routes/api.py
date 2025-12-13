@@ -6093,6 +6093,64 @@ def _sanitize_vm_name(name: str) -> str:
         return 'vm'
 
 
+def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
+    """Sanitize VM entries from an imported manifest.
+    When keep_vmid is False, vmid is dropped (config-only import).
+    """
+    if not isinstance(vms_value, list):
+        return []
+    allowed_keys = {
+        'name',
+        'vmid',
+        'viewable_to_user',
+        'start_commands',
+        'stored_commands',
+        'internal_network_adaptors',
+        'use_linked_clone',
+        'clone_timeout_sec',
+        'storage_volume',
+        'skip_post_clone_snapshot',
+    }
+    out = []
+    for vm in vms_value:
+        rec = {}
+        if isinstance(vm, dict):
+            rec = dict(vm)
+        elif isinstance(vm, str):
+            rec = {'name': vm}
+        else:
+            continue
+
+        nm = _sanitize_vm_name(str(rec.get('name', '')).strip())
+        if not nm:
+            continue
+        clean = {'name': nm}
+
+        for k in allowed_keys:
+            if k in ('name', 'vmid'):
+                continue
+            if k in rec:
+                clean[k] = rec.get(k)
+
+        if keep_vmid and ('vmid' in rec):
+            clean['vmid'] = rec.get('vmid')
+
+        # Adaptor names: keep only valid names
+        try:
+            if 'internal_network_adaptors' in clean:
+                raw = clean.get('internal_network_adaptors')
+                if not isinstance(raw, list):
+                    raw = []
+                clean['internal_network_adaptors'] = [
+                    str(a).strip() for a in raw if _is_valid_adaptor_name(a)
+                ]
+        except Exception:
+            clean['internal_network_adaptors'] = []
+
+        out.append(clean)
+    return out
+
+
 def _validate_project_fields(data: dict) -> list:
     errors = []
     def port_ok(v):
@@ -6492,6 +6550,7 @@ def import_project():
 
     # Save upload to a temporary file to avoid loading large archives into memory
     import tempfile
+    import shutil
     uploads_dir = os.path.join(current_app.config["DATA_DIR"], "uploads")
     try:
         os.makedirs(uploads_dir, exist_ok=True)
@@ -6534,23 +6593,8 @@ def import_project():
                     # Apply import selection: remove credentials/VMs as requested
                     if not include_creds:
                         pdata2.pop('credentials', None)
-                    if not include_vms:
-                        # Keep VM names only (no vmid or extra fields)
-                        try:
-                            vlist = pdata2.get('vms') or []
-                            names_only = []
-                            if isinstance(vlist, list):
-                                for vm in vlist:
-                                    nm = ''
-                                    if isinstance(vm, dict):
-                                        nm = str(vm.get('name', '')).strip()
-                                    elif isinstance(vm, str):
-                                        nm = vm.strip()
-                                    if nm:
-                                        names_only.append({ 'name': _sanitize_vm_name(nm) })
-                            pdata2['vms'] = names_only
-                        except Exception:
-                            pdata2['vms'] = []
+                    # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                    pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
                     try:
                         vlist = pdata2.get('vms') or []
                         if isinstance(vlist, list):
@@ -6583,6 +6627,10 @@ def import_project():
                     ]:
                         if key in pdata2:
                             setattr(proj, key, pdata2[key])
+                    try:
+                        proj.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                    except Exception:
+                        proj.vms = []
                     s.upsert(proj)
                     id_map[pdata2.get('id','')] = new_id
                     results.append(proj.__dict__)
@@ -6601,7 +6649,7 @@ def import_project():
                             continue
                         new_name = f"{target}_{uuid.uuid4().hex}_{safe}"
                         with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
-                            dst.write(src.read())
+                            shutil.copyfileobj(src, dst, length=1024 * 1024)
                         # append to project
                         proj = s.get(target)
                         if proj:
@@ -6622,23 +6670,8 @@ def import_project():
                 # Apply import selection: remove credentials/VMs as requested
                 if not include_creds:
                     pdata2.pop('credentials', None)
-                if not include_vms:
-                    # Keep VM names only (no vmid or extra fields)
-                    try:
-                        vlist = pdata2.get('vms') or []
-                        names_only = []
-                        if isinstance(vlist, list):
-                            for vm in vlist:
-                                nm = ''
-                                if isinstance(vm, dict):
-                                    nm = str(vm.get('name', '')).strip()
-                                elif isinstance(vm, str):
-                                    nm = vm.strip()
-                                if nm:
-                                    names_only.append({ 'name': _sanitize_vm_name(nm) })
-                        pdata2['vms'] = names_only
-                    except Exception:
-                        pdata2['vms'] = []
+                # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
                 try:
                     vlist = pdata2.get('vms') or []
                     if isinstance(vlist, list):
@@ -6664,6 +6697,10 @@ def import_project():
                 ]:
                     if key in pdata2:
                         setattr(project, key, pdata2[key])
+                try:
+                    project.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                except Exception:
+                    project.vms = []
                 # For single-project import, drop associations (targets unknown)
                 try:
                     project.associated_projects = []
@@ -6684,7 +6721,7 @@ def import_project():
                     safe = secure_filename(base) or base
                     new_name = f"{new_id}_{uuid.uuid4().hex}_{safe}"
                     with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
-                        dst.write(src.read())
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
                     imported.append(new_name)
                 project.materials = imported
 
@@ -6770,6 +6807,7 @@ def import_project_start():
 
     # Persist upload to temp file first (this request handles the upload body)
     import tempfile
+    import shutil
     uploads_dir = os.path.join(current_app.config["DATA_DIR"], "uploads")
     os.makedirs(uploads_dir, exist_ok=True)
     tmp_fd = None
@@ -6859,30 +6897,8 @@ def import_project_start():
                                 pdata2['tag'] = _sanitize_tag(pdata2.get('tag', ''))
                             if not include_creds:
                                 pdata2.pop('credentials', None)
-                            if not include_vms:
-                                # Preserve VM configuration (names/adaptors, commands), but clear vmid to avoid stale IDs
-                                try:
-                                    vlist = pdata2.get('vms') or []
-                                    kept = []
-                                    if isinstance(vlist, list):
-                                        for vm in vlist:
-                                            rec = {}
-                                            if isinstance(vm, dict):
-                                                rec = dict(vm)
-                                            elif isinstance(vm, str):
-                                                rec = { 'name': vm }
-                                            # sanitize name and drop vmid
-                                            nm = _sanitize_vm_name(str(rec.get('name','')).strip())
-                                            if not nm:
-                                                continue
-                                            rec['name'] = nm
-                                            if 'vmid' in rec:
-                                                try: del rec['vmid']
-                                                except Exception: rec['vmid'] = None
-                                            kept.append(rec)
-                                    pdata2['vms'] = kept
-                                except Exception:
-                                    pdata2['vms'] = []
+                            # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                            pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
                             try:
                                 vlist = pdata2.get('vms') or []
                                 if isinstance(vlist, list):
@@ -6913,20 +6929,7 @@ def import_project_start():
                                     setattr(proj, key_field, pdata2[key_field])
                             # Preserve VM entries from manifest (names, adaptors, commands, etc.)
                             try:
-                                vlist = pdata2.get('vms') or []
-                                kept = []
-                                if isinstance(vlist, list):
-                                    for vm in vlist:
-                                        rec = dict(vm) if isinstance(vm, dict) else ({'name': str(vm)} if isinstance(vm, str) else {})
-                                        nm = _sanitize_vm_name(str(rec.get('name','')).strip())
-                                        if not nm:
-                                            continue
-                                        rec['name'] = nm
-                                        if not include_vms and 'vmid' in rec:
-                                            try: del rec['vmid']
-                                            except Exception: rec['vmid'] = None
-                                        kept.append(rec)
-                                proj.vms = kept
+                                proj.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
                             except Exception:
                                 proj.vms = []
                             try:
@@ -6969,7 +6972,7 @@ def import_project_start():
                                     continue
                                 new_name = f"{target}_{uuid.uuid4().hex}_{safe}"
                                 with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
-                                    dst.write(src.read())
+                                    shutil.copyfileobj(src, dst, length=1024 * 1024)
                                 proj = s.get(target)
                                 if proj:
                                     proj.materials.append(new_name)
@@ -6989,29 +6992,8 @@ def import_project_start():
                             pdata2['tag'] = _sanitize_tag(pdata2.get('tag', ''))
                         if not include_creds:
                             pdata2.pop('credentials', None)
-                        if not include_vms:
-                            # Preserve VM configuration but clear vmid to avoid stale IDs
-                            try:
-                                vlist = pdata2.get('vms') or []
-                                kept = []
-                                if isinstance(vlist, list):
-                                    for vm in vlist:
-                                        rec = {}
-                                        if isinstance(vm, dict):
-                                            rec = dict(vm)
-                                        elif isinstance(vm, str):
-                                            rec = { 'name': vm }
-                                        nm = _sanitize_vm_name(str(rec.get('name','')).strip())
-                                        if not nm:
-                                            continue
-                                        rec['name'] = nm
-                                        if 'vmid' in rec:
-                                            try: del rec['vmid']
-                                            except Exception: rec['vmid'] = None
-                                        kept.append(rec)
-                                pdata2['vms'] = kept
-                            except Exception:
-                                pdata2['vms'] = []
+                        # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                        pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
                         try:
                             vlist = pdata2.get('vms') or []
                             if isinstance(vlist, list):
@@ -7040,20 +7022,7 @@ def import_project_start():
                                 setattr(project, key_field, pdata2[key_field])
                         # Preserve VM entries from manifest
                         try:
-                            vlist = pdata2.get('vms') or []
-                            kept = []
-                            if isinstance(vlist, list):
-                                for vm in vlist:
-                                    rec = dict(vm) if isinstance(vm, dict) else ({'name': str(vm)} if isinstance(vm, str) else {})
-                                    nm = _sanitize_vm_name(str(rec.get('name','')).strip())
-                                    if not nm:
-                                        continue
-                                    rec['name'] = nm
-                                    if not include_vms and 'vmid' in rec:
-                                        try: del rec['vmid']
-                                        except Exception: rec['vmid'] = None
-                                    kept.append(rec)
-                            project.vms = kept
+                            project.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
                         except Exception:
                             project.vms = []
                         try:
@@ -7085,7 +7054,7 @@ def import_project_start():
                             safe = secure_filename(base) or base
                             new_name = f"{new_id}_{uuid.uuid4().hex}_{safe}"
                             with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
-                                dst.write(src.read())
+                                shutil.copyfileobj(src, dst, length=1024 * 1024)
                             imported.append(new_name)
                             _emit_import(job, f"[WRITE] {zname} -> {new_name}")
                             done_steps += 1; _tick('materials')

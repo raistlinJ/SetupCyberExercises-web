@@ -1,14 +1,63 @@
+version: "3.9"
+
 services:
-  toolhub:
-    build: .
-    ports:
-      - "8081:8080"
+  certs:
+    image: alpine:3.20
+    container_name: sce-web-certs
+    environment:
+      - CERT_DNS=${CERT_DNS:-localhost}
+    command:
+      - sh
+      - -ec
+      - |
+        apk add --no-cache openssl >/dev/null
+        mkdir -p /out
+        if [ -s /out/cert.pem ] && [ -s /out/key.pem ]; then
+          echo 'Existing certs found in volume, skipping generation.'
+          exit 0
+        fi
+        CERT_DNS="$${CERT_DNS:-localhost}"
+        echo "Generating self-signed certificate for CN=$${CERT_DNS}..."
+        openssl req -x509 -nodes -newkey rsa:2048 \
+          -keyout /out/key.pem \
+          -out /out/cert.pem \
+          -days 365 \
+          -subj "/CN=$${CERT_DNS}" \
+          -addext "subjectAltName=DNS:$${CERT_DNS},DNS:localhost,IP:127.0.0.1"
+    volumes:
+      - certs:/out
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     environment:
       - PORT=8080
       - DATA_DIR=/data
-    restart: unless-stopped
     volumes:
-      - toolhub-data:/data
+      - ./data:/data
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:stable-alpine
+    container_name: sce-web-nginx
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+      app:
+        condition: service_started
+    volumes:
+      - certs:/etc/nginx/certs:ro
+      - ./deploy:/etc/nginx/conf.d:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    security_opt:
+      - seccomp:unconfined
+    privileged: true
+    command: ["nginx", "-g", "master_process off; daemon off;"]
+    restart: unless-stopped
 
 volumes:
-  toolhub-data:
+  certs:

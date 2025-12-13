@@ -21,13 +21,16 @@ def create_app():
     except Exception:
         app.config['ACL_DEBUG'] = False
 
-    # Security quick wins
-    # Limit request body size (e.g., ~200MB default; override via env MAX_CONTENT_MB)
+    # Optional request body size cap (disabled by default).
+    # If you need a limit, set MAX_CONTENT_MB to a positive integer.
     try:
-        max_mb = int(os.environ.get('MAX_CONTENT_MB', '200'))
-        app.config['MAX_CONTENT_LENGTH'] = max_mb * 1024 * 1024
+        raw_max_mb = os.environ.get('MAX_CONTENT_MB')
+        if raw_max_mb is not None:
+            max_mb = int(raw_max_mb)
+            if max_mb > 0:
+                app.config['MAX_CONTENT_LENGTH'] = max_mb * 1024 * 1024
     except Exception:
-        app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+        pass
 
     # Optional simple API key (shared secret) for all modifying endpoints
     app.config['API_KEY'] = os.environ.get('API_KEY') or None

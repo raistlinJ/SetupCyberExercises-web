@@ -4,6 +4,41 @@
 .shell-sidebar .list-group-item { cursor: pointer; }
 .shell-content { overflow: auto; }
 
+/* Full-height shell layout (fills viewport below the top banner) */
+@media (min-width: 768px) {
+	body.shell-body {
+		min-height: 100vh;
+		display: flex;
+		flex-direction: column;
+	}
+
+	body.shell-body > .shell-container {
+		flex: 1 1 auto;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	body.shell-body > .shell-container > .row {
+		flex: 1 1 auto;
+		min-height: 0;
+	}
+
+	body.shell-body .shell-sidebar,
+	body.shell-body .shell-content {
+		min-height: 0;
+	}
+
+	body.shell-body .shell-sidebar {
+		overflow-y: auto;
+	}
+
+	body.shell-body #sidebar-projects {
+		min-height: 0;
+		overflow-y: auto;
+	}
+}
+
 /* Scrollable containers for data tables */
 .data-scrollbox {
 	max-height: min(72vh, 740px);

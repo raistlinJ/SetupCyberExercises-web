@@ -39,6 +39,64 @@ function vmScrollContainer(){
   try { return document.getElementById('vm-table'); } catch { return null; }
 }
 
+function _vmBuildProxmoxHref(proj){
+  try {
+    const baseRaw = (proj && proj.proxmox_url != null) ? String(proj.proxmox_url).trim() : '';
+    if (!baseRaw) return '';
+    const portRaw = (proj && proj.proxmox_api_port != null) ? String(proj.proxmox_api_port).trim() : '';
+    let urlStr = baseRaw;
+    if (!/^https?:\/\//i.test(urlStr)) urlStr = `https://${urlStr}`;
+    const u = new URL(urlStr);
+    if (portRaw && !u.port) u.port = portRaw;
+    // Keep stable: remove trailing slash for nicer nav links
+    return u.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function vmUpdateProxmoxNavLinkForCurrent(){
+  const link = document.getElementById('nav-proxmox-link');
+  if (!link) return;
+  let proj = PROJ;
+  try {
+    const cur = getCurrentPid ? getCurrentPid() : '';
+    if (cur && (!proj || canonicalPid(proj.id) !== canonicalPid(cur))) {
+      proj = (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(cur)) || proj;
+    }
+  } catch {}
+  const href = _vmBuildProxmoxHref(proj);
+  if (href) {
+    link.href = href;
+    try {
+      const u = new URL(href);
+      const hostPort = u.host || href;
+      link.textContent = `Server: ${hostPort}`;
+      link.title = href;
+    } catch {
+      link.textContent = `Server: ${href}`;
+      link.title = href;
+    }
+    link.classList.remove('disabled');
+    try {
+      link.classList.remove('border-secondary', 'text-muted');
+      link.classList.add('border-primary', 'text-primary');
+    } catch {}
+    link.removeAttribute('aria-disabled');
+    link.removeAttribute('tabindex');
+  } else {
+    link.href = '#';
+    link.textContent = 'Server: —';
+    link.classList.add('disabled');
+    try {
+      link.classList.remove('border-primary', 'text-primary');
+      link.classList.add('border-secondary', 'text-muted');
+    } catch {}
+    link.setAttribute('aria-disabled', 'true');
+    link.setAttribute('tabindex', '-1');
+  }
+}
+
 function vmRestoreScrollPosition(){
   try {
     const el = vmScrollContainer();
@@ -404,6 +462,7 @@ async function vmLoadProject() {
   PROJ = proj;
   const infoFound = document.getElementById('vm-info');
   if (infoFound) infoFound.textContent = '';
+  try { vmUpdateProxmoxNavLinkForCurrent(); } catch {}
     try { VM_COLS = readVmCols(PROJ.id); const ids=['name','cred','status','state','id','node','template','nets']; ids.forEach(id=>{ const el=document.getElementById(`vm-col-${id}`); if(el) el.checked = !!VM_COLS[id]; }); } catch {}
     renderVmTable(proj);
   updateRefreshState();
@@ -423,6 +482,7 @@ async function vmLoadProjectById(pid) {
   if (!proj) { if (info) info.textContent = 'Project not found.'; PROJ = null; renderVmTable(null); return; }
   PROJ = proj;
   if (info) info.textContent = '';
+  try { vmUpdateProxmoxNavLinkForCurrent(); } catch {}
   try { VM_COLS = readVmCols(PROJ.id); const ids=['name','cred','status','state','id','node','template','nets']; ids.forEach(id=>{ const el=document.getElementById(`vm-col-${id}`); if(el) el.checked = !!VM_COLS[id]; }); } catch {}
   renderVmTable(proj);
   updateRefreshState();
@@ -1694,6 +1754,7 @@ window.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('DOMContentLoaded', async () => {
   try { await ensureAllProjects(); } catch {}
   try { await setupProjectsSelector(); } catch {}
+  try { vmUpdateProxmoxNavLinkForCurrent(); } catch {}
   // Adopt CTFd Manager selection if present and VM Manager not already multi
   try {
     const raw = sessionStorage.getItem('toolhub.ctfd.mgr.selectedPids.v1');
@@ -1727,6 +1788,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // If multi, keep merged view when sidebar switches current project
   document.addEventListener('project-selected', (e) => {
     try {
+      try { vmUpdateProxmoxNavLinkForCurrent(); } catch {}
       const pid = e.detail || '';
       if (pid) {
         // Re-derive selection from per-project associations for new base project

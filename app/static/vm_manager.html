@@ -9,7 +9,7 @@
   <link href="/static/css/shell.css" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
 </head>
-<body>
+<body class="shell-body">
 <header class="app-banner">
   <div class="container-fluid d-flex align-items-center justify-content-between py-2">
     <div class="d-flex align-items-center gap-2">
@@ -68,6 +68,9 @@
           </li>
           <li class="nav-item">
             <a class="nav-link" data-shell-link href="/static/exports.html">Exports</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link vm-server-link disabled fw-semibold border border-secondary rounded-pill px-2 py-1 text-nowrap" id="nav-proxmox-link" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true" tabindex="-1" title="Open this project's Proxmox UI">Server: —</a>
           </li>
         </ul>
         <div class="d-flex align-items-center gap-2">

@@ -1,0 +1,9 @@
+{
+    auto_https disable_redirects
+}
+
+:443 {
+    tls internal
+    encode gzip
+    reverse_proxy toolhub:8080
+}
