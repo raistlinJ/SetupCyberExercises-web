@@ -6598,6 +6598,10 @@ def import_project():
         include_vms = (request.form.get('includeVms', 'true').lower() != 'false')
     except Exception:
         include_creds, include_vms = True, True
+    try:
+        import_as_templates = (request.form.get('importAsTemplates', 'false').lower() == 'true')
+    except Exception:
+        import_as_templates = False
     s = _store()
     mats_dir = os.path.join(current_app.config["DATA_DIR"], "materials")
     os.makedirs(mats_dir, exist_ok=True)
@@ -6852,6 +6856,10 @@ def import_project_start():
         include_vms = (request.form.get('includeVms', 'true').lower() != 'false')
     except Exception:
         include_creds, include_vms = True, True
+    try:
+        import_as_templates = (request.form.get('importAsTemplates', 'false').lower() == 'true')
+    except Exception:
+        import_as_templates = False
     # Optional Proxmox connection parameters for VM restore
     prox = {
         'baseUrl': (request.form.get('baseUrl') or '').strip(),
@@ -6886,7 +6894,7 @@ def import_project_start():
     _import_job_record(job_id)
     app_obj = current_app._get_current_object()
 
-    def worker(job: str, path: str, include_creds: bool, include_vms: bool):
+    def worker(job: str, path: str, include_creds: bool, include_vms: bool, import_as_templates: bool):
         # Ensure app context in thread
         with app_obj.app_context():
             key = _import_job_key(job)
@@ -7326,6 +7334,20 @@ def import_project_start():
                                                     )
                                                 except Exception:
                                                     pass
+                                                # Optionally convert restored VMs to templates
+                                                if import_as_templates:
+                                                    try:
+                                                        _emit_import(job, f"[TEMPLATE] converting {vm_name} ({vmid}) to template")
+                                                        tmpl = f"qm template {vmid}"
+                                                        _ssh_run_stream(
+                                                            c,
+                                                            tmpl,
+                                                            sudo=use_sudo,
+                                                            sudo_password=password,
+                                                            emit=lambda m: _emit_import(job, m),
+                                                        )
+                                                    except Exception as e:
+                                                        _emit_import(job, f"[TEMPLATE][WARN] failed to convert {vm_name} ({vmid}) to template: {e}")
                                                 restored.append((vm_name, vmid))
                                             # Merge restored VMIDs onto existing VM entries, preserving other fields
                                             try:
@@ -7403,7 +7425,7 @@ def import_project_start():
                 except Exception:
                     pass
 
-    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms), daemon=True)
+    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms, import_as_templates), daemon=True)
     t.start()
     return jsonify({"job": job_id})
 

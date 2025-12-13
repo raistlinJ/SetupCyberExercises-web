@@ -4364,7 +4364,12 @@ async function performProjectImport(options = {}) {
   fd.append('file', file);
   if (options.includeCreds !== undefined) fd.append('includeCreds', options.includeCreds ? 'true' : 'false');
   if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
+  if (options.importAsTemplates !== undefined) fd.append('importAsTemplates', options.importAsTemplates ? 'true' : 'false');
   const label = `Import project: ${file.name}`;
+
+  // Publish progress into the global queue/progress system so the user can hide/show
+  // via the Queue dock, just like other tasks.
+  try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Import', 'Uploading…'); } catch {}
 
   // Prefer the dedicated Import Progress modal (scrolling log) when available.
   const modalEl = document.getElementById('importProgressModal');
@@ -4402,6 +4407,7 @@ async function performProjectImport(options = {}) {
           const mapped = Math.max(0, Math.min(35, Math.round((pct * 35) / 100)));
           const bytes = _fmtByteProgress(loaded, total);
           const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+          try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch {}
           if (hasImportModal) {
             try {
               if (bar) { bar.style.width = `${mapped}%`; bar.textContent = `${mapped}%`; bar.setAttribute('aria-valuenow', String(mapped)); }
@@ -4422,6 +4428,7 @@ async function performProjectImport(options = {}) {
       } else {
         try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch {}
       }
+      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch {}
     }, { projectId: options.queueKey || 'import' });
   } catch (err) {
     if (hasImportModal) {
@@ -4464,6 +4471,7 @@ async function performProjectImport(options = {}) {
       if (log) log.textContent = 'Import completed.';
     } catch {}
   }
+  try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
   try {
     (window.shell && shell.logSuccess)
       ? shell.logSuccess('Config: project imported')
@@ -4547,11 +4555,12 @@ function _fmtByteProgress(loaded, total){
   } catch { return ''; }
 }
 
-async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox }){
+async function _runAsyncImportWithProx({ file, includeCreds, includeVms, importAsTemplates, prox }){
   const fd = new FormData();
   fd.append('file', file);
   fd.append('includeCreds', includeCreds ? 'true' : 'false');
   fd.append('includeVms', includeVms ? 'true' : 'false');
+  if (importAsTemplates !== undefined) fd.append('importAsTemplates', importAsTemplates ? 'true' : 'false');
   if (prox) {
     if (prox.baseUrl) fd.append('baseUrl', String(prox.baseUrl));
     if (prox.apiPort !== undefined && prox.apiPort !== null && String(prox.apiPort) !== '') fd.append('apiPort', String(prox.apiPort));
@@ -4562,6 +4571,9 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox })
   }
 
   const label = `Import project: ${file?.name || 'archive'}`;
+
+  // Publish progress state for the Queue dock (do not auto-open the generic modal).
+  try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Import', 'Uploading…'); } catch {}
 
   // Optional rich import progress modal (shows full backend logs).
   const modalEl = document.getElementById('importProgressModal');
@@ -4596,17 +4608,15 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox })
     await runQueued(label, async () => {
       const resp = await _xhrPostFormData('/api/projects/import/start', fd, {
         onProgress: (pct, loaded, total) => {
-          if (!hasImportModal) {
-            try {
-              if (typeof window.updateActionProgress === 'function') {
-                // Reserve 0-30% for upload.
-                const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
-                const bytes = _fmtByteProgress(loaded, total);
-                const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
-                window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`);
-              }
-            } catch {}
-          }
+          try {
+            if (typeof window.updateActionProgress === 'function') {
+              // Reserve 0-30% for upload.
+              const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
+              const bytes = _fmtByteProgress(loaded, total);
+              const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+              window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`);
+            }
+          } catch {}
           try {
             if (bar) {
               const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
@@ -4638,8 +4648,10 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox })
   const poll = async () => {
     const s = await http('GET', `/api/projects/import/status?id=${encodeURIComponent(jobId)}`);
     const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
-    const mapped = Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
     const statusText = String(s.status || 'processing');
+    const mapped = (statusText === 'completed')
+      ? 100
+      : Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
     let detail = '';
     try {
       if (Array.isArray(s.log) && s.log.length) {
@@ -4656,10 +4668,8 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox })
       }
     } catch {}
     try {
-      if (!hasImportModal) {
-        if (typeof window.updateActionProgress === 'function') {
-          window.updateActionProgress(mapped, statusText, detail || 'Importing…');
-        }
+      if (typeof window.updateActionProgress === 'function') {
+        window.updateActionProgress(mapped, statusText, detail || 'Importing…');
       }
     } catch {}
 
@@ -4669,6 +4679,7 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox })
         bar.style.width = `${Math.max(0, Math.min(100, mapped))}%`;
         bar.textContent = `${Math.max(0, Math.min(100, mapped))}%`;
         bar.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, mapped))));
+        if (statusText === 'completed') bar.classList.remove('progress-bar-animated');
       }
       if (stat) stat.textContent = statusText;
       if (log) {
@@ -4696,10 +4707,29 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox })
     await new Promise(r => setTimeout(r, 1500));
   }
 
+  try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
   return finalStatus;
 }
 
-async function gateImportThroughProxLogin({ file, includeCreds, includeVms }){
+// Allow the Queue dock's "View Progress" action to re-open the import log modal.
+// shell.js will call this (if present) before falling back to the generic action progress modal.
+try {
+  window.openProgressDetailsModal = (progressState) => {
+    try {
+      const t = String(progressState && progressState.title ? progressState.title : '');
+      if (!t || !/^import\b/i.test(t)) return false;
+      const modalEl = document.getElementById('importProgressModal');
+      if (!modalEl || !window.bootstrap || !window.bootstrap.Modal) return false;
+      const inst = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+      inst.show();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+} catch {}
+
+async function gateImportThroughProxLogin({ file, includeCreds, includeVms, importAsTemplates }){
   // If no modal, fall back to prompts.
   if (!document.getElementById('proxLoginModal') || !window.bootstrap) {
     const baseUrl = _ensureHttpsUrl(window.prompt('Proxmox URL (https://host or host):', '') || '');
@@ -4713,7 +4743,7 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms }){
     const verifySSL = true;
     const prox = { baseUrl, apiPort, sshPort, username, password, verifySSL };
     _writeImportProxCreds({ baseUrl, apiPort, sshPort, username, password, verifySSL });
-    const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, prox });
+    const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, importAsTemplates, prox });
     // Handle success UX
     const importedId = (Array.isArray(st?.imported) && st.imported[0]?.id) || (st?.imported?.id) || '';
     try {
@@ -4742,7 +4772,7 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms }){
   if (passEl) passEl.value = sess.password || '';
   if (vsslEl) vsslEl.checked = (sess.verifySSL !== false);
 
-  window.__IMPORT_NEXT__ = { file, includeCreds, includeVms };
+  window.__IMPORT_NEXT__ = { file, includeCreds, includeVms, importAsTemplates: !!importAsTemplates };
   const modalEl = document.getElementById('proxLoginModal');
   const m = new window.bootstrap.Modal(modalEl);
   m.show();
@@ -4765,13 +4795,19 @@ function importProject() {
   }
   const credsEl = document.getElementById('imp-creds');
   const vmsEl = document.getElementById('imp-vms');
+  const templatesEl = document.getElementById('imp-as-templates');
   const warnEl = document.getElementById('imp-vms-warning');
   if (credsEl) credsEl.checked = true;
   if (vmsEl) vmsEl.checked = true;
+  if (templatesEl) { templatesEl.checked = false; templatesEl.disabled = !(vmsEl && vmsEl.checked); }
   if (warnEl) warnEl.style.display = vmsEl && vmsEl.checked ? 'block' : 'none';
   if (vmsEl) {
     vmsEl.onchange = () => {
       if (warnEl) warnEl.style.display = vmsEl.checked ? 'block' : 'none';
+      if (templatesEl) {
+        templatesEl.disabled = !vmsEl.checked;
+        if (!vmsEl.checked) templatesEl.checked = false;
+      }
     };
   }
   const modal = new window.bootstrap.Modal(modalEl);
@@ -4788,6 +4824,7 @@ function importProject() {
       if (continueBtn.dataset.busy === '1' || continueBtn.disabled) return;
       const includeCreds = !!document.getElementById('imp-creds')?.checked;
       const includeVms = !!document.getElementById('imp-vms')?.checked;
+      const importAsTemplates = includeVms && !!document.getElementById('imp-as-templates')?.checked;
       if (includeVms) {
         const proceed = confirm('Importing VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
         if (!proceed) return;
@@ -4800,10 +4837,10 @@ function importProject() {
           const input = document.getElementById('import-file');
           const file = input && input.files && input.files[0] ? input.files[0] : null;
           if (!file) return;
-          const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms });
+          const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms, importAsTemplates });
           if (ok) { try { input.value = ''; } catch {} }
         } else {
-          const ok = await performProjectImport({ includeCreds, includeVms, queueKey: 'import' });
+          const ok = await performProjectImport({ includeCreds, includeVms, importAsTemplates, queueKey: 'import' });
           if (ok) {
             try { modal.hide(); } catch {}
           }
@@ -5063,6 +5100,7 @@ async function exportProxLoginSave(){
         file,
         includeCreds: !!importNext.includeCreds,
         includeVms: !!importNext.includeVms,
+        importAsTemplates: !!importNext.importAsTemplates,
         prox,
       });
       // Post-success refresh

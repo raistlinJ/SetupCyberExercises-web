@@ -254,6 +254,10 @@
           <input class="form-check-input" type="checkbox" id="imp-vms" checked>
           <label class="form-check-label" for="imp-vms">VMs</label>
         </div>
+        <div class="form-check form-switch ms-4 mt-1">
+          <input class="form-check-input" type="checkbox" id="imp-as-templates">
+          <label class="form-check-label" for="imp-as-templates">Import VMs as templates</label>
+        </div>
         <div id="imp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
           Importing VMs can be very time-consuming. This runs on the remote host, downloads disk files, and compresses them.
         </div>
@@ -490,11 +494,29 @@
       const noneBtn = document.getElementById('imp-sel-none');
       const c = document.getElementById('imp-creds');
       const v = document.getElementById('imp-vms');
+      const t = document.getElementById('imp-as-templates');
       const warn = document.getElementById('imp-vms-warning');
       if (allBtn && noneBtn && c && v) {
-        allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (warn) warn.style.display = 'block'; });
-        noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (warn) warn.style.display = 'none'; });
-        v.addEventListener('change', () => { if (warn) warn.style.display = v.checked ? 'block' : 'none'; });
+        allBtn.addEventListener('click', () => {
+          c.checked = true;
+          v.checked = true;
+          if (warn) warn.style.display = 'block';
+          if (t) { t.disabled = false; }
+        });
+        noneBtn.addEventListener('click', () => {
+          c.checked = false;
+          v.checked = false;
+          if (warn) warn.style.display = 'none';
+          if (t) { t.checked = false; t.disabled = true; }
+        });
+        v.addEventListener('change', () => {
+          if (warn) warn.style.display = v.checked ? 'block' : 'none';
+          if (t) {
+            t.disabled = !v.checked;
+            if (!v.checked) t.checked = false;
+          }
+        });
+        if (t) { t.disabled = !v.checked; if (!v.checked) t.checked = false; }
       }
     } catch {}
   });

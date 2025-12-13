@@ -1737,18 +1737,26 @@ const ConsoleDock = (() => {
         btnEl.addEventListener('click', (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
-          if (typeof window.openActionProgressModal === 'function') {
-            window.openActionProgressModal();
-          }
+          try {
+            if (typeof window.openProgressDetailsModal === 'function') {
+              const st = (typeof window.getActionProgressState === 'function') ? window.getActionProgressState() : null;
+              if (window.openProgressDetailsModal(st)) return;
+            }
+          } catch {}
+          if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
         });
       });
       const clickableCards = body.querySelectorAll('[data-act="q-open-progress"]');
       clickableCards.forEach(card => {
         card.addEventListener('click', (ev) => {
           if (ev.target && ev.target.closest('[data-act="q-cancel-active"]')) return;
-          if (typeof window.openActionProgressModal === 'function') {
-            window.openActionProgressModal();
-          }
+          try {
+            if (typeof window.openProgressDetailsModal === 'function') {
+              const st = (typeof window.getActionProgressState === 'function') ? window.getActionProgressState() : null;
+              if (window.openProgressDetailsModal(st)) return;
+            }
+          } catch {}
+          if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
         });
       });
     }
