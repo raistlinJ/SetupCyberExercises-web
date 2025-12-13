@@ -1174,6 +1174,7 @@ function ctfdRestoreSnapshot(){
   const info = document.getElementById('ctfd-info');
   if (info && PROJ) info.textContent = '';
       } catch {}
+      try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
       renderCtfdTable(PROJ);
       return true;
     }
@@ -1233,6 +1234,63 @@ function ctfdMigrateSelectedToAssoc(basePid){ try {
   try { sessionStorage.removeItem(CTFD_STORE_SELECTED); } catch {}
 } catch {} }
 function ctfdCurrentPid(){ try { return (window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : (PROJ?.id||''); } catch { return PROJ?.id||''; } }
+
+function _ctfdBuildServerHref(proj){
+  try {
+    const baseRaw = (proj && proj.challenge_url != null) ? String(proj.challenge_url).trim()
+      : ((proj && proj.ctfd_url != null) ? String(proj.ctfd_url).trim() : '');
+    if (!baseRaw) return '';
+    const portRaw = (proj && proj.challenge_port != null) ? String(proj.challenge_port).trim()
+      : ((proj && proj.ctfd_port != null) ? String(proj.ctfd_port).trim() : '');
+    const u = new URL(normalizeUrl(baseRaw));
+    if (portRaw && !u.port) u.port = portRaw;
+    return u.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function ctfdUpdateServerNavLinkForCurrent(){
+  const link = document.getElementById('nav-ctfd-link');
+  if (!link) return;
+  let proj = PROJ;
+  try {
+    const cur = String(ctfdCurrentPid() || '').trim();
+    if (cur && (!proj || String(proj.id) !== cur)) {
+      proj = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === cur) || null;
+    }
+  } catch {}
+  const href = _ctfdBuildServerHref(proj);
+  if (href) {
+    link.href = href;
+    try {
+      const u = new URL(href);
+      const hostPort = u.host || href;
+      link.textContent = `Server: ${hostPort}`;
+      link.title = href;
+    } catch {
+      link.textContent = `Server: ${href}`;
+      link.title = href;
+    }
+    link.classList.remove('disabled');
+    try {
+      link.classList.remove('border-secondary', 'text-muted');
+      link.classList.add('border-primary', 'text-primary');
+    } catch {}
+    link.removeAttribute('aria-disabled');
+    link.removeAttribute('tabindex');
+  } else {
+    link.href = '#';
+    link.textContent = 'Server: —';
+    link.classList.add('disabled');
+    try {
+      link.classList.remove('border-primary', 'text-primary');
+      link.classList.add('border-secondary', 'text-muted');
+    } catch {}
+    link.setAttribute('aria-disabled', 'true');
+    link.setAttribute('tabindex', '-1');
+  }
+}
 
 function ctfdSelectionMatches(expectedPid){
   const target = String(expectedPid || '').trim();
@@ -2382,6 +2440,7 @@ async function ctfdLoadProjectConfig(pid){
     }
     if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
     PROJ = proj;
+    try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
   if(info) info.textContent = '';
@@ -2496,6 +2555,7 @@ async function ctfdLoadProjectById(pid){
     }
     if (abortIfStale()) return;
   PROJ = proj; if(info) info.textContent = '';
+    try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
     // Restore UI state for this project
@@ -2978,6 +3038,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await shell.initShell('vm'); // reuse same sidebar population logic
   // First try to restore previous in-session view so page switch won't blank the table
   try { if (ctfdRestoreSnapshot()) { updateCtfdControlsEnabled(); } } catch {}
+  try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
   wireCtfdFilter();
   wireCtfdLogin();
   wireCtfdCols();
@@ -3056,6 +3117,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('project-selected', (e)=>{
       try {
         const pid = e.detail || '';
+        try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
         ctfdStopCountdown(false);
         CTFD_LAST_CHALLENGES_STATE = null;
         CTFD_CHALLENGE_REVEAL_EXPECTED = false;
