@@ -583,4 +583,31 @@ if __name__ == "__main__":
     from waitress import serve
     app = create_app()
     port = int(os.environ.get("PORT", "8080"))
-    serve(app, host="0.0.0.0", port=port)
+    def _env_int(name: str, default: int) -> int:
+        try:
+            value = os.environ.get(name)
+            if value is None:
+                return default
+            parsed = int(value)
+            return parsed
+        except Exception:
+            return default
+
+    def _waitress_body_cap() -> int:
+        # Default to unlimited unless explicitly capped.
+        default_cap = 0
+        cap = _env_int("WAITRESS_MAX_REQUEST_BODY", default_cap)
+        if cap == 0:
+            return (2**63) - 1
+        if cap < 0:
+            return 50 * 1024 * 1024 * 1024
+        return cap
+
+    serve(
+        app,
+        host="0.0.0.0",
+        port=port,
+        max_request_body_size=_waitress_body_cap(),
+        inbuf_overflow=_env_int("WAITRESS_INBUF_OVERFLOW", 512 * 1024 * 1024),
+        outbuf_overflow=_env_int("WAITRESS_OUTBUF_OVERFLOW", 512 * 1024 * 1024),
+    )

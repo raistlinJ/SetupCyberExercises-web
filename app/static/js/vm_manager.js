@@ -67,6 +67,7 @@ function vmUpdateProxmoxNavLinkForCurrent(){
   } catch {}
   const href = _vmBuildProxmoxHref(proj);
   if (href) {
+    try { link.classList.remove('d-none'); } catch {}
     link.href = href;
     try {
       const u = new URL(href);
@@ -87,6 +88,7 @@ function vmUpdateProxmoxNavLinkForCurrent(){
   } else {
     link.href = '#';
     link.textContent = 'Server: —';
+    try { link.classList.add('d-none'); } catch {}
     link.classList.add('disabled');
     try {
       link.classList.remove('border-primary', 'text-primary');
@@ -154,7 +156,20 @@ var http = (typeof window !== 'undefined' && typeof window.http === 'function')
       const res = await fetch(url, opts);
       if (!res.ok) {
         let msg = res.statusText;
-        try { msg = (await res.text()) || msg; } catch {}
+        let bodyText = '';
+        try { bodyText = (await res.text()) || ''; } catch {}
+        if (bodyText) msg = bodyText;
+        try {
+          if (res.status === 403) {
+            let extracted = '';
+            try {
+              const parsed = JSON.parse(bodyText || '{}');
+              extracted = (parsed && (parsed.error || parsed.message)) ? String(parsed.error || parsed.message) : '';
+            } catch {}
+            const warn = extracted || (bodyText || 'Action is disabled when app is running in remote mode.');
+            try { if (typeof window.showToast === 'function') window.showToast(warn, 'warning'); } catch {}
+          }
+        } catch {}
         throw new Error(msg || `HTTP ${res.status}`);
       }
       const ct = res.headers.get('content-type') || '';

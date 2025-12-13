@@ -563,6 +563,7 @@ function ctfdBuildSpeechPlan(key, context, fallbackText){
   return { segments, hasSpeech, hasAudio: compiled.hasAudio };
 }
 async function ctfdTryPlayCustomAudio(key, delaySeconds){
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return { played: false, duration: 0 }; } catch {}
   try {
     const entry = ctfdGetAudioEntry(key);
     if (!ctfdIsAudioEnabled(key)) return { played: false, duration: 0 };
@@ -644,6 +645,7 @@ function ctfdBuildFallbackPattern(key){
   return clone;
 }
 function ctfdPlayFallbackPattern(pattern, delaySeconds){
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return Promise.resolve({ played: false, duration: 0 }); } catch {}
   try {
     if (!Array.isArray(pattern) || !pattern.length) return Promise.resolve({ played: false, duration: 0 });
     const key = pattern.key;
@@ -725,6 +727,7 @@ function ctfdWaitSeconds(seconds){
   return new Promise(resolve => setTimeout(resolve, delay * 1000));
 }
 function ctfdSpeakTextSegment(text, opts){
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return Promise.resolve({ spoke: false, elapsed: 0 }); } catch {}
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return Promise.resolve({ spoke: false, elapsed: 0 });
   return new Promise((resolve) => {
@@ -1262,6 +1265,7 @@ function ctfdUpdateServerNavLinkForCurrent(){
   } catch {}
   const href = _ctfdBuildServerHref(proj);
   if (href) {
+    try { link.classList.remove('d-none'); } catch {}
     link.href = href;
     try {
       const u = new URL(href);
@@ -1282,6 +1286,7 @@ function ctfdUpdateServerNavLinkForCurrent(){
   } else {
     link.href = '#';
     link.textContent = 'Server: —';
+    try { link.classList.add('d-none'); } catch {}
     link.classList.add('disabled');
     try {
       link.classList.remove('border-primary', 'text-primary');

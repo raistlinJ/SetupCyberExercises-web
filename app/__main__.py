@@ -39,17 +39,28 @@ if __name__ == "__main__":
             if value is None:
                 return default
             parsed = int(value)
-            return parsed if parsed > 0 else default
+            return parsed
         except Exception:
             return default
+
+    def _waitress_body_cap() -> int:
+        # Waitress enforces max_request_body_size as a hard cap.
+        # Treat 0 (and the default when unset) as "disable" by setting an effectively-unbounded cap.
+        default_cap = 0
+        cap = _env_int("WAITRESS_MAX_REQUEST_BODY", default_cap)
+        if cap == 0:
+            return (2**63) - 1
+        if cap < 0:
+            return 50 * 1024 * 1024 * 1024
+        return cap
 
     waitress_params = {
         "host": "0.0.0.0",
         "port": p,
         # Allow large imports/exports unless overridden via env vars
-        "max_request_body_size": _env_int("WAITRESS_MAX_REQUEST_BODY", 8 * 1024 * 1024 * 1024),  # 8 GiB
-        "inbuf_overflow": _env_int("WAITRESS_INBUF_OVERFLOW", 64 * 1024 * 1024),  # 64 MiB
-        "outbuf_overflow": _env_int("WAITRESS_OUTBUF_OVERFLOW", 64 * 1024 * 1024),
+        "max_request_body_size": _waitress_body_cap(),
+        "inbuf_overflow": _env_int("WAITRESS_INBUF_OVERFLOW", 512 * 1024 * 1024),  # 512 MiB
+        "outbuf_overflow": _env_int("WAITRESS_OUTBUF_OVERFLOW", 512 * 1024 * 1024),
     }
     app.logger.info("Starting Waitress on port %s (body cap=%s bytes)", p, waitress_params["max_request_body_size"])
     serve(app, **waitress_params)

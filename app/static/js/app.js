@@ -410,7 +410,21 @@ async function http(method, url, body) {
   const res = await fetch(url, opts);
   if (!res.ok) {
     let msg = res.statusText;
-    try { msg = (await res.text()) || msg; } catch {}
+    let bodyText = '';
+    try { bodyText = (await res.text()) || ''; } catch {}
+    if (bodyText) msg = bodyText;
+    // Remote-mode enforcement uses HTTP 403; show a friendly message when possible.
+    try {
+      if (res.status === 403) {
+        let extracted = '';
+        try {
+          const parsed = JSON.parse(bodyText || '{}');
+          extracted = (parsed && (parsed.error || parsed.message)) ? String(parsed.error || parsed.message) : '';
+        } catch {}
+        const warn = extracted || (bodyText || 'Action is disabled when app is running in remote mode.');
+        try { if (typeof window.showToast === 'function') window.showToast(warn, 'warning'); } catch {}
+      }
+    } catch {}
     throw new Error(msg || `HTTP ${res.status}`);
   }
   const ct = res.headers.get('content-type') || '';
@@ -684,6 +698,7 @@ function settingsModalBuildPreviewSpeechText(key, entry){
   return settingsModalRenderSpeechTemplate(tpl, context);
 }
 function settingsModalSpeakPreview(text){
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
   if (!text || !settingsSpeechSupported()) return;
   try {
     settingsModalSyncTtsWorkingFromInputs();
@@ -1123,6 +1138,16 @@ async function settingsModalResetFromStorage(){
   if (defCfg) defCfg.checked = !!settings.defaultCfgExpanded;
   if (defVm) defVm.checked = !!settings.defaultVmExpanded;
   if (defMat) defMat.checked = !!settings.defaultMatExpanded;
+  try {
+    const remoteToggle = document.getElementById('settings-run-remote');
+    if (remoteToggle) {
+      let checked = false;
+      try { checked = !!(window.shell && shell.isRemote && shell.isRemote()); } catch {}
+      if (!checked) checked = (settings && settings.runMode === 'remote');
+      remoteToggle.checked = !!checked;
+    }
+  } catch {}
+  try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(); } catch {}
   const currentPid = (window.shell && shell.getCurrentProjectId) ? String(shell.getCurrentProjectId() || '').trim() : '';
   let projectAudio = {};
   let audioLoaded = false;
@@ -1185,6 +1210,7 @@ function settingsModalHandleFile(key, file){
   reader.readAsDataURL(file);
 }
 function settingsModalPreviewAudio(key, soundIndex){
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
   try {
     const entry = settingsAudioEnsureEntry(key);
     if (!entry) return;
@@ -1448,6 +1474,25 @@ async function saveSettingsInternal(){
   if (defCfg) settings.defaultCfgExpanded = !!defCfg.checked;
   if (defVm) settings.defaultVmExpanded = !!defVm.checked;
   if (defMat) settings.defaultMatExpanded = !!defMat.checked;
+  let remoteMode = false;
+  let runModeSavedOk = true;
+  let runModeSaveStatus = 0;
+  try {
+    const remoteToggle = document.getElementById('settings-run-remote');
+    remoteMode = !!remoteToggle?.checked;
+    // Persist via shell (localStorage + server). Don't pin to per-browser settings.
+    try {
+      if (window.shell && shell.setRunModeAsync) {
+        const res = await shell.setRunModeAsync(remoteMode ? 'remote' : 'local');
+        runModeSavedOk = !!res?.ok;
+        runModeSaveStatus = Number(res?.status || 0);
+      } else if (window.shell && shell.setRunMode) {
+        shell.setRunMode(remoteMode ? 'remote' : 'local');
+        runModeSavedOk = true;
+      }
+    } catch { runModeSavedOk = false; }
+    try { delete settings.runMode; } catch {}
+  } catch {}
   settingsModalSyncTtsWorkingFromInputs();
   const nextRate = settingsClampNumber(_settingsTtsWorking.rate ?? SETTINGS_TTS_DEFAULT_RATE, SETTINGS_TTS_MIN_RATE, SETTINGS_TTS_MAX_RATE, SETTINGS_TTS_DEFAULT_RATE);
   const nextPitch = settingsClampNumber(_settingsTtsWorking.pitch ?? SETTINGS_TTS_DEFAULT_PITCH, SETTINGS_TTS_MIN_PITCH, SETTINGS_TTS_MAX_PITCH, SETTINGS_TTS_DEFAULT_PITCH);
@@ -1530,6 +1575,7 @@ async function saveSettingsInternal(){
   if (Object.keys(audioForStorage).length) settings.audio = audioForStorage;
   else delete settings.audio;
   writeSettings(settings);
+  // run mode already persisted above
   try { document.dispatchEvent(new CustomEvent('settings-changed', { detail: { settings } })); } catch {}
   let resetFailed = false;
   try {
@@ -1540,6 +1586,16 @@ async function saveSettingsInternal(){
   }
   let toastMessage = 'Settings saved.';
   let toastLevel = 'success';
+  if (!runModeSavedOk) {
+    if (runModeSaveStatus === 404) {
+      toastMessage = 'Settings saved locally, but this server does not support Remote mode persistence yet (404 /api/runtime). Rebuild/restart the containers.';
+    } else if (runModeSaveStatus) {
+      toastMessage = `Settings saved locally, but failed to persist Remote mode on the server (HTTP ${runModeSaveStatus}).`;
+    } else {
+      toastMessage = 'Settings saved locally, but failed to persist Remote mode on the server.';
+    }
+    toastLevel = 'warning';
+  }
   if (audioSaveFailed && resetFailed) {
     toastMessage = 'Settings saved locally, but the server update failed and the UI may be stale. Please reload.';
     toastLevel = 'warning';
@@ -1589,6 +1645,8 @@ async function loadProjects() {
       }
     }
     try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Config: loaded ${(data.projects||[]).length} project(s)`) : console.log('Config: projects loaded'); } catch {}
+    // Ensure any dynamically rendered controls get remote-mode disabling.
+    try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(container); } catch {}
   } catch (e) {
     container.innerHTML = `<div class="text-danger">Error: ${e.message}</div>`;
     try { (window.shell && shell.logError) ? shell.logError('Config: load projects failed: ' + e.message) : console.error('Config load failed:', e); } catch {}
@@ -2684,7 +2742,7 @@ function renderProjectCard(p) {
         </div>
         <div class="ms-auto d-flex gap-2">
           <button class="btn btn-sm btn-outline-primary" onclick="duplicateProject('${p.id}')">Duplicate</button>
-          <button class="btn btn-sm btn-outline-secondary" onclick="openExportOptions('${p.id}')">Export</button>
+          <button class="btn btn-sm btn-outline-secondary" data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode." onclick="openExportOptions('${p.id}')">Export</button>
           <button class="btn btn-sm btn-outline-danger" onclick="deleteProject('${p.id}')">Delete</button>
         </div>
       </div>
@@ -4218,6 +4276,12 @@ document.addEventListener('DOMContentLoaded', () => {
 let EXPORT_CONTEXT = { pid: null };
 
 function openExportOptions(pid) {
+  try {
+    if (window.shell && shell.isRemote && shell.isRemote()) {
+      try { showToast('Export is disabled in remote mode.', 'warning'); } catch { alert('Export is disabled in remote mode.'); }
+      return;
+    }
+  } catch {}
   EXPORT_CONTEXT.pid = pid;
   try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: open export options for ${pid}`) : console.log('Open export options', pid); } catch {}
   const modalEl = document.getElementById('exportOptionsModal');
@@ -4287,6 +4351,12 @@ function openExportOptions(pid) {
 }
 
 async function performProjectImport(options = {}) {
+  try {
+    if (window.shell && shell.isRemote && shell.isRemote()) {
+      try { showToast('Import is disabled in remote mode.', 'warning'); } catch { alert('Import is disabled in remote mode.'); }
+      return false;
+    }
+  } catch {}
   const input = document.getElementById('import-file');
   if (!input || !input.files || !input.files[0]) return false;
   const file = input.files[0];
@@ -4295,23 +4365,72 @@ async function performProjectImport(options = {}) {
   if (options.includeCreds !== undefined) fd.append('includeCreds', options.includeCreds ? 'true' : 'false');
   if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
   const label = `Import project: ${file.name}`;
-  try {
-    if (typeof window.showActionProgress === 'function') {
-      window.showActionProgress('Import', 'Uploading…');
-      if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
-    }
-  } catch {}
+
+  // Prefer the dedicated Import Progress modal (scrolling log) when available.
+  const modalEl = document.getElementById('importProgressModal');
+  const hasImportModal = !!(modalEl && window.bootstrap);
+  const bar = document.getElementById('imp-prog-bar');
+  const stat = document.getElementById('imp-status');
+  const log = document.getElementById('imp-log');
+  let modalInst = null;
+  if (hasImportModal) {
+    try {
+      modalInst = new window.bootstrap.Modal(modalEl);
+      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow','0'); }
+      if (stat) stat.textContent = 'Uploading…';
+      if (log) log.textContent = 'Preparing upload…';
+      modalInst.show();
+    } catch {}
+  } else {
+    // Fallback to action progress (only if import modal isn't available).
+    try {
+      if (typeof window.showActionProgress === 'function') {
+        window.showActionProgress('Import', 'Uploading…');
+        if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
+      }
+    } catch {}
+  }
   try {
     if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(true);
   } catch {}
   let resp = null;
   try {
     await runQueued(label, async () => {
-      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(35, 'Importing…', 'Sending archive to server…'); } catch {}
-      resp = await http('POST', '/api/projects/import', fd);
-      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch {}
+      // Use XHR for legacy import so we can show byte upload progress.
+      resp = await _xhrPostFormData('/api/projects/import', fd, {
+        onProgress: (pct, loaded, total) => {
+          const mapped = Math.max(0, Math.min(35, Math.round((pct * 35) / 100)));
+          const bytes = _fmtByteProgress(loaded, total);
+          const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+          if (hasImportModal) {
+            try {
+              if (bar) { bar.style.width = `${mapped}%`; bar.textContent = `${mapped}%`; bar.setAttribute('aria-valuenow', String(mapped)); }
+              if (stat) stat.textContent = line;
+              if (log) log.textContent = line;
+            } catch {}
+          } else {
+            try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch {}
+          }
+        }
+      });
+      if (hasImportModal) {
+        try {
+          if (bar) { bar.style.width = '90%'; bar.textContent = '90%'; bar.setAttribute('aria-valuenow','90'); }
+          if (stat) stat.textContent = 'Finalizing…';
+          if (log) log.textContent = 'Applying imported configuration…';
+        } catch {}
+      } else {
+        try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch {}
+      }
     }, { projectId: options.queueKey || 'import' });
   } catch (err) {
+    if (hasImportModal) {
+      try {
+        if (bar) { bar.style.width = '100%'; bar.textContent = 'Error'; bar.setAttribute('aria-valuenow','100'); bar.classList.remove('progress-bar-animated'); }
+        if (stat) stat.textContent = 'error';
+        if (log) log.textContent = 'Failed to import project: ' + (err?.message || err);
+      } catch {}
+    }
     try { showToast('Failed to import project: ' + (err?.message || err), 'danger'); } catch {}
     try {
       (window.shell && shell.logError)
@@ -4323,7 +4442,9 @@ async function performProjectImport(options = {}) {
     try {
       if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(false);
     } catch {}
-    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+    if (!hasImportModal) {
+      try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+    }
   }
   if (!resp) return false;
   try { input.value = ''; } catch {}
@@ -4336,6 +4457,13 @@ async function performProjectImport(options = {}) {
     if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config');
   } catch {}
   try { showToast('Project imported.', 'success'); } catch {}
+  if (hasImportModal) {
+    try {
+      if (bar) { bar.style.width = '100%'; bar.textContent = '100%'; bar.setAttribute('aria-valuenow','100'); bar.classList.remove('progress-bar-animated'); }
+      if (stat) stat.textContent = 'completed';
+      if (log) log.textContent = 'Import completed.';
+    } catch {}
+  }
   try {
     (window.shell && shell.logSuccess)
       ? shell.logSuccess('Config: project imported')
@@ -4344,7 +4472,290 @@ async function performProjectImport(options = {}) {
   return true;
 }
 
+// --- Proxmox gating + async import (for VM restores) ---
+
+function _readImportProxCreds(){
+  try { return JSON.parse(sessionStorage.getItem('toolhub.session.proxmox.import') || '{}'); } catch { return {}; }
+}
+function _writeImportProxCreds(creds){
+  try { sessionStorage.setItem('toolhub.session.proxmox.import', JSON.stringify(creds || {})); } catch {}
+}
+
+function _ensureHttpsUrl(raw){
+  try {
+    const s = (raw || '').trim();
+    if (!s) return '';
+    return /^https?:\/\//i.test(s) ? s : `https://${s}`;
+  } catch { return ''; }
+}
+
+function _xhrPostFormData(url, formData, { onProgress } = {}){
+  return new Promise((resolve, reject) => {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url, true);
+      xhr.responseType = 'text';
+      xhr.upload.onprogress = (ev) => {
+        try {
+          if (!onProgress || !ev || !ev.lengthComputable) return;
+          const pct = Math.max(0, Math.min(100, Math.round((ev.loaded * 100) / Math.max(ev.total, 1))));
+          onProgress(pct, ev.loaded, ev.total);
+        } catch {}
+      };
+      xhr.onload = () => {
+        try {
+          const status = xhr.status || 0;
+          const text = xhr.responseText || '';
+          let body = null;
+          try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+          if (status >= 200 && status < 300) return resolve(body);
+          const msg = (body && typeof body === 'object' && body.error) ? body.error : (typeof body === 'string' && body ? body : `HTTP ${status}`);
+          const err = new Error(msg);
+          err.status = status;
+          err.body = body;
+          return reject(err);
+        } catch (e) { return reject(e); }
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(formData);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function _fmtBytes(n){
+  try {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v < 0) return '0 B';
+    const units = ['B','KB','MB','GB','TB'];
+    let x = v;
+    let i = 0;
+    while (x >= 1024 && i < units.length - 1) { x /= 1024; i += 1; }
+    const prec = i === 0 ? 0 : (x >= 10 ? 1 : 2);
+    return `${x.toFixed(prec)} ${units[i]}`;
+  } catch { return '0 B'; }
+}
+
+function _fmtByteProgress(loaded, total){
+  try {
+    const l = Number(loaded);
+    const t = Number(total);
+    if (Number.isFinite(l) && Number.isFinite(t) && t > 0) return `${_fmtBytes(l)} / ${_fmtBytes(t)}`;
+    if (Number.isFinite(l)) return `${_fmtBytes(l)} / ?`;
+    return '';
+  } catch { return ''; }
+}
+
+async function _runAsyncImportWithProx({ file, includeCreds, includeVms, prox }){
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('includeCreds', includeCreds ? 'true' : 'false');
+  fd.append('includeVms', includeVms ? 'true' : 'false');
+  if (prox) {
+    if (prox.baseUrl) fd.append('baseUrl', String(prox.baseUrl));
+    if (prox.apiPort !== undefined && prox.apiPort !== null && String(prox.apiPort) !== '') fd.append('apiPort', String(prox.apiPort));
+    if (prox.sshPort !== undefined && prox.sshPort !== null && String(prox.sshPort) !== '') fd.append('sshPort', String(prox.sshPort));
+    if (prox.username) fd.append('username', String(prox.username));
+    if (prox.password) fd.append('password', String(prox.password));
+    if (prox.verifySSL !== undefined) fd.append('verifySSL', prox.verifySSL ? 'true' : 'false');
+  }
+
+  const label = `Import project: ${file?.name || 'archive'}`;
+
+  // Optional rich import progress modal (shows full backend logs).
+  const modalEl = document.getElementById('importProgressModal');
+  const hasImportModal = !!(modalEl && window.bootstrap);
+  const bar = document.getElementById('imp-prog-bar');
+  const stat = document.getElementById('imp-status');
+  const log = document.getElementById('imp-log');
+  let modalInst = null;
+  if (hasImportModal) {
+    try {
+      modalInst = new window.bootstrap.Modal(modalEl);
+      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow','0'); }
+      if (stat) stat.textContent = 'Uploading…';
+      if (log) log.textContent = 'Waiting…';
+      modalInst.show();
+    } catch {}
+  }
+
+  // Only use action progress as a fallback when the Import Progress modal isn't present.
+  if (!hasImportModal) {
+    try {
+      if (typeof window.showActionProgress === 'function') {
+        window.showActionProgress('Import', 'Uploading…');
+        if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
+      }
+    } catch {}
+  }
+
+  let jobId = '';
+  let lastLogCount = 0;
+  try {
+    await runQueued(label, async () => {
+      const resp = await _xhrPostFormData('/api/projects/import/start', fd, {
+        onProgress: (pct, loaded, total) => {
+          if (!hasImportModal) {
+            try {
+              if (typeof window.updateActionProgress === 'function') {
+                // Reserve 0-30% for upload.
+                const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
+                const bytes = _fmtByteProgress(loaded, total);
+                const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+                window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`);
+              }
+            } catch {}
+          }
+          try {
+            if (bar) {
+              const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
+              bar.style.width = `${mapped}%`;
+              bar.textContent = `${mapped}%`;
+              bar.setAttribute('aria-valuenow', String(mapped));
+            }
+            const bytes = _fmtByteProgress(loaded, total);
+            const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+            if (stat) stat.textContent = line;
+            if (log) log.textContent = line;
+          } catch {}
+        }
+      });
+      jobId = resp && typeof resp === 'object' ? String(resp.job || '') : '';
+      if (!jobId) throw new Error('Import did not return a job id');
+    }, { projectId: 'import' });
+  } catch (e) {
+    // Friendly remote-mode message if backend blocks
+    if (e && (e.status === 403 || e.status === 401)) {
+      try {
+        const msg = (e.body && e.body.error) ? e.body.error : 'Import is not allowed.';
+        showToast(msg, e.status === 403 ? 'warning' : 'danger');
+      } catch {}
+    }
+    throw e;
+  }
+
+  const poll = async () => {
+    const s = await http('GET', `/api/projects/import/status?id=${encodeURIComponent(jobId)}`);
+    const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
+    const mapped = Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
+    const statusText = String(s.status || 'processing');
+    let detail = '';
+    try {
+      if (Array.isArray(s.log) && s.log.length) {
+        detail = String(s.log[s.log.length - 1] || '');
+        // Stream only new lines to console dock as DEBUG
+        try {
+          const start = Math.max(0, lastLogCount);
+          for (let i = start; i < s.log.length; i++) {
+            if (window.shell && shell.logDebug) shell.logDebug(`[IMPORT] ${s.log[i]}`);
+            else console.debug('[IMPORT]', s.log[i]);
+          }
+          lastLogCount = s.log.length;
+        } catch {}
+      }
+    } catch {}
+    try {
+      if (!hasImportModal) {
+        if (typeof window.updateActionProgress === 'function') {
+          window.updateActionProgress(mapped, statusText, detail || 'Importing…');
+        }
+      }
+    } catch {}
+
+    // Update import progress modal with full log.
+    try {
+      if (bar) {
+        bar.style.width = `${Math.max(0, Math.min(100, mapped))}%`;
+        bar.textContent = `${Math.max(0, Math.min(100, mapped))}%`;
+        bar.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, mapped))));
+      }
+      if (stat) stat.textContent = statusText;
+      if (log) {
+        if (Array.isArray(s.log) && s.log.length) {
+          log.textContent = s.log.join('\n');
+          try {
+            const box = log.parentElement;
+            if (box) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+          } catch {}
+        } else {
+          log.textContent = detail || '';
+        }
+      }
+    } catch {}
+
+    if (statusText === 'completed') return { done: true, ok: true, status: s };
+    if (statusText === 'error' || statusText === 'cancelled') return { done: true, ok: false, status: s };
+    return { done: false, ok: false, status: s };
+  };
+
+  let finalStatus = null;
+  while (true) {
+    const res = await poll();
+    if (res.done) { finalStatus = res.status; if (!res.ok) throw new Error((res.status?.errors && res.status.errors[0]) || 'Import failed'); break; }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+
+  return finalStatus;
+}
+
+async function gateImportThroughProxLogin({ file, includeCreds, includeVms }){
+  // If no modal, fall back to prompts.
+  if (!document.getElementById('proxLoginModal') || !window.bootstrap) {
+    const baseUrl = _ensureHttpsUrl(window.prompt('Proxmox URL (https://host or host):', '') || '');
+    if (!baseUrl) return false;
+    const username = (window.prompt('Proxmox username (e.g., root@pam):', '') || '').trim();
+    if (!username) return false;
+    const password = (window.prompt('Proxmox password:', '') || '');
+    if (!password) return false;
+    const apiPort = Number(window.prompt('API Port:', '8006') || 8006);
+    const sshPort = Number(window.prompt('SSH Port:', '22') || 22);
+    const verifySSL = true;
+    const prox = { baseUrl, apiPort, sshPort, username, password, verifySSL };
+    _writeImportProxCreds({ baseUrl, apiPort, sshPort, username, password, verifySSL });
+    const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, prox });
+    // Handle success UX
+    const importedId = (Array.isArray(st?.imported) && st.imported[0]?.id) || (st?.imported?.id) || '';
+    try {
+      if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') shell.setCurrentProjectId(importedId);
+    } catch {}
+    try { await loadProjects(); } catch {}
+    try { if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config'); } catch {}
+    try { showToast('Project imported.', 'success'); } catch {}
+    return true;
+  }
+
+  // Prefill from last-used import creds
+  const sess = _readImportProxCreds() || {};
+  const urlEl = document.getElementById('prox-url');
+  const apiEl = document.getElementById('prox-api-port');
+  const sshEl = document.getElementById('prox-ssh-port');
+  const userEl = document.getElementById('prox-username');
+  const passEl = document.getElementById('prox-password');
+  const vsslEl = document.getElementById('prox-verify-ssl');
+  const feedback = document.getElementById('prox-login-feedback');
+  if (feedback) { feedback.textContent = ''; feedback.className = 'me-auto small'; }
+  if (urlEl) urlEl.value = sess.baseUrl || '';
+  if (apiEl) apiEl.value = (sess.apiPort ?? 8006);
+  if (sshEl) sshEl.value = (sess.sshPort ?? 22);
+  if (userEl) userEl.value = sess.username || '';
+  if (passEl) passEl.value = sess.password || '';
+  if (vsslEl) vsslEl.checked = (sess.verifySSL !== false);
+
+  window.__IMPORT_NEXT__ = { file, includeCreds, includeVms };
+  const modalEl = document.getElementById('proxLoginModal');
+  const m = new window.bootstrap.Modal(modalEl);
+  m.show();
+  return true;
+}
+
 function importProject() {
+  try {
+    if (window.shell && shell.isRemote && shell.isRemote()) {
+      try { showToast('Import is disabled in remote mode.', 'warning'); } catch { alert('Import is disabled in remote mode.'); }
+      return;
+    }
+  } catch {}
   const input = document.getElementById('import-file');
   if (!input || !input.files || !input.files[0]) return;
   const modalEl = document.getElementById('importOptionsModal');
@@ -4363,7 +4774,7 @@ function importProject() {
       if (warnEl) warnEl.style.display = vmsEl.checked ? 'block' : 'none';
     };
   }
-  const modal = new bootstrap.Modal(modalEl);
+  const modal = new window.bootstrap.Modal(modalEl);
   const continueBtn = document.getElementById('imp-continue');
   if (continueBtn) {
     const setBusy = (flag) => {
@@ -4383,9 +4794,19 @@ function importProject() {
       }
       setBusy(true);
       try {
-        const ok = await performProjectImport({ includeCreds, includeVms, queueKey: 'import' });
-        if (ok) {
+        // If importing VMs, prompt for Proxmox target and run async import job.
+        if (includeVms) {
           try { modal.hide(); } catch {}
+          const input = document.getElementById('import-file');
+          const file = input && input.files && input.files[0] ? input.files[0] : null;
+          if (!file) return;
+          const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms });
+          if (ok) { try { input.value = ''; } catch {} }
+        } else {
+          const ok = await performProjectImport({ includeCreds, includeVms, queueKey: 'import' });
+          if (ok) {
+            try { modal.hide(); } catch {}
+          }
         }
       } finally {
         setBusy(false);
@@ -4396,6 +4817,12 @@ function importProject() {
 }
 
 async function startExportJob(pid, opts) {
+  try {
+    if (window.shell && shell.isRemote && shell.isRemote()) {
+      try { showToast('Export is disabled in remote mode.', 'warning'); } catch { alert('Export is disabled in remote mode.'); }
+      return;
+    }
+  } catch {}
   // Read Proxmox session creds from sessionStorage
   const sess = readProxCreds(pid) || {};
   const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, username: sess.username || '', password: sess.password || '' };
@@ -4549,9 +4976,11 @@ async function gateExportThroughProxLogin(pid, opts){
 }
 
 async function exportProxLoginSave(){
-  const next = window.__EXPORT_NEXT__;
-  if (!next) return;
-  const { pid, opts } = next;
+  const exportNext = window.__EXPORT_NEXT__;
+  const importNext = window.__IMPORT_NEXT__;
+  if (!exportNext && !importNext) return;
+  const pid = exportNext ? exportNext.pid : null;
+  const opts = exportNext ? exportNext.opts : null;
   const saveBtn = document.getElementById('btn-prox-save');
   const setBusy = (flag) => { if (saveBtn) saveBtn.disabled = !!flag; };
   const urlEl = document.getElementById('prox-url');
@@ -4563,52 +4992,91 @@ async function exportProxLoginSave(){
   const feedback = document.getElementById('prox-login-feedback');
   setBusy(true);
   try {
-    const data = await http('GET', '/api/projects');
-    const proj = (data.projects || []).find(p => p.id === pid);
-    if (!proj) { alert('Project not found.'); return; }
     const ensure = (s)=>{ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; };
-    const url = ensure((urlEl?.value||proj.proxmox_url||'').trim());
-    const apiPort = Number((apiEl?.value||proj.proxmox_api_port||8006));
-    const sshPort = Number((sshEl?.value||proj.proxmox_ssh_port||22));
+    const urlRaw = (urlEl?.value || '').trim();
+    const url = ensure(urlRaw);
+    const apiPort = Number((apiEl?.value || 8006));
+    const sshPort = Number((sshEl?.value || 22));
     const username = (userEl?.value||'').trim();
     const password = passEl?.value || '';
     const verifySSL = !!(vsslEl?.checked);
     if (!url){ if (feedback){ feedback.textContent='Enter Proxmox URL'; feedback.className='me-auto small text-danger'; } return; }
     if (!username || !password){ if (feedback){ feedback.textContent='Enter username and password'; feedback.className='me-auto small text-danger'; } return; }
-    try {
-      await http('PATCH', `/api/projects/${encodeURIComponent(pid)}`, {
-        proxmox_url: url, proxmox_api_port: apiPort, proxmox_ssh_port: sshPort, proxmox_verify_ssl: verifySSL
-      });
-    } catch {}
-    try { sessionStorage.setItem(`toolhub.session.proxmox.${pid}`, JSON.stringify({ username, password })); } catch {}
-    let verify;
-    try {
-      await runQueued(`Verify Proxmox login for ${proj?.name || pid}`, async () => {
-        verify = await http('POST', `/api/projects/${encodeURIComponent(pid)}/proxmox/verify`, {
-          baseUrl: url, apiPort, sshPort, username, password, verifySSL
+
+    // If exporting, we can verify and persist onto the project.
+    if (exportNext) {
+      const data = await http('GET', '/api/projects');
+      const proj = (data.projects || []).find(p => p.id === pid);
+      if (!proj) { alert('Project not found.'); return; }
+      try {
+        await http('PATCH', `/api/projects/${encodeURIComponent(pid)}`, {
+          proxmox_url: url, proxmox_api_port: apiPort, proxmox_ssh_port: sshPort, proxmox_verify_ssl: verifySSL
         });
-      }, { projectId: pid });
-    } catch(e) {
-      verify = { ok:false, proxmox_ok:false, ssh_ok:false, proxmox_error: e?.message || 'verify failed' };
-    }
-    if (!verify || !verify.ok){
-      const apiOk = !!(verify && verify.proxmox_ok);
-      const sshOk = !!(verify && verify.ssh_ok);
-      const apiErr = (verify && verify.proxmox_error) ? String(verify.proxmox_error) : '';
-      const sshErr = (verify && verify.ssh_error) ? String(verify.ssh_error) : '';
-      const details = [apiErr, sshErr].filter(Boolean).join(' | ');
-      const msg = (!apiOk && !sshOk) ? 'Neither Proxmox API nor SSH could be reached.' : (!apiOk ? 'Proxmox API could not be reached.' : 'SSH could not be reached.');
-      if (feedback){ feedback.textContent = `${msg} ${details}`.trim(); feedback.className='me-auto small text-danger'; }
-      try { sessionStorage.removeItem(`toolhub.session.proxmox.${pid}`); } catch {}
+      } catch {}
+      try { sessionStorage.setItem(`toolhub.session.proxmox.${pid}`, JSON.stringify({ username, password })); } catch {}
+      let verify;
+      try {
+        await runQueued(`Verify Proxmox login for ${proj?.name || pid}`, async () => {
+          verify = await http('POST', `/api/projects/${encodeURIComponent(pid)}/proxmox/verify`, {
+            baseUrl: url, apiPort, sshPort, username, password, verifySSL
+          });
+        }, { projectId: pid });
+      } catch(e) {
+        verify = { ok:false, proxmox_ok:false, ssh_ok:false, proxmox_error: e?.message || 'verify failed' };
+      }
+      if (!verify || !verify.ok){
+        const apiOk = !!(verify && verify.proxmox_ok);
+        const sshOk = !!(verify && verify.ssh_ok);
+        const apiErr = (verify && verify.proxmox_error) ? String(verify.proxmox_error) : '';
+        const sshErr = (verify && verify.ssh_error) ? String(verify.ssh_error) : '';
+        const details = [apiErr, sshErr].filter(Boolean).join(' | ');
+        const msg = (!apiOk && !sshOk) ? 'Neither Proxmox API nor SSH could be reached.' : (!apiOk ? 'Proxmox API could not be reached.' : 'SSH could not be reached.');
+        if (feedback){ feedback.textContent = `${msg} ${details}`.trim(); feedback.className='me-auto small text-danger'; }
+        try { sessionStorage.removeItem(`toolhub.session.proxmox.${pid}`); } catch {}
+        return;
+      }
+      try {
+        const modalEl = document.getElementById('proxLoginModal');
+        const bs = window.bootstrap;
+        const m = (bs && modalEl) ? bs.Modal.getInstance(modalEl) : null;
+        if (m) m.hide();
+      } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess('Proxmox login verified (API + SSH)') : console.log('Proxmox login verified'); } catch {}
+      await startExportJob(pid, opts);
       return;
     }
-    try {
-      const modalEl = document.getElementById('proxLoginModal');
-      const m = window.bootstrap && modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
-      if (m) m.hide();
-    } catch {}
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Proxmox login verified (API + SSH)') : console.log('Proxmox login verified'); } catch {}
-    await startExportJob(pid, opts);
+
+    // Import path: store session creds and start async import job.
+    if (importNext) {
+      const file = importNext.file;
+      if (!file) { if (feedback){ feedback.textContent='No import file selected.'; feedback.className='me-auto small text-danger'; } return; }
+      _writeImportProxCreds({ baseUrl: url, apiPort, sshPort, username, password, verifySSL });
+      try {
+        const modalEl = document.getElementById('proxLoginModal');
+        const bs = window.bootstrap;
+        const m = (bs && modalEl) ? bs.Modal.getInstance(modalEl) : null;
+        if (m) m.hide();
+      } catch {}
+      window.__IMPORT_NEXT__ = null;
+      const prox = { baseUrl: url, apiPort, sshPort, username, password, verifySSL };
+      const st = await _runAsyncImportWithProx({
+        file,
+        includeCreds: !!importNext.includeCreds,
+        includeVms: !!importNext.includeVms,
+        prox,
+      });
+      // Post-success refresh
+      const importedId = (Array.isArray(st?.imported) && st.imported[0]?.id) || '';
+      try {
+        const input = document.getElementById('import-file');
+        if (input) input.value = '';
+      } catch {}
+      try { if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') shell.setCurrentProjectId(importedId); } catch {}
+      try { await loadProjects(); } catch {}
+      try { if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config'); } catch {}
+      try { showToast('Project imported.', 'success'); } catch {}
+      return;
+    }
   } catch (err) {
     if (feedback){
       feedback.textContent = 'Login failed: ' + (err && err.message ? err.message : 'Unknown error');
@@ -4619,6 +5087,17 @@ async function exportProxLoginSave(){
     setBusy(false);
   }
 }
+
+// If the Proxmox login modal is dismissed, clear any pending action.
+try {
+  document.addEventListener('hidden.bs.modal', (ev) => {
+    try {
+      if (!ev || !ev.target || ev.target.id !== 'proxLoginModal') return;
+      window.__EXPORT_NEXT__ = null;
+      window.__IMPORT_NEXT__ = null;
+    } catch {}
+  });
+} catch {}
 
 // Toast helper for this page
 function showToast(message, type) {

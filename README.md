@@ -150,6 +150,7 @@ python -m app
 ```
 
 This uses Waitress and listens on `0.0.0.0:${PORT:-8080}`.
+Waitress request body cap is unlimited by default; set `WAITRESS_MAX_REQUEST_BODY` to a positive byte value if you want a cap.
 In-app Project fields include Proxmox/Guacamole/Keycloak/Challenge URLs and ports, Instances count, Tag, and Advanced Proxmox paths/options.
 
 ## Using the UI

@@ -27,6 +27,7 @@ import time
 from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
 from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps
+from ..storage.runtime import RuntimeStore
 
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
@@ -5180,6 +5181,53 @@ def health():
 def _store() -> ProjectStore:
     return ProjectStore(current_app.config["DATA_DIR"])
 
+
+def _runtime_store() -> RuntimeStore:
+    return RuntimeStore(current_app.config["DATA_DIR"])
+
+
+def _is_remote_mode() -> bool:
+    try:
+        return _runtime_store().get_run_mode() == 'remote'
+    except Exception:
+        return False
+
+
+def _block_when_remote(feature: str):
+    if _is_remote_mode():
+        msg = f"{feature} is disabled when app is running in remote mode."
+        return jsonify({"error": msg}), 403
+    return None
+
+
+@api_bp.get('/runtime')
+def runtime_get():
+    """Return the server-persisted runtime mode.
+
+    Response: { ok: true, runMode: 'local'|'remote' }
+    """
+    try:
+        mode = _runtime_store().get_run_mode()
+    except Exception:
+        mode = 'local'
+    return jsonify({'ok': True, 'runMode': mode})
+
+
+@api_bp.post('/runtime')
+def runtime_set():
+    """Persist runtime mode on the server so it survives restarts.
+
+    Body: { runMode: 'local'|'remote' }
+    Response: { ok: true, runMode: 'local'|'remote' }
+    """
+    body = request.get_json(silent=True) or {}
+    mode = body.get('runMode') if isinstance(body, dict) else None
+    try:
+        normalized = _runtime_store().set_run_mode(mode)
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+    return jsonify({'ok': True, 'runMode': normalized})
+
 def _ctfd_client_from_req(proj: Project) -> CTFdClient:
     body = request.get_json(silent=True) or {}
     base_url = (body.get('baseUrl') or getattr(proj, 'challenge_url', '') or '').strip()
@@ -6494,6 +6542,9 @@ def duplicate_project(pid: str):
 @api_bp.route("/projects/<pid>/export", methods=["GET"])
 @_secure_route()
 def export_project(pid: str):
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -6533,6 +6584,9 @@ def export_project(pid: str):
 # Import project (zip) — synchronous legacy endpoint (kept for backward compatibility)
 @api_bp.route("/projects/import", methods=["POST"])
 def import_project():
+    blocked = _block_when_remote('Import')
+    if blocked:
+        return blocked
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     file = request.files['file']
@@ -6781,6 +6835,9 @@ def _emit_import(job_id: str, msg: str):
 @api_bp.route("/projects/import/start", methods=["POST"])
 @_secure_route()
 def import_project_start():
+    blocked = _block_when_remote('Import')
+    if blocked:
+        return blocked
     """Upload a ZIP and start an async import job. Returns { job }.
     UI should track upload progress via XHR, then poll /projects/import/status?id=JOB.
     """
@@ -7116,6 +7173,56 @@ def import_project_start():
                                         except Exception:
                                             pass
                                         sftp = c.open_sftp()
+
+                                        # Ensure bridge-ageing 0 for any imported internal bridges (interfaces + interfaces.new)
+                                        try:
+                                            bridges_needed: Set[str] = set()
+                                            for vm in (getattr(project, 'vms', None) or []):
+                                                if isinstance(vm, dict):
+                                                    raw = (
+                                                        vm.get('internal_network_adaptors')
+                                                        or vm.get('internal_network_adapters')
+                                                        or vm.get('internalNetworkAdaptors')
+                                                        or vm.get('internalNetworkAdapters')
+                                                    )
+                                                else:
+                                                    raw = getattr(vm, 'internal_network_adaptors', None)
+                                                if not raw:
+                                                    continue
+                                                if isinstance(raw, (list, tuple, set)):
+                                                    for b in raw:
+                                                        try:
+                                                            bridges_needed.add(_validate_iface(str(b)))
+                                                        except Exception:
+                                                            continue
+                                                else:
+                                                    try:
+                                                        bridges_needed.add(_validate_iface(str(raw)))
+                                                    except Exception:
+                                                        pass
+                                            if bridges_needed:
+                                                _emit_import(job, f"[AGEING] ensuring bridge-ageing 0 for {len(bridges_needed)} bridge(s): {', '.join(sorted(bridges_needed))}")
+                                                iface_list = ' '.join(sorted(bridges_needed))
+                                                # Keep it idempotent; create interfaces.new if missing.
+                                                ageing_script = (
+                                                    "set -e; "
+                                                    "MAIN=/etc/network/interfaces; NEW=/etc/network/interfaces.new; "
+                                                    "[ -f $NEW ] || cp $MAIN $NEW; "
+                                                    f"for IFACE in {iface_list}; do "
+                                                    "for F in $MAIN $NEW; do [ -f $F ] || continue; "
+                                                    "grep -Eq \"^iface ${IFACE} \" $F || echo \"iface ${IFACE} inet manual\" >> $F; "
+                                                    "awk -v IFACE=\"$IFACE\" 'BEGIN{in=0;have=0} $1==\"iface\" { if(in && $2!=IFACE) in=0; if($2==IFACE){in=1; next} } in && ($1==\"bridge-ageing\" || $1==\"bridge_ageing\") && $2==\"0\" {have=1} END{exit(have?0:1)}' $F >/dev/null 2>&1 "
+                                                    "|| sed -i \"/^iface ${IFACE} /a\\\\    bridge-ageing 0\" $F; "
+                                                    "done; done"
+                                                )
+                                                import shlex
+                                                use_sudo_ageing = (str(ssh_user).strip().lower() != 'root')
+                                                _ssh_run_cmd(c, f"sh -lc {shlex.quote(ageing_script)}", sudo=use_sudo_ageing, sudo_password=password)
+                                                _emit_import(job, "[AGEING] bridge-ageing 0 ensured (interfaces + interfaces.new)")
+                                            else:
+                                                _emit_import(job, "[AGEING] no internal bridges listed; skipping ageing update")
+                                        except Exception as e:
+                                            _emit_import(job, f"[AGEING][WARN] failed to apply bridge-ageing 0: {e}")
                                         # Discover vzdump backup archives in zip (ignore .log and other non-archives)
                                         backups = [
                                             n for n in zf.namelist()
@@ -7368,6 +7475,9 @@ def import_project_cancel():
 # Export multiple projects
 @api_bp.route("/projects/export", methods=["GET"])
 def export_projects():
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     s = _store()
     ids = request.args.get("ids")
     include_materials = request.args.get("includeMaterials", "true").lower() != "false"
@@ -7560,6 +7670,9 @@ def _job_record(pid: str, job_id: str):
 @api_bp.route("/projects/<pid>/export/start", methods=["POST"])
 @_secure_route()
 def export_project_start(pid: str):
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -8238,6 +8351,9 @@ def export_project_cancel(pid: str):
 
 @api_bp.route("/projects/<pid>/export/download", methods=["GET"])
 def export_project_download(pid: str):
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     rec = _ACTIVE_JOBS.get(_job_key(pid))
     if not rec or rec.get('action') != 'export' or rec.get('status') != 'completed':
         return jsonify({"error": "Export not ready"}), 400
@@ -8429,6 +8545,9 @@ def delete_material(pid: str, fname: str):
 # Exports: list and delete
 @api_bp.route("/projects/<pid>/exports", methods=["GET"])
 def list_exports(pid: str):
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -8451,6 +8570,9 @@ def list_exports(pid: str):
 @api_bp.route("/projects/<pid>/exports/<export_id>", methods=["DELETE"])
 @_secure_route()
 def delete_export(pid: str, export_id: str):
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -8493,6 +8615,9 @@ def delete_export(pid: str, export_id: str):
 
 @api_bp.route("/projects/<pid>/exports/<export_id>/download", methods=["GET"])
 def download_export_by_id(pid: str, export_id: str):
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -8518,6 +8643,9 @@ def download_export_by_id(pid: str, export_id: str):
 @api_bp.route("/projects/<pid>/exports/<export_id>/reveal", methods=["POST"])
 @_secure_route()
 def reveal_export_in_finder(pid: str, export_id: str):
+    blocked = _block_when_remote('Export')
+    if blocked:
+        return blocked
     """Best-effort: on macOS, ask the OS to reveal the file in Finder. Returns ok even if unsupported."""
     s = _store()
     proj = s.get(pid)

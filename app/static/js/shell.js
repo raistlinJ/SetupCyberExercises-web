@@ -1,3 +1,265 @@
+// --- Run Mode (Local vs Remote) ---
+const TOOLHUB_SETTINGS_KEY = 'toolhub.settings.v1';
+const REMOTE_UI_TOOLTIP_DEFAULT = 'Disabled when app is running in remote mode.';
+let _runModeRevision = 0;
+let _remoteUiGuardsInstalled = false;
+let _remoteUiLastBlockedAt = 0;
+function _installRemoteModeGuards(){
+  if (_remoteUiGuardsInstalled) return;
+  _remoteUiGuardsInstalled = true;
+
+  function _findRemoteDisabledTarget(t){
+    try {
+      if (!t) return null;
+      if (t.closest) return t.closest('[data-remote-disable]');
+    } catch {}
+    return null;
+  }
+
+  function _notifyBlocked(el){
+    const now = Date.now();
+    if (now - _remoteUiLastBlockedAt < 800) return;
+    _remoteUiLastBlockedAt = now;
+    const msg = (el && el.getAttribute && el.getAttribute('data-remote-tooltip')) || REMOTE_UI_TOOLTIP_DEFAULT;
+    // Best-effort: show tooltip if present on wrapper.
+    try {
+      const w = (el && el.parentElement && el.parentElement.dataset && el.parentElement.dataset.remoteTooltipWrapper === '1') ? el.parentElement : null;
+      const tipHost = w || el;
+      if (tipHost && window.bootstrap && bootstrap.Tooltip) {
+        bootstrap.Tooltip.getOrCreateInstance(tipHost).show();
+      }
+    } catch {}
+    // Best-effort: toast if available.
+    try { if (typeof window.showToast === 'function') window.showToast(msg, 'warning'); } catch {}
+  }
+
+  function _blockIfRemote(ev){
+    try {
+      if (!isRemote()) return;
+      const el = _findRemoteDisabledTarget(ev.target);
+      if (!el) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      try { ev.stopImmediatePropagation(); } catch {}
+      _notifyBlocked(el);
+      return false;
+    } catch {}
+  }
+
+  document.addEventListener('click', _blockIfRemote, true);
+  document.addEventListener('submit', _blockIfRemote, true);
+  document.addEventListener('keydown', (ev) => {
+    try {
+      if (!isRemote()) return;
+      // Prevent keyboard activation of disabled controls.
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      const el = _findRemoteDisabledTarget(ev.target);
+      if (!el) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      try { ev.stopImmediatePropagation(); } catch {}
+      _notifyBlocked(el);
+    } catch {}
+  }, true);
+}
+function readToolhubSettings(){
+  try { return JSON.parse(localStorage.getItem(TOOLHUB_SETTINGS_KEY) || '{}') || {}; } catch { return {}; }
+}
+function writeToolhubSettings(s){
+  try { localStorage.setItem(TOOLHUB_SETTINGS_KEY, JSON.stringify(s || {})); } catch {}
+}
+function getRunMode(){
+  try {
+    const s = readToolhubSettings();
+    return (s && s.runMode === 'remote') ? 'remote' : 'local';
+  } catch {
+    return 'local';
+  }
+}
+function isRemote(){ return getRunMode() === 'remote'; }
+
+function _setRunModeLocal(normalized, emitEvent){
+  const mode = (String(normalized || '').toLowerCase() === 'remote') ? 'remote' : 'local';
+  _runModeRevision++;
+  const s = readToolhubSettings();
+  if (mode === 'local') delete s.runMode;
+  else s.runMode = 'remote';
+  writeToolhubSettings(s);
+  if (emitEvent) {
+    try { document.dispatchEvent(new CustomEvent('run-mode-changed', { detail: { mode } })); } catch {}
+  }
+  try { applyRemoteModeUI(); } catch {}
+  return mode;
+}
+
+let _serverRunModeLoaded = false;
+let _serverRunModePromise = null;
+async function loadRunModeFromServer(){
+  if (_serverRunModeLoaded) return getRunMode();
+  if (_serverRunModePromise) return _serverRunModePromise;
+  _serverRunModePromise = (async()=>{
+    const startRev = _runModeRevision;
+    try {
+      const res = await fetch('/api/runtime', { method: 'GET', credentials: 'same-origin' });
+      if (!res.ok) throw new Error('runtime fetch failed');
+      const data = await res.json();
+      const mode = (data && data.runMode === 'remote') ? 'remote' : 'local';
+      // Avoid clobbering a user toggle that happened while this request was in-flight.
+      if (_runModeRevision === startRev) {
+        _setRunModeLocal(mode, false);
+      }
+    } catch {
+      // Best-effort; fall back to local storage default.
+    } finally {
+      _serverRunModeLoaded = true;
+    }
+    return getRunMode();
+  })();
+  return _serverRunModePromise;
+}
+
+async function persistRunModeToServer(mode){
+  const normalized = (String(mode || '').toLowerCase() === 'remote') ? 'remote' : 'local';
+  try {
+    const res = await fetch('/api/runtime', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      keepalive: true,
+      body: JSON.stringify({ runMode: normalized })
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.text()) || ''; } catch {}
+      return { ok: false, status: res.status || 0, detail };
+    }
+    const data = await res.json().catch(()=>null);
+    const ok = !!(data && data.ok && (data.runMode === 'remote' || data.runMode === 'local'));
+    return { ok, status: res.status || 200, mode: normalized, data };
+  } catch (e) {
+    return { ok: false, status: 0, detail: (e && e.message) ? e.message : String(e || '') };
+  }
+}
+
+function setRunMode(mode){
+  const normalized = _setRunModeLocal(mode, true);
+  // Best-effort: persist on server so it survives reboots.
+  try { persistRunModeToServer(normalized).then(()=>{}); } catch {}
+  _serverRunModeLoaded = true; // don't immediately overwrite with stale server value
+  return normalized;
+}
+
+async function setRunModeAsync(mode){
+  const normalized = _setRunModeLocal(mode, true);
+  const result = await persistRunModeToServer(normalized);
+  _serverRunModeLoaded = true;
+  return { ok: !!result?.ok, mode: normalized, status: result?.status || 0, detail: result?.detail || '' };
+}
+
+function _remoteUiEnsureWrapper(el){
+  try {
+    const p = el.parentElement;
+    if (p && p.dataset && p.dataset.remoteTooltipWrapper === '1') return p;
+    const w = document.createElement('span');
+    w.dataset.remoteTooltipWrapper = '1';
+    // Keep inline layout stable for buttons/links.
+    w.className = 'd-inline-block';
+    el.parentNode.insertBefore(w, el);
+    w.appendChild(el);
+    return w;
+  } catch {
+    return null;
+  }
+}
+
+function _remoteUiSetDisabled(el, disabled, tooltipText){
+  const tip = tooltipText || el.getAttribute('data-remote-tooltip') || REMOTE_UI_TOOLTIP_DEFAULT;
+  try {
+    if (disabled) {
+      if (!el.dataset.remoteOrigClass) el.dataset.remoteOrigClass = el.className || '';
+      if (el.tagName === 'A') {
+        if (!el.dataset.remoteOrigHref) el.dataset.remoteOrigHref = el.getAttribute('href') || '';
+        el.setAttribute('href', '#');
+        el.setAttribute('aria-disabled', 'true');
+        el.setAttribute('tabindex', '-1');
+        el.classList.add('disabled');
+      }
+      // Generic visual mute + interaction block.
+      el.style.pointerEvents = 'none';
+      el.style.opacity = '0.65';
+      // Form controls.
+      if ('disabled' in el) el.disabled = true;
+      // Labels (file inputs): disable nested input too.
+      try { el.querySelectorAll('input,button,select,textarea').forEach(x => { try { x.disabled = true; } catch {} }); } catch {}
+
+      const w = _remoteUiEnsureWrapper(el);
+      if (w) {
+        w.setAttribute('data-bs-toggle', 'tooltip');
+        w.setAttribute('data-bs-placement', 'top');
+        w.setAttribute('title', tip);
+        w.style.cursor = 'not-allowed';
+        try {
+          if (window.bootstrap && bootstrap.Tooltip) {
+            bootstrap.Tooltip.getOrCreateInstance(w);
+          }
+        } catch {}
+      }
+    } else {
+      // Restore.
+      try { el.style.pointerEvents = ''; el.style.opacity = ''; } catch {}
+      if ('disabled' in el) el.disabled = false;
+      if (el.tagName === 'A') {
+        const orig = el.dataset.remoteOrigHref || '';
+        if (orig) el.setAttribute('href', orig);
+        else el.removeAttribute('href');
+        el.removeAttribute('aria-disabled');
+        el.removeAttribute('tabindex');
+        el.classList.remove('disabled');
+      }
+      try {
+        const cls = el.dataset.remoteOrigClass;
+        if (cls !== undefined) el.className = cls;
+      } catch {}
+      // Allow nested form controls again.
+      try { el.querySelectorAll('input,button,select,textarea').forEach(x => { try { x.disabled = false; } catch {} }); } catch {}
+      // Remove tooltip from wrapper if present.
+      try {
+        const p = el.parentElement;
+        if (p && p.dataset && p.dataset.remoteTooltipWrapper === '1') {
+          try {
+            if (window.bootstrap && bootstrap.Tooltip) {
+              const inst = bootstrap.Tooltip.getInstance(p);
+              if (inst) inst.dispose();
+            }
+          } catch {}
+          p.removeAttribute('data-bs-toggle');
+          p.removeAttribute('data-bs-placement');
+          p.removeAttribute('title');
+          p.style.cursor = '';
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+function applyRemoteModeUI(root){
+  const host = root || document;
+  const remote = isRemote();
+  try {
+    host.querySelectorAll('[data-remote-disable]')
+      .forEach(el => _remoteUiSetDisabled(el, remote, el.getAttribute('data-remote-tooltip') || REMOTE_UI_TOOLTIP_DEFAULT));
+  } catch {}
+  // If audio is disabled, ensure Settings is not stuck on Notifications tab.
+  if (remote) {
+    try {
+      const notifTab = document.getElementById('settings-tab-notifications');
+      if (notifTab && notifTab.classList.contains('active')) {
+        const generalTab = document.getElementById('settings-tab-general');
+        if (generalTab) generalTab.click();
+      }
+    } catch {}
+  }
+}
 // Shared shell for sidebar project list and cross-page sync
 const CURRENT_PROJECT_KEY = 'toolhub.currentProjectId.v1';
 const SIDEBAR_COLLAPSE_KEY = 'toolhub.sidebarCollapsed.v1';
@@ -321,11 +583,14 @@ async function renderSidebarProjects(activeTab) {
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
 
 async function initShell(activeTab) {
+  try { _installRemoteModeGuards(); } catch {}
   ensureSidebarToggleControl();
   applySidebarCollapseState(_sidebarCollapsed);
   await renderSidebarProjects(activeTab);
   updateSidebarToggleLabel();
   positionSidebarToggle();
+  try { await loadRunModeFromServer(); } catch {}
+  try { applyRemoteModeUI(); } catch {}
   // If a query ?id= is present, prefer that and set current
   const u = new URL(window.location.href);
   const qid = u.searchParams.get('id');
@@ -334,11 +599,14 @@ async function initShell(activeTab) {
 }
 
 async function refreshSidebar(activeTab) {
+  try { _installRemoteModeGuards(); } catch {}
   await renderSidebarProjects(activeTab);
   ensureSidebarToggleControl();
   applySidebarCollapseState(_sidebarCollapsed);
   updateSidebarToggleLabel();
   positionSidebarToggle();
+  try { await loadRunModeFromServer(); } catch {}
+  try { applyRemoteModeUI(); } catch {}
 }
 
 // --- Shared Remote Action Queue (global across pages) ---
@@ -928,7 +1196,8 @@ function hideActionProgress(){
   }
   if (modal && window.bootstrap && window.bootstrap.Modal) {
     try {
-      const inst = bootstrap.Modal.getInstance(modal) || bootstrap.Modal.getOrCreateInstance(modal);
+      const bs = window.bootstrap;
+      const inst = bs.Modal.getInstance(modal) || bs.Modal.getOrCreateInstance(modal);
       inst.hide();
     } catch {}
   }
@@ -956,12 +1225,18 @@ function openActionProgressModal(){
     if (ACTION_PROGRESS_STATE.barText) barEl.textContent = ACTION_PROGRESS_STATE.barText;
     barEl.classList.add('progress-bar-striped', 'progress-bar-animated');
   }
-  const inst = bootstrap.Modal.getOrCreateInstance(modal);
+  let inst;
+  try {
+    const bs = window.bootstrap;
+    inst = bs.Modal.getOrCreateInstance(modal);
+  } catch {
+    return;
+  }
   ACTION_PROGRESS_STATE.visible = true;
   ACTION_PROGRESS_STATE.updatedAt = Date.now();
   actionProgressEmit();
   setTimeout(() => {
-    try { inst.show(); } catch {}
+    try { inst && inst.show(); } catch {}
   }, 10);
 }
 document.addEventListener('hidden.bs.modal', (ev)=>{
@@ -1624,6 +1899,13 @@ window.shell = {
   refreshSidebar,
   getCurrentProjectId,
   setCurrentProjectId,
+  getRunMode,
+  setRunMode,
+  setRunModeAsync,
+  isRemote,
+  loadRunModeFromServer,
+  persistRunModeToServer,
+  applyRemoteModeUI,
   toggleSidebar,
   setSidebarImportBusy,
   setSidebarCollapsed,

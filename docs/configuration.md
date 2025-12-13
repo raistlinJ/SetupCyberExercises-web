@@ -23,7 +23,7 @@ python -m app
 ```
 
 - Listens on `0.0.0.0:${PORT:-8080}`.
-- Defaults: 50 GiB `max_request_body_size`, 512 MiB `inbuf_overflow`/`outbuf_overflow`.
+- Defaults: unlimited `max_request_body_size`, 512 MiB `inbuf_overflow`/`outbuf_overflow`.
 - Override via env vars documented below.
 
 ### PORT Selection Logic
@@ -54,7 +54,7 @@ python -m app
 | --- | --- | --- |
 | `DATA_DIR` | `/data` (Docker) or auto-picked | Storage for JSON state, materials, uploads. |
 | `PORT` | auto-picked | Port used by `python -m app`. |
-| `WAITRESS_MAX_REQUEST_BODY` | `50 * 1024 * 1024 * 1024` | Request body cap in bytes. Increase for huge imports or lower for memory safety. |
+| `WAITRESS_MAX_REQUEST_BODY` | `0` | Request body cap in bytes. `0` means unlimited (effectively disables the cap). Set a positive value to cap uploads. |
 | `WAITRESS_INBUF_OVERFLOW` | `512 * 1024 * 1024` | Bytes buffered before Waitress spools request bodies to disk. |
 | `WAITRESS_OUTBUF_OVERFLOW` | `512 * 1024 * 1024` | Bytes buffered before responses spool to disk. |
 | `AUTH_ENABLE` | `1` | Toggle session auth (see `auth.md`). |

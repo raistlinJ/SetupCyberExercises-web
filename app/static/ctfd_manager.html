@@ -48,7 +48,7 @@
         <button class="btn btn-sm btn-primary" onclick="createProjectSidebar()" title="Create project">Add</button>
       </div>
       <div class="p-2 border-bottom">
-        <label class="btn btn-outline-secondary btn-sm mb-0 w-100" title="Import a project ZIP">
+        <label class="btn btn-outline-secondary btn-sm mb-0 w-100" title="Import a project ZIP" data-remote-disable="import" data-remote-tooltip="Import is disabled when app is running in remote mode.">
           Import Project <input type="file" id="import-file" accept=".zip" hidden onchange="openImportOptionsCTFd()" />
         </label>
       </div>
@@ -62,7 +62,7 @@
           <li class="nav-item"><a class="nav-link active" aria-current="page" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a></li>
           <li class="nav-item"><a class="nav-link" data-shell-link href="/static/exports.html">Exports</a></li>
           <li class="nav-item">
-            <a class="nav-link ctfd-server-link disabled fw-semibold border border-secondary rounded-pill px-2 py-1 text-nowrap" id="nav-ctfd-link" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true" tabindex="-1" title="Open this project's CTFd UI">Server: —</a>
+            <a class="nav-link ctfd-server-link d-none disabled fw-semibold border border-secondary rounded-pill px-2 py-1 text-nowrap" id="nav-ctfd-link" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true" tabindex="-1" title="Open this project's CTFd UI">Server: —</a>
           </li>
         </ul>
         <div class="d-flex align-items-center gap-2">

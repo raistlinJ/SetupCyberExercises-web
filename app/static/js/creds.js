@@ -86,7 +86,7 @@
             <button class="nav-link active" id="settings-tab-general" data-bs-toggle="tab" data-bs-target="#settings-pane-general" type="button" role="tab" aria-controls="settings-pane-general" aria-selected="true">General</button>
           </li>
           <li class="nav-item" role="presentation">
-            <button class="nav-link" id="settings-tab-notifications" data-bs-toggle="tab" data-bs-target="#settings-pane-notifications" type="button" role="tab" aria-controls="settings-pane-notifications" aria-selected="false">Notifications</button>
+            <button class="nav-link" id="settings-tab-notifications" data-remote-disable="audio" data-remote-tooltip="Audio is disabled when app is running in remote mode." data-bs-toggle="tab" data-bs-target="#settings-pane-notifications" type="button" role="tab" aria-controls="settings-pane-notifications" aria-selected="false">Notifications</button>
           </li>
         </ul>
         <div class="tab-content pt-3">
@@ -105,16 +105,23 @@
               <label class="form-check-label" for="def-mat">Expand Materials by default</label>
             </div>
             <hr/>
+            <h6 class="text-uppercase text-muted mb-2">Runtime</h6>
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="settings-run-remote">
+              <label class="form-check-label" for="settings-run-remote">Remote mode</label>
+            </div>
+            <p class="small text-muted mb-3">Local is the default. When Remote mode is on, Import, Export, and Audio features are disabled in the UI.</p>
+            <hr/>
             <h6 class="text-uppercase text-muted mb-2">Text-to-Speech</h6>
             <p id="settings-tts-support-note" class="small text-muted mb-2">Applies to supported browsers.</p>
             <div class="row g-2 mb-3">
               <div class="col">
                 <label class="form-label small mb-1" for="settings-tts-rate">Speech rate</label>
-                <input class="form-control form-control-sm" type="number" step="0.1" min="0.5" max="2.0" id="settings-tts-rate" value="1">
+                <input class="form-control form-control-sm" type="number" step="0.1" min="0.5" max="2.0" id="settings-tts-rate" value="1" data-remote-disable="audio" data-remote-tooltip="Audio is disabled when app is running in remote mode.">
               </div>
               <div class="col">
                 <label class="form-label small mb-1" for="settings-tts-pitch">Speech pitch</label>
-                <input class="form-control form-control-sm" type="number" step="0.1" min="0" max="2.0" id="settings-tts-pitch" value="1">
+                <input class="form-control form-control-sm" type="number" step="0.1" min="0" max="2.0" id="settings-tts-pitch" value="1" data-remote-disable="audio" data-remote-tooltip="Audio is disabled when app is running in remote mode.">
               </div>
             </div>
             <p class="small text-muted mb-3">Adjust how quickly and how high announcements are spoken by the browser.</p>

@@ -8,6 +8,17 @@ async function http(method, url, body) {
     let ct = '';
     try { bodyText = await res.text(); } catch {}
     try { ct = res.headers.get('content-type') || ''; } catch {}
+    try {
+      if (res.status === 403) {
+        let extracted = '';
+        try {
+          const parsed = JSON.parse(bodyText || '{}');
+          extracted = (parsed && (parsed.error || parsed.message)) ? String(parsed.error || parsed.message) : '';
+        } catch {}
+        const warn = extracted || (bodyText || 'Action is disabled when app is running in remote mode.');
+        try { if (typeof window.showToast === 'function') window.showToast(warn, 'warning'); } catch {}
+      }
+    } catch {}
     try { (window.shell && shell.logError) ? shell.logError(`[HTTP] ${method} ${url} -> ${res.status} ${res.statusText} ${ct ? '('+ct+')' : ''} ${bodyText ? ' body=' + bodyText.slice(0,800) : ''}`) : console.error('[HTTP]', method, url, res.status, res.statusText, bodyText); } catch {}
     throw new Error(bodyText || res.statusText);
   }
