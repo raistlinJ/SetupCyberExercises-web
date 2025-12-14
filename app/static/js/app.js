@@ -3167,6 +3167,20 @@ function renderProjectCard(p) {
 function proxCredKey(pid){ return `toolhub.session.proxmox.${pid}`; }
 function readProxCreds(pid){ try { return JSON.parse(sessionStorage.getItem(proxCredKey(pid))||'{}'); } catch { return {}; } }
 function writeProxCreds(pid,obj){ try { sessionStorage.setItem(proxCredKey(pid), JSON.stringify({ username: obj.username||'', password: obj.password||'' })); } catch {} }
+function readPersistProxCreds(pid){
+  try {
+    if (window.CREDS && typeof CREDS.readPersistProxCreds === 'function') return CREDS.readPersistProxCreds(pid) || {};
+  } catch {}
+  return {};
+}
+function readBestProxCreds(pid){
+  const sess = readProxCreds(pid) || {};
+  const persisted = readPersistProxCreds(pid) || {};
+  return {
+    username: (sess.username || persisted.username || ''),
+    password: (sess.password || persisted.password || ''),
+  };
+}
 function proxMetaKey(pid){ return `toolhub.session.proxmox.meta.${pid}`; }
 function writeProxMeta(pid,obj){ try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj||{})); } catch {} }
 function normalizeUrl(s){ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
@@ -3292,6 +3306,7 @@ function openAddFromServer(pid){
   const verEl = document.getElementById('afs-verify');
   const uEl = document.getElementById('afs-username');
   const pwEl = document.getElementById('afs-password');
+  const saveEl = document.getElementById('afs-save-creds');
   const list = document.getElementById('afs-list');
   const addBtn = document.getElementById('afs-add');
   const filterEl = document.getElementById('afs-filter');
@@ -3301,8 +3316,10 @@ function openAddFromServer(pid){
   if (portEl) portEl.value = (p.proxmox_api_port ?? 8006);
   if (verEl) verEl.checked = (p.proxmox_verify_ssl !== false);
   const sess = readProxCreds(pid) || {};
-  if (uEl) uEl.value = sess.username || '';
-  if (pwEl) pwEl.value = sess.password || '';
+  const persisted = readPersistProxCreds(pid) || {};
+  if (uEl) uEl.value = sess.username || persisted.username || '';
+  if (pwEl) pwEl.value = sess.password || persisted.password || '';
+  if (saveEl) saveEl.checked = !!(persisted.username || persisted.password);
   if (list) { list.innerHTML = ''; list.style.display = 'none'; }
   if (addBtn) addBtn.disabled = true;
   if (filterEl) filterEl.value = '';
@@ -3329,6 +3346,7 @@ async function fetchTemplatesForAFS(){
   const verEl = document.getElementById('afs-verify');
   const uEl = document.getElementById('afs-username');
   const pwEl = document.getElementById('afs-password');
+  const saveEl = document.getElementById('afs-save-creds');
   const list = document.getElementById('afs-list');
   const filterGroup = document.getElementById('afs-filter-group');
   const urlBase = normalizeUrl((urlEl?.value||'').trim());
@@ -3357,6 +3375,14 @@ async function fetchTemplatesForAFS(){
         // persist creds and meta for VM Manager prefill
         writeProxCreds(pid, { username: body.username||'', password: body.password||'' });
         writeProxMeta(pid, { url: urlBase, apiPort: apiPort, sshPort: Number(p.proxmox_ssh_port||22)||22 });
+        // Optional: persist creds per project across sessions (client-side only)
+        try {
+          const wantsPersist = !!(saveEl && saveEl.checked);
+          if (window.CREDS && typeof CREDS.setPersistProxCreds === 'function') {
+            if (wantsPersist) CREDS.setPersistProxCreds(pid, body.username || '', body.password || '', true);
+            else CREDS.setPersistProxCreds(pid, '', '', false);
+          }
+        } catch {}
         if (filterGroup) filterGroup.style.display = '';
         if (list) list.style.display = '';
         renderAFSList();
@@ -4892,8 +4918,8 @@ async function startExportJob(pid, opts) {
     }
   } catch {}
   // Read Proxmox session creds from sessionStorage
-  const sess = readProxCreds(pid) || {};
-  const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, username: sess.username || '', password: sess.password || '' };
+  const creds = readBestProxCreds(pid) || {};
+  const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, username: creds.username || '', password: creds.password || '' };
   if (!body.username || !body.password) { alert('Please log into Proxmox (Update Proxmox Creds) before exporting VMs.'); return; }
   // Ensure console dock shows debug-level messages
   try { if (window.shell && shell.enableConsoleDebug) shell.enableConsoleDebug(true); } catch {}
@@ -5029,11 +5055,12 @@ async function gateExportThroughProxLogin(pid, opts){
   const p = document.getElementById('prox-password');
   const vssl = document.getElementById('prox-verify-ssl');
   const sess = readProxCreds(pid) || {};
+  const persisted = readPersistProxCreds(pid) || {};
   if (url) url.value = proj.proxmox_url || '';
   if (api) api.value = proj.proxmox_api_port ?? 8006;
   if (ssh) ssh.value = proj.proxmox_ssh_port ?? 22;
-  if (u) u.value = sess.username || '';
-  if (p) p.value = sess.password || '';
+  if (u) u.value = sess.username || persisted.username || '';
+  if (p) p.value = sess.password || persisted.password || '';
   if (vssl) vssl.checked = (proj.proxmox_verify_ssl !== false);
   // Stash next action
   window.__EXPORT_NEXT__ = { pid, opts };

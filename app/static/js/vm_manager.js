@@ -1838,19 +1838,38 @@ function prefillProxLoginModal() {
   if (api) api.value = PROJ.proxmox_api_port ?? 8006;
   if (ssh) ssh.value = PROJ.proxmox_ssh_port ?? 22;
   if (vssl) vssl.checked = (PROJ.proxmox_verify_ssl !== false);
-  // If persistent creds exist in localStorage and session creds missing, adopt them
+  // If persistent creds exist and session creds missing, adopt them.
+  // Supports current creds.js format (u_enc/p_enc) and legacy plaintext (username/password).
   try {
-    const raw = localStorage.getItem(`toolhub.prox.persist.${PROJ.id}`);
-    if (raw) {
-      const obj = JSON.parse(raw);
-      if (u && !u.value && obj.username) u.value = obj.username;
-      if (p && !p.value && obj.password) p.value = obj.password;
-      const saveBox = document.getElementById('prox-save-creds');
-      if (saveBox) saveBox.checked = true;
-    } else {
-      const saveBox = document.getElementById('prox-save-creds');
-      if (saveBox) saveBox.checked = false;
+    let persisted = {};
+    try {
+      if (window.CREDS && typeof CREDS.readPersistProxCreds === 'function') {
+        persisted = CREDS.readPersistProxCreds(PROJ.id) || {};
+      }
+    } catch {}
+    if (!persisted || (!persisted.username && !persisted.password)) {
+      // Legacy fallback + migrate to creds.js format
+      try {
+        const raw = localStorage.getItem(`toolhub.prox.persist.${PROJ.id}`);
+        if (raw) {
+          const obj = JSON.parse(raw);
+          if (obj && (obj.username || obj.password)) {
+            persisted = { username: String(obj.username || ''), password: String(obj.password || '') };
+            try {
+              if (window.CREDS && typeof CREDS.setPersistProxCreds === 'function') {
+                CREDS.setPersistProxCreds(PROJ.id, persisted.username, persisted.password, true);
+              }
+            } catch {}
+          }
+        }
+      } catch {}
     }
+
+    const saveBox = document.getElementById('prox-save-creds');
+    const hasPersisted = !!(persisted && (persisted.username || persisted.password));
+    if (saveBox) saveBox.checked = hasPersisted;
+    if (u && !u.value && persisted.username) u.value = persisted.username;
+    if (p && !p.value && persisted.password) p.value = persisted.password;
   } catch {}
 }
 
@@ -2129,11 +2148,13 @@ async function saveProxCredsFromModal() {
   
   try {
     const saveBox = document.getElementById('prox-save-creds');
-    if (saveBox && saveBox.checked) {
-      // Store in localStorage for persistence across sessions (still client-only)
-      localStorage.setItem(`toolhub.prox.persist.${PROJ.id}`, JSON.stringify({ username: u, password: p }));
+    const wantsPersist = !!(saveBox && saveBox.checked);
+    if (window.CREDS && typeof CREDS.setPersistProxCreds === 'function') {
+      CREDS.setPersistProxCreds(PROJ.id, u, p, wantsPersist);
     } else {
-      localStorage.removeItem(`toolhub.prox.persist.${PROJ.id}`);
+      // Fallback (legacy)
+      if (wantsPersist) localStorage.setItem(`toolhub.prox.persist.${PROJ.id}`, JSON.stringify({ username: u, password: p }));
+      else localStorage.removeItem(`toolhub.prox.persist.${PROJ.id}`);
     }
   } catch {}
   
