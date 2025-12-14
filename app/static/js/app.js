@@ -1,5 +1,8 @@
 const UI_STATE_KEY = 'toolhub.uiState.v1';
-const UI_SETTINGS_KEY = 'toolhub.settings.v1';
+// IMPORTANT: Do not share storage with `shell.js` runtime settings.
+// `shell.js` uses `toolhub.settings.v1` for runMode persistence. This UI layer has its own key.
+const UI_SETTINGS_KEY = 'toolhub.uiSettings.v2';
+const UI_SETTINGS_KEY_LEGACY = 'toolhub.settings.v1';
 // Project cache for UI-only previews
 window.PROJ_CACHE = window.PROJ_CACHE || {};
 window.MATERIAL_PENDING = window.MATERIAL_PENDING || {};
@@ -445,9 +448,31 @@ function setProjState(pid, patch) {
 
 // Settings helpers
 function readSettings() {
-  try { return JSON.parse(localStorage.getItem(UI_SETTINGS_KEY) || '{}'); } catch { return {}; }
+  // Prefer dedicated UI settings key.
+  try {
+    const raw = localStorage.getItem(UI_SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw || '{}') || {};
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {}
+  // Legacy migration: older versions stored UI settings in `toolhub.settings.v1`.
+  // That key is now owned by `shell.js` for runMode, so copy everything except `runMode`.
+  try {
+    const legacy = JSON.parse(localStorage.getItem(UI_SETTINGS_KEY_LEGACY) || '{}') || {};
+    if (legacy && typeof legacy === 'object') {
+      try { delete legacy.runMode; } catch {}
+      try {
+        if (Object.keys(legacy).length) {
+          localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(legacy));
+        }
+      } catch {}
+      return legacy;
+    }
+  } catch {}
+  return {};
 }
-function writeSettings(s) { localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(s || {})); }
+function writeSettings(s) { try { localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(s || {})); } catch {} }
 
 const PROJECT_AUDIO_CACHE = {};
 const PROJECT_AUDIO_LOADED = new Set();
@@ -1609,6 +1634,12 @@ async function saveSettingsInternal(){
   try { showToast(toastMessage, toastLevel); } catch {}
   const modal = document.getElementById('settingsModal');
   if (modal && window.bootstrap && window.bootstrap.Modal) {
+    // Ensure remote-mode UI changes apply immediately after the settings modal closes.
+    try {
+      modal.addEventListener('hidden.bs.modal', () => {
+        try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(); } catch {}
+      }, { once: true });
+    } catch {}
     const inst = bootstrap.Modal.getInstance(modal) || null;
     if (inst) inst.hide();
   }
@@ -5140,8 +5171,18 @@ try {
 // Toast helper for this page
 function showToast(message, type) {
   try {
-    const container = document.getElementById('toastContainer');
-    if (!container || !window.bootstrap) { alert(message); return; }
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toastContainer';
+      container.className = 'toast-container position-fixed top-0 end-0 p-3';
+      container.style.zIndex = '1080';
+      document.body.appendChild(container);
+    }
+    if (!window.bootstrap) {
+      try { console.log(String(message || '')); } catch {}
+      return;
+    }
     const el = document.createElement('div');
     el.className = `toast align-items-center text-bg-${type||'info'} border-0`;
     el.role = 'alert';
@@ -5156,7 +5197,9 @@ function showToast(message, type) {
     const t = new bootstrap.Toast(el, { delay: 3500 });
     t.show();
     el.addEventListener('hidden.bs.toast', () => el.remove());
-  } catch { try { alert(message); } catch {} }
+  } catch {
+    try { console.log(String(message || '')); } catch {}
+  }
 }
 // Credentials UI Helpers
 function sanitizeSimple(s) { try { return String(s || '').trim(); } catch { return ''; } }
