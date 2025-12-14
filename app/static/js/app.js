@@ -478,7 +478,7 @@ const PROJECT_AUDIO_CACHE = {};
 const PROJECT_AUDIO_LOADED = new Set();
 
 // Settings modal + audio customization
-const SETTINGS_AUDIO_MAX_BYTES = 600 * 1024;
+const SETTINGS_AUDIO_MAX_BYTES = 10 * 1024 * 1024;
 const SETTINGS_AUDIO_FIELDS = {
   ctfdFirstUser: {
     inputId: 'settings-audio-ctfd-user',
@@ -724,19 +724,44 @@ function settingsModalBuildPreviewSpeechText(key, entry){
 }
 function settingsModalSpeakPreview(text){
   try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
-  if (!text || !settingsSpeechSupported()) return;
+  if (!text || !settingsSpeechSupported()) return Promise.resolve(false);
   try {
     settingsModalSyncTtsWorkingFromInputs();
     const synth = window.speechSynthesis;
-    if (!synth) return;
-    const utterance = new SpeechSynthesisUtterance(String(text));
-    const rate = settingsClampNumber(_settingsTtsWorking.rate ?? SETTINGS_TTS_DEFAULT_RATE, SETTINGS_TTS_MIN_RATE, SETTINGS_TTS_MAX_RATE, SETTINGS_TTS_DEFAULT_RATE);
-    const pitch = settingsClampNumber(_settingsTtsWorking.pitch ?? SETTINGS_TTS_DEFAULT_PITCH, SETTINGS_TTS_MIN_PITCH, SETTINGS_TTS_MAX_PITCH, SETTINGS_TTS_DEFAULT_PITCH);
-    if (Number.isFinite(rate)) utterance.rate = rate;
-    if (Number.isFinite(pitch)) utterance.pitch = pitch;
-    try { synth.cancel(); } catch {}
-    synth.speak(utterance);
-  } catch {}
+    if (!synth) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const utterance = new SpeechSynthesisUtterance(String(text));
+      const rate = settingsClampNumber(_settingsTtsWorking.rate ?? SETTINGS_TTS_DEFAULT_RATE, SETTINGS_TTS_MIN_RATE, SETTINGS_TTS_MAX_RATE, SETTINGS_TTS_DEFAULT_RATE);
+      const pitch = settingsClampNumber(_settingsTtsWorking.pitch ?? SETTINGS_TTS_DEFAULT_PITCH, SETTINGS_TTS_MIN_PITCH, SETTINGS_TTS_MAX_PITCH, SETTINGS_TTS_DEFAULT_PITCH);
+      if (Number.isFinite(rate)) utterance.rate = rate;
+      if (Number.isFinite(pitch)) utterance.pitch = pitch;
+
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        if (APP_ACTIVE_SPEECH_PLAYBACK && APP_ACTIVE_SPEECH_PLAYBACK._utterance === utterance) APP_ACTIVE_SPEECH_PLAYBACK = null;
+        resolve(!!ok);
+      };
+
+      utterance.onend = () => finish(true);
+      utterance.onerror = () => finish(false);
+
+      APP_ACTIVE_SPEECH_PLAYBACK = {
+        _utterance: utterance,
+        stop: () => {
+          if (settled) return;
+          try { synth.cancel(); } catch {}
+          finish(false);
+        }
+      };
+
+      try { synth.cancel(); } catch {}
+      synth.speak(utterance);
+    });
+  } catch {
+    return Promise.resolve(false);
+  }
 }
 let _settingsAudioWorking = {};
 const SETTINGS_TTS_DEFAULT_RATE = 1.0;
@@ -891,6 +916,53 @@ window.projectAudioIsLoaded = projectAudioIsLoaded;
 const AUDIO_MEDIA_PREFIX = 'media:';
 const AUDIO_EVENT_PREFIX = 'event:';
 
+let APP_ACTIVE_AUDIO_PLAYBACK = null;
+let APP_ACTIVE_SPEECH_PLAYBACK = null;
+let APP_ACTIVE_PLAY_BUTTON = null;
+let APP_ACTIVE_PLAY_TOKEN = 0;
+
+function appSetPlayStopButtonState(btn, playing){
+  if (!btn) return;
+  const isPlaying = !!playing;
+  if (!btn.dataset.playLabel) btn.dataset.playLabel = btn.textContent || 'Preview';
+  const playLabel = btn.dataset.playLabel || 'Preview';
+  const stopLabel = 'Stop';
+  btn.textContent = isPlaying ? stopLabel : playLabel;
+  if (isPlaying) btn.dataset.playing = '1';
+  else delete btn.dataset.playing;
+}
+
+function appClearActivePlayButton(){
+  if (!APP_ACTIVE_PLAY_BUTTON) return;
+  try { appSetPlayStopButtonState(APP_ACTIVE_PLAY_BUTTON, false); } catch {}
+  APP_ACTIVE_PLAY_BUTTON = null;
+}
+
+function appStopActiveAudioPlayback(){
+  const active = APP_ACTIVE_AUDIO_PLAYBACK;
+  if (!active) return;
+  APP_ACTIVE_AUDIO_PLAYBACK = null;
+  try { if (active && typeof active.stop === 'function') active.stop(); } catch {}
+}
+
+function appStopActiveSpeechPlayback(){
+  const active = APP_ACTIVE_SPEECH_PLAYBACK;
+  APP_ACTIVE_SPEECH_PLAYBACK = null;
+  try { if (active && typeof active.stop === 'function') active.stop(); } catch {}
+  try {
+    const synth = window.speechSynthesis;
+    if (synth && typeof synth.cancel === 'function') synth.cancel();
+  } catch {}
+}
+
+function appStopActivePlayback(){
+  appStopActiveAudioPlayback();
+  appStopActiveSpeechPlayback();
+  appClearActivePlayButton();
+}
+
+try { window.appStopActivePlayback = appStopActivePlayback; } catch {}
+
 function audioMakeMediaKey(){
   let id = '';
   try {
@@ -964,7 +1036,7 @@ async function mediaManagerUploadFile(file){
   if (!file) return;
   if (mediaManagerRemoteBlocked()) return;
   if (file.size > SETTINGS_AUDIO_MAX_BYTES) {
-    alert('Audio file too large. Limit is 600 KB per file.');
+    alert('Audio file too large. Limit is 10 MB per file.');
     return;
   }
   const pid = mediaManagerReadCurrentPid();
@@ -1075,13 +1147,18 @@ function wireMediaManagerControls(){
   const list = document.getElementById('settings-media-list');
   if (upload && !upload._toolhubBound) {
     upload.addEventListener('change', async (ev) => {
-      const file = ev.target && ev.target.files && ev.target.files[0];
-      const hadFile = !!file;
+      const files = (ev.target && ev.target.files) ? Array.from(ev.target.files) : [];
+      const hadFile = files.length > 0;
       let uploadedOk = false;
       try {
-        if (file) {
-          await mediaManagerUploadFile(file);
-          uploadedOk = true;
+        for (const file of files) {
+          if (!file) continue;
+          try {
+            await mediaManagerUploadFile(file);
+            uploadedOk = true;
+          } catch (err) {
+            try { showToast(`Media upload failed (${file && file.name ? file.name : 'file'}): ${err?.message || err}`, 'warning'); } catch {}
+          }
         }
       } catch (err) {
         try { showToast(`Media upload failed: ${err?.message || err}`, 'warning'); } catch {}
@@ -1108,15 +1185,63 @@ function wireMediaManagerControls(){
       if (action === 'media-preview') {
         if (mediaManagerRemoteBlocked()) return;
         try {
+          if (actionBtn && actionBtn.dataset.playing === '1') {
+            try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+            appStopActivePlayback();
+            return;
+          }
+          try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+          appStopActivePlayback();
           const pid = mediaManagerReadCurrentPid();
           if (!pid) return;
           const audioStore = getProjectAudio(pid) || {};
           const entry = audioStore[key];
           const sound = audioNormalizeSingleSound(entry);
           if (!sound || !sound.dataUrl) return;
+
+          APP_ACTIVE_PLAY_BUTTON = actionBtn;
+          const token = String(++APP_ACTIVE_PLAY_TOKEN);
+          if (actionBtn) actionBtn.dataset.playToken = token;
+          appSetPlayStopButtonState(actionBtn, true);
+
           const audio = new Audio(sound.dataUrl);
-          audio.play().catch(()=>{});
-        } catch {}
+          let settled = false;
+          const cleanup = () => {
+            try { audio.removeEventListener('ended', onEnded); } catch {}
+            try { audio.removeEventListener('error', onError); } catch {}
+            try { audio.removeEventListener('abort', onError); } catch {}
+          };
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            if (APP_ACTIVE_AUDIO_PLAYBACK && APP_ACTIVE_AUDIO_PLAYBACK._audio === audio) APP_ACTIVE_AUDIO_PLAYBACK = null;
+            if (APP_ACTIVE_PLAY_BUTTON === actionBtn && (!actionBtn || actionBtn.dataset.playToken === token)) {
+              try { appSetPlayStopButtonState(actionBtn, false); } catch {}
+              if (APP_ACTIVE_PLAY_BUTTON === actionBtn) APP_ACTIVE_PLAY_BUTTON = null;
+            }
+          };
+          const onEnded = () => finish();
+          const onError = () => finish();
+          audio.addEventListener('ended', onEnded);
+          audio.addEventListener('error', onError);
+          audio.addEventListener('abort', onError);
+          APP_ACTIVE_AUDIO_PLAYBACK = {
+            _audio: audio,
+            stop: () => {
+              if (settled) return;
+              try { audio.pause(); } catch {}
+              try { audio.currentTime = 0; } catch {}
+              finish();
+            }
+          };
+          audio.play().catch(()=> finish());
+        } catch {
+          try {
+            if (actionBtn) appSetPlayStopButtonState(actionBtn, false);
+            if (APP_ACTIVE_PLAY_BUTTON === actionBtn) APP_ACTIVE_PLAY_BUTTON = null;
+          } catch {}
+        }
         return;
       }
       if (action === 'media-delete') {
@@ -1455,7 +1580,7 @@ async function settingsModalResetFromStorage(){
 function settingsModalHandleFile(key, file){
   if (!file) return;
   if (file.size > SETTINGS_AUDIO_MAX_BYTES) {
-    alert('Audio file too large. Limit is 600 KB per sound.');
+    alert('Audio file too large. Limit is 10 MB per sound.');
     return;
   }
   const reader = new FileReader();
@@ -1480,9 +1605,25 @@ function settingsModalHandleFile(key, file){
   };
   reader.readAsDataURL(file);
 }
-function settingsModalPreviewAudio(key, soundIndex){
+function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
   try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
+  let token = '';
+  const revert = () => {
+    try {
+      if (!sourceBtn) return;
+      appSetPlayStopButtonState(sourceBtn, false);
+      if (APP_ACTIVE_PLAY_BUTTON === sourceBtn) APP_ACTIVE_PLAY_BUTTON = null;
+    } catch {}
+  };
   try {
+    if (sourceBtn && sourceBtn.dataset && sourceBtn.dataset.playing === '1') {
+      try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+      appStopActivePlayback();
+      return;
+    }
+    try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+    appStopActivePlayback();
+
     const entry = settingsAudioEnsureEntry(key);
     if (!entry) return;
     const speechSupported = settingsSpeechSupported();
@@ -1492,13 +1633,51 @@ function settingsModalPreviewAudio(key, soundIndex){
     const sounds = settingsAudioValidSounds(entry);
     const idx = Number.isFinite(soundIndex) ? Number(soundIndex) : NaN;
     const clip = Number.isFinite(idx) && idx >= 0 && idx < sounds.length ? sounds[idx] : (sounds[0] || null);
+
+    APP_ACTIVE_PLAY_BUTTON = sourceBtn || null;
+    token = String(++APP_ACTIVE_PLAY_TOKEN);
+    if (sourceBtn) sourceBtn.dataset.playToken = token;
+    appSetPlayStopButtonState(sourceBtn, true);
     let fallbackTimer = null;
     let speechTriggered = false;
+    let cancelled = false;
+    let previewAudioEl = null;
     const triggerSpeech = ()=>{
+      if (cancelled) return;
       if (!hasSpeech || speechTriggered) return;
       speechTriggered = true;
       if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
-      settingsModalSpeakPreview(speechText);
+
+      // Never overlap audio + speech: pause the current preview audio (if any) without
+      // ending the session / resetting the button state.
+      try {
+        if (previewAudioEl) {
+          previewAudioEl.pause();
+          previewAudioEl.currentTime = 0;
+        }
+      } catch {}
+      try {
+        if (APP_ACTIVE_AUDIO_PLAYBACK && APP_ACTIVE_AUDIO_PLAYBACK._audio === previewAudioEl) APP_ACTIVE_AUDIO_PLAYBACK = null;
+      } catch {}
+
+      const p = settingsModalSpeakPreview(speechText);
+      if (p && typeof p.finally === 'function') {
+        p.finally(()=> finishSession());
+      } else {
+        // Best-effort fallback: clear button after a short delay.
+        setTimeout(()=> finishSession(), 1500);
+      }
+    };
+
+    const finishSession = ()=>{
+      try {
+        cancelled = true;
+        if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+      } catch {}
+      if (APP_ACTIVE_PLAY_BUTTON === sourceBtn && (!sourceBtn || sourceBtn.dataset.playToken === token)) {
+        try { appSetPlayStopButtonState(sourceBtn, false); } catch {}
+        if (APP_ACTIVE_PLAY_BUTTON === sourceBtn) APP_ACTIVE_PLAY_BUTTON = null;
+      }
     };
     const scheduleFallback = (audio)=>{
       if (!hasSpeech) return;
@@ -1511,6 +1690,17 @@ function settingsModalPreviewAudio(key, soundIndex){
     };
     if (clip && clip.dataUrl) {
       const audio = new Audio(clip.dataUrl);
+      previewAudioEl = audio;
+      const stop = () => {
+        cancelled = true;
+        try { if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; } } catch {}
+        try {
+          audio.pause();
+          audio.currentTime = 0;
+        } catch {}
+        try { finishSession(); } catch {}
+      };
+      APP_ACTIVE_AUDIO_PLAYBACK = { _audio: audio, stop };
       if (hasSpeech) {
         scheduleFallback(audio);
         audio.addEventListener('loadedmetadata', ()=> scheduleFallback(audio), { once: true });
@@ -1518,11 +1708,19 @@ function settingsModalPreviewAudio(key, soundIndex){
         audio.addEventListener('error', triggerSpeech, { once: true });
         audio.addEventListener('abort', triggerSpeech, { once: true });
       }
-      audio.play().catch(()=> triggerSpeech());
+      if (!hasSpeech) {
+        audio.addEventListener('ended', finishSession, { once: true });
+        audio.addEventListener('error', finishSession, { once: true });
+        audio.addEventListener('abort', finishSession, { once: true });
+      }
+      audio.play().catch(()=> (hasSpeech ? triggerSpeech() : finishSession()));
     } else {
-      triggerSpeech();
+      if (hasSpeech) triggerSpeech();
+      else finishSession();
     }
-  } catch {}
+  } catch {
+    revert();
+  }
 }
 function settingsModalClearAudio(key){
   const entry = settingsAudioEnsureEntry(key);
@@ -1633,7 +1831,7 @@ function wireSettingsAudioControls(){
       numInput._toolhubBound = true;
     });
     if (preview && !preview._toolhubBound) {
-      preview.addEventListener('click', ()=> settingsModalPreviewAudio(key));
+      preview.addEventListener('click', (ev)=> settingsModalPreviewAudio(key, undefined, ev.currentTarget));
       preview._toolhubBound = true;
     }
     if (clear && !clear._toolhubBound) {
@@ -1711,7 +1909,7 @@ function wireSettingsAudioControls(){
           const row = previewBtn.closest('[data-sound-index]');
           const rawIdx = row ? row.getAttribute('data-sound-index') : null;
           const idx = rawIdx != null ? Number(rawIdx) : NaN;
-          settingsModalPreviewAudio(key, Number.isFinite(idx) ? idx : undefined);
+          settingsModalPreviewAudio(key, Number.isFinite(idx) ? idx : undefined, previewBtn);
           return;
         }
         const removeBtn = ev.target && ev.target.closest('[data-action="remove-sound"]');

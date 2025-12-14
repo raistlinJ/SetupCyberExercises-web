@@ -232,10 +232,10 @@
             <p class="small text-muted mb-3">Upload short audio files here, then select them per-project in the CTFd Manager notification audio section.</p>
             <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
               <label class="btn btn-outline-secondary btn-sm mb-0">
-                Upload Audio<input type="file" id="settings-media-upload" accept="audio/*" hidden>
+                Upload Audio<input type="file" id="settings-media-upload" accept="audio/*" multiple hidden>
               </label>
               <button type="button" class="btn btn-outline-secondary btn-sm" id="settings-media-refresh">Refresh</button>
-              <span class="small text-muted">Max 600 KB per file.</span>
+              <span class="small text-muted">Max 10 MB per file.</span>
             </div>
             <div id="settings-media-status" class="small text-muted mb-2"></div>
             <div class="card" id="settings-media-card">
