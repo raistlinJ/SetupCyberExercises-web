@@ -312,9 +312,9 @@
           <input id="prox-username" class="form-control" placeholder="E.g., root@pam" title="E.g., root@pam" />
         </div>
         <div class="mb-3">
-          <label class="form-label" title="Proxmox password (not persisted)">Password</label>
+          <label class="form-label" title="Proxmox password (saved only if 'Save credentials' is enabled)">Password</label>
           <div class="input-group">
-            <input id="prox-password" type="password" class="form-control" title="Stored only in this session" />
+            <input id="prox-password" type="password" class="form-control" title="Stored in this session unless you enable 'Save credentials'" />
             <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" data-target="prox-password" title="Show">&#x1F576;&#xFE0E;</button>
           </div>
         </div>
@@ -324,9 +324,9 @@
         </div>
         <div class="form-check mb-2">
           <input class="form-check-input" type="checkbox" id="prox-save-creds">
-          <label class="form-check-label" for="prox-save-creds" title="If enabled, credentials will be saved with this project on the server (encrypted at rest).">Save credentials</label>
+          <label class="form-check-label" for="prox-save-creds" title="If enabled, credentials will be saved on the server for your user and this project (encrypted at rest).">Save credentials</label>
         </div>
-        <small class="text-muted">If unchecked, credentials live only in sessionStorage and clear on tab close. When checked, they're stored in localStorage on this device only (never sent to the server).</small>
+        <small class="text-muted">If unchecked, credentials live only in this browser session and clear on tab close. If checked, they are saved on the server for your user and this project (encrypted at rest).</small>
       </form>
       <div class="modal-footer">
         <div id="prox-login-feedback" class="me-auto small"></div>
