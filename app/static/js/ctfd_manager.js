@@ -719,12 +719,15 @@ function ctfdNotifyTemplatesListHtml(templates, defaultTemplate, rowSoundKey, au
   return list.map(t => ctfdNotifyTemplateItemHtml(t, rowSoundKey, audioStore)).join('');
 }
 
-async function ctfdRenderNotifyConfig(){
+async function ctfdRenderNotifyConfig(options){
   const rows = document.getElementById('ctfd-notify-rows');
   const status = document.getElementById('ctfd-notify-status');
   const saveBtn = document.getElementById('ctfd-notify-save');
   const reloadBtn = document.getElementById('ctfd-notify-reload');
   if (!rows) return;
+
+  const opts = options && typeof options === 'object' ? options : {};
+  const forceReload = !!opts.force;
 
   const pid = ctfdCurrentPid();
   if (reloadBtn) reloadBtn.disabled = !pid;
@@ -745,7 +748,9 @@ async function ctfdRenderNotifyConfig(){
   if (status) status.textContent = 'Loading…';
   try {
     if (typeof loadProjectAudio === 'function') {
-      await loadProjectAudio(pid, { force: true, silent: true });
+      // Avoid re-downloading the full audio store (including base64 blobs)
+      // on every refresh. Use cached store unless the user explicitly hits Reload.
+      await loadProjectAudio(pid, { force: forceReload, silent: true });
     }
   } catch {}
   let audioStore = ctfdGetProjectAudioStore(pid);
@@ -869,7 +874,9 @@ async function ctfdSaveNotifyConfig(){
   let audioStore = {};
   try {
     if (typeof loadProjectAudio === 'function') {
-      audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+      // Prefer cached store to avoid pulling large base64 payloads during Save.
+      // If not cached yet, loadProjectAudio will fetch it once.
+      audioStore = await loadProjectAudio(pid, { force: false, silent: true });
     } else {
       audioStore = ctfdGetProjectAudioStore(pid);
     }
@@ -930,7 +937,7 @@ function ctfdWireNotifyConfig(){
   const saveBtn = document.getElementById('ctfd-notify-save');
   const rows = document.getElementById('ctfd-notify-rows');
   if (reloadBtn && !reloadBtn._toolhubBound) {
-    reloadBtn.addEventListener('click', ()=> ctfdRenderNotifyConfig());
+    reloadBtn.addEventListener('click', ()=> ctfdRenderNotifyConfig({ force: true }));
     reloadBtn._toolhubBound = true;
   }
   if (saveBtn && !saveBtn._toolhubBound) {
