@@ -235,17 +235,19 @@
                 Upload Audio<input type="file" id="settings-media-upload" accept="audio/*" multiple hidden>
               </label>
               <button type="button" class="btn btn-outline-secondary btn-sm" id="settings-media-refresh">Refresh</button>
+              <button type="button" class="btn btn-outline-danger btn-sm" id="settings-media-delete-selected" data-remote-disable="audio" data-remote-tooltip="Audio is disabled when app is running in remote mode." disabled>Delete Selected</button>
               <span class="small text-muted">Max 10 MB per file.</span>
             </div>
             <div id="settings-media-status" class="small text-muted mb-2"></div>
             <div class="card" id="settings-media-card">
               <div class="card-header py-2 d-flex align-items-center justify-content-between">
+                <label class="small text-muted mb-0 d-flex align-items-center gap-2">
+                  <input class="form-check-input m-0" type="checkbox" id="settings-media-select-all" aria-label="Select all uploaded audio" disabled>
+                  <span>Select all</span>
+                </label>
                 <div class="small text-muted">Uploaded audio</div>
-                <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#settings-media-collapse" aria-expanded="false" aria-controls="settings-media-collapse">Toggle</button>
               </div>
-              <div id="settings-media-collapse" class="collapse">
-                <ul class="list-group list-group-flush list-group-sm" id="settings-media-list"></ul>
-              </div>
+              <ul class="list-group list-group-flush list-group-sm" id="settings-media-list"></ul>
             </div>
           </div>
         </div>

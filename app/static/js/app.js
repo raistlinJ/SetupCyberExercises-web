@@ -478,6 +478,7 @@ const PROJECT_AUDIO_CACHE = {};
 const PROJECT_AUDIO_LOADED = new Set();
 
 // Settings modal + audio customization
+// Must match backend ProjectStore._MAX_AUDIO_BYTES
 const SETTINGS_AUDIO_MAX_BYTES = 10 * 1024 * 1024;
 const SETTINGS_AUDIO_FIELDS = {
   ctfdFirstUser: {
@@ -994,17 +995,54 @@ function audioNormalizeSingleSound(entry){
   };
 }
 
+function audioNormalizeSingleSoundLoose(entry){
+  if (!entry || typeof entry !== 'object') return null;
+  const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
+  const sound = sounds.find(s => s && typeof s === 'object') || null;
+  if (!sound) return null;
+  const dataUrl = (sound && typeof sound.dataUrl === 'string') ? sound.dataUrl : '';
+  return {
+    dataUrl: (typeof dataUrl === 'string' && dataUrl.startsWith('data:')) ? dataUrl : '',
+    name: sound.name ? String(sound.name) : 'Audio',
+    size: Number(sound.size) || 0,
+    type: sound.type ? String(sound.type) : '',
+    updated: Number(sound.updated) || 0,
+  };
+}
+
 function audioListMediaItems(audioStore){
   const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
   const items = [];
   Object.entries(store).forEach(([key, entry]) => {
     if (!audioIsMediaKey(String(key))) return;
-    const sound = audioNormalizeSingleSound(entry);
+    const sound = audioNormalizeSingleSoundLoose(entry);
     if (!sound) return;
     items.push({ key: String(key), ...sound });
   });
   items.sort((a, b) => (b.updated || 0) - (a.updated || 0) || String(a.name).localeCompare(String(b.name)));
   return items;
+}
+
+async function mediaManagerLoadMediaMeta(pid){
+  const id = projectAudioCacheKey(pid);
+  if (!id) return {};
+  const pfx = encodeURIComponent(AUDIO_MEDIA_PREFIX);
+  const res = await http('GET', `/api/projects/${id}/audio?prefix=${pfx}&meta=1`);
+  const audio = res && typeof res.audio === 'object' ? res.audio : {};
+  return cloneSettingsAudio(audio);
+}
+
+function mediaManagerUpsertCacheEntry(pid, key, entry){
+  const id = projectAudioCacheKey(pid);
+  if (!id || !key) return;
+  try {
+    const existing = PROJECT_AUDIO_CACHE[id];
+    if (existing && typeof existing === 'object') {
+      existing[String(key)] = cloneSettingsAudio(entry || {});
+      PROJECT_AUDIO_CACHE[id] = existing;
+      PROJECT_AUDIO_LOADED.add(id);
+    }
+  } catch {}
 }
 
 function mediaManagerReadCurrentPid(){
@@ -1023,6 +1061,7 @@ function mediaManagerReadFileAsDataUrl(file){
   return new Promise((resolve, reject) => {
     try {
       const reader = new FileReader();
+      reader.onprogress = null;
       reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
       reader.onerror = () => reject(new Error('Failed to read file'));
       reader.readAsDataURL(file);
@@ -1030,6 +1069,364 @@ function mediaManagerReadFileAsDataUrl(file){
       reject(err);
     }
   });
+}
+
+function mediaManagerReadFileAsDataUrlWithProgress(file, onProgress){
+  return new Promise((resolve, reject) => {
+    try {
+      const reader = new FileReader();
+      reader.onprogress = (ev) => {
+        try {
+          if (!ev || !ev.lengthComputable) return;
+          const pct = ev.total ? Math.round((ev.loaded / ev.total) * 100) : 0;
+          if (typeof onProgress === 'function') onProgress(pct);
+        } catch {}
+      };
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function mediaManagerXhrJson(method, url, body, onProgress){
+  return new Promise((resolve, reject) => {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open(method, url, true);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.responseType = 'text';
+      if (xhr.upload && typeof xhr.upload.addEventListener === 'function') {
+        xhr.upload.addEventListener('progress', (ev) => {
+          try {
+            if (!ev || !ev.lengthComputable) return;
+            const pct = ev.total ? Math.round((ev.loaded / ev.total) * 100) : 0;
+            if (typeof onProgress === 'function') onProgress(pct);
+          } catch {}
+        });
+      }
+      xhr.onload = () => {
+        const ok = xhr.status >= 200 && xhr.status < 300;
+        const text = xhr.responseText || '';
+        if (!ok) return reject(new Error(text || xhr.statusText || `HTTP ${xhr.status}`));
+        try {
+          const parsed = JSON.parse(text || '{}');
+          return resolve(parsed);
+        } catch {
+          return resolve(text);
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(JSON.stringify(body || {}));
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function mediaManagerLooks404(err){
+  const msg = String(err && err.message ? err.message : err || '');
+  return msg.includes('404') || msg.toLowerCase().includes('not found') || msg.includes('requested URL was not found');
+}
+
+async function mediaManagerSha256HexFromDataUrl(dataUrl){
+  try {
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return '';
+    const comma = dataUrl.indexOf(',');
+    if (comma < 0) return '';
+    const header = dataUrl.slice(0, comma);
+    const payload = dataUrl.slice(comma + 1);
+    if (!header.includes(';base64')) return '';
+    if (!payload) return '';
+    // Decode base64 to bytes
+    const bin = atob(payload);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    if (!crypto || !crypto.subtle || typeof crypto.subtle.digest !== 'function') return '';
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const out = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return out || '';
+  } catch {
+    return '';
+  }
+}
+
+function mediaManagerFindDuplicateKeyBySha256(mediaMeta, sha256Hex){
+  if (!sha256Hex) return '';
+  const store = mediaMeta && typeof mediaMeta === 'object' ? mediaMeta : {};
+  for (const [k, v] of Object.entries(store)) {
+    if (!k || typeof k !== 'string' || !k.startsWith(AUDIO_MEDIA_PREFIX)) continue;
+    if (!v || typeof v !== 'object') continue;
+    const sounds = Array.isArray(v.sounds) ? v.sounds : [];
+    const s0 = sounds.find(s => s && typeof s === 'object') || null;
+    const h = s0 && typeof s0.sha256 === 'string' ? String(s0.sha256) : '';
+    if (h && h === sha256Hex) return k;
+  }
+  return '';
+}
+
+function mediaManagerFindDuplicateKeyByDataUrl(audioStore, dataUrl){
+  if (!dataUrl) return '';
+  const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
+  for (const [k, v] of Object.entries(store)) {
+    if (!k || typeof k !== 'string' || !k.startsWith(AUDIO_MEDIA_PREFIX)) continue;
+    const s = audioNormalizeSingleSound(v);
+    if (s && s.dataUrl && s.dataUrl === dataUrl) return k;
+  }
+  return '';
+}
+
+function mediaManagerGetSelectedKeys(){
+  const listEl = document.getElementById('settings-media-list');
+  if (!listEl) return [];
+  const keys = Array.from(listEl.querySelectorAll('input.media-select:checked')).map(el => String(el.getAttribute('data-media-key') || '')).filter(Boolean);
+  // De-dupe while preserving order
+  const seen = new Set();
+  const out = [];
+  for (const k of keys) {
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
+function mediaManagerUpdateBatchDeleteButton(){
+  const btn = document.getElementById('settings-media-delete-selected');
+  if (!btn) return;
+  try { btn.disabled = mediaManagerGetSelectedKeys().length === 0; } catch { btn.disabled = true; }
+}
+
+function mediaManagerSetSelectAllState({ disabled, checked } = {}){
+  const el = document.getElementById('settings-media-select-all');
+  if (!el) return;
+  if (disabled !== undefined) el.disabled = !!disabled;
+  if (checked !== undefined) el.checked = !!checked;
+}
+
+async function mediaManagerDeleteItems(mediaKeys){
+  if (mediaManagerRemoteBlocked()) return { deleted: 0, failed: 0 };
+  const pid = mediaManagerReadCurrentPid();
+  if (!pid) return { deleted: 0, failed: 0 };
+  const keys = Array.isArray(mediaKeys) ? mediaKeys.map(k => String(k || '')).filter(audioIsMediaKey) : [];
+  const unique = Array.from(new Set(keys));
+  if (!unique.length) return { deleted: 0, failed: 0 };
+
+  let deleted = 0;
+  let failed = 0;
+  let fellBackToLegacy = false;
+
+  try {
+    try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Media Delete', `Deleting ${unique.length} file(s)…`); } catch {}
+    for (let i = 0; i < unique.length; i++) {
+      const key = unique[i];
+      const pct = Math.max(0, Math.min(95, Math.round((i / unique.length) * 95)));
+      try {
+        if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: `Deleting ${i + 1}/${unique.length}…`, percent: pct, barText: `${pct}%` });
+      } catch {}
+      try {
+        await http('DELETE', `/api/projects/${encodeURIComponent(pid)}/audio_entry?key=${encodeURIComponent(key)}`);
+        deleted += 1;
+      } catch (err) {
+        if (mediaManagerLooks404(err)) {
+          fellBackToLegacy = true;
+          break;
+        }
+        failed += 1;
+      }
+    }
+
+    if (fellBackToLegacy) {
+      const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+      let legacyDeleted = 0;
+      unique.forEach((key) => {
+        if (!Object.prototype.hasOwnProperty.call(audioStore, key)) return;
+        delete audioStore[key];
+        legacyDeleted += 1;
+        // Clear any per-event references to this media key
+        Object.entries(audioStore).forEach(([k, v]) => {
+          if (!k || typeof k !== 'string') return;
+          if (!k.startsWith(AUDIO_EVENT_PREFIX)) return;
+          if (!v || typeof v !== 'object') return;
+          if (v.soundKey === key) {
+            try { delete v.soundKey; } catch {}
+          }
+        });
+      });
+      await saveProjectAudio(pid, audioStore);
+      deleted = legacyDeleted;
+      // if legacy save worked, treat as no per-key failures
+      failed = 0;
+    }
+
+    try {
+      const id = projectAudioCacheKey(pid);
+      if (id && PROJECT_AUDIO_CACHE[id] && typeof PROJECT_AUDIO_CACHE[id] === 'object') {
+        unique.forEach(k => { try { delete PROJECT_AUDIO_CACHE[id][k]; } catch {} });
+      }
+    } catch {}
+  } finally {
+    try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' }); } catch {}
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+  }
+
+  return { deleted, failed };
+}
+
+async function mediaManagerUploadFilesBatch(files){
+  if (mediaManagerRemoteBlocked()) return { uploaded: 0, duplicated: 0, failed: 0 };
+  const pid = mediaManagerReadCurrentPid();
+  if (!pid) return { uploaded: 0, duplicated: 0, failed: 0 };
+  const list = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (!list.length) return { uploaded: 0, duplicated: 0, failed: 0 };
+
+  let uploaded = 0;
+  let duplicated = 0;
+  let failed = 0;
+
+  // Build sha->key map if server meta includes hashes
+  const existingShaToKey = {};
+  try {
+    const meta = await mediaManagerLoadMediaMeta(pid);
+    Object.entries(meta || {}).forEach(([k, v]) => {
+      if (!audioIsMediaKey(k)) return;
+      const sounds = Array.isArray(v && v.sounds) ? v.sounds : [];
+      const s0 = sounds.find(s => s && typeof s === 'object') || null;
+      const h = s0 && typeof s0.sha256 === 'string' ? String(s0.sha256) : '';
+      if (h) existingShaToKey[h] = k;
+    });
+  } catch {}
+  const seenSha = new Set();
+  const legacyModeSeenDataUrls = new Set();
+
+  let legacyMode = false;
+  let legacyAudioStore = null;
+  let legacyLoaded = false;
+
+  const total = list.length;
+  const mapOverall = (fileIndex, innerPct) => {
+    const span = 100 / Math.max(1, total);
+    const base = fileIndex * span;
+    const v = base + (Math.max(0, Math.min(100, innerPct)) / 100) * span;
+    return Math.max(0, Math.min(100, Math.round(v)));
+  };
+  const setProgress = (pct, text) => {
+    try {
+      if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text, percent: pct, barText: `${pct}%` });
+    } catch {}
+  };
+
+  try {
+    try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Media Upload', `Uploading ${total} file(s)…`); } catch {}
+
+    for (let idx = 0; idx < total; idx++) {
+      const file = list[idx];
+      const name = file && file.name ? file.name : 'file';
+      setProgress(mapOverall(idx, 0), `Reading ${idx + 1}/${total}: ${name}…`);
+
+      let dataUrl = '';
+      try {
+        dataUrl = await mediaManagerReadFileAsDataUrlWithProgress(file, (pct) => {
+          setProgress(mapOverall(idx, Math.round((pct / 100) * 40)), `Reading ${idx + 1}/${total}: ${name}…`);
+        });
+      } catch {
+        failed += 1;
+        continue;
+      }
+      if (!dataUrl || !dataUrl.startsWith('data:')) {
+        failed += 1;
+        continue;
+      }
+
+      setProgress(mapOverall(idx, 42), `Checking ${idx + 1}/${total}: ${name}…`);
+      const sha256Hex = await mediaManagerSha256HexFromDataUrl(dataUrl);
+
+      if (sha256Hex) {
+        if (existingShaToKey[sha256Hex]) { duplicated += 1; continue; }
+        if (seenSha.has(sha256Hex)) { duplicated += 1; continue; }
+      } else {
+        // hash unavailable: only intra-batch dedupe by dataUrl (legacy mode will also check store)
+        if (legacyModeSeenDataUrls.has(dataUrl)) { duplicated += 1; continue; }
+      }
+
+      // Upload path
+      if (legacyMode) {
+        if (!legacyLoaded) {
+          legacyAudioStore = await loadProjectAudio(pid, { force: true, silent: true });
+          legacyLoaded = true;
+        }
+        const dupKey = mediaManagerFindDuplicateKeyByDataUrl(legacyAudioStore, dataUrl);
+        if (dupKey) {
+          duplicated += 1;
+          continue;
+        }
+        const mediaKey = audioMakeMediaKey();
+        legacyAudioStore[mediaKey] = {
+          sounds: [{
+            name: file.name || 'Audio',
+            size: file.size || 0,
+            type: file.type || '',
+            dataUrl,
+            updated: Date.now()
+          }]
+        };
+        uploaded += 1;
+        if (sha256Hex) { existingShaToKey[sha256Hex] = mediaKey; seenSha.add(sha256Hex); }
+        else { legacyModeSeenDataUrls.add(dataUrl); }
+        continue;
+      }
+
+      setProgress(mapOverall(idx, 45), `Uploading ${idx + 1}/${total}: ${name}…`);
+      try {
+        const res = await mediaManagerXhrJson('POST', `/api/projects/${encodeURIComponent(pid)}/audio_media`, {
+          name: file.name || 'Audio',
+          size: file.size || 0,
+          type: file.type || '',
+          dataUrl,
+        }, (pct) => {
+          // Map upload progress roughly into 45..95 inner range
+          const inner = 45 + Math.max(0, Math.min(50, Math.round((pct / 100) * 50)));
+          setProgress(mapOverall(idx, inner), `Uploading ${idx + 1}/${total}: ${name}…`);
+        });
+        const isDup = !!(res && res.duplicated);
+        if (isDup) {
+          duplicated += 1;
+        } else {
+          uploaded += 1;
+          if (sha256Hex) {
+            const key = res && res.key ? String(res.key) : '';
+            existingShaToKey[sha256Hex] = key || existingShaToKey[sha256Hex] || '';
+            seenSha.add(sha256Hex);
+          }
+        }
+      } catch (err) {
+        if (mediaManagerLooks404(err)) {
+          legacyMode = true;
+          idx -= 1; // re-process this file in legacy mode
+          continue;
+        }
+        failed += 1;
+      }
+    }
+
+    if (legacyMode && legacyLoaded && legacyAudioStore) {
+      setProgress(95, 'Saving…');
+      try {
+        await saveProjectAudio(pid, legacyAudioStore);
+      } catch {
+        // If final save fails, mark as failed (best effort)
+        failed += 1;
+      }
+    }
+  } finally {
+    try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' }); } catch {}
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+  }
+
+  return { uploaded, duplicated, failed };
 }
 
 async function mediaManagerUploadFile(file){
@@ -1044,23 +1441,129 @@ async function mediaManagerUploadFile(file){
     alert('Select a project first.');
     return;
   }
-  const dataUrl = await mediaManagerReadFileAsDataUrl(file);
-  if (!dataUrl || !dataUrl.startsWith('data:')) {
-    alert('Unsupported audio format.');
-    return;
+
+  try {
+    if (typeof window.showActionProgress === 'function') {
+      window.showActionProgress('Media Upload', `Reading ${file.name || 'file'}…`);
+      if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
+    }
+  } catch {}
+
+  let dataUrl = '';
+  try {
+    dataUrl = await mediaManagerReadFileAsDataUrlWithProgress(file, (pct) => {
+      try {
+        if (typeof window.updateActionProgress === 'function') {
+          const scaled = Math.max(0, Math.min(40, Math.round((pct / 100) * 40)));
+          window.updateActionProgress({ text: `Reading ${file.name || 'file'}…`, percent: scaled, barText: `${scaled}%` });
+        }
+      } catch {}
+    });
+    if (!dataUrl || !dataUrl.startsWith('data:')) {
+      alert('Unsupported audio format.');
+      return;
+    }
+
+    // Client-side dedupe: prefer hash-based (fast) if available, else fall back to dataUrl match.
+    let sha256Hex = '';
+    try {
+      if (typeof window.updateActionProgress === 'function') {
+        window.updateActionProgress({ text: `Checking duplicates…`, percent: 42, barText: 'Checking…' });
+      }
+    } catch {}
+    sha256Hex = await mediaManagerSha256HexFromDataUrl(dataUrl);
+
+    let dupKey = '';
+    try {
+      const meta = await mediaManagerLoadMediaMeta(pid);
+      dupKey = mediaManagerFindDuplicateKeyBySha256(meta, sha256Hex);
+    } catch {}
+
+    if (!dupKey) {
+      // If meta doesn't include hashes (older backend), fall back to full store equality.
+      try {
+        const full = await loadProjectAudio(pid, { force: false, silent: true });
+        dupKey = mediaManagerFindDuplicateKeyByDataUrl(full, dataUrl);
+      } catch {}
+      if (!dupKey) {
+        try {
+          const full = await loadProjectAudio(pid, { force: true, silent: true });
+          dupKey = mediaManagerFindDuplicateKeyByDataUrl(full, dataUrl);
+        } catch {}
+      }
+    }
+
+    if (dupKey) {
+      try { if (typeof window.showToast === 'function') window.showToast(`Already uploaded: ${file.name || 'Audio'}`, 'info'); } catch {}
+      return;
+    }
+
+    try {
+    if (typeof window.updateActionProgress === 'function') {
+      window.updateActionProgress({ text: `Uploading ${file.name || 'file'}…`, percent: 45, barText: 'Uploading…' });
+    }
+    } catch {}
+
+    let res = null;
+    try {
+      res = await mediaManagerXhrJson('POST', `/api/projects/${encodeURIComponent(pid)}/audio_media`, {
+        name: file.name || 'Audio',
+        size: file.size || 0,
+        type: file.type || '',
+        dataUrl,
+      }, (pct) => {
+        try {
+          if (typeof window.updateActionProgress === 'function') {
+            const scaled = 45 + Math.max(0, Math.min(50, Math.round((pct / 100) * 50)));
+            window.updateActionProgress({ text: `Uploading ${file.name || 'file'}…`, percent: scaled, barText: `${scaled}%` });
+          }
+        } catch {}
+      });
+    } catch (err) {
+      // Backward compatible fallback: if the server doesn't have the new endpoint yet,
+      // fall back to the legacy full-store update path.
+      if (!mediaManagerLooks404(err)) throw err;
+
+      try {
+        if (typeof window.updateActionProgress === 'function') {
+          window.updateActionProgress({ text: `Uploading ${file.name || 'file'}…`, percent: 60, barText: 'Saving…' });
+        }
+      } catch {}
+
+      const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+
+      // Dedupe even in legacy path
+      const legacyDup = mediaManagerFindDuplicateKeyByDataUrl(audioStore, dataUrl);
+      if (legacyDup) {
+        res = { duplicated: true, key: legacyDup, legacy: true };
+      } else {
+      const mediaKey = audioMakeMediaKey();
+      audioStore[mediaKey] = {
+        sounds: [{
+          name: file.name || 'Audio',
+          size: file.size || 0,
+          type: file.type || '',
+          dataUrl,
+          updated: Date.now()
+        }]
+      };
+      await saveProjectAudio(pid, audioStore);
+      res = { duplicated: false, key: mediaKey, legacy: true };
+      }
+    }
+
+    const duplicated = !!(res && res.duplicated);
+    if (duplicated) {
+      try { if (typeof window.showToast === 'function') window.showToast(`Already uploaded: ${file.name || 'Audio'}`, 'info'); } catch {}
+    } else {
+      try { if (typeof window.showToast === 'function') window.showToast(`Uploaded: ${file.name || 'Audio'}`, 'success'); } catch {}
+    }
+  } finally {
+    try {
+      if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' });
+    } catch {}
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
   }
-  const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
-  const mediaKey = audioMakeMediaKey();
-  audioStore[mediaKey] = {
-    sounds: [{
-      name: file.name || 'Audio',
-      size: file.size || 0,
-      type: file.type || '',
-      dataUrl,
-      updated: Date.now()
-    }]
-  };
-  await saveProjectAudio(pid, audioStore);
 }
 
 async function mediaManagerDeleteItem(mediaKey){
@@ -1069,19 +1572,37 @@ async function mediaManagerDeleteItem(mediaKey){
   if (!pid) return;
   const key = String(mediaKey || '');
   if (!audioIsMediaKey(key)) return;
-  const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
-  if (!Object.prototype.hasOwnProperty.call(audioStore, key)) return;
-  delete audioStore[key];
-  // Clear any per-event references to this media key
-  Object.entries(audioStore).forEach(([k, v]) => {
-    if (!k || typeof k !== 'string') return;
-    if (!k.startsWith(AUDIO_EVENT_PREFIX)) return;
-    if (!v || typeof v !== 'object') return;
-    if (v.soundKey === key) {
-      try { delete v.soundKey; } catch {}
+  try {
+    await http('DELETE', `/api/projects/${encodeURIComponent(pid)}/audio_entry?key=${encodeURIComponent(key)}`);
+  } catch (err) {
+    // Backward compatible fallback: some deployments may not yet have the
+    // single-entry delete endpoint. If we got a 404, fall back to the legacy
+    // full-store update.
+    const msg = String(err && err.message ? err.message : err || '');
+    const looks404 = msg.includes('404') || msg.toLowerCase().includes('not found') || msg.includes('requested URL was not found');
+    if (!looks404) throw err;
+
+    const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+    if (!Object.prototype.hasOwnProperty.call(audioStore, key)) return;
+    delete audioStore[key];
+    // Clear any per-event references to this media key
+    Object.entries(audioStore).forEach(([k, v]) => {
+      if (!k || typeof k !== 'string') return;
+      if (!k.startsWith(AUDIO_EVENT_PREFIX)) return;
+      if (!v || typeof v !== 'object') return;
+      if (v.soundKey === key) {
+        try { delete v.soundKey; } catch {}
+      }
+    });
+    await saveProjectAudio(pid, audioStore);
+  }
+
+  try {
+    const id = projectAudioCacheKey(pid);
+    if (id && PROJECT_AUDIO_CACHE[id] && typeof PROJECT_AUDIO_CACHE[id] === 'object') {
+      delete PROJECT_AUDIO_CACHE[id][key];
     }
-  });
-  await saveProjectAudio(pid, audioStore);
+  } catch {}
 }
 
 async function mediaManagerRefreshList(options){
@@ -1094,19 +1615,27 @@ async function mediaManagerRefreshList(options){
   if (!pid) {
     if (statusEl) statusEl.textContent = 'Select a project to manage media.';
     listEl.innerHTML = '<li class="list-group-item small text-muted">No project selected.</li>';
+    mediaManagerUpdateBatchDeleteButton();
+    mediaManagerSetSelectAllState({ disabled: true, checked: false });
     return;
   }
   if (statusEl) statusEl.textContent = 'Loading…';
-  let audioStore = {};
+  let mediaMeta = {};
   try {
-    audioStore = await loadProjectAudio(pid, { force: !!opts.force, silent: true });
-  } catch {
-    audioStore = getProjectAudio(pid) || {};
+    mediaMeta = await mediaManagerLoadMediaMeta(pid);
+  } catch (err) {
+    listEl.innerHTML = '<li class="list-group-item small text-muted">Failed to load uploaded audio.</li>';
+    if (statusEl) statusEl.textContent = `Load failed: ${err?.message || err}`;
+    mediaManagerUpdateBatchDeleteButton();
+    mediaManagerSetSelectAllState({ disabled: true, checked: false });
+    return;
   }
-  const items = audioListMediaItems(audioStore);
+  const items = audioListMediaItems(mediaMeta);
   if (!items.length) {
     listEl.innerHTML = '<li class="list-group-item small text-muted">No uploaded audio yet.</li>';
     if (statusEl) statusEl.textContent = '';
+    mediaManagerUpdateBatchDeleteButton();
+    mediaManagerSetSelectAllState({ disabled: true, checked: false });
     return;
   }
   listEl.innerHTML = items.map(item => {
@@ -1115,65 +1644,83 @@ async function mediaManagerRefreshList(options){
     const typeLabel = item.type ? escHtml(item.type) : 'Audio';
     const meta = `${sizeKb} | ${typeLabel}`;
     return `<li class="list-group-item d-flex align-items-center justify-content-between gap-2" data-media-key="${escHtml(item.key)}">
+  <input class="form-check-input me-2 media-select" type="checkbox" data-media-key="${escHtml(item.key)}" aria-label="Select audio file">
   <div class="flex-grow-1">
     <div>${safeName}</div>
     <div class="small text-muted">${meta}</div>
   </div>
   <div class="btn-group btn-group-sm">
     <button type="button" class="btn btn-outline-secondary" data-action="media-preview">Preview</button>
-    <button type="button" class="btn btn-outline-danger" data-action="media-delete">Delete</button>
   </div>
 </li>`;
   }).join('');
   if (statusEl) statusEl.textContent = '';
-}
-
-function mediaManagerOpenCollapse(){
-  const el = document.getElementById('settings-media-collapse');
-  if (!el) return;
-  try {
-    if (window.bootstrap && bootstrap.Collapse) {
-      const inst = bootstrap.Collapse.getInstance(el) || new bootstrap.Collapse(el, { toggle: false });
-      inst.show();
-      return;
-    }
-  } catch {}
-  try { el.classList.add('show'); } catch {}
+  mediaManagerUpdateBatchDeleteButton();
+  mediaManagerSetSelectAllState({ disabled: false, checked: false });
 }
 
 function wireMediaManagerControls(){
   const upload = document.getElementById('settings-media-upload');
   const refresh = document.getElementById('settings-media-refresh');
+  const delSelected = document.getElementById('settings-media-delete-selected');
+  const selectAll = document.getElementById('settings-media-select-all');
   const list = document.getElementById('settings-media-list');
   if (upload && !upload._toolhubBound) {
     upload.addEventListener('change', async (ev) => {
       const files = (ev.target && ev.target.files) ? Array.from(ev.target.files) : [];
-      const hadFile = files.length > 0;
-      let uploadedOk = false;
       try {
-        for (const file of files) {
-          if (!file) continue;
-          try {
-            await mediaManagerUploadFile(file);
-            uploadedOk = true;
-          } catch (err) {
-            try { showToast(`Media upload failed (${file && file.name ? file.name : 'file'}): ${err?.message || err}`, 'warning'); } catch {}
-          }
-        }
+        const res = await mediaManagerUploadFilesBatch(files);
+        const up = res && Number.isFinite(res.uploaded) ? res.uploaded : 0;
+        const dup = res && Number.isFinite(res.duplicated) ? res.duplicated : 0;
+        const fail = res && Number.isFinite(res.failed) ? res.failed : 0;
+        const msgParts = [];
+        if (up) msgParts.push(`Uploaded ${up}`);
+        if (dup) msgParts.push(`Skipped ${dup} duplicate${dup === 1 ? '' : 's'}`);
+        if (fail) msgParts.push(`${fail} failed`);
+        const msg = msgParts.length ? msgParts.join(' • ') : 'No files uploaded.';
+        try { showToast(msg, fail ? 'warning' : 'success'); } catch {}
       } catch (err) {
         try { showToast(`Media upload failed: ${err?.message || err}`, 'warning'); } catch {}
       }
       try { ev.target.value = ''; } catch {}
       try { await mediaManagerRefreshList({ force: true }); } catch {}
-      if (hadFile && uploadedOk) {
-        try { mediaManagerOpenCollapse(); } catch {}
-      }
     });
     upload._toolhubBound = true;
   }
   if (refresh && !refresh._toolhubBound) {
     refresh.addEventListener('click', () => mediaManagerRefreshList({ force: true }));
     refresh._toolhubBound = true;
+  }
+  if (delSelected && !delSelected._toolhubBound) {
+    delSelected.addEventListener('click', async () => {
+      if (mediaManagerRemoteBlocked()) return;
+      const keys = mediaManagerGetSelectedKeys();
+      if (!keys.length) return;
+      if (!confirm(`Delete ${keys.length} selected audio file${keys.length === 1 ? '' : 's'}?`)) return;
+      delSelected.disabled = true;
+      try {
+        const res = await mediaManagerDeleteItems(keys);
+        const del = res && Number.isFinite(res.deleted) ? res.deleted : 0;
+        const fail = res && Number.isFinite(res.failed) ? res.failed : 0;
+        try { showToast(fail ? `Deleted ${del}. ${fail} failed.` : `Deleted ${del} audio file${del === 1 ? '' : 's'}.`, fail ? 'warning' : 'success'); } catch {}
+      } catch (err) {
+        try { showToast(`Delete failed: ${err?.message || err}`, 'warning'); } catch {}
+      }
+      try { await mediaManagerRefreshList({ force: true }); } catch {}
+    });
+    delSelected._toolhubBound = true;
+  }
+  if (selectAll && !selectAll._toolhubBound) {
+    selectAll.addEventListener('change', () => {
+      const listEl = document.getElementById('settings-media-list');
+      if (!listEl) return;
+      const desired = !!selectAll.checked;
+      listEl.querySelectorAll('input.media-select').forEach(cb => {
+        try { cb.checked = desired; } catch {}
+      });
+      mediaManagerUpdateBatchDeleteButton();
+    });
+    selectAll._toolhubBound = true;
   }
   if (list && !list._toolhubBound) {
     list.addEventListener('click', async (ev) => {
@@ -1194,9 +1741,14 @@ function wireMediaManagerControls(){
           appStopActivePlayback();
           const pid = mediaManagerReadCurrentPid();
           if (!pid) return;
-          const audioStore = getProjectAudio(pid) || {};
-          const entry = audioStore[key];
-          const sound = audioNormalizeSingleSound(entry);
+          let entry = (getProjectAudio(pid) || {})[key];
+          let sound = audioNormalizeSingleSound(entry);
+          if (!sound || !sound.dataUrl) {
+            const fetched = await http('GET', `/api/projects/${encodeURIComponent(pid)}/audio_entry?key=${encodeURIComponent(key)}`);
+            entry = fetched && fetched.entry ? fetched.entry : null;
+            sound = audioNormalizeSingleSound(entry);
+            if (entry) mediaManagerUpsertCacheEntry(pid, key, entry);
+          }
           if (!sound || !sound.dataUrl) return;
 
           APP_ACTIVE_PLAY_BUTTON = actionBtn;
@@ -1244,15 +1796,20 @@ function wireMediaManagerControls(){
         }
         return;
       }
-      if (action === 'media-delete') {
-        if (!confirm('Delete this uploaded audio file?')) return;
-        try {
-          await mediaManagerDeleteItem(key);
-        } catch (err) {
-          try { showToast(`Delete failed: ${err?.message || err}`, 'warning'); } catch {}
+    });
+    list.addEventListener('change', (ev) => {
+      const cb = ev.target;
+      if (!cb || !cb.classList || !cb.classList.contains('media-select')) return;
+      mediaManagerUpdateBatchDeleteButton();
+      try {
+        const all = document.getElementById('settings-media-select-all');
+        if (all) {
+          const listEl = document.getElementById('settings-media-list');
+          const boxes = listEl ? Array.from(listEl.querySelectorAll('input.media-select')) : [];
+          const allChecked = boxes.length ? boxes.every(b => !!b.checked) : false;
+          all.checked = allChecked;
         }
-        try { await mediaManagerRefreshList({ force: true }); } catch {}
-      }
+      } catch {}
     });
     list._toolhubBound = true;
   }
@@ -4737,9 +5294,11 @@ function openExportOptions(pid) {
   try {
     const c = document.getElementById('exp-creds');
     const v = document.getElementById('exp-vms');
+    const a = document.getElementById('exp-notify-audio');
   const warn = document.getElementById('exp-vms-warning');
     if (c) c.checked = true;
     if (v) v.checked = true;
+    if (a) a.checked = true;
   if (warn && v) warn.style.display = v.checked ? 'block' : 'none';
   if (v && warn) v.onchange = () => { warn.style.display = v.checked ? 'block' : 'none'; };
   } catch {}
@@ -4757,6 +5316,7 @@ function openExportOptions(pid) {
       if (dl.dataset.busy === '1' || dl.disabled) return;
       const includeCreds = !!document.getElementById('exp-creds')?.checked;
       const includeVms = !!document.getElementById('exp-vms')?.checked;
+      const includeNotifyAudio = !!document.getElementById('exp-notify-audio')?.checked;
       setBusy(true);
       let proceed = true;
       try {
@@ -4766,7 +5326,7 @@ function openExportOptions(pid) {
         }
         if (includeVms) {
           try { m.hide(); } catch {}
-          await gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms });
+          await gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms, includeNotifyAudio });
         } else {
           try {
             if (typeof window.showActionProgress === 'function') {
@@ -4775,7 +5335,7 @@ function openExportOptions(pid) {
             }
           } catch {}
           const a = document.createElement('a');
-          a.href = `/api/projects/${encodeURIComponent(EXPORT_CONTEXT.pid)}/export?includeCreds=${includeCreds}&includeVms=${includeVms}`;
+          a.href = `/api/projects/${encodeURIComponent(EXPORT_CONTEXT.pid)}/export?includeCreds=${includeCreds}&includeVms=${includeVms}&includeNotifyAudio=${includeNotifyAudio}`;
           // Give the modal a moment to render before starting the download
           setTimeout(() => { try { a.click(); } catch {} }, 50);
           try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: export started') : console.log('Export started'); } catch {}
@@ -4811,6 +5371,7 @@ async function performProjectImport(options = {}) {
   fd.append('file', file);
   if (options.includeCreds !== undefined) fd.append('includeCreds', options.includeCreds ? 'true' : 'false');
   if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
+  if (options.includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', options.includeNotifyAudio ? 'true' : 'false');
   if (options.importAsTemplates !== undefined) fd.append('importAsTemplates', options.importAsTemplates ? 'true' : 'false');
   const label = `Import project: ${file.name}`;
 
@@ -5002,11 +5563,12 @@ function _fmtByteProgress(loaded, total){
   } catch { return ''; }
 }
 
-async function _runAsyncImportWithProx({ file, includeCreds, includeVms, importAsTemplates, prox }){
+async function _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox }){
   const fd = new FormData();
   fd.append('file', file);
   fd.append('includeCreds', includeCreds ? 'true' : 'false');
   fd.append('includeVms', includeVms ? 'true' : 'false');
+  if (includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', includeNotifyAudio ? 'true' : 'false');
   if (importAsTemplates !== undefined) fd.append('importAsTemplates', importAsTemplates ? 'true' : 'false');
   if (prox) {
     if (prox.baseUrl) fd.append('baseUrl', String(prox.baseUrl));
@@ -5176,7 +5738,7 @@ try {
   };
 } catch {}
 
-async function gateImportThroughProxLogin({ file, includeCreds, includeVms, importAsTemplates }){
+async function gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates }){
   // If no modal, fall back to prompts.
   if (!document.getElementById('proxLoginModal') || !window.bootstrap) {
     const baseUrl = _ensureHttpsUrl(window.prompt('Proxmox URL (https://host or host):', '') || '');
@@ -5190,7 +5752,7 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms, impo
     const verifySSL = true;
     const prox = { baseUrl, apiPort, sshPort, username, password, verifySSL };
     _writeImportProxCreds({ baseUrl, apiPort, sshPort, username, password, verifySSL });
-    const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, importAsTemplates, prox });
+    const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox });
     // Handle success UX
     const importedId = (Array.isArray(st?.imported) && st.imported[0]?.id) || (st?.imported?.id) || '';
     try {
@@ -5219,7 +5781,7 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms, impo
   if (passEl) passEl.value = sess.password || '';
   if (vsslEl) vsslEl.checked = (sess.verifySSL !== false);
 
-  window.__IMPORT_NEXT__ = { file, includeCreds, includeVms, importAsTemplates: !!importAsTemplates };
+  window.__IMPORT_NEXT__ = { file, includeCreds, includeVms, includeNotifyAudio: includeNotifyAudio !== false, importAsTemplates: !!importAsTemplates };
   const modalEl = document.getElementById('proxLoginModal');
   const m = new window.bootstrap.Modal(modalEl);
   m.show();
@@ -5242,10 +5804,12 @@ function importProject() {
   }
   const credsEl = document.getElementById('imp-creds');
   const vmsEl = document.getElementById('imp-vms');
+  const notifyAudioEl = document.getElementById('imp-notify-audio');
   const templatesEl = document.getElementById('imp-as-templates');
   const warnEl = document.getElementById('imp-vms-warning');
   if (credsEl) credsEl.checked = true;
   if (vmsEl) vmsEl.checked = true;
+  if (notifyAudioEl) notifyAudioEl.checked = true;
   if (templatesEl) { templatesEl.checked = false; templatesEl.disabled = !(vmsEl && vmsEl.checked); }
   if (warnEl) warnEl.style.display = vmsEl && vmsEl.checked ? 'block' : 'none';
   if (vmsEl) {
@@ -5271,6 +5835,7 @@ function importProject() {
       if (continueBtn.dataset.busy === '1' || continueBtn.disabled) return;
       const includeCreds = !!document.getElementById('imp-creds')?.checked;
       const includeVms = !!document.getElementById('imp-vms')?.checked;
+      const includeNotifyAudio = !!document.getElementById('imp-notify-audio')?.checked;
       const importAsTemplates = includeVms && !!document.getElementById('imp-as-templates')?.checked;
       if (includeVms) {
         const proceed = confirm('Importing VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
@@ -5284,10 +5849,10 @@ function importProject() {
           const input = document.getElementById('import-file');
           const file = input && input.files && input.files[0] ? input.files[0] : null;
           if (!file) return;
-          const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms, importAsTemplates });
+          const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates });
           if (ok) { try { input.value = ''; } catch {} }
         } else {
-          const ok = await performProjectImport({ includeCreds, includeVms, importAsTemplates, queueKey: 'import' });
+          const ok = await performProjectImport({ includeCreds, includeVms, includeNotifyAudio, importAsTemplates, queueKey: 'import' });
           if (ok) {
             try { modal.hide(); } catch {}
           }
@@ -5309,7 +5874,7 @@ async function startExportJob(pid, opts) {
   } catch {}
   // Read Proxmox session creds from sessionStorage
   const creds = readBestProxCreds(pid) || {};
-  const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, username: creds.username || '', password: creds.password || '' };
+  const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, includeNotifyAudio: opts.includeNotifyAudio !== false, username: creds.username || '', password: creds.password || '' };
   if (!body.username || !body.password) { alert('Please log into Proxmox (Update Proxmox Creds) before exporting VMs.'); return; }
   // Ensure console dock shows debug-level messages
   try { if (window.shell && shell.enableConsoleDebug) shell.enableConsoleDebug(true); } catch {}

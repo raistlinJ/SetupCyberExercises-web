@@ -37,13 +37,20 @@ class ImportSelectionApiTests(unittest.TestCase):
         buf.seek(0)
         return buf
 
-    def _start_import_job(self, zip_buf: io.BytesIO, include_creds: bool, include_vms: bool) -> str:
+    def _start_import_job(
+        self,
+        zip_buf: io.BytesIO,
+        include_creds: bool,
+        include_vms: bool,
+        include_notify_audio: bool = True,
+    ) -> str:
         resp = self.client.post(
             '/api/projects/import/start',
             data={
                 'file': (zip_buf, 'proj.zip'),
                 'includeCreds': 'true' if include_creds else 'false',
                 'includeVms': 'true' if include_vms else 'false',
+                'includeNotifyAudio': 'true' if include_notify_audio else 'false',
             },
             content_type='multipart/form-data',
         )
@@ -110,6 +117,70 @@ class ImportSelectionApiTests(unittest.TestCase):
         self.assertIsNotNone(created)
         self.assertEqual(len(created.get('credentials') or []), 1)
         self.assertEqual(len(created.get('vms') or []), 1)
+
+    def test_import_notify_audio_unchecked_drops_media_audio(self):
+        # Minimal valid data URL (base64 for 'abc')
+        data_url = 'data:audio/wav;base64,YWJj'
+        project = {
+            'id': 'orig-3',
+            'name': 'ImportNotifyAudioUnchecked',
+            'audio': {
+                'event:test': {'soundKey': 'media:ding'},
+                'media:ding': {'sounds': [{'dataUrl': data_url, 'name': 'ding.wav'}]},
+            },
+        }
+        zip_buf = self._make_zip(project)
+        job = self._start_import_job(zip_buf, include_creds=True, include_vms=True, include_notify_audio=False)
+        status = self._wait_job_completed(job)
+        self.assertEqual(status.get('status'), 'completed')
+
+        resp = self.client.get('/api/projects')
+        self.assertEqual(resp.status_code, 200)
+        projects = (resp.get_json() or {}).get('projects') or []
+        created = next((p for p in projects if p.get('name') == project['name']), None)
+        self.assertIsNotNone(created)
+        pid = created.get('id')
+        self.assertTrue(pid)
+
+        audio_resp = self.client.get(f'/api/projects/{pid}/audio')
+        self.assertEqual(audio_resp.status_code, 200)
+        audio = (audio_resp.get_json() or {}).get('audio') or {}
+        self.assertIn('event:test', audio)
+        self.assertTrue(all(not str(k).startswith('media:') for k in audio.keys()))
+
+    def test_import_dedupes_duplicate_media_audio_by_hash(self):
+        data_url = 'data:audio/wav;base64,YWJj'
+        project = {
+            'id': 'orig-4',
+            'name': 'ImportNotifyAudioDedupe',
+            'audio': {
+                'media:one': {'sounds': [{'dataUrl': data_url, 'name': 'one.wav'}]},
+                'media:two': {'sounds': [{'dataUrl': data_url, 'name': 'two.wav'}]},
+                # Reference the duplicate key; import should remap it to the retained key.
+                'event:test': {'soundKey': 'media:two'},
+            },
+        }
+        zip_buf = self._make_zip(project)
+        job = self._start_import_job(zip_buf, include_creds=True, include_vms=True, include_notify_audio=True)
+        status = self._wait_job_completed(job)
+        self.assertEqual(status.get('status'), 'completed')
+
+        resp = self.client.get('/api/projects')
+        self.assertEqual(resp.status_code, 200)
+        projects = (resp.get_json() or {}).get('projects') or []
+        created = next((p for p in projects if p.get('name') == project['name']), None)
+        self.assertIsNotNone(created)
+        pid = created.get('id')
+        self.assertTrue(pid)
+
+        audio_resp = self.client.get(f'/api/projects/{pid}/audio')
+        self.assertEqual(audio_resp.status_code, 200)
+        audio = (audio_resp.get_json() or {}).get('audio') or {}
+
+        media_keys = [k for k in audio.keys() if str(k).startswith('media:')]
+        self.assertEqual(len(media_keys), 1)
+        self.assertIn('event:test', audio)
+        self.assertEqual(audio['event:test'].get('soundKey'), media_keys[0])
 
 
 if __name__ == '__main__':

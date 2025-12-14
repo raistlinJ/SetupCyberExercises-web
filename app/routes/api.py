@@ -2,6 +2,7 @@ import os
 import io
 import json
 import zipfile
+import hashlib
 import base64
 import uuid
 import time
@@ -15,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from typing import Any, Dict, List, Optional, Set, Tuple
 import re
-import hashlib
 import mimetypes
 from urllib.parse import urlparse, urlunparse
 from werkzeug.utils import secure_filename
@@ -33,6 +33,86 @@ from ..storage.user_secrets import UserSecretsStore
 
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
+
+
+def _hash_audio_data_url(data_url: str) -> Optional[str]:
+    try:
+        _mime, raw_bytes = ProjectStore._decode_data_url(data_url)
+    except Exception:
+        raw_bytes = b""
+    if not raw_bytes:
+        return None
+    try:
+        return hashlib.sha256(raw_bytes).hexdigest()
+    except Exception:
+        return None
+
+
+def _remap_sound_keys_in_obj(obj: Any, remap: Dict[str, str]):
+    if not remap:
+        return
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            if k == 'soundKey' and isinstance(v, str) and v in remap:
+                obj[k] = remap[v]
+                continue
+            _remap_sound_keys_in_obj(v, remap)
+    elif isinstance(obj, list):
+        for it in obj:
+            _remap_sound_keys_in_obj(it, remap)
+
+
+def _dedupe_media_audio(audio_map: Any) -> Any:
+    """Collapse duplicate uploaded audio entries (media:*) by hashing clip bytes.
+
+    This de-dupes within the imported payload and remaps any `soundKey` references
+    to point at the retained canonical media key.
+    """
+    if not isinstance(audio_map, dict):
+        return audio_map
+
+    hash_to_media_key: Dict[str, str] = {}
+    media_remap: Dict[str, str] = {}
+
+    for raw_key, entry in list(audio_map.items()):
+        key = str(raw_key or '')
+        if not key.startswith('media:'):
+            continue
+        if not isinstance(entry, dict):
+            continue
+
+        sounds = entry.get('sounds')
+        if not isinstance(sounds, list) or not sounds:
+            data_url = entry.get('dataUrl')
+            sounds = [{'dataUrl': data_url}] if data_url else []
+
+        data_url = None
+        for s in sounds:
+            if isinstance(s, dict) and isinstance(s.get('dataUrl'), str) and s.get('dataUrl').startswith('data:'):
+                data_url = s.get('dataUrl')
+                break
+        if not data_url:
+            continue
+
+        digest = _hash_audio_data_url(str(data_url))
+        if not digest:
+            continue
+        if digest in hash_to_media_key:
+            media_remap[key] = hash_to_media_key[digest]
+        else:
+            hash_to_media_key[digest] = key
+
+    if media_remap:
+        _remap_sound_keys_in_obj(audio_map, media_remap)
+        for dup_key, canonical_key in media_remap.items():
+            try:
+                if dup_key != canonical_key and dup_key in audio_map:
+                    audio_map.pop(dup_key, None)
+            except Exception:
+                pass
+
+    return audio_map
+
 def _safe_sleep(sec: float):
     try:
         if sec and sec > 0:
@@ -145,8 +225,11 @@ def _pool_workers_for(proj: Optional[Project], item_count: int, hard_cap: int = 
     return max(1, workers)
 
 
-def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project) -> int:
-    """Embed audio clips into the provided ZipFile, returning number of clips written."""
+def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_prefixes: Optional[tuple[str, ...]] = None) -> int:
+    """Embed audio clips into the provided ZipFile, returning number of clips written.
+
+    include_prefixes: when provided, only include audio entries whose key starts with one of these prefixes.
+    """
     audio = getattr(proj, 'audio', {}) or {}
     if not isinstance(audio, dict) or not audio:
         return 0
@@ -156,6 +239,13 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project) -> int:
     }
     total_written = 0
     for idx, (raw_key, entry) in enumerate(audio.items(), start=1):
+        if include_prefixes:
+            try:
+                key_s = str(raw_key or '')
+            except Exception:
+                key_s = ''
+            if not any(key_s.startswith(pfx) for pfx in include_prefixes):
+                continue
         if not isinstance(entry, dict):
             continue
         try:
@@ -464,6 +554,76 @@ def _secure_route(required_roles=None, api_key=True):
 
         return inner
     return deco
+
+
+@api_bp.route("/debug/storage", methods=["GET"])
+@_secure_route(required_roles=['admin'])
+def debug_storage():
+    """Debug helper: report resolved storage paths.
+
+    Useful to verify docker-compose volume persistence (DATA_DIR=/data).
+    """
+    import tempfile
+
+    try:
+        data_dir = str(current_app.config.get('DATA_DIR') or '')
+    except Exception:
+        data_dir = ''
+    try:
+        env_data_dir = os.environ.get('DATA_DIR')
+    except Exception:
+        env_data_dir = None
+
+    try:
+        projects_json = os.path.join(data_dir, 'projects.json') if data_dir else ''
+    except Exception:
+        projects_json = ''
+
+    meta: Dict[str, Any] = {
+        'env_DATA_DIR': env_data_dir,
+        'DATA_DIR': data_dir,
+        'projects_json': projects_json,
+        'docker_compose_expected_DATA_DIR': '/data',
+    }
+
+    try:
+        meta['cwd'] = os.getcwd()
+    except Exception:
+        meta['cwd'] = None
+
+    try:
+        meta['temp_dir'] = tempfile.gettempdir()
+    except Exception:
+        meta['temp_dir'] = None
+
+    try:
+        meta['DATA_DIR_is_temp'] = bool(meta.get('temp_dir')) and bool(data_dir) and os.path.abspath(data_dir).startswith(os.path.abspath(str(meta.get('temp_dir'))))
+    except Exception:
+        meta['DATA_DIR_is_temp'] = None
+
+    try:
+        meta['docker_compose_volume_ok'] = bool(data_dir) and os.path.abspath(data_dir) == os.path.abspath('/data')
+    except Exception:
+        meta['docker_compose_volume_ok'] = None
+
+    try:
+        st = os.stat(projects_json) if projects_json else None
+    except Exception:
+        st = None
+    if st:
+        try:
+            meta['projects_json_exists'] = True
+            meta['projects_json_size_bytes'] = int(st.st_size)
+            meta['projects_json_mtime_utc'] = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        except Exception:
+            pass
+    else:
+        try:
+            meta['projects_json_exists'] = bool(projects_json and os.path.exists(projects_json))
+        except Exception:
+            meta['projects_json_exists'] = None
+
+    return jsonify(meta)
 
 
 @api_bp.route("/projects/<pid>/proxmox/verify", methods=["POST"])
@@ -6645,7 +6805,231 @@ def get_project_audio(pid: str):
     audio = getattr(proj, 'audio', {}) or {}
     if not isinstance(audio, dict):
         audio = {}
+
+    def _as_bool(v) -> bool:
+        if v is None:
+            return False
+        s = str(v).strip().lower()
+        return s in {"1", "true", "yes", "y", "on"}
+
+    def _entry_meta(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for k, v in entry.items():
+            if k in {"dataUrl", "sounds", "name", "size", "type", "updated"}:
+                continue
+            out[k] = v
+        # Preserve speak templates (if present)
+        if isinstance(entry.get("speakTemplates"), list):
+            out["speakTemplates"] = entry.get("speakTemplates")
+        # Preserve sounds but strip dataUrl
+        sounds = entry.get("sounds")
+        if isinstance(sounds, list):
+            meta_sounds: list[dict[str, Any]] = []
+            for s_obj in sounds:
+                if not isinstance(s_obj, dict):
+                    continue
+                rec: Dict[str, Any] = {}
+                for sk in ("name", "size", "type", "updated", "sha256"):
+                    if sk in s_obj:
+                        rec[sk] = s_obj.get(sk)
+                meta_sounds.append(rec)
+            if meta_sounds:
+                out["sounds"] = meta_sounds
+        return out
+
+    prefix = request.args.get("prefix")
+    meta = _as_bool(request.args.get("meta"))
+    if prefix:
+        try:
+            pfx = str(prefix)
+        except Exception:
+            pfx = ""
+        if pfx:
+            audio = {k: v for k, v in audio.items() if str(k).startswith(pfx)}
+    if meta:
+        audio = {k: _entry_meta(v) for k, v in audio.items()}
+
     return jsonify({"audio": audio})
+
+
+@api_bp.route("/projects/<pid>/audio_entry", methods=["GET"])
+def get_project_audio_entry(pid: str):
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    key = request.args.get("key")
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+    audio = getattr(proj, 'audio', {}) or {}
+    if not isinstance(audio, dict):
+        audio = {}
+    entry = audio.get(key)
+    if entry is None:
+        return jsonify({"error": "Audio entry not found"}), 404
+    return jsonify({"key": key, "entry": entry})
+
+
+@api_bp.route("/projects/<pid>/audio_entry", methods=["DELETE"])
+@_secure_route()
+def delete_project_audio_entry(pid: str):
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    key = request.args.get("key")
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+    audio = getattr(proj, 'audio', {}) or {}
+    if not isinstance(audio, dict):
+        audio = {}
+    if key not in audio:
+        return jsonify({"error": "Audio entry not found"}), 404
+    try:
+        del audio[key]
+    except Exception:
+        audio.pop(key, None)
+    # Clear any per-event references to this media key
+    try:
+        for k, v in list(audio.items()):
+            if not isinstance(k, str) or not k.startswith('event:'):
+                continue
+            if not isinstance(v, dict):
+                continue
+            if v.get('soundKey') == key:
+                try:
+                    del v['soundKey']
+                except Exception:
+                    v.pop('soundKey', None)
+                audio[k] = v
+    except Exception:
+        pass
+
+    sanitized = ProjectStore._sanitize_audio_map(audio)
+    proj = s.update_audio(pid, sanitized)
+    return jsonify({"ok": True, "audio": getattr(proj, 'audio', {}) or {}})
+
+
+@api_bp.route("/projects/<pid>/audio_media", methods=["POST"])
+@_secure_route()
+def upload_project_audio_media(pid: str):
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+
+    try:
+        body = request.get_json(force=True) or {}
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    data_url = body.get('dataUrl')
+    name = body.get('name')
+    size = body.get('size')
+    mime_type = body.get('type')
+
+    try:
+        data_url = str(data_url or '').strip()
+    except Exception:
+        data_url = ''
+    if not data_url.startswith('data:'):
+        return jsonify({"error": "dataUrl must be a base64 data URI"}), 400
+
+    mime, raw_bytes = ProjectStore._decode_data_url(data_url)
+    if raw_bytes is None or raw_bytes == b"":
+        return jsonify({"error": "invalid audio data"}), 400
+    if len(raw_bytes) > ProjectStore._MAX_AUDIO_BYTES:
+        return jsonify({"error": f"exceeds {ProjectStore._MAX_AUDIO_BYTES // (1024 * 1024)} MB limit"}), 400
+
+    try:
+        import hashlib
+        sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
+    except Exception:
+        sha256_hex = ''
+
+    audio = getattr(proj, 'audio', {}) or {}
+    if not isinstance(audio, dict):
+        audio = {}
+
+    # Deduplicate against existing uploaded media
+    if sha256_hex:
+        for k, v in audio.items():
+            try:
+                key = str(k)
+            except Exception:
+                continue
+            if not key.startswith('media:'):
+                continue
+            if not isinstance(v, dict):
+                continue
+            sounds = v.get('sounds')
+            if not isinstance(sounds, list) or not sounds:
+                continue
+            s0 = sounds[0] if isinstance(sounds[0], dict) else None
+            existing_hash = ''
+            if s0 and isinstance(s0.get('sha256'), str):
+                existing_hash = s0.get('sha256')
+            if not existing_hash:
+                # Backward compat: compute if missing
+                existing_url = s0.get('dataUrl') if s0 else None
+                if isinstance(existing_url, str) and existing_url.startswith('data:'):
+                    _m, _b = ProjectStore._decode_data_url(existing_url)
+                    if _b:
+                        try:
+                            existing_hash = hashlib.sha256(_b).hexdigest()
+                        except Exception:
+                            existing_hash = ''
+            if existing_hash and existing_hash == sha256_hex:
+                return jsonify({"ok": True, "duplicated": True, "key": key})
+
+    # New media entry
+    try:
+        import uuid
+        new_key = f"media:{uuid.uuid4()}"
+    except Exception:
+        new_key = f"media:{int(time.time())}"
+
+    label = None
+    try:
+        label = str(name).strip() if name is not None else None
+    except Exception:
+        label = None
+    if not label:
+        label = 'Audio'
+
+    try:
+        mime_label = str(mime_type).strip() if mime_type is not None else ''
+    except Exception:
+        mime_label = ''
+    if not mime_label:
+        mime_label = mime or ''
+
+    try:
+        size_num = int(size) if size is not None else len(raw_bytes)
+    except Exception:
+        size_num = len(raw_bytes)
+
+    audio[new_key] = {
+        'sounds': [
+            {
+                'name': label,
+                'size': size_num,
+                'type': mime_label,
+                'dataUrl': data_url,
+                'updated': int(time.time() * 1000),
+                'sha256': sha256_hex,
+            }
+        ]
+    }
+
+    sanitized = ProjectStore._sanitize_audio_map(audio)
+    proj = s.update_audio(pid, sanitized)
+    entry = (getattr(proj, 'audio', {}) or {}).get(new_key)
+    return jsonify({"ok": True, "duplicated": False, "key": new_key, "entry": entry})
 
 
 @api_bp.route("/projects/<pid>/audio", methods=["PUT", "PATCH"])
@@ -6734,15 +7118,26 @@ def export_project(pid: str):
 
     include_creds = request.args.get("includeCreds", "true").lower() != "false"
     include_vms = request.args.get("includeVms", "true").lower() != "false"
+    include_notify_audio = request.args.get("includeNotifyAudio", "true").lower() != "false"
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms)
+        # Notifications are always exported; this flag only controls whether uploaded notification audio (media:*) is included.
+        if not include_notify_audio:
+            try:
+                audio_map = project_dict.get('audio')
+                if isinstance(audio_map, dict):
+                    project_dict['audio'] = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+            except Exception:
+                pass
         manifest = {
             "schemaVersion": 1,
-            "project": _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms),
+            "project": project_dict,
         }
         zf.writestr("project.json", json.dumps(manifest, indent=2))
-        _write_project_audio_to_zip(zf, proj)
+        if include_notify_audio:
+            _write_project_audio_to_zip(zf, proj, include_prefixes=('media:',))
         for fname in proj.materials:
             fpath = os.path.join(mats_dir, fname)
             if os.path.isfile(fpath):
@@ -6777,8 +7172,9 @@ def import_project():
     try:
         include_creds = (request.form.get('includeCreds', 'true').lower() != 'false')
         include_vms = (request.form.get('includeVms', 'true').lower() != 'false')
+        include_notify_audio = (request.form.get('includeNotifyAudio', 'true').lower() != 'false')
     except Exception:
-        include_creds, include_vms = True, True
+        include_creds, include_vms, include_notify_audio = True, True, True
     try:
         import_as_templates = (request.form.get('importAsTemplates', 'false').lower() == 'true')
     except Exception:
@@ -6870,6 +7266,18 @@ def import_project():
                         proj.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
                     except Exception:
                         proj.vms = []
+
+                    # Notifications config is always imported; uploaded media audio (media:*) is optional.
+                    try:
+                        if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
+                            audio_map = dict(pdata2.get('audio') or {})
+                            if not include_notify_audio:
+                                audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+                            else:
+                                audio_map = _dedupe_media_audio(audio_map)
+                            proj.audio = ProjectStore._sanitize_audio_map(audio_map)
+                    except Exception:
+                        proj.audio = getattr(proj, 'audio', {}) or {}
                     s.upsert(proj)
                     id_map[pdata2.get('id','')] = new_id
                     results.append(proj.__dict__)
@@ -6946,8 +7354,13 @@ def import_project():
                 except Exception:
                     pass
                 try:
-                    if 'audio' in pdata2:
-                        project.audio = ProjectStore._sanitize_audio_map(pdata2.get('audio'))
+                    if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
+                        audio_map = dict(pdata2.get('audio') or {})
+                        if not include_notify_audio:
+                            audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+                        else:
+                            audio_map = _dedupe_media_audio(audio_map)
+                        project.audio = ProjectStore._sanitize_audio_map(audio_map)
                 except Exception:
                     project.audio = getattr(project, 'audio', {}) or {}
 
@@ -7035,8 +7448,9 @@ def import_project_start():
     try:
         include_creds = (request.form.get('includeCreds', 'true').lower() != 'false')
         include_vms = (request.form.get('includeVms', 'true').lower() != 'false')
+        include_notify_audio = (request.form.get('includeNotifyAudio', 'true').lower() != 'false')
     except Exception:
-        include_creds, include_vms = True, True
+        include_creds, include_vms, include_notify_audio = True, True, True
     try:
         import_as_templates = (request.form.get('importAsTemplates', 'false').lower() == 'true')
     except Exception:
@@ -7075,7 +7489,7 @@ def import_project_start():
     _import_job_record(job_id)
     app_obj = current_app._get_current_object()
 
-    def worker(job: str, path: str, include_creds: bool, include_vms: bool, import_as_templates: bool):
+    def worker(job: str, path: str, include_creds: bool, include_vms: bool, include_notify_audio: bool, import_as_templates: bool):
         # Ensure app context in thread
         with app_obj.app_context():
             key = _import_job_key(job)
@@ -7179,8 +7593,14 @@ def import_project_start():
                             except Exception:
                                 proj.vms = []
                             try:
-                                if 'audio' in pdata2:
-                                    proj.audio = ProjectStore._sanitize_audio_map(pdata2.get('audio'))
+                                if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
+                                    audio_map = dict(pdata2.get('audio') or {})
+                                    if not include_notify_audio:
+                                        audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+                                    else:
+                                        # Dedupe duplicate uploaded sounds by hash (within this import).
+                                        audio_map = _dedupe_media_audio(audio_map)
+                                    proj.audio = ProjectStore._sanitize_audio_map(audio_map)
                             except Exception:
                                 proj.audio = getattr(proj, 'audio', {}) or {}
                             # If user provided Proxmox connection in the dialog, store it on the project
@@ -7272,8 +7692,13 @@ def import_project_start():
                         except Exception:
                             project.vms = []
                         try:
-                            if 'audio' in pdata2:
-                                project.audio = ProjectStore._sanitize_audio_map(pdata2.get('audio'))
+                            if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
+                                audio_map = dict(pdata2.get('audio') or {})
+                                if not include_notify_audio:
+                                    audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+                                else:
+                                    audio_map = _dedupe_media_audio(audio_map)
+                                project.audio = ProjectStore._sanitize_audio_map(audio_map)
                         except Exception:
                             project.audio = getattr(project, 'audio', {}) or {}
                         # If user provided Proxmox connection in the dialog, store it on the project
@@ -7606,7 +8031,7 @@ def import_project_start():
                 except Exception:
                     pass
 
-    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms, import_as_templates), daemon=True)
+    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms, include_notify_audio, import_as_templates), daemon=True)
     t.start()
     return jsonify({"job": job_id})
 
@@ -7686,6 +8111,7 @@ def export_projects():
     include_materials = request.args.get("includeMaterials", "true").lower() != "false"
     include_creds = request.args.get("includeCreds", "true").lower() != "false"
     include_vms = request.args.get("includeVms", "true").lower() != "false"
+    include_notify_audio = request.args.get("includeNotifyAudio", "true").lower() != "false"
     # Enforce explicit, single-project selection
     if not ids:
         return jsonify({"error": "ids query parameter is required (single project id)"}), 400
@@ -7700,14 +8126,23 @@ def export_projects():
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms)
+        if not include_notify_audio:
+            try:
+                audio_map = project_dict.get('audio')
+                if isinstance(audio_map, dict):
+                    project_dict['audio'] = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+            except Exception:
+                pass
         manifest = {
             "schemaVersion": 1,
             # Backward-compat: keep top-level key as 'projects' but only include the single selected project
-            "projects": [_project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms)],
+            "projects": [project_dict],
         }
         zf.writestr("project.json", json.dumps(manifest, indent=2))
         if include_materials:
-            _write_project_audio_to_zip(zf, proj)
+            if include_notify_audio:
+                _write_project_audio_to_zip(zf, proj, include_prefixes=('media:',))
             for fname in proj.materials:
                 fpath = os.path.join(mats_dir, fname)
                 if os.path.isfile(fpath):
@@ -7883,6 +8318,7 @@ def export_project_start(pid: str):
     data = request.get_json(force=True) or {}
     include_creds = bool(data.get("includeCreds", True))
     include_vms = bool(data.get("includeVms", True))
+    include_notify_audio = bool(data.get("includeNotifyAudio", True))
     if not include_vms:
         return jsonify({"error": "VM export not requested"}), 400
     username = (data.get("username") or "").strip()
@@ -8404,16 +8840,25 @@ def export_project_start(pid: str):
 
                 with zipfile.ZipFile(local_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     # Write manifest first
+                    project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=True)
+                    if not include_notify_audio:
+                        try:
+                            audio_map = project_dict.get('audio')
+                            if isinstance(audio_map, dict):
+                                project_dict['audio'] = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+                        except Exception:
+                            pass
                     manifest = {
                         "schemaVersion": 1,
-                        "project": _project_to_json_filtered(proj, include_creds=include_creds, include_vms=True),
+                        "project": project_dict,
                     }
                     manifest_bytes = json.dumps(manifest, indent=2).encode('utf-8')
                     zf.writestr("project.json", manifest_bytes)
                     _emit(f"[PKG] wrote project.json ({len(manifest_bytes)} bytes)")
-                    audio_written = _write_project_audio_to_zip(zf, proj)
-                    if audio_written:
-                        _emit(f"[PKG] added {audio_written} audio clip(s)")
+                    if include_notify_audio:
+                        audio_written = _write_project_audio_to_zip(zf, proj, include_prefixes=('media:',))
+                        if audio_written:
+                            _emit(f"[PKG] added {audio_written} audio clip(s)")
 
                     # Add backup files with progress updates mapped to 90..99%
                     packed = 0

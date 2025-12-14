@@ -140,6 +140,11 @@
           <input class="form-check-input" type="checkbox" id="exp-vms" checked>
           <label class="form-check-label" for="exp-vms">VMs</label>
         </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="exp-notify-audio" checked>
+          <label class="form-check-label" for="exp-notify-audio">Notification audio files</label>
+          <div class="small text-muted">Includes uploaded audio (Settings → Media Manager). Notifications are always exported; this only controls whether the audio files are included.</div>
+        </div>
         <div id="exp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
           Exporting VMs can take a long time. This runs on the remote host, downloads disk files, and compresses them.
         </div>
@@ -253,6 +258,11 @@
         <div class="form-check">
           <input class="form-check-input" type="checkbox" id="imp-vms" checked>
           <label class="form-check-label" for="imp-vms">VMs</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="imp-notify-audio" checked>
+          <label class="form-check-label" for="imp-notify-audio">Notification audio files</label>
+          <div class="small text-muted">Imports uploaded audio (Settings → Media Manager). Notifications are always imported; this only controls whether the audio files are imported.</div>
         </div>
         <div class="form-check form-switch ms-4 mt-1">
           <input class="form-check-input" type="checkbox" id="imp-as-templates">
@@ -490,9 +500,10 @@
       const noneBtn = document.getElementById('exp-sel-none');
       const c = document.getElementById('exp-creds');
       const v = document.getElementById('exp-vms');
+      const a = document.getElementById('exp-notify-audio');
       if (allBtn && noneBtn && c && v) {
-        allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; });
-        noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; });
+        allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (a) a.checked = true; });
+        noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (a) a.checked = false; });
       }
     } catch {}
     // Wire import modal controls
@@ -501,18 +512,21 @@
       const noneBtn = document.getElementById('imp-sel-none');
       const c = document.getElementById('imp-creds');
       const v = document.getElementById('imp-vms');
+      const a = document.getElementById('imp-notify-audio');
       const t = document.getElementById('imp-as-templates');
       const warn = document.getElementById('imp-vms-warning');
       if (allBtn && noneBtn && c && v) {
         allBtn.addEventListener('click', () => {
           c.checked = true;
           v.checked = true;
+          if (a) a.checked = true;
           if (warn) warn.style.display = 'block';
           if (t) { t.disabled = false; }
         });
         noneBtn.addEventListener('click', () => {
           c.checked = false;
           v.checked = false;
+          if (a) a.checked = false;
           if (warn) warn.style.display = 'none';
           if (t) { t.checked = false; t.disabled = true; }
         });

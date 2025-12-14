@@ -2,6 +2,8 @@ import json
 import os
 import tempfile
 import base64
+import hashlib
+import ast
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
 
@@ -322,7 +324,132 @@ class ProjectStore:
         if not os.path.exists(self.db_path):
             self._write_all({})
 
-    _MAX_AUDIO_BYTES = 600 * 1024  # 600 KB, matches front-end limit per clip
+        # One-time migration: clean up legacy/incorrectly persisted notification templates
+        # so they show exactly what the user typed (plain strings).
+        try:
+            self._migrate_notify_templates_on_disk_once()
+        except Exception:
+            pass
+
+    _NOTIFY_TPL_MIGRATION_FLAG = ".notify_templates_migrated_v1"
+
+    def _notify_tpl_migration_flag_path(self) -> str:
+        return os.path.join(self.data_dir, self._NOTIFY_TPL_MIGRATION_FLAG)
+
+    @staticmethod
+    def _normalize_notify_template_value(value: Any) -> str:
+        """Best-effort normalize a notify template to a plain string.
+
+        Supports:
+        - string templates
+        - dict templates with keys: text/tpl/template
+        - legacy stringified Python dict repr (via ast.literal_eval)
+        """
+        tpl = value
+        # Recover accidental Python dict reprs persisted as strings.
+        if isinstance(tpl, str):
+            s = tpl.strip()
+            if s.startswith('{') and s.endswith('}') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s or "'tpl'" in s or '"tpl"' in s):
+                try:
+                    parsed = ast.literal_eval(s)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    tpl = parsed
+                else:
+                    # Looks like a legacy-bad dict repr, but we can't recover it.
+                    return ''
+            else:
+                return s
+
+        if isinstance(tpl, dict):
+            raw = tpl.get('text')
+            if raw is None:
+                raw = tpl.get('tpl')
+            if raw is None:
+                raw = tpl.get('template')
+            try:
+                return str(raw or '').strip()
+            except Exception:
+                return ''
+
+        return ''
+
+    def _migrate_notify_templates_on_disk_once(self) -> None:
+        flag_path = self._notify_tpl_migration_flag_path()
+        if os.path.exists(flag_path):
+            return
+
+        try:
+            data = self._read_all()
+        except Exception:
+            return
+
+        changed = False
+        if isinstance(data, dict):
+            for _pid, pdata in data.items():
+                if not isinstance(pdata, dict):
+                    continue
+                audio = pdata.get('audio')
+                if not isinstance(audio, dict):
+                    continue
+
+                audio_changed = False
+                for raw_key, raw_entry in list(audio.items()):
+                    try:
+                        key = str(raw_key or '').strip()
+                    except Exception:
+                        key = ''
+                    if not key.startswith('event:'):
+                        continue
+                    if not isinstance(raw_entry, dict):
+                        continue
+
+                    templates: List[str] = []
+                    had_any = ('speakTemplates' in raw_entry) or ('speakTemplate' in raw_entry)
+                    raw_templates = raw_entry.get('speakTemplates')
+                    if isinstance(raw_templates, list):
+                        for tpl in raw_templates:
+                            text = self._normalize_notify_template_value(tpl)
+                            if text:
+                                templates.append(text)
+
+                    raw_single = raw_entry.get('speakTemplate')
+                    if raw_single is not None:
+                        text = self._normalize_notify_template_value(raw_single)
+                        if text:
+                            templates.append(text)
+
+                    # Rewrite whenever the entry had templates fields, even if the result is empty
+                    # (so corrupted templates get removed from disk).
+                    if had_any:
+                        current_list = raw_entry.get('speakTemplates') if isinstance(raw_entry.get('speakTemplates'), list) else None
+                        if current_list != templates or ('speakTemplate' in raw_entry):
+                            if templates:
+                                raw_entry['speakTemplates'] = templates
+                            else:
+                                raw_entry.pop('speakTemplates', None)
+                            raw_entry.pop('speakTemplate', None)
+                            audio_changed = True
+
+                if audio_changed:
+                    pdata['audio'] = audio
+                    changed = True
+
+        if changed:
+            self._write_all(data)
+
+        # Mark migration complete (even if no changes were needed) to avoid
+        # repeatedly scanning on each request.
+        try:
+            with open(flag_path, 'w', encoding='utf-8') as f:
+                f.write('ok')
+        except Exception:
+            pass
+
+    # Maximum decoded audio bytes per clip.
+    # Note: stored as base64 data URLs inside projects.json, so large clips can grow the JSON file quickly.
+    _MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB
 
     @classmethod
     def _decode_data_url(cls, data_url: str):
@@ -372,8 +499,37 @@ class ProjectStore:
             raw_templates = raw_entry.get('speakTemplates')
             if isinstance(raw_templates, list):
                 for tpl in raw_templates:
+                    text = ''
                     try:
-                        text = str(tpl or '').strip()
+                        tpl_norm = tpl
+                        if isinstance(tpl_norm, str):
+                            s = tpl_norm.strip()
+                            # Some legacy data was accidentally persisted as the
+                            # Python repr() of a dict; best-effort recover.
+                            if s.startswith('{') and s.endswith('}') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
+                                try:
+                                    parsed = ast.literal_eval(s)
+                                except Exception:
+                                    parsed = None
+                                if isinstance(parsed, dict):
+                                    tpl_norm = parsed
+                                else:
+                                    # Looks like a dict repr but can't be recovered; drop it.
+                                    text = ''
+                            else:
+                                text = s
+
+                        if not text and isinstance(tpl_norm, dict):
+                            raw = tpl_norm.get('text')
+                            if raw is None:
+                                raw = tpl_norm.get('tpl')
+                            if raw is None:
+                                raw = tpl_norm.get('template')
+                            text = str(raw or '').strip()
+                        elif not text and not isinstance(tpl_norm, str):
+                            # Ignore non-string/non-dict entries rather than
+                            # persisting Python repr() strings.
+                            text = ''
                     except Exception:
                         text = ''
                     if text:
@@ -381,7 +537,30 @@ class ProjectStore:
             raw_single_tpl = raw_entry.get('speakTemplate')
             if raw_single_tpl is not None:
                 try:
-                    text = str(raw_single_tpl).strip()
+                    tpl_norm = raw_single_tpl
+                    if isinstance(tpl_norm, str):
+                        s = tpl_norm.strip()
+                        if s.startswith('{') and s.endswith('}') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
+                            try:
+                                parsed = ast.literal_eval(s)
+                            except Exception:
+                                parsed = None
+                            if isinstance(parsed, dict):
+                                tpl_norm = parsed
+                            else:
+                                text = ''
+                        else:
+                            text = s
+
+                    if not text and isinstance(tpl_norm, dict):
+                        raw = tpl_norm.get('text')
+                        if raw is None:
+                            raw = tpl_norm.get('tpl')
+                        if raw is None:
+                            raw = tpl_norm.get('template')
+                        text = str(raw or '').strip()
+                    elif not text and not isinstance(tpl_norm, str):
+                        text = ''
                 except Exception:
                     text = ''
                 if text:
@@ -406,12 +585,19 @@ class ProjectStore:
                     return
                 if not raw_bytes:
                     return
+                sha256_hex = ''
+                try:
+                    sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
+                except Exception:
+                    sha256_hex = ''
                 enc = base64.b64encode(raw_bytes).decode('ascii') if raw_bytes else ''
                 if not enc:
                     return
                 mime_type = mime or 'application/octet-stream'
                 normalized_url = f"data:{mime_type};base64,{enc}"
                 sound_rec: Dict[str, Any] = {'dataUrl': normalized_url}
+                if sha256_hex:
+                    sound_rec['sha256'] = sha256_hex
                 size_hint = sound_obj.get('size')
                 if isinstance(size_hint, (int, float)) and size_hint >= 0:
                     sound_rec['size'] = int(size_hint)

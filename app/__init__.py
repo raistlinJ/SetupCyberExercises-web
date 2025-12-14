@@ -484,8 +484,8 @@ def create_app():
     app.require_api_key = require_api_key
 
     # Data directory for persistent storage (projects, materials)
-    # Prefer env var DATA_DIR; if not set or not writable, fall back to local project data folder,
-    # and finally to a temp directory. This avoids read-only FS errors during local dev.
+    # Prefer env var DATA_DIR; if not set or not writable, fall back to a *persistent* local folder
+    # (CWD/data or project-root/data), and only as a last resort use a temp directory.
     env_data_dir = os.environ.get("DATA_DIR")
 
     def try_init_dir(path: str):
@@ -500,10 +500,27 @@ def create_app():
     candidates = []
     if env_data_dir:
         candidates.append(env_data_dir)
-    # project-root/data
+
+    # Prefer a local working-directory data folder when running from an installed package
+    # (site-packages may be read-only).
+    try:
+        candidates.append(os.path.join(os.getcwd(), "data"))
+    except Exception:
+        pass
+
+    # project-root/data (works when running from a source checkout)
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     candidates.append(os.path.join(project_root, "data"))
-    # last resort: temp dir
+
+    # home dir fallback (persistent across reboots)
+    try:
+        home = os.path.expanduser('~')
+        if home and home != '~':
+            candidates.append(os.path.join(home, '.an3s-data'))
+    except Exception:
+        pass
+
+    # last resort: temp dir (NOT durable)
     candidates.append(os.path.join(tempfile.gettempdir(), "toolhub-data"))
 
     for c in candidates:
@@ -519,6 +536,12 @@ def create_app():
         raise OSError("Unable to initialize a writable DATA_DIR from candidates: %r" % candidates)
 
     app.config["DATA_DIR"] = chosen
+
+    try:
+        if os.path.abspath(chosen).startswith(os.path.abspath(tempfile.gettempdir())):
+            app.logger.warning("DATA_DIR resolved to a temp directory (%s). Data may be lost on reboot.", chosen)
+    except Exception:
+        pass
 
     # Finalize secret key configuration: prefer explicit env, else persist within DATA_DIR
     secret_key = env_secret_key

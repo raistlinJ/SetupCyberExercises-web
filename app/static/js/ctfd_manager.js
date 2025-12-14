@@ -32,6 +32,8 @@ const CTFD_AUDIO_SEGMENT_BUFFER = 0.12;
 const CTFD_SPEECH_SEGMENT_BUFFER = 0.12;
 const CTFD_SPEECH_TEAM_NAME_MAX = 12;
 
+let CTFD_NOTIFY_MIGRATE_IN_PROGRESS = false;
+
 let CTFD_ACTIVE_AUDIO_PLAYBACK = null;
 let CTFD_ACTIVE_PLAY_BUTTON = null;
 let CTFD_ACTIVE_PLAY_TOKEN = 0;
@@ -247,6 +249,7 @@ document.addEventListener('settings-changed', ()=>{
 
 document.addEventListener('project-audio-updated', (ev)=>{
   try {
+    if (CTFD_NOTIFY_MIGRATE_IN_PROGRESS) return;
     const pid = ev?.detail?.pid ? String(ev.detail.pid) : '';
     const current = ctfdCurrentPid();
     if (!pid || !current || String(pid) !== String(current)) return;
@@ -255,6 +258,60 @@ document.addEventListener('project-audio-updated', (ev)=>{
     ctfdRenderNotifyConfig();
   } catch {}
 });
+
+function ctfdNotifyMigrationSessionKey(pid){
+  const id = String(pid || '').trim() || 'none';
+  return `toolhub.ctfd.notify.templates.migrated.v1.${id}`;
+}
+
+function ctfdMigrateNotifyTemplatesToStringsInStore(audioStore){
+  const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
+  let changed = false;
+  const outStore = { ...store };
+
+  Object.entries(store).forEach(([k, v]) => {
+    const key = String(k || '');
+    if (!key.startsWith(CTFD_AUDIO_EVENT_PREFIX)) return;
+    if (!v || typeof v !== 'object') return;
+
+    const entry = v;
+    const speakTemplates = Array.isArray(entry.speakTemplates) ? entry.speakTemplates : null;
+    if (!speakTemplates) return;
+
+    let needsRewrite = false;
+    for (const t of speakTemplates) {
+      if (t && typeof t === 'object') { needsRewrite = true; break; }
+      if (t !== null && t !== undefined && typeof t !== 'string') { needsRewrite = true; break; }
+    }
+    if (!needsRewrite) return;
+
+    const nextTemplates = [];
+    speakTemplates.forEach(t => {
+      if (t === null || t === undefined) return;
+      if (typeof t === 'string') {
+        const str = String(t).trim();
+        if (str) nextTemplates.push(str);
+        return;
+      }
+      if (t && typeof t === 'object') {
+        const raw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : ''));
+        const str = String(raw || '').trim();
+        if (str) nextTemplates.push(str);
+        return;
+      }
+      const str = String(t).trim();
+      if (str) nextTemplates.push(str);
+    });
+
+    const nextEntry = { ...entry, speakTemplates: nextTemplates };
+    // Prefer speakTemplates if present.
+    try { delete nextEntry.speakTemplate; } catch {}
+    outStore[key] = nextEntry;
+    changed = true;
+  });
+
+  return { changed, audioStore: outStore };
+}
 
 function ctfdReadSettingsSafe(){
   try {
@@ -306,6 +363,39 @@ function ctfdListProjectMediaOptions(audioStore){
   });
   items.sort((a, b) => (b.updated || 0) - (a.updated || 0) || String(a.name).localeCompare(String(b.name)));
   return items;
+}
+
+function ctfdNotifyAudioTokenTitle(audioStore, soundKey){
+  const key = String(soundKey || '').trim();
+  if (!key) return 'Built-in tone (no uploaded clip selected).';
+  try {
+    const entry = (audioStore && typeof audioStore === 'object') ? audioStore[key] : null;
+    const sound = ctfdNormalizeMediaSound(entry);
+    const name = sound && sound.name ? String(sound.name) : '';
+    return name ? `Audio clip: ${name}` : 'Audio clip';
+  } catch {
+    return 'Audio clip';
+  }
+}
+
+function ctfdSetBootstrapTooltipTitle(el, title){
+  if (!el) return;
+  const next = String(title || '').trim() || 'Audio';
+  try { el.setAttribute('title', next); } catch {}
+  try { el.setAttribute('data-bs-original-title', next); } catch {}
+  try { el.setAttribute('data-bs-title', next); } catch {}
+  try {
+    if (!window.bootstrap) return;
+    const inst = bootstrap.Tooltip.getInstance(el);
+    if (inst && typeof inst.setContent === 'function') {
+      inst.setContent({ '.tooltip-inner': next });
+      return;
+    }
+    if (inst) {
+      try { inst.dispose(); } catch {}
+    }
+    bootstrap.Tooltip.getInstance(el) || new bootstrap.Tooltip(el);
+  } catch {}
 }
 
 function ctfdGetProjectAudioStore(pid){
@@ -583,39 +673,36 @@ function ctfdNotifyNormalizeTemplatesForUi(source){
       if (t === null || t === undefined) return;
       if (typeof t === 'string') {
         const str = String(t).trim();
-        if (str) out.push({ text: str, enabled: true });
+        if (str) out.push(str);
         return;
       }
       if (t && typeof t === 'object') {
         const raw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : ''));
         const str = String(raw || '').trim();
-        if (!str) return;
-        const enabled = t.enabled === undefined ? true : !!t.enabled;
-        const soundKey = typeof t.soundKey === 'string' ? String(t.soundKey || '') : '';
-        out.push(soundKey ? { text: str, enabled, soundKey } : { text: str, enabled });
+        if (str) out.push(str);
         return;
       }
       const str = String(t).trim();
-      if (str) out.push({ text: str, enabled: true });
+      if (str) out.push(str);
     });
   }
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
     const legacyTpl = String(entry.speakTemplate).trim();
-    if (legacyTpl) out.push({ text: legacyTpl, enabled: true });
+    if (legacyTpl) out.push(legacyTpl);
   }
   return out;
 }
 
-function ctfdNotifyTemplateItemHtml(tpl){
-  const enabled = tpl && tpl.enabled !== undefined ? !!tpl.enabled : true;
-  const text = tpl && tpl.text !== undefined ? String(tpl.text || '') : '';
-  const soundKey = tpl && typeof tpl.soundKey === 'string' ? String(tpl.soundKey || '') : '';
+function ctfdNotifyTemplateItemHtml(tplText, rowSoundKey, audioStore){
+  const text = tplText !== undefined ? String(tplText || '') : '';
+  const hasAudioToken = /{{\s*audio\s*}}/i.test(text);
+  const tokenTitle = hasAudioToken ? ctfdNotifyAudioTokenTitle(audioStore, String(rowSoundKey || '')) : '';
+  const tokenHtml = hasAudioToken
+    ? `<span class="input-group-text"><code data-role="notify-audio-token" data-sound-source="row" data-bs-toggle="tooltip" data-bs-placement="top" title="${escHtml(tokenTitle)}">{{audio}}</code></span>`
+    : '';
   return `<div class="input-group input-group-sm mb-1" data-role="notify-tts-item">
-  <div class="input-group-text">
-    <input class="form-check-input mt-0" type="checkbox" data-role="notify-tts-enabled" ${enabled ? 'checked' : ''} />
-  </div>
   <input type="text" class="form-control" data-role="notify-tts-text" value="${escHtml(text)}" />
-  <input type="hidden" data-role="notify-tts-sound" value="${escHtml(soundKey)}" />
+  ${tokenHtml}
   <button class="btn btn-outline-secondary" type="button" data-role="notify-tts-play" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview TTS" aria-label="Preview TTS">
     <i class="bi bi-play-fill" aria-hidden="true"></i>
   </button>
@@ -623,13 +710,13 @@ function ctfdNotifyTemplateItemHtml(tpl){
 </div>`;
 }
 
-function ctfdNotifyTemplatesListHtml(templates, defaultTemplate){
+function ctfdNotifyTemplatesListHtml(templates, defaultTemplate, rowSoundKey, audioStore){
   const list = Array.isArray(templates) ? templates : [];
   if (!list.length) {
     const hint = defaultTemplate ? `Uses default: ${defaultTemplate}` : 'No templates.';
     return `<div class="small text-muted" data-role="notify-tts-empty">${escHtml(hint)}</div>`;
   }
-  return list.map(t => ctfdNotifyTemplateItemHtml(t)).join('');
+  return list.map(t => ctfdNotifyTemplateItemHtml(t, rowSoundKey, audioStore)).join('');
 }
 
 async function ctfdRenderNotifyConfig(){
@@ -661,7 +748,30 @@ async function ctfdRenderNotifyConfig(){
       await loadProjectAudio(pid, { force: true, silent: true });
     }
   } catch {}
-  const audioStore = ctfdGetProjectAudioStore(pid);
+  let audioStore = ctfdGetProjectAudioStore(pid);
+  // One-time migration: convert object-style templates to strings so the saved
+  // notification events only show TTS text like before.
+  try {
+    const migKey = ctfdNotifyMigrationSessionKey(pid);
+    const already = sessionStorage.getItem(migKey) === '1';
+    if (!already && typeof saveProjectAudio === 'function') {
+      const mig = ctfdMigrateNotifyTemplatesToStringsInStore(audioStore);
+      try { sessionStorage.setItem(migKey, '1'); } catch {}
+      if (mig && mig.changed) {
+        CTFD_NOTIFY_MIGRATE_IN_PROGRESS = true;
+        try {
+          await saveProjectAudio(pid, mig.audioStore);
+          audioStore = ctfdGetProjectAudioStore(pid);
+        } catch {
+          // best effort; avoid repeated attempts this session
+        } finally {
+          CTFD_NOTIFY_MIGRATE_IN_PROGRESS = false;
+        }
+      }
+    }
+  } catch {
+    try { CTFD_NOTIFY_MIGRATE_IN_PROGRESS = false; } catch {}
+  }
   const { events } = ctfdSplitProjectAudioStore(audioStore);
   const mediaItems = ctfdListProjectMediaOptions(audioStore);
   const eventKeys = ctfdNotifyEventKeys();
@@ -719,7 +829,7 @@ async function ctfdRenderNotifyConfig(){
       </button>
     </div>
 
-    <div data-role="notify-tts-list">${ctfdNotifyTemplatesListHtml(templates, defaultTemplate)}</div>
+    <div data-role="notify-tts-list">${ctfdNotifyTemplatesListHtml(templates, defaultTemplate, selected, audioStore)}</div>
   </td>
   </tr>`;
   }).join('');
@@ -780,13 +890,9 @@ async function ctfdSaveNotifyConfig(){
     const templates = [];
     tr.querySelectorAll('[data-role="notify-tts-item"]').forEach(item => {
       const textEl = item.querySelector('input[data-role="notify-tts-text"]');
-      const enabledTplEl = item.querySelector('input[data-role="notify-tts-enabled"]');
-      const soundEl = item.querySelector('input[data-role="notify-tts-sound"]');
       const text = textEl ? String(textEl.value || '').trim() : '';
       if (!text) return;
-      const tEnabled = enabledTplEl ? !!enabledTplEl.checked : true;
-      const soundKey = soundEl ? String(soundEl.value || '') : '';
-      templates.push(soundKey ? { text, enabled: tEnabled, soundKey } : { text, enabled: tEnabled });
+      templates.push(text);
     });
 
     const storeKey = `${CTFD_AUDIO_EVENT_PREFIX}${eventKey}`;
@@ -799,7 +905,7 @@ async function ctfdSaveNotifyConfig(){
       try { delete next.soundKey; } catch {}
     }
 
-    // Store templates as objects so each can be enabled/disabled.
+    // Store templates as strings (TTS text only).
     next.speakTemplates = templates;
     try { delete next.speakTemplate; } catch {}
 
@@ -879,7 +985,12 @@ function ctfdWireNotifyConfig(){
           const empty = list.querySelector('[data-role="notify-tts-empty"]');
           if (empty) empty.remove();
         } catch {}
-        list.insertAdjacentHTML('beforeend', ctfdNotifyTemplateItemHtml({ text, enabled: true, soundKey }));
+        let audioStore = {};
+        try {
+          const pid = ctfdCurrentPid();
+          audioStore = ctfdGetProjectAudioStore(pid);
+        } catch { audioStore = {}; }
+        list.insertAdjacentHTML('beforeend', ctfdNotifyTemplateItemHtml(text, soundKey, audioStore));
         if (input) input.value = '';
 
         // Tooltips for newly inserted controls.
@@ -947,12 +1058,9 @@ function ctfdWireNotifyConfig(){
           return;
         }
 
-        // Use the stored per-template audio selection when present.
-        const itemSoundEl = item.querySelector('input[data-role="notify-tts-sound"]');
-        const itemSoundKey = itemSoundEl ? String(itemSoundEl.value || '') : '';
         const rowSelect = tr.querySelector('select[data-role="notify-sound"]');
         const rowSoundKey = rowSelect ? String(rowSelect.value || '') : '';
-        const soundKey = itemSoundKey || rowSoundKey;
+        const soundKey = rowSoundKey;
         const pid = ctfdCurrentPid();
         const audioStore = ctfdGetProjectAudioStore(pid);
         const mediaEntry = (soundKey && audioStore && typeof audioStore[soundKey] === 'object') ? audioStore[soundKey] : null;
@@ -1029,6 +1137,20 @@ function ctfdWireNotifyConfig(){
           ctfdSetPlayStopButtonState(btn, false);
           CTFD_ACTIVE_PLAY_BUTTON = null;
         } catch {}
+      });
+    });
+
+    rows.addEventListener('change', (ev) => {
+      const select = ev.target && ev.target.closest ? ev.target.closest('select[data-role="notify-sound"]') : null;
+      if (!select) return;
+      const tr = select.closest('tr[data-event-key]');
+      if (!tr) return;
+      const pid = ctfdCurrentPid();
+      const audioStore = ctfdGetProjectAudioStore(pid);
+      const soundKey = String(select.value || '').trim();
+      const title = ctfdNotifyAudioTokenTitle(audioStore, soundKey);
+      tr.querySelectorAll('code[data-role="notify-audio-token"][data-sound-source="row"]').forEach(token => {
+        ctfdSetBootstrapTooltipTitle(token, title);
       });
     });
 
@@ -1441,7 +1563,9 @@ function ctfdCompileSpeechTemplate(template, context){
             markFallbackTarget();
           }
         } else {
-          markFallbackTarget();
+          // If the template variable doesn't map to anything, speak the variable name
+          // so it's obvious during preview/testing.
+          pushText(String(key).replace(/_/g, ' '));
         }
       }
     }
