@@ -280,6 +280,10 @@ class Project:
     proxmox_ssh_port: int = 22
     proxmox_api_token: str = ""
     proxmox_verify_ssl: bool = True
+    # Persisted project-scoped secrets (encrypted at rest by API helpers)
+    proxmox_username_enc: str = ""
+    proxmox_password_enc: str = ""
+    ctfd_token_enc: str = ""
     guacamole_url: str = "https://guacamole.localhost"
     guacamole_port: int = 443
     keycloak_url: str = "https://keycloak.localhost"

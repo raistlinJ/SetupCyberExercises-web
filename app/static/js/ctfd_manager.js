@@ -3574,7 +3574,7 @@ async function ctfdStats(kind){
     try { updateActionProgress(100, 'Done'); hideActionProgress(); } catch {}
   }
 }
-function openCtfdLoginModal(){ const el = document.getElementById('ctfdLoginModal'); if(!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); // prefill
+async function openCtfdLoginModal(){ const el = document.getElementById('ctfdLoginModal'); if(!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); // prefill
   try {
     const url = document.getElementById('ctfd-url');
     const port = document.getElementById('ctfd-port');
@@ -3591,14 +3591,27 @@ function openCtfdLoginModal(){ const el = document.getElementById('ctfdLoginModa
     if(PROJ){ if(url) url.value = PROJ.challenge_url || ''; if(port) port.value = PROJ.challenge_port ?? 443; }
     const sess = PROJ? readCtfdCreds(PROJ.id) : {};
     if(tokenEl) tokenEl.value = sess.token || '';
-    // Load persisted token if session empty
+    // Load project-saved token if session empty
     try {
       if (PROJ && tokenEl && !tokenEl.value) {
-        const raw = localStorage.getItem(`toolhub.ctfd.persist.${PROJ.id}`);
-        if (raw) {
-          const obj = JSON.parse(raw);
-          if (obj && obj.token) { tokenEl.value = obj.token; const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = true; }
-        } else { const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = false; }
+        try {
+          if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
+            await CREDS.fetchProjectSecrets(PROJ.id);
+          }
+        } catch {}
+
+        let persisted = '';
+        try {
+          if (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') {
+            persisted = CREDS.readPersistCtfdToken(PROJ.id) || '';
+          }
+        } catch {}
+        if (persisted) {
+          tokenEl.value = persisted;
+          const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = true;
+        } else {
+          const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = false;
+        }
       }
     } catch {}
     if (fb) { fb.textContent = ''; fb.className = 'me-auto small'; }
@@ -3625,10 +3638,9 @@ async function saveCtfdCredsFromModal(){
   writeCtfdCreds(PROJ.id, { username: '', password: '', token, validated: false });
       try {
         const saveBox = document.getElementById('ctfd-save-creds');
-        if (saveBox && saveBox.checked) {
-          localStorage.setItem(`toolhub.ctfd.persist.${PROJ.id}`, JSON.stringify({ token }));
-        } else {
-          localStorage.removeItem(`toolhub.ctfd.persist.${PROJ.id}`);
+        const wantsPersist = !!(saveBox && saveBox.checked);
+        if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
+          await CREDS.setPersistCtfdToken(PROJ.id, token, wantsPersist);
         }
       } catch {}
       updateCtfdControlsEnabled();
@@ -3659,10 +3671,7 @@ async function saveCtfdCredsFromModal(){
         if (res && res.ok) {
           // Mark as validated and enable controls
           writeCtfdCreds(PROJ.id, { username: '', password: '', token, validated: true });
-          try {
-            const saveBox2 = document.getElementById('ctfd-save-creds');
-            if (saveBox2 && saveBox2.checked) localStorage.setItem(`toolhub.ctfd.persist.${PROJ.id}`, JSON.stringify({ token }));
-          } catch {}
+          // token persistence already handled above
           // Enable all CTFd action controls now that auth is confirmed (including Stats)
           try {
             const statsBtn = document.getElementById('act-ctf-stats'); if (statsBtn) statsBtn.disabled = false;
@@ -3739,14 +3748,12 @@ function openCtfdLoginMultiForPids(pids){
       const sess = readCtfdCreds(String(pid)) || {};
       const url = proj.challenge_url || '';
       const port = Number(proj.challenge_port||443);
-      // Use persisted token if session token absent
+      // Use project-saved token (if already cached) when session token absent
       let persistedToken = '';
       if (!sess.token) {
         try {
-          const raw = localStorage.getItem(`toolhub.ctfd.persist.${pid}`);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (parsed && typeof parsed === 'object' && parsed.token) persistedToken = String(parsed.token);
+          if (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') {
+            persistedToken = String(CREDS.readPersistCtfdToken(String(pid)) || '');
           }
         } catch {}
       }
@@ -3762,12 +3769,21 @@ function openCtfdLoginMultiForPids(pids){
     }).filter(Boolean).join('');
     listEl.innerHTML = items || '<div class=\"text-muted\">No projects selected.</div>';
     const el = document.getElementById('ctfdLoginMultiModal'); if (!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); m.show();
-    // If any persisted tokens exist among these pids, tick the save checkbox for clarity
+    // After showing, fetch server secrets to prefill empty token inputs
     try {
-      let anyPersist = false;
-      (pids||[]).forEach(pid => { try { if (localStorage.getItem(`toolhub.ctfd.persist.${pid}`)) anyPersist = true; } catch {} });
-      const persistEl = document.getElementById('ctfd-multi-save-creds');
-      if (persistEl && anyPersist) persistEl.checked = true;
+      if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
+        (pids||[]).forEach(pid => {
+          try {
+            CREDS.fetchProjectSecrets(String(pid)).then(()=>{
+              try {
+                const t = (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') ? (CREDS.readPersistCtfdToken(String(pid)) || '') : '';
+                const inp = document.querySelector(`#ctfd-multi-creds-list [data-pid="${CSS.escape(String(pid))}"][data-field="token"]`);
+                if (inp && !inp.value && t) inp.value = t;
+              } catch {}
+            }).catch(()=>{});
+          } catch {}
+        });
+      }
     } catch {}
     const btn = document.getElementById('btn-ctfd-multi-save');
     if (btn && !btn._bound) {
@@ -3816,7 +3832,11 @@ function openCtfdLoginMultiForPids(pids){
               if (res && res.ok) {
                 writeCtfdCreds(String(pid), { username:'', password:'', token: obj.token||'', validated:true });
                 okCount += 1;
-                try { if (persist) localStorage.setItem(`toolhub.ctfd.persist.${pid}`, JSON.stringify({ token: obj.token||'' })); else localStorage.removeItem(`toolhub.ctfd.persist.${pid}`); } catch {}
+                try {
+                  if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
+                    await CREDS.setPersistCtfdToken(String(pid), obj.token||'', persist);
+                  }
+                } catch {}
               } else { failCount += 1; }
             } catch { failCount += 1; }
           }

@@ -1,5 +1,54 @@
 // Shared credential persistence & visibility utilities
 (function(){
+  const _secretsCache = new Map();
+
+  async function _fetchJson(url, opts){
+    const res = await fetch(url, Object.assign({
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+    }, (opts||{})));
+    let body = null;
+    try { body = await res.json(); } catch { body = null; }
+    if (!res.ok) {
+      const msg = (body && (body.error || body.message)) ? (body.error || body.message) : `Request failed (${res.status})`;
+      throw new Error(msg);
+    }
+    return body;
+  }
+
+  async function fetchProjectSecrets(pid, force){
+    const key = String(pid||'');
+    if (!key) return null;
+    if (!force && _secretsCache.has(key)) return _secretsCache.get(key);
+    let body = await _fetchJson(`/api/projects/${encodeURIComponent(key)}/secrets`, { method: 'GET' });
+
+    // One-time migration from legacy browser localStorage keys into server secrets.
+    // We only do this if the server has no saved values yet.
+    try {
+      const serverHasAny = !!(body?.proxmox?.saved || body?.ctfd?.saved);
+      if (!serverHasAny) {
+        const legacy = readLegacyLocalStorageCreds(key);
+        const hasLegacy = !!(legacy?.proxmox?.username || legacy?.proxmox?.password || legacy?.ctfd?.token);
+        if (hasLegacy) {
+          await patchProjectSecrets(key, legacy);
+          clearLegacyLocalStorageCreds(key);
+          body = await _fetchJson(`/api/projects/${encodeURIComponent(key)}/secrets`, { method: 'GET' });
+        }
+      }
+    } catch {}
+
+    _secretsCache.set(key, body || null);
+    return body;
+  }
+
+  async function patchProjectSecrets(pid, payload){
+    const key = String(pid||'');
+    if (!key) return null;
+    const body = await _fetchJson(`/api/projects/${encodeURIComponent(key)}/secrets`, { method: 'PATCH', body: JSON.stringify(payload || {}) });
+    try { await fetchProjectSecrets(key, true); } catch {}
+    return body;
+  }
+
   function xorEncode(str){
     try {
       const key = 23;
@@ -19,37 +68,79 @@
   }
   function ctfdKey(pid){ return `toolhub.ctfd.persist.${pid}`; }
   function proxKey(pid){ return `toolhub.prox.persist.${pid}`; }
-  function setPersistCtfdToken(pid, token, persist){
+
+  function readLegacyLocalStorageCreds(pid){
+    const out = { proxmox: { username: '', password: '' }, ctfd: { token: '' } };
+    // Proxmox legacy (xor-encoded u_enc/p_enc)
     try {
-      if (!persist) { localStorage.removeItem(ctfdKey(pid)); return; }
-      localStorage.setItem(ctfdKey(pid), JSON.stringify({ token_enc: xorEncode(token || '') }));
+      const raw = localStorage.getItem(proxKey(pid));
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (obj && (obj.u_enc || obj.p_enc)) {
+          out.proxmox.username = xorDecode(obj.u_enc || '');
+          out.proxmox.password = xorDecode(obj.p_enc || '');
+        } else if (obj && (obj.username || obj.password)) {
+          // Older plaintext
+          out.proxmox.username = String(obj.username || '');
+          out.proxmox.password = String(obj.password || '');
+        }
+      }
+    } catch {}
+    // CTFd legacy (xor-encoded token_enc or plaintext token)
+    try {
+      const raw = localStorage.getItem(ctfdKey(pid));
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (obj && obj.token_enc) out.ctfd.token = xorDecode(obj.token_enc);
+        else if (obj && obj.token) out.ctfd.token = String(obj.token || '');
+      }
+    } catch {}
+    // Trim
+    try { out.proxmox.username = String(out.proxmox.username || '').trim(); } catch {}
+    try { out.ctfd.token = String(out.ctfd.token || '').trim(); } catch {}
+    return out;
+  }
+
+  function clearLegacyLocalStorageCreds(pid){
+    try { localStorage.removeItem(proxKey(pid)); } catch {}
+    try { localStorage.removeItem(ctfdKey(pid)); } catch {}
+  }
+  async function setPersistCtfdToken(pid, token, persist){
+    // Persist to the server (per-user, per-project, encrypted at rest).
+    try {
+      if (persist) {
+        await patchProjectSecrets(pid, { ctfd: { token: token || '' } });
+      } else {
+        await patchProjectSecrets(pid, { ctfd: { token: '' } });
+      }
     } catch {}
   }
   function readPersistCtfdToken(pid){
     try {
-      const raw = localStorage.getItem(ctfdKey(pid));
-      if (!raw) return '';
-      const obj = JSON.parse(raw);
-      return obj && obj.token_enc ? xorDecode(obj.token_enc) : '';
-    } catch {
-      return '';
-    }
+      const cached = _secretsCache.get(String(pid||''));
+      const t = cached?.ctfd?.token;
+      if (typeof t === 'string' && t) return t;
+    } catch {}
+    return '';
   }
-  function setPersistProxCreds(pid, username, password, persist){
+  async function setPersistProxCreds(pid, username, password, persist){
+    // Persist to the server (per-user, per-project, encrypted at rest).
     try {
-      if (!persist) { localStorage.removeItem(proxKey(pid)); return; }
-      localStorage.setItem(proxKey(pid), JSON.stringify({ u_enc: xorEncode(username || ''), p_enc: xorEncode(password || '') }));
+      if (persist) {
+        await patchProjectSecrets(pid, { proxmox: { username: username || '', password: password || '' } });
+      } else {
+        await patchProjectSecrets(pid, { proxmox: { username: '', password: '' } });
+      }
     } catch {}
   }
   function readPersistProxCreds(pid){
     try {
-      const raw = localStorage.getItem(proxKey(pid));
-      if (!raw) return {};
-      const obj = JSON.parse(raw);
-      return (obj && (obj.u_enc || obj.p_enc)) ? { username: xorDecode(obj.u_enc || ''), password: xorDecode(obj.p_enc || '') } : {};
-    } catch {
-      return {};
-    }
+      const cached = _secretsCache.get(String(pid||''));
+      const u = cached?.proxmox?.username;
+      const p = cached?.proxmox?.password;
+      if ((typeof u === 'string' && u) || (typeof p === 'string' && p)) return { username: u || '', password: p || '' };
+    } catch {}
+    return {};
   }
   function clearAllPersistedCreds(){
     let removed = 0;
@@ -71,6 +162,8 @@
     return removed;
   }
   window.CREDS = { setPersistCtfdToken, readPersistCtfdToken, setPersistProxCreds, readPersistProxCreds, clearAllPersistedCreds };
+  window.CREDS.fetchProjectSecrets = fetchProjectSecrets;
+  window.CREDS.patchProjectSecrets = patchProjectSecrets;
 
   function ensureSettingsModal(){
     if (document.getElementById('settingsModal')) return;
@@ -127,8 +220,8 @@
             <p class="small text-muted mb-3">Adjust how quickly and how high announcements are spoken by the browser.</p>
             <hr/>
             <h6 class="text-uppercase text-muted mb-2">Security</h6>
-            <p class="small text-muted">Manage locally saved API tokens and credentials stored only in this browser (never on the server).</p>
-            <button type="button" class="btn btn-outline-danger btn-sm" id="btn-clear-creds">Clear Saved Credentials</button>
+            <p class="small text-muted">Saved credentials are stored with the project on the server (encrypted at rest). This button only clears any browser-local fallback cache.</p>
+            <button type="button" class="btn btn-outline-danger btn-sm" id="btn-clear-creds">Clear Browser Credential Cache</button>
             <div id="clear-creds-feedback" class="small mt-2"></div>
             <hr/>
             <h6 class="text-uppercase text-muted mb-2">Plugins</h6>

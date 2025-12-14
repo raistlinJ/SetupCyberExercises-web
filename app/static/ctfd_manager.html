@@ -309,7 +309,7 @@
         </div>
         <div class="form-check mb-2">
           <input class="form-check-input" type="checkbox" id="ctfd-save-creds">
-          <label class="form-check-label" for="ctfd-save-creds" title="If enabled, the API token will be stored in localStorage instead of only this session.">Save credentials (local browser)</label>
+          <label class="form-check-label" for="ctfd-save-creds" title="If enabled, the API token will be saved with this project on the server (encrypted at rest).">Save credentials</label>
         </div>
   <small class="text-muted">If unchecked, the token is stored only for this session (sessionStorage). When checked, it is stored in localStorage on this device only and never sent to the server.</small>
       </div>
@@ -333,7 +333,7 @@
         <div id="ctfd-multi-creds-list" class="vstack gap-3"></div>
         <div class="form-check mb-2">
           <input class="form-check-input" type="checkbox" id="ctfd-multi-save-creds">
-          <label class="form-check-label" for="ctfd-multi-save-creds" title="If enabled, tokens will be stored in localStorage instead of only this session.">Save credentials (local browser)</label>
+          <label class="form-check-label" for="ctfd-multi-save-creds" title="If enabled, tokens will be saved with each project on the server (encrypted at rest).">Save credentials</label>
         </div>
         <small class="text-muted">If unchecked, tokens are session-only (sessionStorage + ephemeral cookie for popups). When checked, they persist in localStorage on this device only and are never sent to the server.</small>
       </div>

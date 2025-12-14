@@ -28,6 +28,8 @@ from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
 from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps
 from ..storage.runtime import RuntimeStore
+from ..storage.secrets import encrypt_str as _enc_secret, decrypt_str as _dec_secret
+from ..storage.user_secrets import UserSecretsStore
 
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
@@ -5186,6 +5188,66 @@ def _runtime_store() -> RuntimeStore:
     return RuntimeStore(current_app.config["DATA_DIR"])
 
 
+def _user_secrets_store() -> UserSecretsStore:
+    return UserSecretsStore(current_app.config["DATA_DIR"])
+
+
+def _acting_username() -> str:
+    """Return the current authenticated username for per-user secret scoping.
+
+    When AUTH is disabled, fall back to a stable pseudo-user.
+    """
+    try:
+        app = current_app._get_current_object()
+    except Exception:
+        app = None
+    user = None
+    try:
+        if app and hasattr(app, 'current_user'):
+            user = app.current_user()
+    except Exception:
+        user = None
+    try:
+        if isinstance(user, dict) and user.get('username'):
+            return str(user.get('username')).strip() or '__anonymous__'
+    except Exception:
+        pass
+    return '__anonymous__'
+
+
+def _migrate_project_level_secrets_if_any(pid: str, username: str) -> None:
+    """One-way migration: project-level encrypted secrets -> per-user secrets.
+
+    This is only used for backward compatibility with earlier builds.
+    It migrates into the current user's secrets and then clears the project fields
+    so secrets are no longer shared across users.
+    """
+    try:
+        s = _store()
+        proj = s.get(pid)
+        if not proj:
+            return
+        old_u = getattr(proj, 'proxmox_username_enc', '') or ''
+        old_p = getattr(proj, 'proxmox_password_enc', '') or ''
+        old_t = getattr(proj, 'ctfd_token_enc', '') or ''
+        if not (old_u or old_p or old_t):
+            return
+        ss = _user_secrets_store()
+        existing = ss.get_enc(username, pid) or {}
+        if not existing:
+            ss.upsert_enc(username, pid,
+                          proxmox_username_enc=old_u,
+                          proxmox_password_enc=old_p,
+                          ctfd_token_enc=old_t)
+        # Clear project-level secrets regardless once a user has accessed migration.
+        proj.proxmox_username_enc = ''
+        proj.proxmox_password_enc = ''
+        proj.ctfd_token_enc = ''
+        s.upsert(proj)
+    except Exception:
+        return
+
+
 def _is_remote_mode() -> bool:
     try:
         return _runtime_store().get_run_mode() == 'remote'
@@ -6248,6 +6310,16 @@ def _validate_project_fields(data: dict) -> list:
 
 def _project_to_json(p: Project) -> dict:
     d = asdict(p)
+    # Never expose encrypted secret blobs in standard project payloads
+    for k in (
+        'proxmox_username_enc',
+        'proxmox_password_enc',
+        'ctfd_token_enc',
+    ):
+        try:
+            d.pop(k, None)
+        except Exception:
+            pass
     try:
         assoc = list(d.get('associated_projects', []) or [])
         d['associated_projects'] = [str(x).strip() for x in assoc if str(x).strip()]
@@ -6293,6 +6365,115 @@ def list_projects():
     # Convert dataclasses to JSON-serializable dicts (including VMConfig)
     projects = [_project_to_json(p) for p in _store().list()]
     return jsonify({"projects": projects})
+
+
+@api_bp.route("/projects/<pid>/secrets", methods=["GET"])
+@_secure_route()
+def get_project_secrets(pid: str):
+    """Return project-scoped credentials (decrypted) for authenticated admin users."""
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    username = _acting_username()
+    _migrate_project_level_secrets_if_any(pid, username)
+    ss = _user_secrets_store()
+    enc = ss.get_enc(username, pid) or {}
+    sk = current_app.config.get('SECRET_KEY')
+    prox_user = _dec_secret(sk, enc.get('proxmox_username_enc') or '')
+    prox_pass = _dec_secret(sk, enc.get('proxmox_password_enc') or '')
+    ctfd_token = _dec_secret(sk, enc.get('ctfd_token_enc') or '')
+    return jsonify({
+        "projectId": pid,
+        "proxmox": {
+            "username": prox_user,
+            "password": prox_pass,
+            "saved": bool(prox_user or prox_pass),
+        },
+        "ctfd": {
+            "token": ctfd_token,
+            "saved": bool(ctfd_token),
+        }
+    })
+
+
+@api_bp.route("/projects/<pid>/secrets", methods=["PATCH", "PUT"])
+@_secure_route()
+def update_project_secrets(pid: str):
+    """Set/clear project-scoped credentials.
+
+    Accepts either nested objects:
+      { proxmox: { username, password }, ctfd: { token } }
+    or flat keys:
+      { proxmox_username, proxmox_password, ctfd_token }
+
+    Any provided secret field set to an empty string clears that secret.
+    """
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    username = _acting_username()
+    _migrate_project_level_secrets_if_any(pid, username)
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+
+    prox = data.get('proxmox') if isinstance(data.get('proxmox'), dict) else {}
+    ctfd = data.get('ctfd') if isinstance(data.get('ctfd'), dict) else {}
+
+    # Prefer nested, fall back to flat.
+    prox_user_in = prox.get('username') if 'username' in prox else data.get('proxmox_username')
+    prox_pass_in = prox.get('password') if 'password' in prox else data.get('proxmox_password')
+    ctfd_token_in = ctfd.get('token') if 'token' in ctfd else data.get('ctfd_token')
+
+    sk = current_app.config.get('SECRET_KEY')
+    ss = _user_secrets_store()
+    existing = ss.get_enc(username, pid) or {}
+    changed = False
+
+    if prox_user_in is not None or prox_pass_in is not None:
+        cur_user = _dec_secret(sk, existing.get('proxmox_username_enc') or '')
+        cur_pass = _dec_secret(sk, existing.get('proxmox_password_enc') or '')
+        new_user = cur_user if prox_user_in is None else str(prox_user_in or '').strip()
+        new_pass = cur_pass if prox_pass_in is None else str(prox_pass_in or '')
+        if not new_user and not new_pass:
+            ss.upsert_enc(username, pid, proxmox_username_enc='', proxmox_password_enc='')
+        else:
+            ss.upsert_enc(
+                username,
+                pid,
+                proxmox_username_enc=_enc_secret(sk, new_user),
+                proxmox_password_enc=_enc_secret(sk, new_pass),
+            )
+        changed = True
+
+    if ctfd_token_in is not None:
+        token = str(ctfd_token_in or '').strip()
+        ss.upsert_enc(username, pid, ctfd_token_enc=_enc_secret(sk, token) if token else '')
+        changed = True
+
+    # Keep project record in sync: ensure project-level fields are cleared so secrets aren't shared.
+    try:
+        if getattr(proj, 'proxmox_username_enc', '') or getattr(proj, 'proxmox_password_enc', '') or getattr(proj, 'ctfd_token_enc', ''):
+            proj.proxmox_username_enc = ''
+            proj.proxmox_password_enc = ''
+            proj.ctfd_token_enc = ''
+            s.upsert(proj)
+    except Exception:
+        pass
+
+    enc = ss.get_enc(username, pid) or {}
+    prox_user = _dec_secret(sk, enc.get('proxmox_username_enc') or '')
+    prox_pass = _dec_secret(sk, enc.get('proxmox_password_enc') or '')
+    ctfd_token = _dec_secret(sk, enc.get('ctfd_token_enc') or '')
+    return jsonify({
+        "ok": True,
+        "projectId": pid,
+        "proxmox_saved": bool(prox_user or prox_pass),
+        "ctfd_saved": bool(ctfd_token),
+    })
 
 @api_bp.route("/projects", methods=["POST"])
 @_secure_route()

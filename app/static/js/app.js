@@ -3320,6 +3320,22 @@ function openAddFromServer(pid){
   if (uEl) uEl.value = sess.username || persisted.username || '';
   if (pwEl) pwEl.value = sess.password || persisted.password || '';
   if (saveEl) saveEl.checked = !!(persisted.username || persisted.password);
+
+  // Prefer server-stored project secrets when available
+  try {
+    if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
+      CREDS.fetchProjectSecrets(pid).then(sec => {
+        try {
+          const prox = sec && sec.proxmox ? sec.proxmox : null;
+          const su = (prox && prox.username) ? String(prox.username) : '';
+          const sp = (prox && prox.password) ? String(prox.password) : '';
+          if (saveEl) saveEl.checked = !!(prox && prox.saved);
+          if (uEl && !uEl.value && su) uEl.value = su;
+          if (pwEl && !pwEl.value && sp) pwEl.value = sp;
+        } catch {}
+      }).catch(()=>{});
+    }
+  } catch {}
   if (list) { list.innerHTML = ''; list.style.display = 'none'; }
   if (addBtn) addBtn.disabled = true;
   if (filterEl) filterEl.value = '';
@@ -3375,7 +3391,7 @@ async function fetchTemplatesForAFS(){
         // persist creds and meta for VM Manager prefill
         writeProxCreds(pid, { username: body.username||'', password: body.password||'' });
         writeProxMeta(pid, { url: urlBase, apiPort: apiPort, sshPort: Number(p.proxmox_ssh_port||22)||22 });
-        // Optional: persist creds per project across sessions (client-side only)
+        // Optional: persist creds per project across sessions (server-side project secrets)
         try {
           const wantsPersist = !!(saveEl && saveEl.checked);
           if (window.CREDS && typeof CREDS.setPersistProxCreds === 'function') {

@@ -4,3 +4,4 @@ gunicorn==22.0.0
 waitress==2.1.2
 requests==2.32.3
 paramiko==3.4.0
+cryptography==43.0.3

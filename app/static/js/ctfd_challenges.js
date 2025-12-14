@@ -322,7 +322,7 @@
             <div class="input-group input-group-sm">
               <span class="input-group-text">API Token</span>
               <div class="input-group">
-                <input type="password" class="form-control ctfd-token-input" data-pid="${m.pid}" placeholder="ctfd_…" value="${(()=>{ try { const raw = localStorage.getItem('toolhub.ctfd.persist.${m.pid}'); if (raw) { const obj = JSON.parse(raw); if (obj && obj.token) return escapeHtml(obj.token); } } catch {} return ''; })()}">
+                <input type="password" class="form-control ctfd-token-input" data-pid="${m.pid}" placeholder="ctfd_…" value="">
                 <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" title="Show">&#x1F576;&#xFE0E;</button>
               </div>
             </div>
@@ -331,10 +331,21 @@
       `).join('');
       const m = bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el);
       m.show();
-      // If any tokens persisted, check the save creds checkbox for clarity
+      // After showing, fetch server secrets to prefill empty token inputs
       try {
-        let anyPersist = false; (pids||[]).forEach(pid => { try { if (localStorage.getItem(`toolhub.ctfd.persist.${pid}`)) anyPersist = true; } catch {} });
-        const c = document.getElementById('chals-save-creds'); if (c && anyPersist) c.checked = true;
+        if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
+          (pids||[]).forEach(pid => {
+            try {
+              CREDS.fetchProjectSecrets(String(pid)).then(()=>{
+                try {
+                  const t = (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') ? (CREDS.readPersistCtfdToken(String(pid)) || '') : '';
+                  const inp = document.querySelector(`#ctfdLoginList .ctfd-token-input[data-pid="${CSS.escape(String(pid))}"]`);
+                  if (inp && !inp.value && t) inp.value = t;
+                } catch {}
+              }).catch(()=>{});
+            } catch {}
+          });
+        }
       } catch {}
     } catch {}
   }
@@ -954,20 +965,24 @@
     const saveBtn = document.getElementById('ctfdLoginSave');
     if (el && saveBtn && !saveBtn._toolhubBound) {
       saveBtn._toolhubBound = true;
-      saveBtn.addEventListener('click', () => {
+      saveBtn.addEventListener('click', async () => {
         try {
           const inputs = Array.from(document.querySelectorAll('#ctfdLoginList .ctfd-token-input[data-pid]'));
           const persist = !!document.getElementById('chals-save-creds')?.checked;
-          inputs.forEach(inp => {
+          for (const inp of inputs) {
             const pid = String(inp.getAttribute('data-pid'));
             const token = String(inp.value || '').trim();
-            if (!pid) return;
-            if (!token) return;
+            if (!pid) continue;
+            if (!token) continue;
             const key = `toolhub.session.ctfd.${pid}`;
             try { sessionStorage.setItem(key, JSON.stringify({ token })); } catch {}
             try { document.cookie = `${key}=${encodeURIComponent(JSON.stringify({ token }))}; path=/; SameSite=Lax`; } catch {}
-            try { if (persist) localStorage.setItem(`toolhub.ctfd.persist.${pid}`, JSON.stringify({ token })); else localStorage.removeItem(`toolhub.ctfd.persist.${pid}`); } catch {}
-          });
+            try {
+              if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
+                await CREDS.setPersistCtfdToken(String(pid), token, persist);
+              }
+            } catch {}
+          }
           const modal = (window.bootstrap && (bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el))) || null;
           if (modal) modal.hide();
           setTimeout(() => {

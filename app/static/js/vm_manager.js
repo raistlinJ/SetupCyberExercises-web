@@ -1823,7 +1823,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { await refreshVmView(); } catch {}
 });
 
-function prefillProxLoginModal() {
+async function prefillProxLoginModal() {
   if (!PROJ) return;
   const sess = readProxCreds(PROJ.id) || {};
   const u = document.getElementById('prox-username');
@@ -1838,32 +1838,22 @@ function prefillProxLoginModal() {
   if (api) api.value = PROJ.proxmox_api_port ?? 8006;
   if (ssh) ssh.value = PROJ.proxmox_ssh_port ?? 22;
   if (vssl) vssl.checked = (PROJ.proxmox_verify_ssl !== false);
-  // If persistent creds exist and session creds missing, adopt them.
-  // Supports current creds.js format (u_enc/p_enc) and legacy plaintext (username/password).
+  // If project-saved creds exist and session creds missing, adopt them.
   try {
     let persisted = {};
+    // Prefer server secrets (may update CREDS cache)
+    try {
+      if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
+        await CREDS.fetchProjectSecrets(PROJ.id);
+      }
+    } catch {}
     try {
       if (window.CREDS && typeof CREDS.readPersistProxCreds === 'function') {
         persisted = CREDS.readPersistProxCreds(PROJ.id) || {};
       }
     } catch {}
-    if (!persisted || (!persisted.username && !persisted.password)) {
-      // Legacy fallback + migrate to creds.js format
-      try {
-        const raw = localStorage.getItem(`toolhub.prox.persist.${PROJ.id}`);
-        if (raw) {
-          const obj = JSON.parse(raw);
-          if (obj && (obj.username || obj.password)) {
-            persisted = { username: String(obj.username || ''), password: String(obj.password || '') };
-            try {
-              if (window.CREDS && typeof CREDS.setPersistProxCreds === 'function') {
-                CREDS.setPersistProxCreds(PROJ.id, persisted.username, persisted.password, true);
-              }
-            } catch {}
-          }
-        }
-      } catch {}
-    }
+
+    // No localStorage fallback; legacy migration is handled in CREDS.fetchProjectSecrets.
 
     const saveBox = document.getElementById('prox-save-creds');
     const hasPersisted = !!(persisted && (persisted.username || persisted.password));
@@ -1899,7 +1889,7 @@ function openProxLoginForPid(pid, options = {}){
         }
       } catch {}
       
-      prefillProxLoginModal();
+      await prefillProxLoginModal();
       
       const modalEl = document.getElementById('proxLoginModal');
       if (!modalEl || !window.bootstrap) {
@@ -2150,11 +2140,7 @@ async function saveProxCredsFromModal() {
     const saveBox = document.getElementById('prox-save-creds');
     const wantsPersist = !!(saveBox && saveBox.checked);
     if (window.CREDS && typeof CREDS.setPersistProxCreds === 'function') {
-      CREDS.setPersistProxCreds(PROJ.id, u, p, wantsPersist);
-    } else {
-      // Fallback (legacy)
-      if (wantsPersist) localStorage.setItem(`toolhub.prox.persist.${PROJ.id}`, JSON.stringify({ username: u, password: p }));
-      else localStorage.removeItem(`toolhub.prox.persist.${PROJ.id}`);
+      await CREDS.setPersistProxCreds(PROJ.id, u, p, wantsPersist);
     }
   } catch {}
   
