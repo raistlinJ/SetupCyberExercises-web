@@ -25,6 +25,8 @@ const CTFD_FIRST_PLACE_HISTORY = {};
 let CTFD_AUDIO_CONTEXT = null;
 const CTFD_AUDIO_CACHE = {};
 const CTFD_AUDIO_ROTATION = {};
+const CTFD_AUDIO_MEDIA_PREFIX = 'media:';
+const CTFD_AUDIO_EVENT_PREFIX = 'event:';
 const CTFD_SPEECH_DEFAULT_DELAY = 0.35;
 const CTFD_AUDIO_SEGMENT_BUFFER = 0.12;
 const CTFD_SPEECH_SEGMENT_BUFFER = 0.12;
@@ -174,16 +176,730 @@ document.addEventListener('settings-changed', ()=>{
   ctfdReschedulePeriodicForCurrent();
 });
 
+document.addEventListener('project-audio-updated', (ev)=>{
+  try {
+    const pid = ev?.detail?.pid ? String(ev.detail.pid) : '';
+    const current = ctfdCurrentPid();
+    if (!pid || !current || String(pid) !== String(current)) return;
+    ctfdResetAudioCache();
+    ctfdReschedulePeriodicForCurrent();
+    ctfdRenderNotifyConfig();
+  } catch {}
+});
+
 function ctfdReadSettingsSafe(){
   try {
     if (typeof readSettings === 'function') return readSettings() || {};
   } catch {}
   return {};
 }
+
+function ctfdSplitProjectAudioStore(audioStore){
+  const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
+  const media = {};
+  const events = {};
+  Object.entries(store).forEach(([rawKey, rawEntry]) => {
+    const key = String(rawKey || '');
+    if (!key) return;
+    if (key.startsWith(CTFD_AUDIO_MEDIA_PREFIX)) {
+      media[key] = rawEntry;
+      return;
+    }
+    if (key.startsWith(CTFD_AUDIO_EVENT_PREFIX)) {
+      const eventKey = key.slice(CTFD_AUDIO_EVENT_PREFIX.length);
+      if (eventKey) events[eventKey] = rawEntry;
+    }
+  });
+  return { media, events };
+}
+
+function ctfdNormalizeMediaSound(entry){
+  if (!entry || typeof entry !== 'object') return null;
+  const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
+  const sound = sounds.find(s => s && typeof s.dataUrl === 'string' && s.dataUrl.startsWith('data:')) || null;
+  if (!sound) return null;
+  return {
+    dataUrl: sound.dataUrl,
+    name: sound.name ? String(sound.name) : 'Audio',
+    size: Number(sound.size) || 0,
+    type: sound.type ? String(sound.type) : '',
+    updated: Number(sound.updated) || 0,
+  };
+}
+
+function ctfdListProjectMediaOptions(audioStore){
+  const { media } = ctfdSplitProjectAudioStore(audioStore);
+  const items = [];
+  Object.entries(media).forEach(([key, entry]) => {
+    const sound = ctfdNormalizeMediaSound(entry);
+    if (!sound) return;
+    items.push({ key: String(key), ...sound });
+  });
+  items.sort((a, b) => (b.updated || 0) - (a.updated || 0) || String(a.name).localeCompare(String(b.name)));
+  return items;
+}
+
+function ctfdGetProjectAudioStore(pid){
+  const id = String(pid || '').trim();
+  if (!id) return {};
+  try {
+    if (typeof getProjectAudio === 'function') return getProjectAudio(id) || {};
+  } catch {}
+  return {};
+}
+
 function ctfdGetSettingsAudio(){
-  const settings = ctfdReadSettingsSafe();
-  const audio = settings && typeof settings.audio === 'object' ? settings.audio : {};
-  return audio || {};
+  // Notifications are now project-scoped and backed by /api/projects/<pid>/audio.
+  const pid = ctfdCurrentPid();
+  const audioStore = ctfdGetProjectAudioStore(pid);
+  const { media, events } = ctfdSplitProjectAudioStore(audioStore);
+  const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
+  const out = {};
+
+  Object.keys(meta).forEach(eventKey => {
+    const fromEvents = (events && typeof events[eventKey] === 'object') ? events[eventKey] : null;
+    const fromLegacy = (audioStore && typeof audioStore[eventKey] === 'object') ? audioStore[eventKey] : null;
+    const source = fromEvents || fromLegacy || {};
+    let entry;
+    try { entry = source ? JSON.parse(JSON.stringify(source)) : {}; }
+    catch { entry = source ? { ...source } : {}; }
+
+    const soundKey = typeof entry.soundKey === 'string' ? entry.soundKey.trim() : '';
+    if (soundKey && Object.prototype.hasOwnProperty.call(media, soundKey)) {
+      const mediaEntry = media[soundKey];
+      if (mediaEntry && typeof mediaEntry === 'object') {
+        if (Array.isArray(mediaEntry.sounds)) entry.sounds = mediaEntry.sounds;
+        else if (mediaEntry.dataUrl) entry.dataUrl = mediaEntry.dataUrl;
+      }
+    }
+    out[eventKey] = entry;
+  });
+
+  return out;
+}
+
+const CTFD_NOTIFY_LABELS = {
+  ctfdFirstUser: 'User 1st Place',
+  ctfdFirstTeam: 'Team 1st Place',
+  ctfdFirstScore: 'First Solve',
+  ctfdFirstCategoryUser: 'Category 1st (User)',
+  ctfdFirstCategoryTeam: 'Category 1st (Team)',
+  ctfdCountdown: 'Countdown Start',
+  ctfdCountdownStop: 'Countdown Stop',
+  ctfdPeriodic: 'Periodic'
+};
+
+const CTFD_NOTIFY_WHEN = {
+  ctfdFirstUser: 'Plays when the detected rank #1 user changes during refresh (a new user becomes user_rank = 1).',
+  ctfdFirstTeam: 'Plays when the detected rank #1 team changes during refresh (a new team becomes team_rank = 1).',
+  ctfdFirstScore: 'Plays when the project transitions from “no score yet” to “has score” during refresh (first solve/points appear).',
+  ctfdFirstCategoryUser: 'Plays when a new “first solve in category” is detected for a user after initial seeding (during refresh).',
+  ctfdFirstCategoryTeam: 'Plays when a new “first solve in category” is detected for a team after initial seeding (during refresh).',
+  ctfdCountdown: 'Plays as the countdown cue used when enabling Challenges Visible (and on countdown completion announcements).',
+  ctfdCountdownStop: 'Plays when cancelling/stopping the pending countdown (typically when disabling Challenges Visible while a countdown is active).',
+  ctfdPeriodic: 'Plays on the periodic timer at the configured interval while enabled.'
+};
+
+function ctfdNotifyWhenDescriptionFor(key){
+  const k = String(key || '').trim();
+  return CTFD_NOTIFY_WHEN[k] || 'Plays when this event triggers.';
+}
+
+let CTFD_NOTIFY_ACTIVE_EVENT_KEY = '';
+
+function ctfdNotifySetActiveEventKey(key){
+  const next = String(key || '').trim();
+  if (!next) return;
+  CTFD_NOTIFY_ACTIVE_EVENT_KEY = next;
+}
+
+function ctfdNotifyGetActiveEventKey(){
+  const current = String(CTFD_NOTIFY_ACTIVE_EVENT_KEY || '').trim();
+  if (current) return current;
+  try {
+    const rows = document.getElementById('ctfd-notify-rows');
+    const first = rows ? rows.querySelector('tr[data-event-key]') : null;
+    const k = first ? String(first.getAttribute('data-event-key') || '').trim() : '';
+    return k;
+  } catch { return ''; }
+}
+
+function ctfdNotifyTemplateVarsForEvent(eventKey){
+  const key = String(eventKey || '').trim();
+  if (!key) return [];
+  const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
+  const cfg = meta && typeof meta === 'object' ? (meta[key] || {}) : {};
+
+  const sources = [];
+  if (cfg && typeof cfg.placeholderHint === 'string') sources.push(cfg.placeholderHint);
+  try {
+    const defaultTemplate = ctfdNotifyDefaultSpeakTemplateFor(key);
+    if (defaultTemplate) sources.push(defaultTemplate);
+  } catch {}
+
+  const seen = new Set();
+  const out = [];
+  const push = (name)=>{
+    const v = String(name || '').trim();
+    if (!v) return;
+    if (seen.has(v)) return;
+    seen.add(v);
+    out.push(v);
+  };
+
+  // Always include the special audio token.
+  push('audio');
+
+  const re = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
+  sources.forEach(text => {
+    const raw = String(text || '');
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+      push(m[1]);
+    }
+  });
+
+  // Hide unknown placeholders that don't correspond to context keys.
+  // (We still keep 'audio' always.)
+  return out;
+}
+
+function ctfdNotifyTemplateVarDescription(name){
+  const key = String(name || '').trim();
+  const map = {
+    audio: 'Insert the selected audio clip here (no-op if no clip is selected).',
+    project: 'Project name/label.',
+    project_clause: 'Convenience text like “ in <project>”.',
+    leader: 'Main competitor name for the event (user or team).',
+    user_first: 'User name (when available).',
+    team_first: 'Team name (when available).',
+    team_clause: 'Convenience text like “ from team <team>”.',
+    first_team: 'Leaderboard #1 team name (when available).',
+    second_team: 'Leaderboard #2 team name (when available).',
+    third_team: 'Leaderboard #3 team name (when available).',
+    challenge: 'Challenge name (when available).',
+    challenge_clause: 'Convenience text like “ on <challenge>”.',
+    category: 'Challenge category (when available).',
+    category_clause: 'Convenience text like “ in <category>”.',
+    points: 'Points value (when available).',
+    points_clause: 'Convenience text like “ worth 100 points”.',
+    reason: 'Reason code for countdown events (when available).',
+    reason_clause: 'Convenience text like “ for scoreboard reveal”.',
+    countdown_seconds: 'Countdown duration (seconds), when available.',
+    interval_minutes: 'Periodic interval minutes, when available.',
+    interval_minutes_clause: 'Convenience text like “ 30 minutes”, when available.'
+  };
+  return map[key] || 'Template variable.';
+}
+
+function ctfdRenderNotifyTemplateVarsModal(){
+  let eventKey = '';
+  try {
+    const select = document.getElementById('ctfd-template-vars-select');
+    eventKey = select ? String(select.value || '').trim() : '';
+  } catch { eventKey = ''; }
+  if (!eventKey) eventKey = ctfdNotifyGetActiveEventKey();
+
+  const body = document.getElementById('ctfd-template-vars-body');
+  if (!body) return;
+
+  if (!eventKey) {
+    body.innerHTML = '<tr><td colspan="2" class="small text-muted">Select an event row to see its variables.</td></tr>';
+    return;
+  }
+
+  const vars = ctfdNotifyTemplateVarsForEvent(eventKey);
+  if (!vars.length) {
+    body.innerHTML = '<tr><td colspan="2" class="small text-muted">No variables found for this event.</td></tr>';
+    return;
+  }
+
+  body.innerHTML = vars.map(v => {
+    const safe = escHtml(v);
+    const desc = escHtml(ctfdNotifyTemplateVarDescription(v));
+    return `<tr><td><code>{{${safe}}}</code></td><td>${desc}</td></tr>`;
+  }).join('');
+}
+
+function ctfdPopulateNotifyTemplateVarsEventSelect(selectedKey){
+  const select = document.getElementById('ctfd-template-vars-select');
+  if (!select) return;
+  const keys = ctfdNotifyEventKeys();
+  const desired = String(selectedKey || '').trim();
+  const active = desired || ctfdNotifyGetActiveEventKey();
+  const options = keys.map(k => {
+    const label = ctfdNotifyLabelFor(k);
+    return `<option value="${escHtml(k)}">${escHtml(label)}</option>`;
+  }).join('');
+  select.innerHTML = options;
+  if (active && keys.includes(active)) select.value = active;
+  else if (keys.length) select.value = keys[0];
+}
+
+function ctfdWireNotifyTemplateVarsModal(){
+  const modal = document.getElementById('ctfdTemplateVarsModal');
+  if (!modal || modal._toolhubBound) return;
+  modal.addEventListener('show.bs.modal', () => {
+    try {
+      ctfdPopulateNotifyTemplateVarsEventSelect(ctfdNotifyGetActiveEventKey());
+      ctfdRenderNotifyTemplateVarsModal();
+    } catch {}
+  });
+  try {
+    const select = document.getElementById('ctfd-template-vars-select');
+    if (select && !select._toolhubBound) {
+      select.addEventListener('change', () => {
+        try {
+          const key = String(select.value || '').trim();
+          if (key) ctfdNotifySetActiveEventKey(key);
+        } catch {}
+        try { ctfdRenderNotifyTemplateVarsModal(); } catch {}
+      });
+      select._toolhubBound = true;
+    }
+  } catch {}
+  modal._toolhubBound = true;
+}
+
+function ctfdNotifyEventKeys(){
+  const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
+  const keys = Object.keys(meta);
+  // Prefer stable ordering when meta is missing.
+  if (!keys.length) {
+    return Object.keys(CTFD_NOTIFY_LABELS);
+  }
+  return keys;
+}
+
+function ctfdNotifyLabelFor(key){
+  return CTFD_NOTIFY_LABELS[key] || key;
+}
+
+function ctfdNotifyIsMultiMode(){
+  return Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
+}
+
+function ctfdNotifyDefaultSpeakTemplateFor(eventKey){
+  const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
+  const cfg = meta && typeof meta === 'object' ? meta[eventKey] : {};
+  const tpl = cfg && typeof cfg.defaultSpeakTemplate === 'string' ? cfg.defaultSpeakTemplate : '';
+  return String(tpl || '');
+}
+
+function ctfdNotifyDefaultSpeakEnabledFor(eventKey){
+  const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
+  const cfg = meta && typeof meta === 'object' ? meta[eventKey] : {};
+  if (cfg && cfg.defaultSpeak !== undefined) return !!cfg.defaultSpeak;
+  return false;
+}
+
+function ctfdNotifyNormalizeTemplatesForUi(source){
+  const out = [];
+  const entry = source && typeof source === 'object' ? source : {};
+  if (Array.isArray(entry.speakTemplates)) {
+    entry.speakTemplates.forEach(t => {
+      if (t === null || t === undefined) return;
+      if (typeof t === 'string') {
+        const str = String(t).trim();
+        if (str) out.push({ text: str, enabled: true });
+        return;
+      }
+      if (t && typeof t === 'object') {
+        const raw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : ''));
+        const str = String(raw || '').trim();
+        if (!str) return;
+        const enabled = t.enabled === undefined ? true : !!t.enabled;
+        out.push({ text: str, enabled });
+        return;
+      }
+      const str = String(t).trim();
+      if (str) out.push({ text: str, enabled: true });
+    });
+  }
+  if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
+    const legacyTpl = String(entry.speakTemplate).trim();
+    if (legacyTpl) out.push({ text: legacyTpl, enabled: true });
+  }
+  return out;
+}
+
+function ctfdNotifyTemplateItemHtml(tpl){
+  const enabled = tpl && tpl.enabled !== undefined ? !!tpl.enabled : true;
+  const text = tpl && tpl.text !== undefined ? String(tpl.text || '') : '';
+  return `<div class="input-group input-group-sm mb-1" data-role="notify-tts-item">
+  <div class="input-group-text">
+    <input class="form-check-input mt-0" type="checkbox" data-role="notify-tts-enabled" ${enabled ? 'checked' : ''} />
+  </div>
+  <input type="text" class="form-control" data-role="notify-tts-text" value="${escHtml(text)}" />
+  <button class="btn btn-outline-secondary" type="button" data-role="notify-tts-play" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview TTS" aria-label="Preview TTS">
+    <i class="bi bi-play-fill" aria-hidden="true"></i>
+  </button>
+  <button class="btn btn-outline-danger" type="button" data-role="notify-tts-remove">Remove</button>
+</div>`;
+}
+
+function ctfdNotifyTemplatesListHtml(templates, defaultTemplate){
+  const list = Array.isArray(templates) ? templates : [];
+  if (!list.length) {
+    const hint = defaultTemplate ? `Uses default: ${defaultTemplate}` : 'No templates.';
+    return `<div class="small text-muted" data-role="notify-tts-empty">${escHtml(hint)}</div>`;
+  }
+  return list.map(t => ctfdNotifyTemplateItemHtml(t)).join('');
+}
+
+async function ctfdRenderNotifyConfig(){
+  const rows = document.getElementById('ctfd-notify-rows');
+  const status = document.getElementById('ctfd-notify-status');
+  const saveBtn = document.getElementById('ctfd-notify-save');
+  const reloadBtn = document.getElementById('ctfd-notify-reload');
+  if (!rows) return;
+
+  const pid = ctfdCurrentPid();
+  if (reloadBtn) reloadBtn.disabled = !pid;
+  if (saveBtn) saveBtn.disabled = !pid;
+
+  if (!pid) {
+    rows.innerHTML = '<tr><td colspan="3" class="small text-muted">Select a project to configure notification audio.</td></tr>';
+    if (status) status.textContent = '';
+    return;
+  }
+  if (ctfdNotifyIsMultiMode()) {
+    rows.innerHTML = '<tr><td colspan="3" class="small text-muted">Notification audio is configured per-project (disable multi-project selection to edit).</td></tr>';
+    if (status) status.textContent = '';
+    if (saveBtn) saveBtn.disabled = true;
+    return;
+  }
+
+  if (status) status.textContent = 'Loading…';
+  try {
+    if (typeof loadProjectAudio === 'function') {
+      await loadProjectAudio(pid, { force: true, silent: true });
+    }
+  } catch {}
+  const audioStore = ctfdGetProjectAudioStore(pid);
+  const { events } = ctfdSplitProjectAudioStore(audioStore);
+  const mediaItems = ctfdListProjectMediaOptions(audioStore);
+  const eventKeys = ctfdNotifyEventKeys();
+
+  const optionsHtml = ['<option value="">Built-in tone</option>']
+    .concat(mediaItems.map(item => `<option value="${escHtml(item.key)}">${escHtml(item.name || 'Audio')}</option>`))
+    .join('');
+
+  rows.innerHTML = eventKeys.map(eventKey => {
+    const raw = (events && typeof events[eventKey] === 'object') ? events[eventKey] : null;
+    const legacy = (audioStore && typeof audioStore[eventKey] === 'object') ? audioStore[eventKey] : null;
+    const source = raw || legacy || {};
+    const enabled = source && source.enabled !== undefined ? !!source.enabled : ctfdDefaultAudioEnabled(eventKey);
+    const selected = source && typeof source.soundKey === 'string' ? String(source.soundKey) : '';
+    const speak = source && source.speak !== undefined ? !!source.speak : ctfdNotifyDefaultSpeakEnabledFor(eventKey);
+    const defaultTemplate = ctfdNotifyDefaultSpeakTemplateFor(eventKey);
+    const templates = ctfdNotifyNormalizeTemplatesForUi(source);
+    const label = ctfdNotifyLabelFor(eventKey);
+    const when = ctfdNotifyWhenDescriptionFor(eventKey);
+    return `<tr data-event-key="${escHtml(eventKey)}">
+  <td>
+    <input class="form-check-input" type="checkbox" data-role="notify-enabled" ${enabled ? 'checked' : ''} />
+  </td>
+  <td class="small">
+    <div class="d-flex align-items-center gap-2">
+      <span>${escHtml(label)}</span>
+      <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" data-role="notify-when" data-bs-toggle="tooltip" data-bs-placement="top" title="${escHtml(when)}" aria-label="When this event plays">
+        <i class="bi bi-question-circle" aria-hidden="true"></i>
+      </button>
+    </div>
+  </td>
+  <td>
+    <div class="input-group input-group-sm mb-2">
+      <select class="form-select" data-role="notify-sound">${optionsHtml}</select>
+      <button type="button" class="btn btn-outline-secondary" data-role="notify-preview" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview audio" aria-label="Preview audio">
+        <i class="bi bi-play-fill" aria-hidden="true"></i>
+      </button>
+    </div>
+
+    <div class="d-flex align-items-center gap-2 mb-1">
+      <div class="form-check m-0">
+        <input class="form-check-input" type="checkbox" data-role="notify-speak" ${speak ? 'checked' : ''} />
+        <label class="form-check-label small">Speak (TTS)</label>
+      </div>
+    </div>
+
+    <div class="small text-muted mb-1">Use <code>{{audio}}</code> to place the audio clip inside the spoken text.</div>
+
+    <div class="input-group input-group-sm mb-1">
+      <input type="text" class="form-control" data-role="notify-tts-new" placeholder="e.g. {{audio}} First solve for {{name}}" />
+      <button class="btn btn-outline-secondary" type="button" data-role="notify-tts-add">Add</button>
+      <button type="button" class="btn btn-outline-secondary" data-role="notify-vars" data-bs-toggle="tooltip" data-bs-placement="top" title="Template Variable List" aria-label="Template Variable List">
+        <i class="bi bi-question-circle" aria-hidden="true"></i>
+      </button>
+    </div>
+
+    <div data-role="notify-tts-list">${ctfdNotifyTemplatesListHtml(templates, defaultTemplate)}</div>
+  </td>
+  </tr>`;
+  }).join('');
+
+  // Tooltips for dynamically-rendered controls.
+  try {
+    if (window.bootstrap) {
+      rows.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
+        try { bootstrap.Tooltip.getInstance(el) || new bootstrap.Tooltip(el); } catch {}
+      });
+    }
+  } catch {}
+
+  // Apply selected values after row HTML exists.
+  rows.querySelectorAll('tr[data-event-key]').forEach(tr => {
+    const eventKey = tr.getAttribute('data-event-key') || '';
+    const raw = (events && typeof events[eventKey] === 'object') ? events[eventKey] : null;
+    const legacy = (audioStore && typeof audioStore[eventKey] === 'object') ? audioStore[eventKey] : null;
+    const source = raw || legacy || {};
+    const selected = source && typeof source.soundKey === 'string' ? String(source.soundKey) : '';
+    const select = tr.querySelector('select[data-role="notify-sound"]');
+    if (select) select.value = selected;
+  });
+
+  if (status) status.textContent = mediaItems.length ? '' : 'No uploaded audio yet. Upload files in Settings → Media Manager.';
+}
+
+async function ctfdSaveNotifyConfig(){
+  const status = document.getElementById('ctfd-notify-status');
+  const pid = ctfdCurrentPid();
+  if (!pid) return;
+  if (ctfdNotifyIsMultiMode()) return;
+  const rows = document.getElementById('ctfd-notify-rows');
+  if (!rows) return;
+  if (status) status.textContent = 'Saving…';
+
+  let audioStore = {};
+  try {
+    if (typeof loadProjectAudio === 'function') {
+      audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+    } else {
+      audioStore = ctfdGetProjectAudioStore(pid);
+    }
+  } catch {
+    audioStore = ctfdGetProjectAudioStore(pid);
+  }
+
+  rows.querySelectorAll('tr[data-event-key]').forEach(tr => {
+    const eventKey = tr.getAttribute('data-event-key') || '';
+    if (!eventKey) return;
+    const enabledEl = tr.querySelector('input[data-role="notify-enabled"]');
+    const selectEl = tr.querySelector('select[data-role="notify-sound"]');
+    const speakEl = tr.querySelector('input[data-role="notify-speak"]');
+    const enabled = !!enabledEl?.checked;
+    const soundKey = selectEl ? String(selectEl.value || '') : '';
+    const speak = !!speakEl?.checked;
+
+    const templates = [];
+    tr.querySelectorAll('[data-role="notify-tts-item"]').forEach(item => {
+      const textEl = item.querySelector('input[data-role="notify-tts-text"]');
+      const enabledTplEl = item.querySelector('input[data-role="notify-tts-enabled"]');
+      const text = textEl ? String(textEl.value || '').trim() : '';
+      if (!text) return;
+      const tEnabled = enabledTplEl ? !!enabledTplEl.checked : true;
+      templates.push({ text, enabled: tEnabled });
+    });
+
+    const storeKey = `${CTFD_AUDIO_EVENT_PREFIX}${eventKey}`;
+    const existing = (audioStore && typeof audioStore[storeKey] === 'object') ? audioStore[storeKey] : {};
+    const next = existing && typeof existing === 'object' ? { ...existing } : {};
+    next.enabled = enabled;
+    next.speak = speak;
+    if (soundKey) next.soundKey = soundKey;
+    else {
+      try { delete next.soundKey; } catch {}
+    }
+
+    // Store templates as objects so each can be enabled/disabled.
+    next.speakTemplates = templates;
+    try { delete next.speakTemplate; } catch {}
+
+    audioStore[storeKey] = next;
+  });
+
+  try {
+    if (typeof saveProjectAudio === 'function') {
+      await saveProjectAudio(pid, audioStore);
+      if (status) status.textContent = 'Saved.';
+      setTimeout(() => { try { if (status && status.textContent === 'Saved.') status.textContent = ''; } catch {} }, 1500);
+    } else {
+      if (status) status.textContent = 'Save is unavailable.';
+    }
+  } catch (err) {
+    if (status) status.textContent = `Save failed: ${err?.message || err}`;
+  }
+}
+
+function ctfdWireNotifyConfig(){
+  const reloadBtn = document.getElementById('ctfd-notify-reload');
+  const saveBtn = document.getElementById('ctfd-notify-save');
+  const rows = document.getElementById('ctfd-notify-rows');
+  if (reloadBtn && !reloadBtn._toolhubBound) {
+    reloadBtn.addEventListener('click', ()=> ctfdRenderNotifyConfig());
+    reloadBtn._toolhubBound = true;
+  }
+  if (saveBtn && !saveBtn._toolhubBound) {
+    saveBtn.addEventListener('click', ()=> ctfdSaveNotifyConfig());
+    saveBtn._toolhubBound = true;
+  }
+  if (rows && !rows._toolhubBound) {
+    rows.addEventListener('focusin', (ev) => {
+      const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-event-key]') : null;
+      if (!tr) return;
+      const eventKey = tr.getAttribute('data-event-key') || '';
+      ctfdNotifySetActiveEventKey(eventKey);
+    });
+    rows.addEventListener('click', (ev) => {
+      const trForActive = ev.target && ev.target.closest ? ev.target.closest('tr[data-event-key]') : null;
+      if (trForActive) {
+        const eventKey = trForActive.getAttribute('data-event-key') || '';
+        ctfdNotifySetActiveEventKey(eventKey);
+      }
+
+      const varsBtn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-vars"]') : null;
+      if (varsBtn) {
+        ev.preventDefault();
+        try {
+          const tr = varsBtn.closest('tr[data-event-key]');
+          const eventKey = tr ? (tr.getAttribute('data-event-key') || '') : '';
+          if (eventKey) ctfdNotifySetActiveEventKey(eventKey);
+        } catch {}
+        try {
+          const modalEl = document.getElementById('ctfdTemplateVarsModal');
+          if (modalEl && window.bootstrap) {
+            const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+            modal.show();
+          }
+        } catch {}
+        return;
+      }
+
+      const addBtn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-tts-add"]') : null;
+      if (addBtn) {
+        ev.preventDefault();
+        const tr = addBtn.closest('tr[data-event-key]');
+        if (!tr) return;
+        const input = tr.querySelector('input[data-role="notify-tts-new"]');
+        const text = input ? String(input.value || '').trim() : '';
+        if (!text) return;
+        const list = tr.querySelector('[data-role="notify-tts-list"]');
+        if (!list) return;
+        try {
+          const empty = list.querySelector('[data-role="notify-tts-empty"]');
+          if (empty) empty.remove();
+        } catch {}
+        list.insertAdjacentHTML('beforeend', ctfdNotifyTemplateItemHtml({ text, enabled: true }));
+        if (input) input.value = '';
+        return;
+      }
+
+      const removeBtn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-tts-remove"]') : null;
+      if (removeBtn) {
+        ev.preventDefault();
+        const item = removeBtn.closest('[data-role="notify-tts-item"]');
+        const tr = removeBtn.closest('tr[data-event-key]');
+        const list = tr ? tr.querySelector('[data-role="notify-tts-list"]') : null;
+        if (item) item.remove();
+        if (list && !list.querySelector('[data-role="notify-tts-item"]')) {
+          const eventKey = tr ? (tr.getAttribute('data-event-key') || '') : '';
+          const defaultTemplate = eventKey ? ctfdNotifyDefaultSpeakTemplateFor(eventKey) : '';
+          list.innerHTML = ctfdNotifyTemplatesListHtml([], defaultTemplate);
+        }
+        return;
+      }
+
+      const ttsPlayBtn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-tts-play"]') : null;
+      if (ttsPlayBtn) {
+        ev.preventDefault();
+        try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
+        const item = ttsPlayBtn.closest('[data-role="notify-tts-item"]');
+        const tr = ttsPlayBtn.closest('tr[data-event-key]');
+        if (!item || !tr) return;
+        const eventKey = tr.getAttribute('data-event-key') || '';
+        const label = ctfdNotifyLabelFor(eventKey);
+        const textEl = item.querySelector('input[data-role="notify-tts-text"]');
+        const tpl = textEl ? String(textEl.value || '').trim() : '';
+        if (!tpl) return;
+
+        const select = tr.querySelector('select[data-role="notify-sound"]');
+        const soundKey = select ? String(select.value || '') : '';
+        const pid = ctfdCurrentPid();
+        const audioStore = ctfdGetProjectAudioStore(pid);
+        const mediaEntry = (soundKey && audioStore && typeof audioStore[soundKey] === 'object') ? audioStore[soundKey] : null;
+        const sound = ctfdNormalizeMediaSound(mediaEntry);
+        const skipAudioSegments = !soundKey || !sound || !sound.dataUrl;
+
+        const payload = {
+          context: { name: 'Example', team: 'Example', category: 'Example', points: 0, rank: 1 },
+          fallbackText: label
+        };
+
+        ctfdSpeakFromTemplate(tpl, payload, 0, {
+          interrupt: true,
+          forceSpeak: true,
+          skipAudioSegments,
+          onAudioRequest: async () => {
+            try {
+              if (!sound || !sound.dataUrl) return { played: false, duration: 0 };
+              const audio = new Audio(sound.dataUrl);
+              return await new Promise((resolve) => {
+                let settled = false;
+                const finish = (played) => {
+                  if (settled) return;
+                  settled = true;
+                  const duration = (Number.isFinite(audio.duration) && audio.duration > 0) ? audio.duration : 0;
+                  resolve({ played, duration });
+                };
+                audio.addEventListener('ended', () => finish(true));
+                audio.addEventListener('error', () => finish(false));
+                audio.addEventListener('abort', () => finish(false));
+                audio.play().catch(() => finish(false));
+              });
+            } catch {
+              return { played: false, duration: 0 };
+            }
+          }
+        }).catch(()=>{});
+        return;
+      }
+
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-preview"]') : null;
+      if (!btn) return;
+      ev.preventDefault();
+      try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
+      const tr = btn.closest('tr[data-event-key]');
+      if (!tr) return;
+      const select = tr.querySelector('select[data-role="notify-sound"]');
+      const soundKey = select ? String(select.value || '') : '';
+      if (!soundKey) return;
+      const pid = ctfdCurrentPid();
+      const audioStore = ctfdGetProjectAudioStore(pid);
+      const entry = audioStore && typeof audioStore[soundKey] === 'object' ? audioStore[soundKey] : null;
+      const sound = ctfdNormalizeMediaSound(entry);
+      if (!sound || !sound.dataUrl) return;
+      const audio = new Audio(sound.dataUrl);
+      audio.play().catch(()=>{});
+    });
+
+    rows.addEventListener('keydown', (ev) => {
+      try {
+        const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-event-key]') : null;
+        if (tr) ctfdNotifySetActiveEventKey(tr.getAttribute('data-event-key') || '');
+      } catch {}
+      const input = ev.target && ev.target.closest ? ev.target.closest('input[data-role="notify-tts-new"]') : null;
+      if (!input) return;
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      const tr = input.closest('tr[data-event-key]');
+      const addBtn = tr ? tr.querySelector('button[data-role="notify-tts-add"]') : null;
+      if (addBtn) addBtn.click();
+    });
+
+    rows._toolhubBound = true;
+  }
+  document.addEventListener('project-selected', () => ctfdRenderNotifyConfig());
+  ctfdRenderNotifyConfig();
 }
 function ctfdClearPeriodicTimer(){
   if (CTFD_PERIODIC_TIMER) {
@@ -335,19 +1051,35 @@ function ctfdGetAudioEntry(key){
   delete entry.size;
   delete entry.type;
   delete entry.updated;
+  // Templates are stored per-project under event:<key>.
+  // Support both legacy formats:
+  // - speakTemplate: string
+  // - speakTemplates: string[]
+  // And current format:
+  // - speakTemplates: Array<{ text: string, enabled: boolean }>
   const templates = [];
   if (Array.isArray(entry.speakTemplates)) {
     entry.speakTemplates.forEach(t => {
       if (t === null || t === undefined) return;
-      const str = String(t).trim();
-      if (str) templates.push(str);
+      if (typeof t === 'string') {
+        const str = String(t).trim();
+        if (str) templates.push({ text: str, enabled: true });
+        return;
+      }
+      if (t && typeof t === 'object') {
+        const textRaw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : ''));
+        const str = String(textRaw || '').trim();
+        if (!str) return;
+        const enabled = t.enabled === undefined ? true : !!t.enabled;
+        templates.push({ text: str, enabled });
+      }
     });
   }
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
     const legacyTpl = String(entry.speakTemplate).trim();
-    if (legacyTpl) templates.push(legacyTpl);
+    if (legacyTpl) templates.push({ text: legacyTpl, enabled: true });
   }
-  if (!templates.length && defaultTemplate) templates.push(defaultTemplate);
+  if (!templates.length && defaultTemplate) templates.push({ text: defaultTemplate, enabled: true });
   entry.speakTemplates = templates;
   entry.defaultSpeakTemplate = defaultTemplate;
   delete entry.speakTemplate;
@@ -366,9 +1098,20 @@ function ctfdListValidSounds(entry){
 function ctfdListValidTemplates(entry){
   const list = entry && Array.isArray(entry.speakTemplates) ? entry.speakTemplates : [];
   return list.map((tpl, idx) => {
-    const str = tpl != null ? String(tpl).trim() : '';
-    return { tpl: str, idx };
-  }).filter(item => !!item.tpl);
+    if (tpl === null || tpl === undefined) return { tpl: '', idx, enabled: false };
+    if (typeof tpl === 'string') {
+      const str = String(tpl).trim();
+      return { tpl: str, idx, enabled: true };
+    }
+    if (tpl && typeof tpl === 'object') {
+      const raw = (tpl.text !== undefined ? tpl.text : (tpl.tpl !== undefined ? tpl.tpl : ''));
+      const str = String(raw || '').trim();
+      const enabled = tpl.enabled === undefined ? true : !!tpl.enabled;
+      return { tpl: str, idx, enabled };
+    }
+    const str = String(tpl).trim();
+    return { tpl: str, idx, enabled: true };
+  }).filter(item => !!item.tpl && !!item.enabled);
 }
 function ctfdRotationState(key){
   if (!CTFD_AUDIO_ROTATION[key]) {
@@ -693,15 +1436,96 @@ function ctfdPlayFallbackPattern(pattern, delaySeconds){
   } catch { return Promise.resolve({ played: false, duration: 0 }); }
 }
 async function ctfdPlayNamedSound(key, fallbackPattern, delaySeconds){
+  // Mirror Preview behavior: only play a configured (selected) audio clip.
+  // No fallback tones/patterns when a clip is not selected or fails to play.
   if (!ctfdIsAudioEnabled(key)) return { played: false, duration: 0 };
   const customResult = await ctfdTryPlayCustomAudio(key, delaySeconds);
   if (customResult && customResult.played) return customResult;
-  if (Array.isArray(fallbackPattern) && fallbackPattern.length) {
-    const tagged = fallbackPattern.map(note => ({ ...note }));
-    tagged.key = key;
-    return await ctfdPlayFallbackPattern(tagged, delaySeconds);
-  }
   return { played: false, duration: 0 };
+}
+
+function ctfdBuildSpeechPlanFromTemplate(template, context, fallbackText, opts){
+  const options = opts && typeof opts === 'object' ? opts : {};
+  const compiled = ctfdCompileSpeechTemplate(template, context);
+  let segments = compiled.segments.slice();
+
+  const skipAudio = !!options.skipAudioSegments;
+  const hadAudioToken = compiled.hasAudio && segments.some(s => s && s.type === 'audio');
+  if (skipAudio && hadAudioToken) {
+    segments = segments.filter(s => !(s && s.type === 'audio'));
+  }
+
+  let hasSpeech = compiled.hasSpeech && segments.some(s => s && s.type === 'text' && String(s.text || '').trim());
+
+  if (!hasSpeech) {
+    const fallback = fallbackText != null ? String(fallbackText).trim() : '';
+    // When audio is unavailable (skipAudioSegments) and the template was audio-only (or effectively
+    // has no text), speak the fallback label instead of doing nothing.
+    const wantsFallback = compiled.hasSpeechIntent || !compiled.templateTrimmed || (skipAudio && hadAudioToken);
+    if (fallback && wantsFallback) {
+      const insertAt = compiled.fallbackTargets.length ? compiled.fallbackTargets[0] : segments.length;
+      const clamped = Math.max(0, Math.min(insertAt, segments.length));
+      const prev = clamped > 0 ? segments[clamped - 1] : null;
+      const next = clamped < segments.length ? segments[clamped] : null;
+      if (prev && prev.type === 'text') {
+        prev.text += fallback;
+      } else if (next && next.type === 'text') {
+        next.text = fallback + next.text;
+      } else {
+        segments.splice(clamped, 0, { type: 'text', text: fallback });
+      }
+      hasSpeech = true;
+    }
+  }
+
+  const hasAudio = !skipAudio && !!compiled.hasAudio;
+  return { segments, hasSpeech, hasAudio };
+}
+
+async function ctfdSpeakFromTemplate(template, payload, delaySeconds, opts){
+  const { context, fallbackText } = ctfdNormalizeSpeechPayload(payload);
+  const plan = ctfdBuildSpeechPlanFromTemplate(template, context, fallbackText, opts);
+  const segments = plan.segments || [];
+  const audioHandler = opts && typeof opts.onAudioRequest === 'function' ? opts.onAudioRequest : null;
+  const speechAllowed = plan.hasSpeech && ctfdSpeechSupported() && !!(opts && opts.forceSpeak);
+  const baseDelay = Math.max(0, Number(delaySeconds) || 0);
+  let elapsed = 0;
+  let timeline = baseDelay;
+  const baseSpeechStart = ctfdComputeSpeechDelay(baseDelay);
+  let nextSpeechBaseline = baseSpeechStart;
+  let spokeAny = false;
+  for (const segment of segments) {
+    if (segment.type === 'audio') {
+      if (!audioHandler) continue;
+      const wait = Math.max(0, timeline - elapsed);
+      if (wait > 0) {
+        await ctfdWaitSeconds(wait);
+        elapsed += wait;
+      }
+      try {
+        const result = await audioHandler(0);
+        const duration = Number(result && result.duration);
+        if (Number.isFinite(duration) && duration > 0) elapsed += duration;
+      } catch {}
+      timeline = elapsed + CTFD_AUDIO_SEGMENT_BUFFER;
+      nextSpeechBaseline = Math.max(nextSpeechBaseline, timeline);
+    } else if (segment.type === 'text') {
+      if (!speechAllowed) continue;
+      const start = Math.max(timeline, nextSpeechBaseline);
+      const wait = Math.max(0, start - elapsed);
+      if (wait > 0) {
+        await ctfdWaitSeconds(wait);
+        elapsed += wait;
+      }
+      const speechResult = await ctfdSpeakTextSegment(segment.text, opts);
+      if (speechResult.spoke) spokeAny = true;
+      const spokenDuration = Number(speechResult.elapsed);
+      if (Number.isFinite(spokenDuration) && spokenDuration > 0) elapsed += spokenDuration;
+      timeline = elapsed + CTFD_SPEECH_SEGMENT_BUFFER;
+      nextSpeechBaseline = Math.max(nextSpeechBaseline, timeline);
+    }
+  }
+  return { spoke: spokeAny, wantsAudio: plan.hasAudio };
 }
 function ctfdNormalizeSpeechPayload(payload){
   if (typeof payload === 'string') {
@@ -759,48 +1583,29 @@ function ctfdSpeakTextSegment(text, opts){
 }
 async function ctfdSpeakForEvent(key, payload, delaySeconds, opts){
   const { context, fallbackText } = ctfdNormalizeSpeechPayload(payload);
-  const plan = ctfdBuildSpeechPlan(key, context, fallbackText);
-  const segments = plan.segments || [];
-  const audioHandler = opts && typeof opts.onAudioRequest === 'function' ? opts.onAudioRequest : null;
-  const speechAllowed = plan.hasSpeech && ctfdSpeechSupported() && ctfdShouldSpeak(key);
-  const baseDelay = Math.max(0, Number(delaySeconds) || 0);
-  let elapsed = 0;
-  let timeline = baseDelay;
-  const baseSpeechStart = ctfdComputeSpeechDelay(baseDelay);
-  let nextSpeechBaseline = baseSpeechStart;
-  let spokeAny = false;
-  for (const segment of segments) {
-    if (segment.type === 'audio') {
-      if (!audioHandler) continue;
-      const wait = Math.max(0, timeline - elapsed);
-      if (wait > 0) {
-        await ctfdWaitSeconds(wait);
-        elapsed += wait;
-      }
-      try {
-        const result = await audioHandler(0);
-        const duration = Number(result && result.duration);
-        if (Number.isFinite(duration) && duration > 0) elapsed += duration;
-      } catch {}
-      timeline = elapsed + CTFD_AUDIO_SEGMENT_BUFFER;
-      nextSpeechBaseline = Math.max(nextSpeechBaseline, timeline);
-    } else if (segment.type === 'text') {
-      if (!speechAllowed) continue;
-      const start = Math.max(timeline, nextSpeechBaseline);
-      const wait = Math.max(0, start - elapsed);
-      if (wait > 0) {
-        await ctfdWaitSeconds(wait);
-        elapsed += wait;
-      }
-      const speechResult = await ctfdSpeakTextSegment(segment.text, opts);
-      if (speechResult.spoke) spokeAny = true;
-      const spokenDuration = Number(speechResult.elapsed);
-      if (Number.isFinite(spokenDuration) && spokenDuration > 0) elapsed += spokenDuration;
-      timeline = elapsed + CTFD_SPEECH_SEGMENT_BUFFER;
-      nextSpeechBaseline = Math.max(nextSpeechBaseline, timeline);
-    }
-  }
-  return { spoke: spokeAny, wantsAudio: plan.hasAudio };
+  const template = ctfdSpeechTemplateFor(key);
+
+  // Mirror Preview behavior:
+  // - When no clip is selected (no soundKey) OR audio is disabled, treat {{audio}} as a no-op.
+  // - If the template ends up audio-only, speak the fallback label instead of staying silent.
+  let hasSelectedClip = false;
+  try {
+    const entry = ctfdGetAudioEntry(key);
+    const soundKey = (entry && typeof entry.soundKey === 'string') ? entry.soundKey.trim() : '';
+    const sounds = ctfdListValidSounds(entry);
+    hasSelectedClip = !!(soundKey && sounds && sounds.length);
+  } catch {}
+  let audioEnabled = false;
+  try { audioEnabled = ctfdIsAudioEnabled(key); } catch {}
+  let skipAudioSegments = !audioEnabled || !hasSelectedClip;
+  try { if (window.shell && shell.isRemote && shell.isRemote()) skipAudioSegments = true; } catch {}
+
+  const forceSpeak = !!ctfdShouldSpeak(key);
+  return await ctfdSpeakFromTemplate(template, { context, fallbackText }, delaySeconds, {
+    ...(opts && typeof opts === 'object' ? opts : {}),
+    forceSpeak,
+    skipAudioSegments,
+  });
 }
 function ctfdCountdownReasonLabel(reason){
   if (!reason) return '';
@@ -3047,6 +3852,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireCtfdFilter();
   wireCtfdLogin();
   wireCtfdCols();
+  try { ctfdWireNotifyConfig(); } catch {}
+  try { ctfdWireNotifyTemplateVarsModal(); } catch {}
   // Projects selector UI (does not alter single-project flow yet)
   try { await ctfdSetupProjectsUi(); } catch {}
   ctfdRestoreSkippedIndicator();

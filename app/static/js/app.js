@@ -886,6 +886,252 @@ window.saveProjectAudio = saveProjectAudio;
 window.getProjectAudio = getProjectAudio;
 window.peekProjectAudio = peekProjectAudio;
 window.projectAudioIsLoaded = projectAudioIsLoaded;
+
+// Project audio store prefixes
+const AUDIO_MEDIA_PREFIX = 'media:';
+const AUDIO_EVENT_PREFIX = 'event:';
+
+function audioMakeMediaKey(){
+  let id = '';
+  try {
+    if (typeof crypto !== 'undefined' && crypto && typeof crypto.randomUUID === 'function') {
+      id = crypto.randomUUID();
+    }
+  } catch {}
+  if (!id) {
+    id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+  return `${AUDIO_MEDIA_PREFIX}${id}`;
+}
+
+function audioIsMediaKey(key){
+  return typeof key === 'string' && key.startsWith(AUDIO_MEDIA_PREFIX);
+}
+
+function audioNormalizeSingleSound(entry){
+  if (!entry || typeof entry !== 'object') return null;
+  const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
+  const sound = sounds.find(s => s && typeof s.dataUrl === 'string' && s.dataUrl.startsWith('data:')) || null;
+  if (!sound) return null;
+  return {
+    dataUrl: sound.dataUrl,
+    name: sound.name ? String(sound.name) : 'Audio',
+    size: Number(sound.size) || 0,
+    type: sound.type ? String(sound.type) : '',
+    updated: Number(sound.updated) || 0,
+  };
+}
+
+function audioListMediaItems(audioStore){
+  const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
+  const items = [];
+  Object.entries(store).forEach(([key, entry]) => {
+    if (!audioIsMediaKey(String(key))) return;
+    const sound = audioNormalizeSingleSound(entry);
+    if (!sound) return;
+    items.push({ key: String(key), ...sound });
+  });
+  items.sort((a, b) => (b.updated || 0) - (a.updated || 0) || String(a.name).localeCompare(String(b.name)));
+  return items;
+}
+
+function mediaManagerReadCurrentPid(){
+  try {
+    return (window.shell && shell.getCurrentProjectId) ? String(shell.getCurrentProjectId() || '').trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function mediaManagerRemoteBlocked(){
+  try { return !!(window.shell && shell.isRemote && shell.isRemote()); } catch { return false; }
+}
+
+function mediaManagerReadFileAsDataUrl(file){
+  return new Promise((resolve, reject) => {
+    try {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function mediaManagerUploadFile(file){
+  if (!file) return;
+  if (mediaManagerRemoteBlocked()) return;
+  if (file.size > SETTINGS_AUDIO_MAX_BYTES) {
+    alert('Audio file too large. Limit is 600 KB per file.');
+    return;
+  }
+  const pid = mediaManagerReadCurrentPid();
+  if (!pid) {
+    alert('Select a project first.');
+    return;
+  }
+  const dataUrl = await mediaManagerReadFileAsDataUrl(file);
+  if (!dataUrl || !dataUrl.startsWith('data:')) {
+    alert('Unsupported audio format.');
+    return;
+  }
+  const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+  const mediaKey = audioMakeMediaKey();
+  audioStore[mediaKey] = {
+    sounds: [{
+      name: file.name || 'Audio',
+      size: file.size || 0,
+      type: file.type || '',
+      dataUrl,
+      updated: Date.now()
+    }]
+  };
+  await saveProjectAudio(pid, audioStore);
+}
+
+async function mediaManagerDeleteItem(mediaKey){
+  if (mediaManagerRemoteBlocked()) return;
+  const pid = mediaManagerReadCurrentPid();
+  if (!pid) return;
+  const key = String(mediaKey || '');
+  if (!audioIsMediaKey(key)) return;
+  const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+  if (!Object.prototype.hasOwnProperty.call(audioStore, key)) return;
+  delete audioStore[key];
+  // Clear any per-event references to this media key
+  Object.entries(audioStore).forEach(([k, v]) => {
+    if (!k || typeof k !== 'string') return;
+    if (!k.startsWith(AUDIO_EVENT_PREFIX)) return;
+    if (!v || typeof v !== 'object') return;
+    if (v.soundKey === key) {
+      try { delete v.soundKey; } catch {}
+    }
+  });
+  await saveProjectAudio(pid, audioStore);
+}
+
+async function mediaManagerRefreshList(options){
+  const opts = options && typeof options === 'object' ? options : {};
+  const listEl = document.getElementById('settings-media-list');
+  const statusEl = document.getElementById('settings-media-status');
+  if (!listEl) return;
+
+  const pid = mediaManagerReadCurrentPid();
+  if (!pid) {
+    if (statusEl) statusEl.textContent = 'Select a project to manage media.';
+    listEl.innerHTML = '<li class="list-group-item small text-muted">No project selected.</li>';
+    return;
+  }
+  if (statusEl) statusEl.textContent = 'Loading…';
+  let audioStore = {};
+  try {
+    audioStore = await loadProjectAudio(pid, { force: !!opts.force, silent: true });
+  } catch {
+    audioStore = getProjectAudio(pid) || {};
+  }
+  const items = audioListMediaItems(audioStore);
+  if (!items.length) {
+    listEl.innerHTML = '<li class="list-group-item small text-muted">No uploaded audio yet.</li>';
+    if (statusEl) statusEl.textContent = '';
+    return;
+  }
+  listEl.innerHTML = items.map(item => {
+    const safeName = escHtml(item.name || 'Audio');
+    const sizeKb = item.size ? `${Math.round(item.size / 1024)} KB` : 'Size unknown';
+    const typeLabel = item.type ? escHtml(item.type) : 'Audio';
+    const meta = `${sizeKb} | ${typeLabel}`;
+    return `<li class="list-group-item d-flex align-items-center justify-content-between gap-2" data-media-key="${escHtml(item.key)}">
+  <div class="flex-grow-1">
+    <div>${safeName}</div>
+    <div class="small text-muted">${meta}</div>
+  </div>
+  <div class="btn-group btn-group-sm">
+    <button type="button" class="btn btn-outline-secondary" data-action="media-preview">Preview</button>
+    <button type="button" class="btn btn-outline-danger" data-action="media-delete">Delete</button>
+  </div>
+</li>`;
+  }).join('');
+  if (statusEl) statusEl.textContent = '';
+}
+
+function mediaManagerOpenCollapse(){
+  const el = document.getElementById('settings-media-collapse');
+  if (!el) return;
+  try {
+    if (window.bootstrap && bootstrap.Collapse) {
+      const inst = bootstrap.Collapse.getInstance(el) || new bootstrap.Collapse(el, { toggle: false });
+      inst.show();
+      return;
+    }
+  } catch {}
+  try { el.classList.add('show'); } catch {}
+}
+
+function wireMediaManagerControls(){
+  const upload = document.getElementById('settings-media-upload');
+  const refresh = document.getElementById('settings-media-refresh');
+  const list = document.getElementById('settings-media-list');
+  if (upload && !upload._toolhubBound) {
+    upload.addEventListener('change', async (ev) => {
+      const file = ev.target && ev.target.files && ev.target.files[0];
+      const hadFile = !!file;
+      let uploadedOk = false;
+      try {
+        if (file) {
+          await mediaManagerUploadFile(file);
+          uploadedOk = true;
+        }
+      } catch (err) {
+        try { showToast(`Media upload failed: ${err?.message || err}`, 'warning'); } catch {}
+      }
+      try { ev.target.value = ''; } catch {}
+      try { await mediaManagerRefreshList({ force: true }); } catch {}
+      if (hadFile && uploadedOk) {
+        try { mediaManagerOpenCollapse(); } catch {}
+      }
+    });
+    upload._toolhubBound = true;
+  }
+  if (refresh && !refresh._toolhubBound) {
+    refresh.addEventListener('click', () => mediaManagerRefreshList({ force: true }));
+    refresh._toolhubBound = true;
+  }
+  if (list && !list._toolhubBound) {
+    list.addEventListener('click', async (ev) => {
+      const row = ev.target && ev.target.closest ? ev.target.closest('[data-media-key]') : null;
+      const key = row ? row.getAttribute('data-media-key') : '';
+      const actionBtn = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+      const action = actionBtn ? actionBtn.getAttribute('data-action') : '';
+      if (!key || !action) return;
+      if (action === 'media-preview') {
+        if (mediaManagerRemoteBlocked()) return;
+        try {
+          const pid = mediaManagerReadCurrentPid();
+          if (!pid) return;
+          const audioStore = getProjectAudio(pid) || {};
+          const entry = audioStore[key];
+          const sound = audioNormalizeSingleSound(entry);
+          if (!sound || !sound.dataUrl) return;
+          const audio = new Audio(sound.dataUrl);
+          audio.play().catch(()=>{});
+        } catch {}
+        return;
+      }
+      if (action === 'media-delete') {
+        if (!confirm('Delete this uploaded audio file?')) return;
+        try {
+          await mediaManagerDeleteItem(key);
+        } catch (err) {
+          try { showToast(`Delete failed: ${err?.message || err}`, 'warning'); } catch {}
+        }
+        try { await mediaManagerRefreshList({ force: true }); } catch {}
+      }
+    });
+    list._toolhubBound = true;
+  }
+}
 function settingsAudioValidSounds(entry){
   const list = Array.isArray(entry && entry.sounds) ? entry.sounds : [];
   return list.filter(sound => {
@@ -1484,9 +1730,11 @@ function wireSettingsModal(){
   const modal = document.getElementById('settingsModal');
   if (!modal || modal._toolhubBound) return;
   modal._toolhubBound = true;
-  wireSettingsAudioControls();
+  // Legacy notifications/audio editor removed; Media Manager owns uploads.
   wireSettingsTtsControls();
+  wireMediaManagerControls();
   modal.addEventListener('show.bs.modal', settingsModalResetFromStorage);
+  modal.addEventListener('show.bs.modal', () => { try { mediaManagerRefreshList({ force: true }); } catch {} });
   modal.addEventListener('hidden.bs.modal', settingsModalResetFromStorage);
   settingsModalResetFromStorage();
 }
@@ -1533,72 +1781,6 @@ async function saveSettingsInternal(){
     delete settings.ttsRate;
     delete settings.ttsPitch;
   }
-  const mergedAudio = {};
-  Object.keys(SETTINGS_AUDIO_FIELDS).forEach((key)=>{
-    const entry = settingsAudioEnsureEntry(key);
-    const defEnabled = settingsAudioDefaultEnabled(key);
-    const defSpeak = settingsAudioDefaultSpeak(key);
-    const defTemplate = settingsAudioDefaultSpeakTemplate(key);
-    const enabled = entry.enabled === undefined ? defEnabled : !!entry.enabled;
-    const speak = entry.speak === undefined ? defSpeak : !!entry.speak;
-    const sounds = settingsAudioValidSounds(entry);
-    const templates = settingsAudioValidTemplates(entry);
-    const payload = {};
-    if (enabled !== defEnabled) payload.enabled = enabled;
-    if (speak !== defSpeak) payload.speak = speak;
-    if (sounds.length) {
-      payload.sounds = sounds.map(sound => ({
-        name: sound.name || '',
-        size: Number(sound.size) || 0,
-        type: sound.type || '',
-        dataUrl: sound.dataUrl,
-        updated: sound.updated || Date.now()
-      }));
-    }
-    const defTemplateTrimmed = typeof defTemplate === 'string' ? defTemplate.trim() : '';
-    const normalizedTemplates = templates.map(t => t.trim()).filter(Boolean);
-    const shouldStoreTemplates = normalizedTemplates.length > 0 && !(normalizedTemplates.length === 1 && normalizedTemplates[0] === defTemplateTrimmed);
-    if (shouldStoreTemplates) payload.speakTemplates = normalizedTemplates;
-    const cfg = SETTINGS_AUDIO_FIELDS[key];
-    if (cfg && Array.isArray(cfg.numericFields)) {
-      cfg.numericFields.forEach(field => {
-        if (!field || !field.key) return;
-        const value = entry[field.key];
-        const defaultValue = field.defaultValue !== undefined ? settingsAudioClampNumeric(field.defaultValue, field) : undefined;
-        if (Number.isFinite(value)) {
-          if (defaultValue === undefined || value !== defaultValue) payload[field.key] = value;
-        } else if (defaultValue !== undefined && payload[field.key] !== undefined) {
-          delete payload[field.key];
-        }
-      });
-    }
-    if (!Object.keys(payload).length) return;
-    mergedAudio[key] = payload;
-  });
-  const currentPid = (window.shell && shell.getCurrentProjectId) ? String(shell.getCurrentProjectId() || '').trim() : '';
-  const cacheId = projectAudioCacheKey(currentPid);
-  let storedProjectAudio = cloneSettingsAudio(mergedAudio);
-  let audioSaveFailed = false;
-  if (cacheId) {
-    if (!settings.projectAudio || typeof settings.projectAudio !== 'object') settings.projectAudio = {};
-    try {
-      const savedAudio = await saveProjectAudio(cacheId, mergedAudio);
-      storedProjectAudio = cloneSettingsAudio(savedAudio);
-      if (Object.keys(storedProjectAudio).length) settings.projectAudio[cacheId] = storedProjectAudio;
-      else delete settings.projectAudio[cacheId];
-    } catch (err) {
-      audioSaveFailed = true;
-      storedProjectAudio = cloneSettingsAudio(mergedAudio);
-      settings.projectAudio[cacheId] = storedProjectAudio;
-      PROJECT_AUDIO_CACHE[cacheId] = cloneSettingsAudio(storedProjectAudio);
-      PROJECT_AUDIO_LOADED.add(cacheId);
-      try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to save audio for project ${cacheId}: ${err?.message || err}`) : console.warn('Settings: failed to save project audio', cacheId, err); } catch {}
-    }
-    if (settings.projectAudio && !Object.keys(settings.projectAudio).length) delete settings.projectAudio;
-  }
-  const audioForStorage = cloneSettingsAudio(storedProjectAudio);
-  if (Object.keys(audioForStorage).length) settings.audio = audioForStorage;
-  else delete settings.audio;
   writeSettings(settings);
   // run mode already persisted above
   try { document.dispatchEvent(new CustomEvent('settings-changed', { detail: { settings } })); } catch {}
@@ -1621,13 +1803,7 @@ async function saveSettingsInternal(){
     }
     toastLevel = 'warning';
   }
-  if (audioSaveFailed && resetFailed) {
-    toastMessage = 'Settings saved locally, but the server update failed and the UI may be stale. Please reload.';
-    toastLevel = 'warning';
-  } else if (audioSaveFailed) {
-    toastMessage = 'Settings saved locally. Failed to update project audio on server.';
-    toastLevel = 'warning';
-  } else if (resetFailed) {
+  if (resetFailed) {
     toastMessage = 'Settings saved, but the UI may be out of date. Please reload.';
     toastLevel = 'warning';
   }
