@@ -40,3 +40,33 @@ class NotifyTemplateStartupMigrationTests(unittest.TestCase):
 
             # Flag file should exist to prevent repeated scans.
             self.assertTrue(os.path.exists(os.path.join(tmp, '.notify_templates_migrated_v1')))
+
+    def test_startup_migration_drops_unrecoverable_corrupted_templates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, 'projects.json')
+            with open(db_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'p1': {
+                        'id': 'p1',
+                        'name': 'P1',
+                        'audio': {
+                            'event:challenge_solved': {
+                                'enabled': True,
+                                'soundKey': 'media:none',
+                                'speak': True,
+                                # Looks like dict repr but is invalid Python -> should be dropped
+                                'speakTemplates': ["{'text': 'oops'"],
+                                # Valid template should remain
+                                'speakTemplate': 'ok',
+                            }
+                        }
+                    }
+                }, f, indent=2, sort_keys=True)
+
+            ProjectStore(tmp)
+
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            evt = (data.get('p1') or {}).get('audio', {}).get('event:challenge_solved') or {}
+            self.assertEqual(evt.get('speakTemplates'), ['ok'])

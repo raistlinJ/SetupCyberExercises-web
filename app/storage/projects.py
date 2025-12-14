@@ -349,7 +349,9 @@ class ProjectStore:
         # Recover accidental Python dict reprs persisted as strings.
         if isinstance(tpl, str):
             s = tpl.strip()
-            if s.startswith('{') and s.endswith('}') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s or "'tpl'" in s or '"tpl"' in s):
+            # If it looks like someone persisted a Python dict repr as a string,
+            # attempt to recover it; otherwise treat unrecoverable forms as corrupted.
+            if s.startswith('{') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s or "'tpl'" in s or '"tpl"' in s):
                 try:
                     parsed = ast.literal_eval(s)
                 except Exception:
@@ -506,7 +508,7 @@ class ProjectStore:
                             s = tpl_norm.strip()
                             # Some legacy data was accidentally persisted as the
                             # Python repr() of a dict; best-effort recover.
-                            if s.startswith('{') and s.endswith('}') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
+                            if s.startswith('{') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
                                 try:
                                     parsed = ast.literal_eval(s)
                                 except Exception:
@@ -540,7 +542,7 @@ class ProjectStore:
                     tpl_norm = raw_single_tpl
                     if isinstance(tpl_norm, str):
                         s = tpl_norm.strip()
-                        if s.startswith('{') and s.endswith('}') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
+                        if s.startswith('{') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
                             try:
                                 parsed = ast.literal_eval(s)
                             except Exception:
