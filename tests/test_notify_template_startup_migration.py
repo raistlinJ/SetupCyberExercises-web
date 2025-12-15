@@ -70,3 +70,34 @@ class NotifyTemplateStartupMigrationTests(unittest.TestCase):
 
             evt = (data.get('p1') or {}).get('audio', {}).get('event:challenge_solved') or {}
             self.assertEqual(evt.get('speakTemplates'), ['ok'])
+
+    def test_startup_migration_preserves_dict_templates_with_soundkey(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, 'projects.json')
+            with open(db_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'p1': {
+                        'id': 'p1',
+                        'name': 'P1',
+                        'audio': {
+                            'event:challenge_solved': {
+                                'enabled': True,
+                                'soundKey': 'media:none',
+                                'speak': True,
+                                'speakTemplates': [
+                                    {'text': 'hello {{audio}}', 'enabled': True, 'soundKey': 'media:abc'},
+                                ],
+                                'speakTemplate': 'legacy single',
+                            }
+                        }
+                    }
+                }, f, indent=2, sort_keys=True)
+
+            ProjectStore(tmp)
+
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            evt = (data.get('p1') or {}).get('audio', {}).get('event:challenge_solved') or {}
+            self.assertEqual(evt.get('speakTemplates'), [{'text': 'hello {{audio}}', 'soundKey': 'media:abc'}, 'legacy single'])
+            self.assertNotIn('speakTemplate', evt)

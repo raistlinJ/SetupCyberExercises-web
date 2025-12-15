@@ -1,3 +1,4 @@
+LICENSE
 README.md
 pyproject.toml
 an3s.egg-info/PKG-INFO
@@ -30,5 +31,17 @@ app/static/js/ctfd_manager.js
 app/static/js/instances.js
 app/static/js/queue_persistence.js
 app/static/js/shell.js
+app/static/js/stored_command_core.js
 app/static/js/vm_manager.js
 app/storage/projects.py
+app/storage/runtime.py
+app/storage/secrets.py
+app/storage/user_secrets.py
+tests/test_command_status.py
+tests/test_export_notify_audio_option.py
+tests/test_import_selection_api.py
+tests/test_job_status_api.py
+tests/test_notify_template_startup_migration.py
+tests/test_project_secrets_api.py
+tests/test_run_commands_api.py
+tests/test_runtime_mode_api.py

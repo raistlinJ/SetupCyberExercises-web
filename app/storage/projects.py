@@ -407,20 +407,39 @@ class ProjectStore:
                     if not isinstance(raw_entry, dict):
                         continue
 
-                    templates: List[str] = []
+                    templates: List[Any] = []
                     had_any = ('speakTemplates' in raw_entry) or ('speakTemplate' in raw_entry)
                     raw_templates = raw_entry.get('speakTemplates')
                     if isinstance(raw_templates, list):
                         for tpl in raw_templates:
-                            text = self._normalize_notify_template_value(tpl)
-                            if text:
-                                templates.append(text)
+                            # Preserve dict templates with per-template soundKey when present.
+                            if isinstance(tpl, dict):
+                                text = self._normalize_notify_template_value(tpl)
+                                if not text:
+                                    continue
+                                sound_key = tpl.get('soundKey')
+                                enabled = tpl.get('enabled')
+                                try:
+                                    sound_key_str = str(sound_key or '').strip() if sound_key is not None else ''
+                                except Exception:
+                                    sound_key_str = ''
+                                if sound_key_str:
+                                    item: Dict[str, Any] = {'text': text, 'soundKey': sound_key_str}
+                                    if isinstance(enabled, bool) and enabled is False:
+                                        item['enabled'] = False
+                                    templates.append(item)  # type: ignore[list-item]
+                                else:
+                                    templates.append(text)  # type: ignore[list-item]
+                            else:
+                                text = self._normalize_notify_template_value(tpl)
+                                if text:
+                                    templates.append(text)  # type: ignore[list-item]
 
                     raw_single = raw_entry.get('speakTemplate')
                     if raw_single is not None:
                         text = self._normalize_notify_template_value(raw_single)
                         if text:
-                            templates.append(text)
+                            templates.append(text)  # type: ignore[list-item]
 
                     # Rewrite whenever the entry had templates fields, even if the result is empty
                     # (so corrupted templates get removed from disk).
@@ -497,45 +516,68 @@ class ProjectStore:
                     if trimmed:
                         entry[scalar_key] = trimmed
             # Normalize speak templates
-            templates: List[str] = []
+            # Allow per-template dict format: {text: str, enabled?: bool, soundKey?: str}
+            templates: List[Any] = []
             raw_templates = raw_entry.get('speakTemplates')
             if isinstance(raw_templates, list):
                 for tpl in raw_templates:
-                    text = ''
-                    try:
-                        tpl_norm = tpl
-                        if isinstance(tpl_norm, str):
-                            s = tpl_norm.strip()
-                            # Some legacy data was accidentally persisted as the
-                            # Python repr() of a dict; best-effort recover.
-                            if s.startswith('{') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
-                                try:
-                                    parsed = ast.literal_eval(s)
-                                except Exception:
-                                    parsed = None
-                                if isinstance(parsed, dict):
-                                    tpl_norm = parsed
-                                else:
-                                    # Looks like a dict repr but can't be recovered; drop it.
-                                    text = ''
-                            else:
-                                text = s
-
-                        if not text and isinstance(tpl_norm, dict):
-                            raw = tpl_norm.get('text')
+                    # Preserve dict templates (for per-template audio selection).
+                    if isinstance(tpl, dict):
+                        try:
+                            raw = tpl.get('text')
                             if raw is None:
-                                raw = tpl_norm.get('tpl')
+                                raw = tpl.get('tpl')
                             if raw is None:
-                                raw = tpl_norm.get('template')
+                                raw = tpl.get('template')
                             text = str(raw or '').strip()
-                        elif not text and not isinstance(tpl_norm, str):
-                            # Ignore non-string/non-dict entries rather than
-                            # persisting Python repr() strings.
+                        except Exception:
                             text = ''
-                    except Exception:
-                        text = ''
-                    if text:
-                        templates.append(text)
+                        if not text:
+                            continue
+                        try:
+                            sound_key = str(tpl.get('soundKey') or '').strip() if tpl.get('soundKey') is not None else ''
+                        except Exception:
+                            sound_key = ''
+                        enabled = tpl.get('enabled')
+                        if sound_key:
+                            item: Dict[str, Any] = {'text': text, 'soundKey': sound_key}
+                            if isinstance(enabled, bool) and enabled is False:
+                                item['enabled'] = False
+                            templates.append(item)
+                        else:
+                            templates.append(text)
+                        continue
+
+                    # Strings remain strings (including legacy stringified dict reprs).
+                    if isinstance(tpl, str):
+                        s = tpl.strip()
+                        # Some legacy data was accidentally persisted as a Python dict repr;
+                        # recover only the text content and persist as a plain string.
+                        if s.startswith('{') and len(s) <= 4096 and ("'text'" in s or '"text"' in s or "'template'" in s or '"template"' in s):
+                            try:
+                                parsed = ast.literal_eval(s)
+                            except Exception:
+                                parsed = None
+                            if isinstance(parsed, dict):
+                                try:
+                                    raw = parsed.get('text')
+                                    if raw is None:
+                                        raw = parsed.get('tpl')
+                                    if raw is None:
+                                        raw = parsed.get('template')
+                                    text = str(raw or '').strip()
+                                except Exception:
+                                    text = ''
+                                if text:
+                                    templates.append(text)
+                            # If unrecoverable, drop it.
+                        else:
+                            if s:
+                                templates.append(s)
+                        continue
+
+                    # Ignore non-string/non-dict entries.
+                    continue
             raw_single_tpl = raw_entry.get('speakTemplate')
             if raw_single_tpl is not None:
                 try:

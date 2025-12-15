@@ -342,15 +342,34 @@ function ctfdSplitProjectAudioStore(audioStore){
 function ctfdNormalizeMediaSound(entry){
   if (!entry || typeof entry !== 'object') return null;
   const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
-  const sound = sounds.find(s => s && typeof s.dataUrl === 'string' && s.dataUrl.startsWith('data:')) || null;
-  if (!sound) return null;
-  return {
-    dataUrl: sound.dataUrl,
-    name: sound.name ? String(sound.name) : 'Audio',
-    size: Number(sound.size) || 0,
-    type: sound.type ? String(sound.type) : '',
-    updated: Number(sound.updated) || 0,
-  };
+
+  // Prefer a clip with an embedded dataUrl, but still support meta-only entries
+  // (sounds[] without dataUrl) so dropdowns/tooltips can show filenames.
+  const sound = sounds.find(s => s && typeof s === 'object') || null;
+  if (sound) {
+    const dataUrl = (typeof sound.dataUrl === 'string' && sound.dataUrl.startsWith('data:')) ? String(sound.dataUrl) : '';
+    return {
+      dataUrl,
+      name: sound.name ? String(sound.name) : (entry.name ? String(entry.name) : 'Audio'),
+      size: Number(sound.size) || 0,
+      type: sound.type ? String(sound.type) : (entry.type ? String(entry.type) : ''),
+      updated: Number(sound.updated) || 0,
+    };
+  }
+
+  // Backward-compat / in-memory entries: some callers may still provide a single-clip object.
+  const legacyUrl = (entry && typeof entry.dataUrl === 'string') ? String(entry.dataUrl) : '';
+  if (legacyUrl && legacyUrl.startsWith('data:')) {
+    return {
+      dataUrl: legacyUrl,
+      name: entry.name ? String(entry.name) : 'Audio',
+      size: Number(entry.size) || 0,
+      type: entry.type ? String(entry.type) : '',
+      updated: Number(entry.updated) || 0,
+    };
+  }
+
+  return null;
 }
 
 function ctfdListProjectMediaOptions(audioStore){
@@ -376,6 +395,45 @@ function ctfdNotifyAudioTokenTitle(audioStore, soundKey){
   } catch {
     return 'Audio clip';
   }
+}
+
+function ctfdNotifyMediaLabelForKey(audioStore, soundKey){
+  const key = String(soundKey || '').trim();
+  if (!key) return '';
+  try {
+    const entry = (audioStore && typeof audioStore === 'object') ? audioStore[key] : null;
+    const sound = ctfdNormalizeMediaSound(entry);
+    const name = sound && sound.name ? String(sound.name) : '';
+    return name || key;
+  } catch {
+    return key;
+  }
+}
+
+function ctfdSelectHasValue(select, value){
+  if (!select) return false;
+  const desired = String(value || '').trim();
+  if (!desired) return true;
+  try {
+    const opts = select.options || [];
+    for (let i = 0; i < opts.length; i++) {
+      if (String(opts[i].value || '') === desired) return true;
+    }
+  } catch {}
+  return false;
+}
+
+function ctfdSelectEnsureValue(select, value, label){
+  if (!select) return;
+  const desired = String(value || '').trim();
+  if (!desired) return;
+  if (ctfdSelectHasValue(select, desired)) return;
+  try {
+    const opt = document.createElement('option');
+    opt.value = desired;
+    opt.textContent = String(label || desired);
+    select.appendChild(opt);
+  } catch {}
 }
 
 function ctfdSetBootstrapTooltipTitle(el, title){
@@ -545,6 +603,8 @@ function ctfdNotifyTemplateVarDescription(name){
     reason: 'Reason code for countdown events (when available).',
     reason_clause: 'Convenience text like “ for scoreboard reveal”.',
     countdown_seconds: 'Countdown duration (seconds), when available.',
+    interval_seconds: 'Periodic interval (seconds), when available.',
+    interval_seconds_clause: 'Convenience text like “ 30 seconds”, when available.',
     interval_minutes: 'Periodic interval minutes, when available.',
     interval_minutes_clause: 'Convenience text like “ 30 minutes”, when available.'
   };
@@ -665,7 +725,7 @@ function ctfdNotifySampleNewTemplateFor(eventKey){
   return '{{audio}} Event update.';
 }
 
-function ctfdNotifyNormalizeTemplatesForUi(source){
+function ctfdNotifyNormalizeTemplateItemsForUi(source){
   const out = [];
   const entry = source && typeof source === 'object' ? source : {};
   if (Array.isArray(entry.speakTemplates)) {
@@ -673,35 +733,53 @@ function ctfdNotifyNormalizeTemplatesForUi(source){
       if (t === null || t === undefined) return;
       if (typeof t === 'string') {
         const str = String(t).trim();
-        if (str) out.push(str);
+        if (str) out.push({ text: str, soundKey: '' });
         return;
       }
       if (t && typeof t === 'object') {
-        const raw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : ''));
+        const raw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : (t.template !== undefined ? t.template : '')));
         const str = String(raw || '').trim();
-        if (str) out.push(str);
+        if (!str) return;
+        const soundKey = typeof t.soundKey === 'string' ? String(t.soundKey || '').trim() : '';
+        out.push({ text: str, soundKey });
         return;
       }
       const str = String(t).trim();
-      if (str) out.push(str);
+      if (str) out.push({ text: str, soundKey: '' });
     });
   }
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
     const legacyTpl = String(entry.speakTemplate).trim();
-    if (legacyTpl) out.push(legacyTpl);
+    if (legacyTpl) out.push({ text: legacyTpl, soundKey: '' });
   }
   return out;
 }
 
-function ctfdNotifyTemplateItemHtml(tplText, rowSoundKey, audioStore){
-  const text = tplText !== undefined ? String(tplText || '') : '';
+function ctfdNotifyClipOptionsHtml(mediaItems, rowSoundKey, audioStore){
+  const items = Array.isArray(mediaItems) ? mediaItems : [];
+  // Per-item selection is explicit (no inheritance). Empty means "no uploaded clip".
+  const clipOptions = items.map(item => `<option value="${escHtml(item.key)}">${escHtml(item.name || 'Audio')}</option>`).join('');
+  return `<option value="">No clip</option>${clipOptions}`;
+}
+
+function ctfdNotifyTemplateItemHtml(tplItem, rowSoundKey, audioStore, clipOptionsHtml){
+  const obj = (tplItem && typeof tplItem === 'object') ? tplItem : { text: tplItem };
+  const text = obj.text !== undefined ? String(obj.text || '') : '';
+  const itemSoundKey = typeof obj.soundKey === 'string' ? String(obj.soundKey || '').trim() : '';
   const hasAudioToken = /{{\s*audio\s*}}/i.test(text);
-  const tokenTitle = hasAudioToken ? ctfdNotifyAudioTokenTitle(audioStore, String(rowSoundKey || '')) : '';
+  const effectiveSoundKey = itemSoundKey;
+  const tokenTitle = hasAudioToken ? ctfdNotifyAudioTokenTitle(audioStore, effectiveSoundKey) : '';
+  const options = (typeof clipOptionsHtml === 'string' && clipOptionsHtml) ? clipOptionsHtml : '<option value="">Default</option>';
+  const audioSelectHtml = hasAudioToken
+    ? `<input type="hidden" data-role="notify-tts-soundkey" value="${escHtml(effectiveSoundKey)}" />
+       <select class="form-select" data-role="notify-tts-sound" data-initial-sound-key="${escHtml(effectiveSoundKey)}" style="max-width: 190px;" aria-label="Audio for this template">${options}</select>`
+    : '';
   const tokenHtml = hasAudioToken
-    ? `<span class="input-group-text"><code data-role="notify-audio-token" data-sound-source="row" data-bs-toggle="tooltip" data-bs-placement="top" title="${escHtml(tokenTitle)}">{{audio}}</code></span>`
+    ? `<span class="input-group-text"><code data-role="notify-audio-token" data-sound-source="item" data-bs-toggle="tooltip" data-bs-placement="top" title="${escHtml(tokenTitle)}">{{audio}}</code></span>`
     : '';
   return `<div class="input-group input-group-sm mb-1" data-role="notify-tts-item">
   <input type="text" class="form-control" data-role="notify-tts-text" value="${escHtml(text)}" />
+  ${audioSelectHtml}
   ${tokenHtml}
   <button class="btn btn-outline-secondary" type="button" data-role="notify-tts-play" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview TTS" aria-label="Preview TTS">
     <i class="bi bi-play-fill" aria-hidden="true"></i>
@@ -716,7 +794,9 @@ function ctfdNotifyTemplatesListHtml(templates, defaultTemplate, rowSoundKey, au
     const hint = defaultTemplate ? `Uses default: ${defaultTemplate}` : 'No templates.';
     return `<div class="small text-muted" data-role="notify-tts-empty">${escHtml(hint)}</div>`;
   }
-  return list.map(t => ctfdNotifyTemplateItemHtml(t, rowSoundKey, audioStore)).join('');
+  const mediaItems = ctfdListProjectMediaOptions(audioStore);
+  const clipOptionsHtml = ctfdNotifyClipOptionsHtml(mediaItems, rowSoundKey, audioStore);
+  return list.map(t => ctfdNotifyTemplateItemHtml(t, rowSoundKey, audioStore, clipOptionsHtml)).join('');
 }
 
 async function ctfdRenderNotifyConfig(options){
@@ -754,46 +834,32 @@ async function ctfdRenderNotifyConfig(options){
     }
   } catch {}
   let audioStore = ctfdGetProjectAudioStore(pid);
-  // One-time migration: convert object-style templates to strings so the saved
-  // notification events only show TTS text like before.
-  try {
-    const migKey = ctfdNotifyMigrationSessionKey(pid);
-    const already = sessionStorage.getItem(migKey) === '1';
-    if (!already && typeof saveProjectAudio === 'function') {
-      const mig = ctfdMigrateNotifyTemplatesToStringsInStore(audioStore);
-      try { sessionStorage.setItem(migKey, '1'); } catch {}
-      if (mig && mig.changed) {
-        CTFD_NOTIFY_MIGRATE_IN_PROGRESS = true;
-        try {
-          await saveProjectAudio(pid, mig.audioStore);
-          audioStore = ctfdGetProjectAudioStore(pid);
-        } catch {
-          // best effort; avoid repeated attempts this session
-        } finally {
-          CTFD_NOTIFY_MIGRATE_IN_PROGRESS = false;
-        }
-      }
-    }
-  } catch {
-    try { CTFD_NOTIFY_MIGRATE_IN_PROGRESS = false; } catch {}
-  }
   const { events } = ctfdSplitProjectAudioStore(audioStore);
   const mediaItems = ctfdListProjectMediaOptions(audioStore);
   const eventKeys = ctfdNotifyEventKeys();
-
-  const optionsHtml = ['<option value="">Built-in tone</option>']
-    .concat(mediaItems.map(item => `<option value="${escHtml(item.key)}">${escHtml(item.name || 'Audio')}</option>`))
-    .join('');
 
   rows.innerHTML = eventKeys.map(eventKey => {
     const raw = (events && typeof events[eventKey] === 'object') ? events[eventKey] : null;
     const legacy = (audioStore && typeof audioStore[eventKey] === 'object') ? audioStore[eventKey] : null;
     const source = raw || legacy || {};
     const enabled = source && source.enabled !== undefined ? !!source.enabled : ctfdDefaultAudioEnabled(eventKey);
-    const selected = source && typeof source.soundKey === 'string' ? String(source.soundKey) : '';
+    const selected = '';
     const speak = source && source.speak !== undefined ? !!source.speak : ctfdNotifyDefaultSpeakEnabledFor(eventKey);
+    const playOrderRaw = source && typeof source.playOrder === 'string' ? String(source.playOrder).trim().toLowerCase() : '';
+    const playOrderMode = playOrderRaw === 'sequential' ? 'sequential' : 'random';
+    const safeDomId = String(eventKey || '').replace(/[^a-zA-Z0-9_-]/g, '_') || 'event';
+
+    let intervalSecondsValue = '';
+    if (eventKey === 'ctfdPeriodic') {
+      const rawSec = Number(source && source.intervalSeconds);
+      const rawMin = Number(source && source.intervalMinutes);
+      const derived = (Number.isFinite(rawSec) && rawSec > 0)
+        ? rawSec
+        : ((Number.isFinite(rawMin) && rawMin > 0) ? rawMin * 60 : 30 * 60);
+      intervalSecondsValue = Number.isFinite(derived) ? String(Math.max(1, Math.round(derived))) : '';
+    }
     const defaultTemplate = ctfdNotifyDefaultSpeakTemplateFor(eventKey);
-    const templates = ctfdNotifyNormalizeTemplatesForUi(source);
+    const templates = ctfdNotifyNormalizeTemplateItemsForUi(source);
     const sampleTpl = ctfdNotifySampleNewTemplateFor(eventKey);
     const label = ctfdNotifyLabelFor(eventKey);
     const when = ctfdNotifyWhenDescriptionFor(eventKey);
@@ -810,17 +876,22 @@ async function ctfdRenderNotifyConfig(options){
     </div>
   </td>
   <td>
-    <div class="input-group input-group-sm mb-2">
-      <select class="form-select" data-role="notify-sound">${optionsHtml}</select>
-      <button type="button" class="btn btn-outline-secondary" data-role="notify-preview" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview audio" aria-label="Preview audio">
-        <i class="bi bi-play-fill" aria-hidden="true"></i>
-      </button>
-    </div>
+    ${eventKey === 'ctfdPeriodic' ? `<div class="input-group input-group-sm mb-2" style="max-width: 280px;">
+      <span class="input-group-text">Period (sec)</span>
+      <input type="number" class="form-control" min="1" step="1" data-role="notify-period-sec" value="${escHtml(intervalSecondsValue)}" />
+    </div>` : ''}
 
     <div class="d-flex align-items-center gap-2 mb-1">
       <div class="form-check m-0">
         <input class="form-check-input" type="checkbox" data-role="notify-speak" ${speak ? 'checked' : ''} />
         <label class="form-check-label small">Speak (TTS)</label>
+      </div>
+
+      <div class="btn-group btn-group-sm" role="group" aria-label="Play order">
+        <input type="radio" class="btn-check" name="notify-order-${escHtml(safeDomId)}" id="notify-order-${escHtml(safeDomId)}-seq" data-role="notify-order" value="sequential" ${playOrderMode === 'sequential' ? 'checked' : ''} />
+        <label class="btn btn-outline-secondary" for="notify-order-${escHtml(safeDomId)}-seq">Sequential</label>
+        <input type="radio" class="btn-check" name="notify-order-${escHtml(safeDomId)}" id="notify-order-${escHtml(safeDomId)}-rnd" data-role="notify-order" value="random" ${playOrderMode !== 'sequential' ? 'checked' : ''} />
+        <label class="btn btn-outline-secondary" for="notify-order-${escHtml(safeDomId)}-rnd">Random</label>
       </div>
     </div>
 
@@ -854,9 +925,33 @@ async function ctfdRenderNotifyConfig(options){
     const raw = (events && typeof events[eventKey] === 'object') ? events[eventKey] : null;
     const legacy = (audioStore && typeof audioStore[eventKey] === 'object') ? audioStore[eventKey] : null;
     const source = raw || legacy || {};
-    const selected = source && typeof source.soundKey === 'string' ? String(source.soundKey) : '';
-    const select = tr.querySelector('select[data-role="notify-sound"]');
-    if (select) select.value = selected;
+    // Initialize per-template audio selectors and tooltips.
+    const rowSoundKey = '';
+    tr.querySelectorAll('select[data-role="notify-tts-sound"]').forEach(sel => {
+      const init = sel.getAttribute('data-initial-sound-key');
+      const desired = init !== null ? String(init || '').trim() : '';
+      ctfdSelectEnsureValue(sel, desired, ctfdNotifyMediaLabelForKey(audioStore, desired));
+      if (desired) {
+        try { sel.value = desired; } catch {}
+      } else {
+        try { sel.value = ''; } catch {}
+      }
+      try {
+        const item = sel.closest('[data-role="notify-tts-item"]');
+        const hidden = item ? item.querySelector('input[data-role="notify-tts-soundkey"]') : null;
+        if (hidden) hidden.value = String(sel.value || '').trim();
+      } catch {}
+      try { sel.removeAttribute('data-initial-sound-key'); } catch {}
+    });
+    tr.querySelectorAll('code[data-role="notify-audio-token"][data-sound-source="item"]').forEach(token => {
+      try {
+        const item = token.closest('[data-role="notify-tts-item"]');
+        const hidden = item ? item.querySelector('input[data-role="notify-tts-soundkey"]') : null;
+        const effective = hidden ? String(hidden.value || '').trim() : '';
+        const title = ctfdNotifyAudioTokenTitle(audioStore, effective);
+        ctfdSetBootstrapTooltipTitle(token, title);
+      } catch {}
+    });
   });
 
   if (status) status.textContent = mediaItems.length ? '' : 'No uploaded audio yet. Upload files in Settings → Media Manager.';
@@ -874,9 +969,11 @@ async function ctfdSaveNotifyConfig(){
   let audioStore = {};
   try {
     if (typeof loadProjectAudio === 'function') {
-      // Prefer cached store to avoid pulling large base64 payloads during Save.
-      // If not cached yet, loadProjectAudio will fetch it once.
-      audioStore = await loadProjectAudio(pid, { force: false, silent: true });
+      // Reload the latest full store before saving.
+      // Other UI paths (e.g., Media Manager) can update the project audio via
+      // single-purpose endpoints and may not refresh our cached full store.
+      // Using a stale cache here would overwrite and effectively delete those updates.
+      audioStore = await loadProjectAudio(pid, { force: true, silent: true });
     } else {
       audioStore = ctfdGetProjectAudioStore(pid);
     }
@@ -888,18 +985,34 @@ async function ctfdSaveNotifyConfig(){
     const eventKey = tr.getAttribute('data-event-key') || '';
     if (!eventKey) return;
     const enabledEl = tr.querySelector('input[data-role="notify-enabled"]');
-    const selectEl = tr.querySelector('select[data-role="notify-sound"]');
     const speakEl = tr.querySelector('input[data-role="notify-speak"]');
+    const orderEl = tr.querySelector('input[data-role="notify-order"]:checked');
+    const periodEl = tr.querySelector('input[data-role="notify-period-sec"]');
     const enabled = !!enabledEl?.checked;
-    const soundKey = selectEl ? String(selectEl.value || '') : '';
     const speak = !!speakEl?.checked;
+    const playOrder = (orderEl && String(orderEl.value || '') === 'sequential') ? 'sequential' : 'random';
 
     const templates = [];
     tr.querySelectorAll('[data-role="notify-tts-item"]').forEach(item => {
       const textEl = item.querySelector('input[data-role="notify-tts-text"]');
       const text = textEl ? String(textEl.value || '').trim() : '';
       if (!text) return;
-      templates.push(text);
+
+      // Prefer the hidden persisted soundKey, falling back to the select.
+      // (The select can be re-initialized during renders; the hidden is the canonical per-item state.)
+      let tplSoundKey = '';
+      const hidden = item.querySelector('input[data-role="notify-tts-soundkey"]');
+      if (hidden) tplSoundKey = String(hidden.value || '').trim();
+      if (!tplSoundKey) {
+        const sel = item.querySelector('select[data-role="notify-tts-sound"]');
+        tplSoundKey = sel ? String(sel.value || '').trim() : '';
+      }
+
+      // Persist a per-item clip if one is selected.
+      // (We don't gate this on {{audio}} detection here because text edits and token parsing
+      // shouldn't cause us to drop a selected clip on Save.)
+      if (tplSoundKey) templates.push({ text, enabled: true, soundKey: tplSoundKey });
+      else templates.push(text);
     });
 
     const storeKey = `${CTFD_AUDIO_EVENT_PREFIX}${eventKey}`;
@@ -907,12 +1020,23 @@ async function ctfdSaveNotifyConfig(){
     const next = existing && typeof existing === 'object' ? { ...existing } : {};
     next.enabled = enabled;
     next.speak = speak;
-    if (soundKey) next.soundKey = soundKey;
-    else {
-      try { delete next.soundKey; } catch {}
+    next.playOrder = playOrder;
+    // Row-level clip selection is disabled; clips are configured per-template item only.
+    try { delete next.soundKey; } catch {}
+
+    // Periodic interval (seconds) — stored only for the periodic event.
+    if (eventKey === 'ctfdPeriodic') {
+      const raw = periodEl ? Number(periodEl.value) : NaN;
+      if (Number.isFinite(raw) && raw > 0) {
+        next.intervalSeconds = Math.max(1, Math.round(raw));
+      } else {
+        try { delete next.intervalSeconds; } catch {}
+      }
+    } else {
+      try { delete next.intervalSeconds; } catch {}
     }
 
-    // Store templates as strings (TTS text only).
+    // Store templates as strings (TTS only) OR dicts ({ text, soundKey }) when a per-item clip is selected.
     next.speakTemplates = templates;
     try { delete next.speakTemplate; } catch {}
 
@@ -984,8 +1108,7 @@ function ctfdWireNotifyConfig(){
         const input = tr.querySelector('input[data-role="notify-tts-new"]');
         const text = input ? String(input.value || '').trim() : '';
         if (!text) return;
-        const rowSelect = tr.querySelector('select[data-role="notify-sound"]');
-        const soundKey = rowSelect ? String(rowSelect.value || '') : '';
+        const rowSoundKey = '';
         const list = tr.querySelector('[data-role="notify-tts-list"]');
         if (!list) return;
         try {
@@ -997,7 +1120,37 @@ function ctfdWireNotifyConfig(){
           const pid = ctfdCurrentPid();
           audioStore = ctfdGetProjectAudioStore(pid);
         } catch { audioStore = {}; }
-        list.insertAdjacentHTML('beforeend', ctfdNotifyTemplateItemHtml(text, soundKey, audioStore));
+
+        const mediaItems = ctfdListProjectMediaOptions(audioStore);
+        const clipOptionsHtml = ctfdNotifyClipOptionsHtml(mediaItems, rowSoundKey, audioStore);
+        const defaultItemSoundKey = '';
+        list.insertAdjacentHTML('beforeend', ctfdNotifyTemplateItemHtml({ text, soundKey: defaultItemSoundKey }, rowSoundKey, audioStore, clipOptionsHtml));
+
+        // Initialize the just-added item's per-template selector (if present) and token tooltip.
+        try {
+          const items = list.querySelectorAll('[data-role="notify-tts-item"]');
+          const newItem = items && items.length ? items[items.length - 1] : null;
+          if (newItem) {
+            const sel = newItem.querySelector('select[data-role="notify-tts-sound"]');
+            if (sel) {
+              const init = sel.getAttribute('data-initial-sound-key');
+              try { sel.value = init !== null ? String(init || '').trim() : ''; } catch {}
+              try { sel.removeAttribute('data-initial-sound-key'); } catch {}
+
+              // Persist the per-item selection into the hidden field.
+              try {
+                const hidden = newItem.querySelector('input[data-role="notify-tts-soundkey"]');
+                if (hidden) hidden.value = String(sel.value || '').trim();
+              } catch {}
+            }
+            const token = newItem.querySelector('code[data-role="notify-audio-token"]');
+            if (token) {
+              const hidden = newItem.querySelector('input[data-role="notify-tts-soundkey"]');
+              const effective = hidden ? String(hidden.value || '').trim() : (sel ? String(sel.value || '').trim() : '');
+              ctfdSetBootstrapTooltipTitle(token, ctfdNotifyAudioTokenTitle(audioStore, effective));
+            }
+          }
+        } catch {}
         if (input) input.value = '';
 
         // Tooltips for newly inserted controls.
@@ -1065,9 +1218,9 @@ function ctfdWireNotifyConfig(){
           return;
         }
 
-        const rowSelect = tr.querySelector('select[data-role="notify-sound"]');
-        const rowSoundKey = rowSelect ? String(rowSelect.value || '') : '';
-        const soundKey = rowSoundKey;
+        const itemSelect = item.querySelector('select[data-role="notify-tts-sound"]');
+        const itemSoundKey = itemSelect ? String(itemSelect.value || '').trim() : '';
+        const soundKey = itemSoundKey;
         const pid = ctfdCurrentPid();
         const audioStore = ctfdGetProjectAudioStore(pid);
         const mediaEntry = (soundKey && audioStore && typeof audioStore[soundKey] === 'object') ? audioStore[soundKey] : null;
@@ -1102,63 +1255,28 @@ function ctfdWireNotifyConfig(){
         return;
       }
 
-      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-preview"]') : null;
-      if (!btn) return;
-      ev.preventDefault();
-      if (btn.dataset.playing === '1') {
-        ctfdStopActivePlayback();
-        return;
-      }
-      ctfdStopActivePlayback();
-      CTFD_ACTIVE_PLAY_BUTTON = btn;
-      const token = String(++CTFD_ACTIVE_PLAY_TOKEN);
-      btn.dataset.playToken = token;
-      ctfdSetPlayStopButtonState(btn, true);
-      const revert = () => {
-        try {
-          if (CTFD_ACTIVE_PLAY_BUTTON === btn) CTFD_ACTIVE_PLAY_BUTTON = null;
-          ctfdSetPlayStopButtonState(btn, false);
-        } catch {}
-      };
-      try {
-        if (window.shell && shell.isRemote && shell.isRemote()) {
-          revert();
-          return;
-        }
-      } catch {}
-      const tr = btn.closest('tr[data-event-key]');
-      if (!tr) {
-        revert();
-        return;
-      }
-      const select = tr.querySelector('select[data-role="notify-sound"]');
-      const soundKey = select ? String(select.value || '') : '';
-      if (!soundKey) {
-        revert();
-        return;
-      }
-      ctfdPlayProjectMediaSoundKey(soundKey, 0).catch(()=>{}).finally(() => {
-        try {
-          if (CTFD_ACTIVE_PLAY_BUTTON !== btn) return;
-          if (btn.dataset.playToken !== token) return;
-          ctfdSetPlayStopButtonState(btn, false);
-          CTFD_ACTIVE_PLAY_BUTTON = null;
-        } catch {}
-      });
     });
 
     rows.addEventListener('change', (ev) => {
-      const select = ev.target && ev.target.closest ? ev.target.closest('select[data-role="notify-sound"]') : null;
-      if (!select) return;
-      const tr = select.closest('tr[data-event-key]');
-      if (!tr) return;
-      const pid = ctfdCurrentPid();
-      const audioStore = ctfdGetProjectAudioStore(pid);
-      const soundKey = String(select.value || '').trim();
-      const title = ctfdNotifyAudioTokenTitle(audioStore, soundKey);
-      tr.querySelectorAll('code[data-role="notify-audio-token"][data-sound-source="row"]').forEach(token => {
-        ctfdSetBootstrapTooltipTitle(token, title);
-      });
+      const tplSelect = ev.target && ev.target.closest ? ev.target.closest('select[data-role="notify-tts-sound"]') : null;
+      if (tplSelect) {
+        const item = tplSelect.closest('[data-role="notify-tts-item"]');
+        const tr = tplSelect.closest('tr[data-event-key]');
+        if (!item || !tr) return;
+        const pid = ctfdCurrentPid();
+        const audioStore = ctfdGetProjectAudioStore(pid);
+
+        const selectedKey = String(tplSelect.value || '').trim();
+        try {
+          const hidden = item.querySelector('input[data-role="notify-tts-soundkey"]');
+          if (hidden) hidden.value = selectedKey;
+        } catch {}
+        const title = ctfdNotifyAudioTokenTitle(audioStore, selectedKey);
+        item.querySelectorAll('code[data-role="notify-audio-token"]').forEach(token => {
+          ctfdSetBootstrapTooltipTitle(token, title);
+        });
+        return;
+      }
     });
 
     rows.addEventListener('keydown', (ev) => {
@@ -1187,6 +1305,16 @@ function ctfdClearPeriodicTimer(){
   }
   CTFD_PERIODIC_ACTIVE_PID = '';
 }
+
+function ctfdPeriodicIntervalSeconds(entry){
+  const obj = entry && typeof entry === 'object' ? entry : {};
+  const sec = Number(obj.intervalSeconds);
+  if (Number.isFinite(sec) && sec > 0) return sec;
+  const min = Number(obj.intervalMinutes);
+  if (Number.isFinite(min) && min > 0) return min * 60;
+  return NaN;
+}
+
 function ctfdSchedulePeriodicTimer(pid){
   const targetPid = pid || ctfdCurrentPid() || '';
   if (!targetPid) {
@@ -1195,12 +1323,12 @@ function ctfdSchedulePeriodicTimer(pid){
   }
   const entry = ctfdGetAudioEntry('ctfdPeriodic');
   const enabled = entry && entry.enabled !== undefined ? !!entry.enabled : ctfdDefaultAudioEnabled('ctfdPeriodic');
-  const intervalMinutes = entry && Number(entry.intervalMinutes);
-  if (!enabled || !Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+  const intervalSeconds = ctfdPeriodicIntervalSeconds(entry);
+  if (!enabled || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
     ctfdClearPeriodicTimer();
     return;
   }
-  const delayMs = Math.max(60000, Math.round(intervalMinutes * 60000));
+  const delayMs = Math.max(1000, Math.round(intervalSeconds * 1000));
   ctfdClearPeriodicTimer();
   CTFD_PERIODIC_ACTIVE_PID = String(targetPid);
   CTFD_PERIODIC_TIMER = setTimeout(()=>{
@@ -1221,8 +1349,8 @@ function ctfdReschedulePeriodicForProject(pid){
   }
   const entry = ctfdGetAudioEntry('ctfdPeriodic');
   const enabled = entry && entry.enabled !== undefined ? !!entry.enabled : ctfdDefaultAudioEnabled('ctfdPeriodic');
-  const intervalMinutes = entry && Number(entry.intervalMinutes);
-  if (!enabled || !Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+  const intervalSeconds = ctfdPeriodicIntervalSeconds(entry);
+  if (!enabled || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
     ctfdClearPeriodicTimer();
     return;
   }
@@ -1400,6 +1528,14 @@ function ctfdRotationState(key){
   }
   return CTFD_AUDIO_ROTATION[key];
 }
+
+function ctfdPlayOrderMode(entry){
+  const raw = entry && typeof entry === 'object' && typeof entry.playOrder === 'string'
+    ? String(entry.playOrder || '').trim().toLowerCase()
+    : '';
+  return raw === 'sequential' ? 'sequential' : 'random';
+}
+
 function ctfdShuffleIndices(count){
   const arr = [];
   for (let i = 0; i < count; i++) arr.push(i);
@@ -1418,8 +1554,13 @@ function ctfdSelectNextSoundSlot(key, entry){
   const active = new Set(list.map(item => item.idx));
   state.soundsQueue = (state.soundsQueue || []).filter(idx => active.has(idx));
   if (!state.soundsQueue.length) {
-    const order = ctfdShuffleIndices(list.length);
-    state.soundsQueue = order.map(i => list[i].idx);
+	const mode = ctfdPlayOrderMode(entry);
+	if (mode === 'sequential') {
+	  state.soundsQueue = list.map(item => item.idx);
+	} else {
+	  const order = ctfdShuffleIndices(list.length);
+	  state.soundsQueue = order.map(i => list[i].idx);
+	}
   }
   const nextIdx = state.soundsQueue.shift();
   const selected = list.find(item => item.idx === nextIdx) || list[0];
@@ -1432,8 +1573,13 @@ function ctfdSelectNextTemplateText(key, entry, fallback){
   const active = new Set(list.map(item => item.idx));
   state.templatesQueue = (state.templatesQueue || []).filter(idx => active.has(idx));
   if (!state.templatesQueue.length) {
-    const order = ctfdShuffleIndices(list.length);
-    state.templatesQueue = order.map(i => list[i].idx);
+	const mode = ctfdPlayOrderMode(entry);
+	if (mode === 'sequential') {
+	  state.templatesQueue = list.map(item => item.idx);
+	} else {
+	  const order = ctfdShuffleIndices(list.length);
+	  state.templatesQueue = order.map(i => list[i].idx);
+	}
   }
   const nextIdx = state.templatesQueue.shift();
   const selected = list.find(item => item.idx === nextIdx) || list[0];
@@ -1447,8 +1593,13 @@ function ctfdSelectNextTemplateSelection(key, entry, fallback){
   const active = new Set(list.map(item => item.idx));
   state.templatesQueue = (state.templatesQueue || []).filter(idx => active.has(idx));
   if (!state.templatesQueue.length) {
-    const order = ctfdShuffleIndices(list.length);
-    state.templatesQueue = order.map(i => list[i].idx);
+	const mode = ctfdPlayOrderMode(entry);
+	if (mode === 'sequential') {
+	  state.templatesQueue = list.map(item => item.idx);
+	} else {
+	  const order = ctfdShuffleIndices(list.length);
+	  state.templatesQueue = order.map(i => list[i].idx);
+	}
   }
   const nextIdx = state.templatesQueue.shift();
   const selected = list.find(item => item.idx === nextIdx) || list[0];
@@ -2079,18 +2230,24 @@ function ctfdSpeechContextProject(projectId){
 }
 function ctfdSpeechContextPeriodic(projectId){
   const base = ctfdSpeechContextProject(projectId);
-  let intervalMinutes = 0;
+  let intervalSeconds = 0;
   try {
     const entry = ctfdGetAudioEntry('ctfdPeriodic');
-    if (entry && Number.isFinite(Number(entry.intervalMinutes))) {
-      intervalMinutes = Number(entry.intervalMinutes);
-    }
+    const sec = ctfdPeriodicIntervalSeconds(entry);
+    if (Number.isFinite(sec)) intervalSeconds = Number(sec);
   } catch {}
-  if (Number.isFinite(intervalMinutes) && intervalMinutes > 0) {
-    const rounded = Math.round(intervalMinutes);
-    base.interval_minutes = String(rounded);
-    base.interval_minutes_clause = ` ${rounded} minute${rounded === 1 ? '' : 's'}`;
+  if (Number.isFinite(intervalSeconds) && intervalSeconds > 0) {
+    const roundedSec = Math.max(1, Math.round(intervalSeconds));
+    base.interval_seconds = String(roundedSec);
+    base.interval_seconds_clause = ` ${roundedSec} second${roundedSec === 1 ? '' : 's'}`;
+
+    // Backward-compat for existing templates that reference minutes.
+    const roundedMin = Math.max(1, Math.round(roundedSec / 60));
+    base.interval_minutes = String(roundedMin);
+    base.interval_minutes_clause = ` ${roundedMin} minute${roundedMin === 1 ? '' : 's'}`;
   } else {
+    base.interval_seconds = '';
+    base.interval_seconds_clause = '';
     base.interval_minutes = '';
     base.interval_minutes_clause = '';
   }
@@ -2128,9 +2285,16 @@ function ctfdAnnouncePeriodic(projectId){
   const enabled = entry && entry.enabled !== undefined ? !!entry.enabled : ctfdDefaultAudioEnabled('ctfdPeriodic');
   if (!enabled) return;
   const context = ctfdSpeechContextPeriodic(pid);
-  const intervalVal = Number(context.interval_minutes);
+  const intervalSec = Number(context.interval_seconds);
   const projectClause = context.project_clause || '';
-  const intervalLabel = Number.isFinite(intervalVal) && intervalVal > 0 ? `${intervalVal} minute${intervalVal === 1 ? '' : 's'}` : 'the configured interval';
+  let intervalLabel = 'the configured interval';
+  if (Number.isFinite(intervalSec) && intervalSec > 0) {
+    if (intervalSec < 60) intervalLabel = `${intervalSec} second${intervalSec === 1 ? '' : 's'}`;
+    else {
+      const intervalMin = Math.max(1, Math.round(intervalSec / 60));
+      intervalLabel = `${intervalMin} minute${intervalMin === 1 ? '' : 's'}`;
+    }
+  }
   const fallback = `Periodic update${projectClause}. Next check in ${intervalLabel}.`;
   void ctfdSpeakForEvent('ctfdPeriodic', { context, fallbackText: fallback }, 0, {
     onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdPeriodic', CTFD_AUDIO_FALLBACKS.ctfdPeriodic || [], startDelay)
