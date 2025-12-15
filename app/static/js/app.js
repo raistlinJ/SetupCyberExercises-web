@@ -5563,6 +5563,47 @@ function _fmtByteProgress(loaded, total){
   } catch { return ''; }
 }
 
+function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onCancel, onTaskCreated } = {}){
+  return new Promise((resolve, reject) => {
+    try {
+      if (typeof window.queueRemoteAction !== 'function') {
+        Promise.resolve().then(fn).then(resolve).catch(reject);
+        return;
+      }
+      let entry = null;
+      const entryFn = async () => {
+        try {
+          const res = await Promise.resolve(fn());
+          try { resolve(res); } catch {}
+          return res;
+        } catch (e) {
+          try { reject(e); } catch {}
+          throw e;
+        }
+      };
+      entry = window.queueRemoteAction(label, entryFn, {
+        projectId,
+        dedupeKey,
+        allowDuplicate,
+        onCancel: () => {
+          try { onCancel && onCancel(); } catch {}
+          // If cancelled before the task starts, the function never runs;
+          // resolve to avoid leaving the UI waiting forever.
+          try {
+            if (!entry || !entry.startedAt) resolve({ status: 'cancelled' });
+          } catch {}
+        }
+      });
+      try { if (entry && onTaskCreated) onTaskCreated(entry); } catch {}
+      if (!entry) {
+        try { resolve(null); } catch {}
+      }
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 async function _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox }){
   const fd = new FormData();
   fd.append('file', file);
@@ -5611,112 +5652,165 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
     } catch {}
   }
 
-  let jobId = '';
-  let lastLogCount = 0;
+  const state = { jobId: '', taskId: null, cancelRequested: false };
+  try { window.__ACTIVE_IMPORT_STATE__ = state; } catch {}
+
+  const cancelBtn = document.getElementById('imp-cancel-btn');
+  const setCancelEnabled = (enabled) => {
+    try {
+      if (!cancelBtn) return;
+      cancelBtn.disabled = !enabled;
+      cancelBtn.classList.toggle('disabled', !enabled);
+    } catch {}
+  };
+  const markCancelling = () => {
+    try {
+      if (!cancelBtn) return;
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Cancelling…';
+      cancelBtn.classList.add('disabled');
+    } catch {}
+    try {
+      if (stat) stat.textContent = 'cancelling';
+    } catch {}
+  };
+
+  async function requestCancel(){
+    state.cancelRequested = true;
+    markCancelling();
+    if (!state.jobId) return;
+    try {
+      await http('POST', `/api/projects/import/cancel?id=${encodeURIComponent(state.jobId)}`);
+    } catch {}
+  }
+
+  // Wire Cancel button: cancel the active queue task (preferred), otherwise best-effort cancel by job id.
   try {
-    await runQueued(label, async () => {
-      const resp = await _xhrPostFormData('/api/projects/import/start', fd, {
+    if (cancelBtn) {
+      cancelBtn.onclick = async () => {
+        if (state.cancelRequested) return;
+        if (state.taskId && typeof window.cancelRemoteAction === 'function') {
+          try { window.cancelRemoteAction(state.taskId); } catch {}
+        } else {
+          await requestCancel();
+        }
+      };
+    }
+  } catch {}
+
+  let lastLogCount = 0;
+  // Enable Cancel immediately (even while uploading). If clicked before a job id exists,
+  // we mark cancel requested and cancel as soon as the backend returns a job id.
+  setCancelEnabled(true);
+  const finalStatus = await _queueLongAction(label, async () => {
+    // Start import job (upload archive)
+    let resp;
+    try {
+      resp = await _xhrPostFormData('/api/projects/import/start', fd, {
         onProgress: (pct, loaded, total) => {
-          try {
-            if (typeof window.updateActionProgress === 'function') {
-              // Reserve 0-30% for upload.
-              const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
-              const bytes = _fmtByteProgress(loaded, total);
-              const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
-              window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`);
-            }
-          } catch {}
+          const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
+          const bytes = _fmtByteProgress(loaded, total);
+          const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+          try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`); } catch {}
           try {
             if (bar) {
-              const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
               bar.style.width = `${mapped}%`;
               bar.textContent = `${mapped}%`;
               bar.setAttribute('aria-valuenow', String(mapped));
             }
-            const bytes = _fmtByteProgress(loaded, total);
-            const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
             if (stat) stat.textContent = line;
             if (log) log.textContent = line;
           } catch {}
         }
       });
-      jobId = resp && typeof resp === 'object' ? String(resp.job || '') : '';
-      if (!jobId) throw new Error('Import did not return a job id');
-    }, { projectId: 'import' });
-  } catch (e) {
-    // Friendly remote-mode message if backend blocks
-    if (e && (e.status === 403 || e.status === 401)) {
-      try {
-        const msg = (e.body && e.body.error) ? e.body.error : 'Import is not allowed.';
-        showToast(msg, e.status === 403 ? 'warning' : 'danger');
-      } catch {}
-    }
-    throw e;
-  }
-
-  const poll = async () => {
-    const s = await http('GET', `/api/projects/import/status?id=${encodeURIComponent(jobId)}`);
-    const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
-    const statusText = String(s.status || 'processing');
-    const mapped = (statusText === 'completed')
-      ? 100
-      : Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
-    let detail = '';
-    try {
-      if (Array.isArray(s.log) && s.log.length) {
-        detail = String(s.log[s.log.length - 1] || '');
-        // Stream only new lines to console dock as DEBUG
+    } catch (e) {
+      // Friendly remote-mode message if backend blocks
+      if (e && (e.status === 403 || e.status === 401)) {
         try {
-          const start = Math.max(0, lastLogCount);
-          for (let i = start; i < s.log.length; i++) {
-            if (window.shell && shell.logDebug) shell.logDebug(`[IMPORT] ${s.log[i]}`);
-            else console.debug('[IMPORT]', s.log[i]);
-          }
-          lastLogCount = s.log.length;
+          const msg = (e.body && e.body.error) ? e.body.error : 'Import is not allowed.';
+          showToast(msg, e.status === 403 ? 'warning' : 'danger');
         } catch {}
       }
-    } catch {}
-    try {
-      if (typeof window.updateActionProgress === 'function') {
-        window.updateActionProgress(mapped, statusText, detail || 'Importing…');
-      }
-    } catch {}
+      throw e;
+    }
 
-    // Update import progress modal with full log.
-    try {
-      if (bar) {
-        bar.style.width = `${Math.max(0, Math.min(100, mapped))}%`;
-        bar.textContent = `${Math.max(0, Math.min(100, mapped))}%`;
-        bar.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, mapped))));
-        if (statusText === 'completed') bar.classList.remove('progress-bar-animated');
-      }
-      if (stat) stat.textContent = statusText;
-      if (log) {
+    state.jobId = resp && typeof resp === 'object' ? String(resp.job || '') : '';
+    if (!state.jobId) throw new Error('Import did not return a job id');
+    if (state.cancelRequested) {
+      await requestCancel();
+    }
+
+    // Poll until done
+    while (true) {
+      const s = await http('GET', `/api/projects/import/status?id=${encodeURIComponent(state.jobId)}`);
+      const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
+      const statusText = String(s.status || 'processing');
+      const mapped = (statusText === 'completed')
+        ? 100
+        : Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
+      let detail = '';
+      try {
         if (Array.isArray(s.log) && s.log.length) {
-          log.textContent = s.log.join('\n');
+          detail = String(s.log[s.log.length - 1] || '');
           try {
-            const box = log.parentElement;
-            if (box) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+            const start = Math.max(0, lastLogCount);
+            for (let i = start; i < s.log.length; i++) {
+              if (window.shell && shell.logDebug) shell.logDebug(`[IMPORT] ${s.log[i]}`);
+              else console.debug('[IMPORT]', s.log[i]);
+            }
+            lastLogCount = s.log.length;
           } catch {}
-        } else {
-          log.textContent = detail || '';
         }
+      } catch {}
+      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, statusText, detail || 'Importing…'); } catch {}
+
+      try {
+        if (bar) {
+          bar.style.width = `${Math.max(0, Math.min(100, mapped))}%`;
+          bar.textContent = `${Math.max(0, Math.min(100, mapped))}%`;
+          bar.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, mapped))));
+          if (statusText === 'completed' || statusText === 'cancelled' || statusText === 'error') {
+            bar.classList.remove('progress-bar-animated');
+          }
+        }
+        if (stat) stat.textContent = statusText;
+        if (log) {
+          if (Array.isArray(s.log) && s.log.length) {
+            log.textContent = s.log.join('\n');
+            try {
+              const box = log.parentElement;
+              if (box) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+            } catch {}
+          } else {
+            log.textContent = detail || '';
+          }
+        }
+      } catch {}
+
+      if (statusText === 'completed') return s;
+      if (statusText === 'cancelled') return s;
+      if (statusText === 'error') {
+        const msg = (s?.errors && s.errors[0]) ? String(s.errors[0]) : 'Import failed';
+        throw new Error(msg);
       }
-    } catch {}
-
-    if (statusText === 'completed') return { done: true, ok: true, status: s };
-    if (statusText === 'error' || statusText === 'cancelled') return { done: true, ok: false, status: s };
-    return { done: false, ok: false, status: s };
-  };
-
-  let finalStatus = null;
-  while (true) {
-    const res = await poll();
-    if (res.done) { finalStatus = res.status; if (!res.ok) throw new Error((res.status?.errors && res.status.errors[0]) || 'Import failed'); break; }
-    await new Promise(r => setTimeout(r, 1500));
-  }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }, {
+    projectId: 'import',
+    allowDuplicate: true,
+    onTaskCreated: (task) => { state.taskId = task?.id; },
+    onCancel: () => { requestCancel(); },
+  });
 
   try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+  try { setCancelEnabled(false); } catch {}
+  try { if (cancelBtn) cancelBtn.textContent = 'Cancel Import'; } catch {}
+  try {
+    if (finalStatus && typeof finalStatus === 'object' && String(finalStatus.status || '') === 'cancelled') {
+      if (stat) stat.textContent = 'cancelled';
+      if (log && (!Array.isArray(finalStatus.log) || !finalStatus.log.length)) log.textContent = 'Import cancelled.';
+    }
+  } catch {}
   return finalStatus;
 }
 
@@ -5753,6 +5847,10 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms, incl
     const prox = { baseUrl, apiPort, sshPort, username, password, verifySSL };
     _writeImportProxCreds({ baseUrl, apiPort, sshPort, username, password, verifySSL });
     const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox });
+    if (st && typeof st === 'object' && String(st.status || '') === 'cancelled') {
+      try { showToast('Import cancelled.', 'warning'); } catch {}
+      return false;
+    }
     // Handle success UX
     const importedId = (Array.isArray(st?.imported) && st.imported[0]?.id) || (st?.imported?.id) || '';
     try {
@@ -6109,6 +6207,11 @@ async function exportProxLoginSave(){
       } catch {}
       window.__IMPORT_NEXT__ = null;
       const prox = { baseUrl: url, apiPort, sshPort, username, password, verifySSL };
+
+      // Do not keep the modal's Save button disabled for the entire import.
+      // Imports can take a long time; users may close/re-open the dialog.
+      try { setBusy(false); } catch {}
+
       const st = await _runAsyncImportWithProx({
         file,
         includeCreds: !!importNext.includeCreds,
@@ -6116,6 +6219,10 @@ async function exportProxLoginSave(){
         importAsTemplates: !!importNext.importAsTemplates,
         prox,
       });
+      if (st && typeof st === 'object' && String(st.status || '') === 'cancelled') {
+        try { showToast('Import cancelled.', 'warning'); } catch {}
+        return;
+      }
       // Post-success refresh
       const importedId = (Array.isArray(st?.imported) && st.imported[0]?.id) || '';
       try {
@@ -6141,6 +6248,15 @@ async function exportProxLoginSave(){
 
 // If the Proxmox login modal is dismissed, clear any pending action.
 try {
+  document.addEventListener('shown.bs.modal', (ev) => {
+    try {
+      if (!ev || !ev.target || ev.target.id !== 'proxLoginModal') return;
+      const btn = document.getElementById('btn-prox-save');
+      if (btn) btn.disabled = false;
+      const feedback = document.getElementById('prox-login-feedback');
+      if (feedback) { feedback.textContent = ''; feedback.className = 'me-auto small'; }
+    } catch {}
+  });
   document.addEventListener('hidden.bs.modal', (ev) => {
     try {
       if (!ev || !ev.target || ev.target.id !== 'proxLoginModal') return;

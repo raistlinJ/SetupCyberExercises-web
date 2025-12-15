@@ -7193,6 +7193,7 @@ def import_project():
         uploads_dir = None  # fallback to system temp
     tmp_fd = None
     tmp_path = None
+    work_dir = None
     try:
         if uploads_dir:
             tmp_fd, tmp_path = tempfile.mkstemp(prefix="import_", suffix=".zip", dir=uploads_dir)
@@ -7203,10 +7204,26 @@ def import_project():
             try: os.close(tmp_fd)
             except Exception: pass
         file.save(tmp_path)
+
+        # Stage extracted artifacts into a per-import work directory so we can
+        # commit atomically (important when the client cancels/closes mid-import).
+        try:
+            if uploads_dir:
+                work_dir = tempfile.mkdtemp(prefix="import_work_", dir=uploads_dir)
+            else:
+                work_dir = tempfile.mkdtemp(prefix="import_work_")
+        except Exception:
+            work_dir = None
+
         with zipfile.ZipFile(tmp_path) as zf:
             # Load manifest
             with zf.open('project.json') as mf:
                 manifest = json.load(mf)
+
+            # Atomic commit bookkeeping
+            projects_to_commit: List[Project] = []
+            projects_by_id: Dict[str, Project] = {}
+            staged_materials: List[Tuple[str, str]] = []
 
             results = []
             if 'projects' in manifest:  # multi-project import
@@ -7278,7 +7295,9 @@ def import_project():
                             proj.audio = ProjectStore._sanitize_audio_map(audio_map)
                     except Exception:
                         proj.audio = getattr(proj, 'audio', {}) or {}
-                    s.upsert(proj)
+                    # Defer persistence until the end (atomic import)
+                    projects_to_commit.append(proj)
+                    projects_by_id[new_id] = proj
                     id_map[pdata2.get('id','')] = new_id
                     results.append(proj.__dict__)
 
@@ -7295,13 +7314,35 @@ def import_project():
                         if not target:
                             continue
                         new_name = f"{target}_{uuid.uuid4().hex}_{safe}"
-                        with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
+                        tmp_out = os.path.join(work_dir, new_name) if work_dir else os.path.join(mats_dir, new_name)
+                        with zf.open(zname) as src, open(tmp_out, 'wb') as dst:
                             shutil.copyfileobj(src, dst, length=1024 * 1024)
-                        # append to project
-                        proj = s.get(target)
+                        if work_dir:
+                            staged_materials.append((tmp_out, os.path.join(mats_dir, new_name)))
+                        # append to in-memory project
+                        proj = projects_by_id.get(target)
                         if proj:
                             proj.materials.append(new_name)
-                            s.upsert(proj)
+
+                # Commit: materials first (to avoid projects referencing missing files), then projects.
+                moved: List[str] = []
+                try:
+                    if work_dir:
+                        for src_path, dst_path in staged_materials:
+                            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                            shutil.move(src_path, dst_path)
+                            moved.append(dst_path)
+                    for proj in projects_to_commit:
+                        s.upsert(proj)
+                except Exception:
+                    # Best-effort rollback of any committed materials
+                    for p in moved:
+                        try:
+                            if os.path.exists(p):
+                                os.remove(p)
+                        except Exception:
+                            pass
+                    raise
 
                 if results and errors:
                     return jsonify({"imported": results, "errors": errors}), 201
@@ -7372,12 +7413,31 @@ def import_project():
                     base = os.path.basename(zname)
                     safe = secure_filename(base) or base
                     new_name = f"{new_id}_{uuid.uuid4().hex}_{safe}"
-                    with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
+                    tmp_out = os.path.join(work_dir, new_name) if work_dir else os.path.join(mats_dir, new_name)
+                    with zf.open(zname) as src, open(tmp_out, 'wb') as dst:
                         shutil.copyfileobj(src, dst, length=1024 * 1024)
+                    if work_dir:
+                        staged_materials.append((tmp_out, os.path.join(mats_dir, new_name)))
                     imported.append(new_name)
                 project.materials = imported
 
-                s.upsert(project)
+                # Commit: move materials then upsert project.
+                moved: List[str] = []
+                try:
+                    if work_dir:
+                        for src_path, dst_path in staged_materials:
+                            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                            shutil.move(src_path, dst_path)
+                            moved.append(dst_path)
+                    s.upsert(project)
+                except Exception:
+                    for p in moved:
+                        try:
+                            if os.path.exists(p):
+                                os.remove(p)
+                        except Exception:
+                            pass
+                    raise
                 return jsonify(project.__dict__), 201
     except KeyError:
         return jsonify({"error": "Invalid archive: missing project.json"}), 400
@@ -7389,6 +7449,11 @@ def import_project():
         try:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
+        except Exception:
+            pass
+        try:
+            if work_dir and os.path.isdir(work_dir):
+                shutil.rmtree(work_dir, ignore_errors=True)
         except Exception:
             pass
 
@@ -7411,6 +7476,7 @@ def _import_job_record(job_id: str):
     # best-effort cleanup bookkeeping
     'remote_base': '',
     'local_tmp': '',
+    'local_zip': '',
     'ssh_host': '',
     'ssh_port': 22,
     'ssh_user': '',
@@ -7486,13 +7552,19 @@ def import_project_start():
 
     # Create job record and spawn worker
     job_id = uuid.uuid4().hex
-    _import_job_record(job_id)
+    rec = _import_job_record(job_id)
+    try:
+        rec['local_zip'] = tmp_path
+        _ACTIVE_JOBS[_import_job_key(job_id)] = rec
+    except Exception:
+        pass
     app_obj = current_app._get_current_object()
 
     def worker(job: str, path: str, include_creds: bool, include_vms: bool, include_notify_audio: bool, import_as_templates: bool):
         # Ensure app context in thread
         with app_obj.app_context():
             key = _import_job_key(job)
+            local_work_dir = ''
             try:
                 if _ACTIVE_JOBS.get(key, {}).get('cancel'):
                     _ACTIVE_JOBS[key]['status'] = 'cancelled'
@@ -7500,6 +7572,24 @@ def import_project_start():
                 _ACTIVE_JOBS[key]['status'] = 'processing'
                 _ACTIVE_JOBS[key]['progress'] = 0
                 _emit_import(job, f"[FILE] {os.path.basename(path)}")
+
+                # Stage all imported artifacts into a per-job work directory.
+                # This ensures that cancelled imports do not partially persist projects
+                # or leave behind orphaned materials.
+                try:
+                    import tempfile
+                    uploads_dir2 = os.path.join(app_obj.config["DATA_DIR"], "uploads")
+                    os.makedirs(uploads_dir2, exist_ok=True)
+                    local_work_dir = tempfile.mkdtemp(prefix=f"import_work_{job}_", dir=uploads_dir2)
+                    _ACTIVE_JOBS[key]['local_tmp'] = local_work_dir
+                except Exception:
+                    import tempfile
+                    local_work_dir = tempfile.mkdtemp(prefix=f"import_work_{job}_")
+                    try:
+                        _ACTIVE_JOBS[key]['local_tmp'] = local_work_dir
+                    except Exception:
+                        pass
+
                 # Open ZIP and inspect manifest
                 with zipfile.ZipFile(path) as zf:
                     try:
@@ -7512,6 +7602,12 @@ def import_project_start():
                     s = _store()
                     mats_dir = os.path.join(app_obj.config["DATA_DIR"], "materials")
                     os.makedirs(mats_dir, exist_ok=True)
+
+                    # Commit bookkeeping (atomic persistence):
+                    # - projects_to_commit holds Project objects created during import
+                    # - staged_materials holds (tmp_path, final_path) to move on success
+                    projects_to_commit: List[Project] = []
+                    staged_materials: List[Tuple[str, str]] = []
 
                     # Determine total steps for progress
                     def list_materials():
@@ -7617,11 +7713,16 @@ def import_project_start():
                                     proj.proxmox_verify_ssl = bool(prox.get('verifySSL'))
                             except Exception:
                                 pass
-                            s.upsert(proj)
                             id_map[pdata2.get('id','')] = new_id
                             results.append(proj.__dict__)
-                            _emit_import(job, f"[CREATE] project: {proj.name} ({new_id})")
+                            _emit_import(job, f"[STAGE] project: {proj.name} ({new_id})")
                             done_steps += 1; _tick('processing')
+
+                            # Defer persistence until job completion.
+                            try:
+                                projects_to_commit.append(proj)
+                            except Exception:
+                                pass
 
                         # Materials grouped by original id path
                         for zname in mat_list:
@@ -7637,12 +7738,17 @@ def import_project_start():
                                 if not target:
                                     continue
                                 new_name = f"{target}_{uuid.uuid4().hex}_{safe}"
-                                with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
+                                tmp_out = os.path.join(local_work_dir, new_name)
+                                with zf.open(zname) as src, open(tmp_out, 'wb') as dst:
                                     shutil.copyfileobj(src, dst, length=1024 * 1024)
-                                proj = s.get(target)
-                                if proj:
-                                    proj.materials.append(new_name)
-                                    s.upsert(proj)
+                                staged_materials.append((tmp_out, os.path.join(mats_dir, new_name)))
+                                # Attach material name to the in-memory project for later persistence.
+                                try:
+                                    proj = next((p for p in projects_to_commit if getattr(p, 'id', None) == target), None)
+                                    if proj:
+                                        proj.materials.append(new_name)
+                                except Exception:
+                                    pass
                                 _emit_import(job, f"[WRITE] materials/{orig_id}/{base} -> {new_name}")
                             done_steps += 1; _tick('materials')
 
@@ -7724,15 +7830,19 @@ def import_project_start():
                             base = os.path.basename(zname)
                             safe = secure_filename(base) or base
                             new_name = f"{new_id}_{uuid.uuid4().hex}_{safe}"
-                            with zf.open(zname) as src, open(os.path.join(mats_dir, new_name), 'wb') as dst:
+                            tmp_out = os.path.join(local_work_dir, new_name)
+                            with zf.open(zname) as src, open(tmp_out, 'wb') as dst:
                                 shutil.copyfileobj(src, dst, length=1024 * 1024)
+                            staged_materials.append((tmp_out, os.path.join(mats_dir, new_name)))
                             imported.append(new_name)
                             _emit_import(job, f"[WRITE] {zname} -> {new_name}")
                             done_steps += 1; _tick('materials')
                         project.materials = imported
-                        s.upsert(project)
+
+                        # Defer persistence until job completion.
+                        projects_to_commit.append(project)
                         results.append(project.__dict__)
-                        _emit_import(job, f"[CREATE] project: {project.name} ({new_id})")
+                        _emit_import(job, f"[STAGE] project: {project.name} ({new_id})")
                         done_steps += 1; _tick('processing')
 
                         # Optional VM restore: look for backups/* in archive and restore to Proxmox when requested
@@ -7970,7 +8080,7 @@ def import_project_start():
                                                             rec['vmid'] = int(rid)
                                                     vlist.append(rec)
                                                 project.vms = vlist
-                                                s.upsert(project)
+                                                # Defer persistence until commit (after cancellation check).
                                             except Exception:
                                                 pass
                                     finally:
@@ -7981,12 +8091,51 @@ def import_project_start():
                             except Exception as e:
                                 _emit_import(job, f"[WARN] VM restore step failed: {e}")
 
-                    _ACTIVE_JOBS[key]['imported'] = results
                     _ACTIVE_JOBS[key]['errors'] = errors
                     if _ACTIVE_JOBS.get(key, {}).get('cancel'):
+                        _ACTIVE_JOBS[key]['imported'] = []
                         _ACTIVE_JOBS[key]['status'] = 'cancelled'
                         _emit_import(job, "[CANCELLED] import cancelled")
                     else:
+                        # Commit staged materials then persist projects.
+                        try:
+                            # If cancelled just before committing, do not persist anything.
+                            if _ACTIVE_JOBS.get(key, {}).get('cancel'):
+                                _ACTIVE_JOBS[key]['imported'] = []
+                                _ACTIVE_JOBS[key]['status'] = 'cancelled'
+                                _emit_import(job, "[CANCELLED] import cancelled")
+                                return
+                            _ACTIVE_JOBS[key]['status'] = 'finalizing'
+                        except Exception:
+                            pass
+                        try:
+                            for tmp_src, final_dst in staged_materials:
+                                try:
+                                    os.makedirs(os.path.dirname(final_dst), exist_ok=True)
+                                except Exception:
+                                    pass
+                                try:
+                                    shutil.move(tmp_src, final_dst)
+                                except Exception:
+                                    # Fall back to copy+remove
+                                    try:
+                                        shutil.copyfile(tmp_src, final_dst)
+                                        try:
+                                            os.remove(tmp_src)
+                                        except Exception:
+                                            pass
+                                    except Exception:
+                                        raise
+                        except Exception as e:
+                            raise RuntimeError(f"Failed to commit materials: {e}")
+
+                        for proj in projects_to_commit:
+                            try:
+                                s.upsert(proj)
+                            except Exception as e:
+                                raise RuntimeError(f"Failed to persist project {getattr(proj, 'id', '')}: {e}")
+
+                        _ACTIVE_JOBS[key]['imported'] = results
                         _ACTIVE_JOBS[key]['progress'] = 100
                         _ACTIVE_JOBS[key]['status'] = 'completed'
                         _emit_import(job, "[OK] import completed")
@@ -8002,6 +8151,13 @@ def import_project_start():
                 try:
                     if path and os.path.exists(path):
                         os.remove(path)
+                except Exception:
+                    pass
+                # Cleanup staged work dir (best-effort)
+                try:
+                    if local_work_dir and os.path.isdir(local_work_dir):
+                        import shutil
+                        shutil.rmtree(local_work_dir, ignore_errors=True)
                 except Exception:
                     pass
                 # If job was cancelled, attempt best-effort remote cleanup here too
@@ -8070,6 +8226,17 @@ def import_project_cancel():
     rec = _ACTIVE_JOBS.get(key)
     if not rec or rec.get('action') != 'import':
         return jsonify({"error": "No such job"}), 404
+
+    # If a job is already finalizing or finished, treat cancel as a no-op.
+    # (The worker commits atomically at the end; cancelling during finalization
+    # risks leaving partial on-disk state.)
+    try:
+        st = str(rec.get('status') or '').strip().lower()
+    except Exception:
+        st = ''
+    if st in {'finalizing', 'completed', 'error', 'cancelled'}:
+        return ('', 204)
+
     rec['cancel'] = True
     _ACTIVE_JOBS[key] = rec
     # Best-effort immediate cleanup of any tracked remote temp dir

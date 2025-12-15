@@ -71,6 +71,52 @@ class ImportSelectionApiTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"Import job did not finish within {timeout_sec}s (last={last})")
 
+    def _cancel_job(self, job_id: str):
+        r = self.client.post(f'/api/projects/import/cancel?id={job_id}')
+        self.assertIn(r.status_code, (200, 204))
+
+    def test_import_cancelled_does_not_persist_or_leave_artifacts(self):
+        # Use a project with many materials to make the worker spend time staging,
+        # giving us a reliable window to cancel.
+        buf = io.BytesIO()
+        project = {
+            'id': 'orig-cancel-1',
+            'name': 'ImportCancelledShouldNotPersist',
+            'credentials': [{'username': 'user1', 'password': '12345678'}],
+            'vms': [{'name': 'vmA', 'vmid': 100, 'internal_network_adaptors': ['LAN']}],
+        }
+        with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            manifest = { 'schemaVersion': 1, 'project': project }
+            zf.writestr('project.json', json.dumps(manifest))
+            for i in range(200):
+                zf.writestr(f'materials/file_{i}.txt', ('x' * 1024))
+        buf.seek(0)
+
+        job = self._start_import_job(buf, include_creds=True, include_vms=True, include_notify_audio=True)
+        # Cancel immediately; worker should stop and clean up staging.
+        self._cancel_job(job)
+        status = self._wait_job_completed(job, timeout_sec=8.0)
+        self.assertEqual(status.get('status'), 'cancelled')
+
+        # Project should not appear in list.
+        resp = self.client.get('/api/projects')
+        self.assertEqual(resp.status_code, 200)
+        projects = (resp.get_json() or {}).get('projects') or []
+        created = next((p for p in projects if p.get('name') == project['name']), None)
+        self.assertIsNone(created)
+
+        # No staged work dirs or uploaded zips should remain.
+        uploads_dir = os.path.join(self._tmpdir.name, 'uploads')
+        if os.path.isdir(uploads_dir):
+            leftovers = [n for n in os.listdir(uploads_dir) if n.startswith('import_') or n.startswith('import_work_')]
+            self.assertEqual(leftovers, [])
+
+        # No materials should have been committed (since project never persisted).
+        mats_dir = os.path.join(self._tmpdir.name, 'materials')
+        if os.path.isdir(mats_dir):
+            mats = os.listdir(mats_dir)
+            self.assertEqual(mats, [])
+
     def test_import_respects_unchecked_items(self):
         project = {
             'id': 'orig-1',
@@ -181,6 +227,32 @@ class ImportSelectionApiTests(unittest.TestCase):
         self.assertEqual(len(media_keys), 1)
         self.assertIn('event:test', audio)
         self.assertEqual(audio['event:test'].get('soundKey'), media_keys[0])
+
+    def test_legacy_import_cleans_uploads_temp_artifacts(self):
+        project = {
+            'id': 'orig-legacy-1',
+            'name': 'LegacyImportCleansUploads',
+            'credentials': [{'username': 'user1', 'password': '12345678'}],
+            'vms': [{'name': 'vmA', 'vmid': 100, 'internal_network_adaptors': ['LAN']}],
+        }
+        zip_buf = self._make_zip(project)
+
+        resp = self.client.post(
+            '/api/projects/import',
+            data={
+                'file': (zip_buf, 'proj.zip'),
+                'includeCreds': 'true',
+                'includeVms': 'true',
+                'includeNotifyAudio': 'true',
+            },
+            content_type='multipart/form-data',
+        )
+        self.assertEqual(resp.status_code, 201)
+
+        uploads_dir = os.path.join(self._tmpdir.name, 'uploads')
+        if os.path.isdir(uploads_dir):
+            leftovers = [n for n in os.listdir(uploads_dir) if n.startswith('import_') or n.startswith('import_work_')]
+            self.assertEqual(leftovers, [])
 
 
 if __name__ == '__main__':

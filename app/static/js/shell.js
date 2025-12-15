@@ -954,6 +954,7 @@ function cancelRemoteAction(id) {
   for (const entry of REMOTE_ACTIVE_ENTRIES) {
     if (entry && entry.id === targetId) {
       entry.cancelRequested = true;
+      try { entry.onCancel && entry.onCancel(); } catch {}
       _remoteQueue_emit();
       _remoteQueue_saveState();
       return true;
