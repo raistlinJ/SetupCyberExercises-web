@@ -773,7 +773,7 @@ async function refreshVmView(){
           const inst = Number(p.instances||0); const tag = String(p.tag||'').trim(); const vms = p.vms||[]; const creds = p.credentials||[];
           for (let i=1;i<=inst;i++){
             const suffix = `${tag}${i}`; const cred = creds[i-1]||{}; const uname=(cred.username??'').trim(); const pword=cred.password??''; const st = statusMap.get(i)||{}; const details = Array.isArray(st.vm_details)? st.vm_details : []; const detailMap = new Map(details.map(d=> [String(d.name||''), d]));
-            for (const v of vms){ const vmName = `${v.name}${suffix}`; const d2 = detailMap.get(vmName)||null; const rowStatus = hasAnyStatus ? (d2 ? 'created':'missing') : 'n/a'; rows.push({ pid, project:p.name, index:i, vmName, uname, pword, status: rowStatus, detail:d2, instStatus: st }); }
+            for (const v of vms){ const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; const d2 = detailMap.get(vmName)||null; const rowStatus = hasAnyStatus ? (d2 ? 'created':'missing') : 'n/a'; rows.push({ pid, project:p.name, index:i, vmName, baseName, viewable_to_user: !!(v && v.viewable_to_user), uname, pword, status: rowStatus, detail:d2, instStatus: st }); }
           }
         } catch (e) { try { (window.shell && shell.logWarn)? shell.logWarn(`Refresh skipped for ${p?.name||pid}: ${e?.message||e}`) : console.warn('Refresh skipped', pid, e); } catch {} }
         resolve();
@@ -788,7 +788,7 @@ async function refreshVmView(){
       const inst = Number(p.instances||0); const tag = String(p.tag||'').trim(); const vms = p.vms||[]; const creds = p.credentials||[];
       for (let i=1;i<=inst;i++){
         const suffix = `${tag}${i}`; const cred = creds[i-1]||{}; const uname=(cred.username??'').trim(); const pword=cred.password??'';
-  for (const v of vms){ const vmName = `${v.name}${suffix}`; rows.push({ pid, project:p.name, index:i, vmName, uname, pword, status: 'n/a', detail:null, instStatus: null }); }
+  for (const v of vms){ const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; rows.push({ pid, project:p.name, index:i, vmName, baseName, viewable_to_user: !!(v && v.viewable_to_user), uname, pword, status: 'n/a', detail:null, instStatus: null }); }
       }
     }
   } catch {}
@@ -934,7 +934,15 @@ function renderMergedVmTable(rows){
       const stateHtml = (()=>{ const m = mapProxmoxPowerState(d && d.state); if (!m || m.label==='—') return '<span class=\"text-muted\">—</span>'; return `<span class=\"badge ${m.cls}\">${escHtml(m.label)}</span>`; })();
       const idHtml = d&&d.vmid!=null? `#${d.vmid}` : '—';
       const nodeHtml = d&&d.node? escHtml(d.node) : '—';
-      const templateHtml = (()=>{ const tid = d&&d.template_id!=null? `#${d.template_id}`:''; const tn = d&&d.template_name? escHtml(d.template_name):''; const both = [tn, tid].filter(Boolean).join(' '); return both || '—'; })();
+      const templateHtml = (()=>{
+        const tid = d&&d.template_id!=null? `#${d.template_id}`:'';
+        const tn = d&&d.template_name? escHtml(d.template_name):'';
+        const both = [tn, tid].filter(Boolean).join(' ');
+        const accessBadge = r.viewable_to_user
+          ? '<span class="badge bg-info text-dark" title="User-Accessible">User-Accessible</span>'
+          : '<span class="badge bg-secondary" title="Admin-only">Admin-only</span>';
+        return `<div>${both || '—'}</div><div class="mt-1">${accessBadge}</div>`;
+      })();
       let adaptorsCell = '<span class="text-muted">—</span>';
       const nets = Array.isArray(d?.nets) ? d.nets : [];
       if (nets.length) {
@@ -1301,7 +1309,7 @@ function renderVmTable(proj) {
       const key = `${projectKey}|${i}|${vmName}`;
       // Before first refresh, default to N/A; afterwards, show created/missing
       const rowStatus = hasAnyStatus ? (d ? 'created' : 'missing') : 'n/a';
-      rows.push({ key, index: i, vmName, uname, pword, status: rowStatus, detail: d });
+      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: !!(v && v.viewable_to_user), uname, pword, status: rowStatus, detail: d });
     }
   }
   // Apply filter
@@ -1459,7 +1467,10 @@ function renderVmTable(proj) {
       const tid = (d && d.template_id !== undefined && d.template_id !== null) ? `#${d.template_id}` : '';
       const tn = (d && d.template_name) ? escHtml(d.template_name) : '';
       const both = [tn, tid].filter(Boolean).join(' ');
-      return both || '—';
+      const accessBadge = r.viewable_to_user
+        ? '<span class="badge bg-info text-dark" title="User-Accessible">User-Accessible</span>'
+        : '<span class="badge bg-secondary" title="Admin-only">Admin-only</span>';
+      return `<div>${both || '—'}</div><div class="mt-1">${accessBadge}</div>`;
     })();
     // Adaptors list (single VM)
     let adaptorsCell = '<span class="text-muted">—</span>';
@@ -2246,9 +2257,11 @@ function hasAuth() {
 function updateRefreshState() {
   const btn = document.getElementById('btn-refresh');
   const wrap = document.getElementById('refresh-wrapper');
+  const colsBtn = document.getElementById('vm-cols-btn');
   // In multi mode, consider auth across selected project(s)
   const loggedIn = (vmIsMulti && vmIsMulti()) ? hasAuthForAllSelected() : hasAuth();
   if (btn) btn.disabled = (vmIsMulti && vmIsMulti()) ? true : !loggedIn;
+  if (colsBtn) colsBtn.disabled = !loggedIn;
   const refreshEnabled = !!(btn && !btn.disabled);
   // Toggle config-only notice
   try {
@@ -2265,10 +2278,12 @@ function updateRefreshState() {
     const scopedSelections = multiMode ? listSelectedEntries() : (PROJ ? listSelectedEntriesForPid(PROJ.id) : []);
     const anySelected = scopedSelections.length > 0;
     const disable = !(loggedIn && anySelected);
-  ['act-startup','act-stop','act-nets','act-state','act-control','act-users'].forEach(id => {
+    ['act-startup','act-stop','act-nets','act-state','act-control'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = disable;
     });
+    const usersBtn = document.getElementById('act-users');
+    if (usersBtn) usersBtn.disabled = disable;
   } catch {}
   // Manage tooltip enable/disable
   try {
@@ -2362,6 +2377,8 @@ function friendlyActionName(action){
     run_stored_cmds: 'Run Stored Commands',
     users_create: 'Create Users',
     users_delete: 'Delete Users',
+    users_access_enable: 'Enable User Accessibility',
+    users_access_disable: 'Disable User Accessibility',
   };
   if (!action) return '';
   if (map[action]) return map[action];
@@ -3632,9 +3649,97 @@ async function vmAction(action, opts) {
 async function vmActionExec(action, opts = {}) {
   if (vmIsMulti && vmIsMulti()) { return vmActionMultiExec(action, opts); }
   if (!PROJ) { alert('Select a project first.'); return; }
-  if (!hasAuth()) { alert('Please log in to Proxmox (or configure an API token) to run actions.'); return; }
   const selected = listSelectedEntriesForPid(PROJ.id);
   if (!selected.length) { alert('Select at least one VM row in this project.'); return; }
+
+  // Configuration-only actions: toggle whether VM templates are user-accessible.
+  if (action === 'users_access_enable' || action === 'users_access_disable') {
+    const enable = action === 'users_access_enable';
+    const prettyAction = friendlyActionName(action) || action;
+    // Progress indicator helpers funnel into shared queue state
+    const setAp = (pct, text, detail) => {
+      try { updateActionProgress(pct, text, detail); } catch {}
+    };
+    let topProg = null;
+    try {
+      topProg = document.getElementById('vm-progress');
+      if (topProg) {
+        topProg.classList.remove('d-none');
+        topProg.removeAttribute('aria-hidden');
+        const bar = document.getElementById('vm-progress-bar');
+        if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow','100'); }
+      }
+    } catch {}
+    try { showActionProgress(`${prettyAction} in progress`, 'Preparing…'); } catch {}
+    setAp(10, 'Preparing…', 'Resolving templates…');
+    ACTION_IN_FLIGHT = true;
+    CURRENT_ACTION = action;
+    ACTION_RUN_ID += 1;
+    updateRefreshState();
+
+    const proj = PROJ;
+    const tag = String(proj?.tag || '').trim();
+    const baseNames = new Set((proj?.vms || []).map(v => String(v?.name || '')));
+    const toBaseName = (t) => {
+      const idxStr = String(t.index);
+      const suffix = `${tag}${idxStr}`;
+      const full = String(t.name || '');
+      let base = full;
+      if (suffix && full.endsWith(suffix)) base = full.slice(0, full.length - suffix.length);
+      if (!baseNames.has(base)) {
+        for (const v of (proj?.vms || [])) {
+          if (String(v?.name || '') + suffix === full) { base = String(v?.name || ''); break; }
+        }
+      }
+      return base;
+    };
+
+    try {
+      const uniqueBases = new Set();
+      const skipped = [];
+      for (const t of selected) {
+        const base = toBaseName(t);
+        if (!base || !baseNames.has(base)) {
+          skipped.push({ name: String(t.name || ''), reason: 'template not found in project configuration' });
+          continue;
+        }
+        uniqueBases.add(base);
+      }
+      const bases = Array.from(uniqueBases);
+      if (!bases.length) {
+        try { showActionSummary(prettyAction, { skipped, notices: [{ reason: 'No VM templates were updated.' }] }); } catch {}
+        return;
+      }
+
+      const notices = [];
+      let done = 0;
+      for (const base of bases) {
+        done += 1;
+        const pct = Math.round(10 + (done / bases.length) * 80);
+        setAp(pct, 'Working…', `${enable ? 'Enabling' : 'Disabling'} user accessibility for ${base}…`);
+        await http('PATCH', `/api/projects/${proj.id}/vms/${encodeURIComponent(base)}`, { viewable_to_user: enable });
+        // Update local snapshot so subsequent actions use the new state without a full refresh
+        try {
+          const vmCfg = (PROJ?.vms || []).find(v => String(v?.name || '') === base);
+          if (vmCfg) vmCfg.viewable_to_user = enable;
+        } catch {}
+        notices.push({ name: base, reason: `set user-accessible=${enable ? 'true' : 'false'}` });
+      }
+      setAp(100, 'Done', `Updated ${bases.length} template(s).`);
+      try { showActionSummary(prettyAction, { notices, skipped }); } catch {}
+    } catch (e) {
+      alert('Action failed: ' + (e?.message || e));
+      try { showActionSummary(prettyAction, { errors: [{ reason: e?.message || String(e) }] }); } catch {}
+    } finally {
+      ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
+      try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
+      try { hideActionProgress(); } catch {}
+      try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+    }
+    return;
+  }
+
+  if (!hasAuth()) { alert('Please log in to Proxmox (or configure an API token) to run actions.'); return; }
   // Build targets; for 'create' we must use the base VM name from Configuration (without tag/index suffix)
   let targets = selected.map(entry => ({ index: Number(entry.index), name: entry.name }));
   const sess = readProxCreds(PROJ.id) || {};
@@ -4110,8 +4215,15 @@ async function vmActionMultiExec(action, opts = {}){
     byPid.get(entry.pid).push({ index: Number(entry.index), name: entry.name });
   }
   if (byPid.size===0) { alert('No valid selections.'); return; }
-  // Validate auth for all involved projects
-  for (const pid of byPid.keys()) { if (!hasAuthForPid(pid)) { alert('Some selected projects are missing Proxmox credentials or token. Fix credentials and try again.'); return; } }
+  // Validate auth for Proxmox-backed actions; configuration-only actions do not require Proxmox credentials.
+  if (!(action === 'users_access_enable' || action === 'users_access_disable')) {
+    for (const pid of byPid.keys()) {
+      if (!hasAuthForPid(pid)) {
+        alert('Some selected projects are missing Proxmox credentials or token. Fix credentials and try again.');
+        return;
+      }
+    }
+  }
   // Progress indicator routed through shared helpers
   const friendly = friendlyActionName(action) || action;
   const setAp = (pct, text, detail) => { try { updateActionProgress(pct, text, detail); } catch {} };
@@ -4208,6 +4320,47 @@ async function vmActionMultiExec(action, opts = {}){
     } catch {}
     const makeReq = async (path, body) => http('POST', `/api/projects/${encodeURIComponent(pid)}${path}`, body);
     try {
+      if (action === 'users_access_enable' || action === 'users_access_disable') {
+        const enable = action === 'users_access_enable';
+        const tagLocal = String(proj.tag||'').trim();
+        const baseNameSet = new Set((proj.vms||[]).map(v => String(v.name||'')));
+        const toBaseLocal = (t) => {
+          const idxStr = String(t.index);
+          const suffix = `${tagLocal}${idxStr}`;
+          const full = String(t.name||'');
+          let base = full;
+          if (suffix && full.endsWith(suffix)) base = full.slice(0, full.length - suffix.length);
+          if (!baseNameSet.has(base)) {
+            for (const v of (proj.vms||[])) {
+              if (String(v.name||'') + suffix === full) { base = String(v.name||''); break; }
+            }
+          }
+          return base;
+        };
+        const unique = new Set();
+        const skippedLocal = [];
+        for (const t of targets) {
+          const base = toBaseLocal(t);
+          if (!base || !baseNameSet.has(base)) {
+            skippedLocal.push({ name: String(t.name||''), reason: 'template not found in project configuration' });
+            continue;
+          }
+          unique.add(base);
+        }
+        const bases = Array.from(unique);
+        setAp(Math.max(20,pct), 'Working…', `${enable ? 'Enabling' : 'Disabling'} user accessibility in ${projName}…`);
+        const notices = [];
+        let k = 0;
+        for (const base of bases) {
+          k += 1;
+          setAp(Math.max(20,pct), 'Working…', `${enable ? 'Enabling' : 'Disabling'} ${base} (${k}/${bases.length || 1}) in ${projName}…`);
+          await http('PATCH', `/api/projects/${encodeURIComponent(pid)}/vms/${encodeURIComponent(base)}`, { viewable_to_user: enable });
+          notices.push({ name: base, reason: `set user-accessible=${enable ? 'true' : 'false'}` });
+        }
+        addArr('notices', notices, projName);
+        addArr('skipped', skippedLocal, projName);
+        continue;
+      }
       if (action === 'create') {
         // Convert to base and client-side skip those already existing
         let t = targets.map(toBase);
