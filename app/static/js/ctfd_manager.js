@@ -91,6 +91,9 @@ function ctfdStopActiveSpeechPlayback(){
 }
 
 function ctfdStopActivePlayback(){
+  // Invalidate any in-flight playback loops (TTS/audio sequences) so delayed
+  // segments don't resume after the user presses Stop.
+  try { CTFD_ACTIVE_PLAY_TOKEN = Number(CTFD_ACTIVE_PLAY_TOKEN || 0) + 1; } catch {}
   ctfdStopActiveAudioPlayback();
   ctfdStopActiveSpeechPlayback();
   ctfdClearActivePlayButton();
@@ -567,6 +570,12 @@ function ctfdNotifyTemplateVarsForEvent(eventKey){
   // Always include the special audio token.
   push('audio');
 
+  // Always include all supported placeholders so the TTS hints dialog remains
+  // complete even when an event's default template doesn't reference them.
+  try {
+    Object.keys(CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS).forEach(push);
+  } catch {}
+
   const re = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
   sources.forEach(text => {
     const raw = String(text || '');
@@ -576,58 +585,58 @@ function ctfdNotifyTemplateVarsForEvent(eventKey){
     }
   });
 
-  // Hide unknown placeholders that don't correspond to context keys.
-  // (We still keep 'audio' always.)
+  // Include placeholders referenced by hints/defaults as well (even if they are
+  // not in the known list yet) so the UI stays forward-compatible.
   return out;
 }
 
 function ctfdNotifyTemplateVarDescription(name){
   const key = String(name || '').trim();
-  const map = {
-    audio: 'Insert the selected audio clip here (no-op if no clip is selected).',
-    project: 'Project name/label.',
-    project_clause: 'Convenience text like “ in <project>”.',
-    leader: 'Main competitor name for the event (user or team).',
-    user_first: 'User name (when available).',
-    team_first: 'Team name (when available).',
-    team_clause: 'Convenience text like “ from team <team>”.',
-    first_team: 'Leaderboard #1 team name (when available).',
-    second_team: 'Leaderboard #2 team name (when available).',
-    third_team: 'Leaderboard #3 team name (when available).',
-    challenge: 'Challenge name (when available).',
-    challenge_clause: 'Convenience text like “ on <challenge>”.',
-    category: 'Challenge category (when available).',
-    category_clause: 'Convenience text like “ in <category>”.',
-    points: 'Points value (when available).',
-    points_clause: 'Convenience text like “ worth 100 points”.',
-    reason: 'Reason code for countdown events (when available).',
-    reason_clause: 'Convenience text like “ for scoreboard reveal”.',
-    countdown_seconds: 'Countdown duration (seconds), when available.',
-    interval_seconds: 'Periodic interval (seconds), when available.',
-    interval_seconds_clause: 'Convenience text like “ 30 seconds”, when available.',
-    interval_minutes: 'Periodic interval minutes, when available.',
-    interval_minutes_clause: 'Convenience text like “ 30 minutes”, when available.'
-  };
-  return map[key] || 'Template variable.';
+  return CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS[key] || 'Template variable.';
 }
 
-function ctfdRenderNotifyTemplateVarsModal(){
-  let eventKey = '';
-  try {
-    const select = document.getElementById('ctfd-template-vars-select');
-    eventKey = select ? String(select.value || '').trim() : '';
-  } catch { eventKey = ''; }
-  if (!eventKey) eventKey = ctfdNotifyGetActiveEventKey();
+const CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS = {
+  audio: 'Insert the selected audio clip here (no-op if no clip is selected).',
+  project: 'Project name/label.',
+  project_clause: 'Convenience text like “ in <project>”.',
+  leader: 'Main competitor name for the event (user or team).',
+  user_first: 'User name (when available).',
+  team_first: 'Team name (when available).',
+  team_clause: 'Convenience text like “ from team <team>”.',
+  first_team: 'Leaderboard #1 team name (when available).',
+  second_team: 'Leaderboard #2 team name (when available).',
+  third_team: 'Leaderboard #3 team name (when available).',
+  challenge: 'Challenge name (when available).',
+  challenge_clause: 'Convenience text like “ on <challenge>”.',
+  category: 'Challenge category (when available).',
+  category_clause: 'Convenience text like “ in <category>”.',
+  points: 'Points value (when available).',
+  points_clause: 'Convenience text like “ worth 100 points”.',
+  reason: 'Reason code for countdown events (when available).',
+  reason_clause: 'Convenience text like “ for scoreboard reveal”.',
+  countdown_seconds: 'Countdown duration (seconds), when available.',
+  interval_seconds: 'Periodic interval (seconds), when available.',
+  interval_seconds_clause: 'Convenience text like “ 30 seconds”, when available.',
+  interval_minutes: 'Periodic interval minutes, when available.',
+  interval_minutes_clause: 'Convenience text like “ 30 minutes”, when available.',
+  pause_1: 'Pause for 1 second.',
+  pause_2: 'Pause for 2 seconds.',
+  pause_3: 'Pause for 3 seconds.',
+  pause_4: 'Pause for 4 seconds.',
+  pause_5: 'Pause for 5 seconds.',
+  pause_6: 'Pause for 6 seconds.',
+  pause_7: 'Pause for 7 seconds.',
+  pause_8: 'Pause for 8 seconds.',
+  pause_9: 'Pause for 9 seconds.',
+  pause_10: 'Pause for 10 seconds.'
+};
 
+function ctfdRenderNotifyTemplateVarsModal(){
   const body = document.getElementById('ctfd-template-vars-body');
   if (!body) return;
 
-  if (!eventKey) {
-    body.innerHTML = '<tr><td colspan="2" class="small text-muted">Select an event row to see its variables.</td></tr>';
-    return;
-  }
-
-  const vars = ctfdNotifyTemplateVarsForEvent(eventKey);
+  // Variables are shared across events.
+  const vars = Object.keys(CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS);
   if (!vars.length) {
     body.innerHTML = '<tr><td colspan="2" class="small text-muted">No variables found for this event.</td></tr>';
     return;
@@ -640,44 +649,29 @@ function ctfdRenderNotifyTemplateVarsModal(){
   }).join('');
 }
 
-function ctfdPopulateNotifyTemplateVarsEventSelect(selectedKey){
-  const select = document.getElementById('ctfd-template-vars-select');
-  if (!select) return;
-  const keys = ctfdNotifyEventKeys();
-  const desired = String(selectedKey || '').trim();
-  const active = desired || ctfdNotifyGetActiveEventKey();
-  const options = keys.map(k => {
-    const label = ctfdNotifyLabelFor(k);
-    return `<option value="${escHtml(k)}">${escHtml(label)}</option>`;
-  }).join('');
-  select.innerHTML = options;
-  if (active && keys.includes(active)) select.value = active;
-  else if (keys.length) select.value = keys[0];
-}
-
 function ctfdWireNotifyTemplateVarsModal(){
   const modal = document.getElementById('ctfdTemplateVarsModal');
   if (!modal || modal._toolhubBound) return;
   modal.addEventListener('show.bs.modal', () => {
     try {
-      ctfdPopulateNotifyTemplateVarsEventSelect(ctfdNotifyGetActiveEventKey());
       ctfdRenderNotifyTemplateVarsModal();
     } catch {}
   });
-  try {
-    const select = document.getElementById('ctfd-template-vars-select');
-    if (select && !select._toolhubBound) {
-      select.addEventListener('change', () => {
-        try {
-          const key = String(select.value || '').trim();
-          if (key) ctfdNotifySetActiveEventKey(key);
-        } catch {}
-        try { ctfdRenderNotifyTemplateVarsModal(); } catch {}
-      });
-      select._toolhubBound = true;
-    }
-  } catch {}
   modal._toolhubBound = true;
+}
+
+function ctfdOpenNotifyTemplateVarsModal(){
+  try {
+    const modalEl = document.getElementById('ctfdTemplateVarsModal');
+    if (!modalEl || !window.bootstrap) return;
+    try {
+      ctfdRenderNotifyTemplateVarsModal();
+    } catch {}
+    try {
+      const inst = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+      inst.show();
+    } catch {}
+  } catch {}
 }
 
 function ctfdNotifyEventKeys(){
@@ -714,14 +708,15 @@ function ctfdNotifyDefaultSpeakEnabledFor(eventKey){
 
 function ctfdNotifySampleNewTemplateFor(eventKey){
   const key = String(eventKey || '').trim();
-  if (key === 'ctfdFirstUser') return '{{audio}} New #1 user: {{name}} ({{points}} points).';
-  if (key === 'ctfdFirstTeam') return '{{audio}} New #1 team: {{team}} ({{points}} points).';
-  if (key === 'ctfdFirstScore') return '{{audio}} First solve recorded: {{name}} ({{points}} points).';
-  if (key === 'ctfdFirstCategoryUser') return '{{audio}} First solve in {{category}} by {{name}}.';
-  if (key === 'ctfdFirstCategoryTeam') return '{{audio}} First solve in {{category}} by team {{team}}.';
-  if (key === 'ctfdCountdown') return '{{audio}} Countdown started.';
-  if (key === 'ctfdCountdownStop') return '{{audio}} Countdown cancelled.';
-  if (key === 'ctfdPeriodic') return '{{audio}} Periodic update: {{name}} is #{{rank}}.';
+  // Samples should only use placeholders that exist in the Template Variables modal.
+  if (key === 'ctfdFirstUser') return '{{audio}} New #1 user: {{user_first}} ({{points}} points).';
+  if (key === 'ctfdFirstTeam') return '{{audio}} New #1 team: {{team_first}} ({{points}} points).';
+  if (key === 'ctfdFirstScore') return '{{audio}} First solve recorded: {{leader}} ({{points}} points).';
+  if (key === 'ctfdFirstCategoryUser') return '{{audio}} First solve in {{category}} by {{user_first}}.';
+  if (key === 'ctfdFirstCategoryTeam') return '{{audio}} First solve in {{category}} by {{team_first}}.';
+  if (key === 'ctfdCountdown') return '{{audio}} Countdown started{{project_clause}}.';
+  if (key === 'ctfdCountdownStop') return '{{audio}} Countdown cancelled{{project_clause}}.';
+  if (key === 'ctfdPeriodic') return '{{audio}} Periodic update{{project_clause}}. Next check in {{interval_minutes}} minutes.';
   return '{{audio}} Event update.';
 }
 
@@ -777,14 +772,16 @@ function ctfdNotifyTemplateItemHtml(tplItem, rowSoundKey, audioStore, clipOption
   const tokenHtml = hasAudioToken
     ? `<span class="input-group-text"><code data-role="notify-audio-token" data-sound-source="item" data-bs-toggle="tooltip" data-bs-placement="top" title="${escHtml(tokenTitle)}">{{audio}}</code></span>`
     : '';
-  return `<div class="input-group input-group-sm mb-1" data-role="notify-tts-item">
-  <input type="text" class="form-control" data-role="notify-tts-text" value="${escHtml(text)}" />
-  ${audioSelectHtml}
-  ${tokenHtml}
-  <button class="btn btn-outline-secondary" type="button" data-role="notify-tts-play" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview TTS" aria-label="Preview TTS">
-    <i class="bi bi-play-fill" aria-hidden="true"></i>
-  </button>
-  <button class="btn btn-outline-danger" type="button" data-role="notify-tts-remove">Remove</button>
+  return `<div class="border border-secondary rounded bg-light p-2 mb-2" data-role="notify-tts-item-wrap">
+  <div class="input-group input-group-sm" data-role="notify-tts-item">
+    <input type="text" class="form-control" data-role="notify-tts-text" value="${escHtml(text)}" />
+    ${audioSelectHtml}
+    ${tokenHtml}
+    <button class="btn btn-outline-secondary" type="button" data-role="notify-tts-play" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview TTS" aria-label="Preview TTS">
+      <i class="bi bi-play-fill" aria-hidden="true"></i>
+    </button>
+    <button class="btn btn-outline-danger" type="button" data-role="notify-tts-remove">Remove</button>
+  </div>
 </div>`;
 }
 
@@ -844,7 +841,6 @@ async function ctfdRenderNotifyConfig(options){
     const source = raw || legacy || {};
     const enabled = source && source.enabled !== undefined ? !!source.enabled : ctfdDefaultAudioEnabled(eventKey);
     const selected = '';
-    const speak = source && source.speak !== undefined ? !!source.speak : ctfdNotifyDefaultSpeakEnabledFor(eventKey);
     const playOrderRaw = source && typeof source.playOrder === 'string' ? String(source.playOrder).trim().toLowerCase() : '';
     const playOrderMode = playOrderRaw === 'sequential' ? 'sequential' : 'random';
     const safeDomId = String(eventKey || '').replace(/[^a-zA-Z0-9_-]/g, '_') || 'event';
@@ -882,11 +878,6 @@ async function ctfdRenderNotifyConfig(options){
     </div>` : ''}
 
     <div class="d-flex align-items-center gap-2 mb-1">
-      <div class="form-check m-0">
-        <input class="form-check-input" type="checkbox" data-role="notify-speak" ${speak ? 'checked' : ''} />
-        <label class="form-check-label small">Speak (TTS)</label>
-      </div>
-
       <div class="btn-group btn-group-sm" role="group" aria-label="Play order">
         <input type="radio" class="btn-check" name="notify-order-${escHtml(safeDomId)}" id="notify-order-${escHtml(safeDomId)}-seq" data-role="notify-order" value="sequential" ${playOrderMode === 'sequential' ? 'checked' : ''} />
         <label class="btn btn-outline-secondary" for="notify-order-${escHtml(safeDomId)}-seq">Sequential</label>
@@ -900,9 +891,6 @@ async function ctfdRenderNotifyConfig(options){
     <div class="input-group input-group-sm mb-1">
       <input type="text" class="form-control" data-role="notify-tts-new" placeholder="e.g. ${escHtml(sampleTpl)}" />
       <button class="btn btn-outline-secondary" type="button" data-role="notify-tts-add">Add</button>
-      <button type="button" class="btn btn-outline-secondary" data-role="notify-vars" data-bs-toggle="tooltip" data-bs-placement="top" title="Template Variable List" aria-label="Template Variable List">
-        <i class="bi bi-question-circle" aria-hidden="true"></i>
-      </button>
     </div>
 
     <div data-role="notify-tts-list">${ctfdNotifyTemplatesListHtml(templates, defaultTemplate, selected, audioStore)}</div>
@@ -985,11 +973,10 @@ async function ctfdSaveNotifyConfig(){
     const eventKey = tr.getAttribute('data-event-key') || '';
     if (!eventKey) return;
     const enabledEl = tr.querySelector('input[data-role="notify-enabled"]');
-    const speakEl = tr.querySelector('input[data-role="notify-speak"]');
     const orderEl = tr.querySelector('input[data-role="notify-order"]:checked');
     const periodEl = tr.querySelector('input[data-role="notify-period-sec"]');
     const enabled = !!enabledEl?.checked;
-    const speak = !!speakEl?.checked;
+    const speak = true;
     const playOrder = (orderEl && String(orderEl.value || '') === 'sequential') ? 'sequential' : 'random';
 
     const templates = [];
@@ -1008,10 +995,8 @@ async function ctfdSaveNotifyConfig(){
         tplSoundKey = sel ? String(sel.value || '').trim() : '';
       }
 
-      // Persist a per-item clip if one is selected.
-      // (We don't gate this on {{audio}} detection here because text edits and token parsing
-      // shouldn't cause us to drop a selected clip on Save.)
-      if (tplSoundKey) templates.push({ text, enabled: true, soundKey: tplSoundKey });
+      const hasAudioToken = /{{\s*audio\s*}}/i.test(text);
+      if (hasAudioToken && tplSoundKey) templates.push({ text, enabled: true, soundKey: tplSoundKey });
       else templates.push(text);
     });
 
@@ -1082,24 +1067,6 @@ function ctfdWireNotifyConfig(){
         ctfdNotifySetActiveEventKey(eventKey);
       }
 
-      const varsBtn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-vars"]') : null;
-      if (varsBtn) {
-        ev.preventDefault();
-        try {
-          const tr = varsBtn.closest('tr[data-event-key]');
-          const eventKey = tr ? (tr.getAttribute('data-event-key') || '') : '';
-          if (eventKey) ctfdNotifySetActiveEventKey(eventKey);
-        } catch {}
-        try {
-          const modalEl = document.getElementById('ctfdTemplateVarsModal');
-          if (modalEl && window.bootstrap) {
-            const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
-            modal.show();
-          }
-        } catch {}
-        return;
-      }
-
       const addBtn = ev.target && ev.target.closest ? ev.target.closest('button[data-role="notify-tts-add"]') : null;
       if (addBtn) {
         ev.preventDefault();
@@ -1168,9 +1135,11 @@ function ctfdWireNotifyConfig(){
       if (removeBtn) {
         ev.preventDefault();
         const item = removeBtn.closest('[data-role="notify-tts-item"]');
+        const wrap = removeBtn.closest('[data-role="notify-tts-item-wrap"]');
         const tr = removeBtn.closest('tr[data-event-key]');
         const list = tr ? tr.querySelector('[data-role="notify-tts-list"]') : null;
-        if (item) item.remove();
+        if (wrap) wrap.remove();
+        else if (item) item.remove();
         if (list && !list.querySelector('[data-role="notify-tts-item"]')) {
           const eventKey = tr ? (tr.getAttribute('data-event-key') || '') : '';
           const defaultTemplate = eventKey ? ctfdNotifyDefaultSpeakTemplateFor(eventKey) : '';
@@ -1235,6 +1204,7 @@ function ctfdWireNotifyConfig(){
         ctfdSpeakFromTemplate(tpl, payload, 0, {
           interrupt: true,
           forceSpeak: true,
+          playToken: token,
           skipAudioSegments,
           onAudioRequest: async () => {
             try {
@@ -1623,7 +1593,8 @@ function ctfdShouldSpeak(key){
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
   const cfg = meta && typeof meta === 'object' ? meta[key] : {};
   if (cfg && cfg.defaultSpeak !== undefined) return !!cfg.defaultSpeak;
-  return false;
+  // Default to speaking when unset.
+  return true;
 }
 function ctfdSpeechSupported(){
   try {
@@ -1705,10 +1676,18 @@ function ctfdCompileSpeechTemplate(template, context){
       if (literal.trim()) result.hasSpeechIntent = true;
     }
     const key = (match[1] || '').trim();
+    const keyLower = key ? String(key).toLowerCase() : '';
     if (key) {
-      if (key === 'audio') {
+      if (keyLower === 'audio') {
         result.segments.push({ type: 'audio' });
         result.hasAudio = true;
+      } else if (/^pause_\d+$/.test(keyLower)) {
+        result.hasSpeechIntent = true;
+        const n = Number(String(keyLower).split('_')[1]);
+        const seconds = Number.isFinite(n) ? Math.max(1, Math.min(10, Math.round(n))) : 0;
+        if (seconds > 0) {
+          result.segments.push({ type: 'pause', seconds });
+        }
       } else {
         result.hasSpeechIntent = true;
         if (Object.prototype.hasOwnProperty.call(ctx, key) && ctx[key] != null) {
@@ -1966,6 +1945,11 @@ async function ctfdSpeakFromTemplate(template, payload, delaySeconds, opts){
   const segments = plan.segments || [];
   const audioHandler = opts && typeof opts.onAudioRequest === 'function' ? opts.onAudioRequest : null;
   const speechAllowed = plan.hasSpeech && ctfdSpeechSupported() && !!(opts && opts.forceSpeak);
+  const playToken = (opts && typeof opts === 'object' && opts.playToken !== undefined) ? String(opts.playToken) : '';
+  const isCancelled = () => {
+    if (!playToken) return false;
+    return String(CTFD_ACTIVE_PLAY_TOKEN) !== playToken;
+  };
   const baseDelay = Math.max(0, Number(delaySeconds) || 0);
   let elapsed = 0;
   let timeline = baseDelay;
@@ -1973,28 +1957,49 @@ async function ctfdSpeakFromTemplate(template, payload, delaySeconds, opts){
   let nextSpeechBaseline = baseSpeechStart;
   let spokeAny = false;
   for (const segment of segments) {
+    if (isCancelled()) break;
     if (segment.type === 'audio') {
       if (!audioHandler) continue;
       const wait = Math.max(0, timeline - elapsed);
       if (wait > 0) {
-        await ctfdWaitSeconds(wait);
+        const cancelled = await ctfdWaitSecondsInterruptible(wait, isCancelled);
+        if (cancelled || isCancelled()) break;
         elapsed += wait;
       }
       try {
+        if (isCancelled()) break;
         const result = await audioHandler(0);
         const duration = Number(result && result.duration);
         if (Number.isFinite(duration) && duration > 0) elapsed += duration;
       } catch {}
       timeline = elapsed + CTFD_AUDIO_SEGMENT_BUFFER;
       nextSpeechBaseline = Math.max(nextSpeechBaseline, timeline);
+    } else if (segment.type === 'pause') {
+      const pauseSeconds = Math.max(1, Math.min(10, Number(segment.seconds) || 0));
+
+      const start = Math.max(timeline, nextSpeechBaseline);
+      const wait = Math.max(0, start - elapsed);
+      if (wait > 0) {
+        const cancelled = await ctfdWaitSecondsInterruptible(wait, isCancelled);
+        if (cancelled || isCancelled()) break;
+        elapsed += wait;
+      }
+
+      const cancelledPause = await ctfdWaitSecondsInterruptible(pauseSeconds, isCancelled);
+      if (cancelledPause || isCancelled()) break;
+      elapsed += pauseSeconds;
+      timeline = elapsed;
+      nextSpeechBaseline = Math.max(nextSpeechBaseline, timeline);
     } else if (segment.type === 'text') {
       if (!speechAllowed) continue;
       const start = Math.max(timeline, nextSpeechBaseline);
       const wait = Math.max(0, start - elapsed);
       if (wait > 0) {
-        await ctfdWaitSeconds(wait);
+        const cancelled = await ctfdWaitSecondsInterruptible(wait, isCancelled);
+        if (cancelled || isCancelled()) break;
         elapsed += wait;
       }
+      if (isCancelled()) break;
       const speechResult = await ctfdSpeakTextSegment(segment.text, opts);
       if (speechResult.spoke) spokeAny = true;
       const spokenDuration = Number(speechResult.elapsed);
@@ -2027,6 +2032,23 @@ function ctfdWaitSeconds(seconds){
   const delay = Math.max(0, Number(seconds) || 0);
   if (delay <= 0) return Promise.resolve();
   return new Promise(resolve => setTimeout(resolve, delay * 1000));
+}
+
+function ctfdWaitSecondsInterruptible(seconds, isCancelled){
+  const delay = Math.max(0, Number(seconds) || 0);
+  if (delay <= 0) return Promise.resolve(false);
+  const totalMs = Math.round(delay * 1000);
+  const tickMs = 60;
+  return new Promise(resolve => {
+    const started = Date.now();
+    const step = () => {
+      try { if (typeof isCancelled === 'function' && isCancelled()) return resolve(true); } catch {}
+      const elapsed = Date.now() - started;
+      if (elapsed >= totalMs) return resolve(false);
+      setTimeout(step, Math.min(tickMs, Math.max(0, totalMs - elapsed)));
+    };
+    setTimeout(step, Math.min(tickMs, totalMs));
+  });
 }
 function ctfdSpeakTextSegment(text, opts){
   try { if (window.shell && shell.isRemote && shell.isRemote()) return Promise.resolve({ spoke: false, elapsed: 0 }); } catch {}
@@ -2108,6 +2130,7 @@ async function ctfdPlayProjectMediaSoundKey(soundKey, delaySeconds){
     };
 
     const startPlayback = () => {
+      if (settled) return;
       try {
         const p = audio.play();
         if (p && typeof p.catch === 'function') p.catch(()=> finish(false));
@@ -4421,6 +4444,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireCtfdCols();
   try { ctfdWireNotifyConfig(); } catch {}
   try { ctfdWireNotifyTemplateVarsModal(); } catch {}
+
+  // Single TTS info help button (Notifications header)
+  try {
+    const btn = document.getElementById('ctfd-notify-template-vars');
+    if (btn && !btn._toolhubBound) {
+      btn.addEventListener('click', (e) => {
+        try { e.preventDefault(); } catch {}
+        ctfdOpenNotifyTemplateVarsModal();
+      });
+      btn._toolhubBound = true;
+      try {
+        if (window.bootstrap) bootstrap.Tooltip.getInstance(btn) || new bootstrap.Tooltip(btn);
+      } catch {}
+    }
+  } catch {}
+
   // Projects selector UI (does not alter single-project flow yet)
   try { await ctfdSetupProjectsUi(); } catch {}
   ctfdRestoreSkippedIndicator();

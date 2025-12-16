@@ -192,7 +192,10 @@
               <div id="ctfd-notify-card" class="border rounded p-3 mb-3">
                 <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
                   <div>
-                    <div class="fw-semibold">Notification audio</div>
+                    <div class="fw-semibold d-flex align-items-center gap-2">
+                      <span>Notification audio</span>
+                      <button id="ctfd-notify-template-vars" type="button" class="btn btn-outline-secondary btn-sm py-0 px-2" data-bs-toggle="tooltip" data-bs-placement="top" title="TTS hints" aria-label="TTS hints">?</button>
+                    </div>
                     <div class="small text-muted">Select from uploaded audio files (Settings → Media Manager).</div>
                   </div>
                   <div class="btn-group btn-group-sm" role="group" aria-label="Notification audio actions">
@@ -250,7 +253,7 @@
             <div class="modal-dialog modal-lg modal-dialog-scrollable">
               <div class="modal-content">
                 <div class="modal-header">
-                  <h5 class="modal-title">Notification Template Variables</h5>
+                  <h5 class="modal-title">TTS hints</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -258,9 +261,10 @@
                     Use placeholders like <code>{{project}}</code> in your TTS templates.
                     <code>{{audio}}</code> is a special token that inserts the selected audio clip at that position (or becomes a no-op if no clip is selected).
                   </div>
-                  <div class="input-group input-group-sm mb-2" style="max-width: 520px;">
-                    <span class="input-group-text">Event</span>
-                    <select class="form-select" id="ctfd-template-vars-select" aria-label="Select an event"></select>
+                  <div class="small text-muted mb-3">
+                    To add pauses in TTS, use <code>{{pause_#}}</code> where <code>#</code> is 1–10 seconds (for example: <code>{{pause_3}}</code>).
+                    You can also insert <code>{{audio}}</code> where you want the selected audio clip to play (repeat it for a longer gap if no clip is selected).
+                    Punctuation like commas, periods, or dashes can add natural pauses.
                   </div>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle mb-0">
@@ -271,7 +275,7 @@
                         </tr>
                       </thead>
                       <tbody id="ctfd-template-vars-body">
-                        <tr><td colspan="2" class="small text-muted">Select an event row to see its variables.</td></tr>
+                        <tr><td colspan="2" class="small text-muted">Loading variables…</td></tr>
                       </tbody>
                     </table>
                   </div>

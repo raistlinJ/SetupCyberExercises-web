@@ -957,6 +957,9 @@ function appStopActiveSpeechPlayback(){
 }
 
 function appStopActivePlayback(){
+  // Bump the play token so any in-flight preview chains (timers/events/promises)
+  // can detect cancellation and avoid starting new playback.
+  APP_ACTIVE_PLAY_TOKEN++;
   appStopActiveAudioPlayback();
   appStopActiveSpeechPlayback();
   appClearActivePlayButton();
@@ -2199,8 +2202,9 @@ function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
     let speechTriggered = false;
     let cancelled = false;
     let previewAudioEl = null;
+    const isCancelled = () => cancelled || String(APP_ACTIVE_PLAY_TOKEN) !== token;
     const triggerSpeech = ()=>{
-      if (cancelled) return;
+      if (isCancelled()) return;
       if (!hasSpeech || speechTriggered) return;
       speechTriggered = true;
       if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
@@ -2237,6 +2241,7 @@ function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
       }
     };
     const scheduleFallback = (audio)=>{
+      if (isCancelled()) return;
       if (!hasSpeech) return;
       // Keep speech aligned with audio completion even if metadata is missing.
       let waitMs = 4000;
@@ -6269,6 +6274,14 @@ try {
 // Toast helper for this page
 function showToast(message, type) {
   try {
+    // Style: avoid a trailing "hard stop" on toast messages.
+    try {
+      let s = String(message ?? '');
+      // Remove a single trailing period, but keep ellipses.
+      if (s.endsWith('.') && !s.endsWith('...')) s = s.slice(0, -1);
+      message = s;
+    } catch {}
+
     let container = document.getElementById('toastContainer');
     if (!container) {
       container = document.createElement('div');

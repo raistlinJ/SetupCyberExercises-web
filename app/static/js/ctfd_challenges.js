@@ -1101,6 +1101,11 @@
   }
 
   function showToast(message, type){
+    try {
+      let s = String(message ?? '');
+      if (s.endsWith('.') && !s.endsWith('...')) s = s.slice(0, -1);
+      message = s;
+    } catch {}
     if (!toastWrap) { console[type==='danger'?'error':'log'](message); return; }
     const id = 't_'+Date.now()+Math.random().toString(16).slice(2);
     const bg = type === 'success' ? 'bg-success text-white' : type === 'warning' ? 'bg-warning' : type === 'danger' ? 'bg-danger text-white' : 'bg-secondary text-white';
