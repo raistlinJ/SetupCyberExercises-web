@@ -98,7 +98,7 @@
             <div class="d-flex align-items-center gap-2">
               <button id="btn-prox-login" class="btn btn-sm btn-outline-primary" title="Set Proxmox URL/ports and session credentials">Update Proxmox Creds</button>
               <span id="refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="left" title="Please log in to Proxmox first.">
-                <button id="btn-refresh" class="btn btn-sm btn-outline-secondary" onclick="vmRefresh()" disabled>Refresh States</button>
+                <button id="btn-refresh" class="btn btn-sm btn-outline-secondary" onclick="vmRefresh({forceRefresh:true})" disabled>Refresh States</button>
               </span>
               <div class="input-group input-group-sm" style="width: 200px;">
                 <span class="input-group-text">Auto</span>
@@ -179,8 +179,8 @@
             <div class="btn-group btn-group-sm">
               <button id="act-nets" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled title="Manage network interfaces for selected VMs">Net Adaptors</button>
               <ul class="dropdown-menu">
-                <li><button class="dropdown-item" type="button" onclick="vmAction('nets_assign')">Create Network Interfaces</button></li>
-                <li><button class="dropdown-item" type="button" onclick="vmAction('nets_clear')">Delete Network Interfaces</button></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('nets_set')">Set Network Interfaces</button></li>
+                <li><button class="dropdown-item" type="button" onclick="vmAction('nets_remove')">Remove Network Interfaces</button></li>
               </ul>
             </div>
             <!-- State group -->

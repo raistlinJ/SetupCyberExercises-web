@@ -683,7 +683,15 @@ function vmIsMulti(){ return Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.lengt
 function getActivePids(){ if (vmIsMulti()) return canonicalPidList(SELECTED_PIDS.slice()); const cur=getCurrentPid(); return cur? [cur]: []; }
 function vmClearFilter(){ try { const el=document.getElementById('vm-filter'); if (el) el.value=''; FILTER_TEXT=''; } catch {} try { if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__||[]); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); } }
 
-async function refreshVmView(){
+async function refreshVmView(opts){
+  const forceRefresh = (() => {
+    try {
+      if (typeof opts === 'boolean') return !!opts;
+      return !!(opts && opts.forceRefresh);
+    } catch {
+      return false;
+    }
+  })();
   await ensureAllProjects();
   // Capture the active project IDs at the start to prevent race conditions
   const startPids = getActivePids();
@@ -717,7 +725,7 @@ async function refreshVmView(){
                        `<ul class="mb-2">${items}</ul>`+
                        `<div class="d-flex gap-2">`+
                        `<button class="btn btn-sm btn-primary" onclick="fixAllCredsFromNote()">Fix All Creds</button>`+
-                       `<button class="btn btn-sm btn-outline-secondary" onclick="vmRefresh()">Refresh</button>`+
+                       `<button class="btn btn-sm btn-outline-secondary" onclick="vmRefresh({forceRefresh:true})">Refresh</button>`+
                        `</div>`+
                        `</div>`;
       // Auto-open the first skipped project's login once per session (with user-friendly prompt)
@@ -778,7 +786,7 @@ async function refreshVmView(){
       queueRemoteAction(`Refresh VMs for project ${p.name||pid}`, async () => {
         try {
           const sess = readProxCreds(pid) || {};
-          const body = { username: sess.username||undefined, password: sess.password||undefined, baseUrl: p.proxmox_url||undefined, apiPort: p.proxmox_api_port||undefined, verifySSL: p.proxmox_verify_ssl !== false };
+          const body = { username: sess.username||undefined, password: sess.password||undefined, baseUrl: p.proxmox_url||undefined, apiPort: p.proxmox_api_port||undefined, verifySSL: p.proxmox_verify_ssl !== false, forceRefresh: forceRefresh || undefined };
           const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
           const statuses = resp.instance_statuses || [];
           const statusMap = new Map(statuses.map(s=> [Number(s.index||0), s]));
@@ -1151,8 +1159,16 @@ async function importProjectSidebarWithFlags(opts) {
   }
 }
 
-async function vmRefresh() {
-  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1) { try { await refreshVmView(); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
+async function vmRefresh(opts) {
+  const forceRefresh = (() => {
+    try {
+      if (typeof opts === 'boolean') return !!opts;
+      return !!(opts && opts.forceRefresh);
+    } catch {
+      return false;
+    }
+  })();
+  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length>1) { try { await refreshVmView({ forceRefresh }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
   if (!PROJ) { alert('Load a project first.'); return; }
   const label = `Refresh VMs for project ${PROJ?.name || PROJ?.id || ''}`.trim();
   await runQueued(label, async () => {
@@ -1183,7 +1199,8 @@ async function vmRefresh() {
         password: sess.password || undefined, 
         baseUrl: PROJ.proxmox_url || undefined, 
         apiPort: PROJ.proxmox_api_port || undefined, 
-        verifySSL: PROJ.proxmox_verify_ssl !== false 
+        verifySSL: PROJ.proxmox_verify_ssl !== false,
+        forceRefresh: forceRefresh || undefined,
       };
       try { shell.step('Prepared refresh body'); } catch {}
       const resp = await http('POST', `/api/projects/${refreshPid}/instances/refresh/vm`, body);
@@ -1220,6 +1237,133 @@ async function vmRefresh() {
     lockProject: false,
     dedupeWhileActive: true,
   });
+}
+
+function _vmExpectedBridgeName(adaptorLabel, idx) {
+  try {
+    const base = String(adaptorLabel || '').replace(/[^A-Za-z]/g, '').slice(0, 8);
+    let name = base ? `${base}${idx}` : `br${idx}`;
+    if (name.length > 15) name = name.slice(0, 15);
+    return name;
+  } catch {
+    return `br${idx}`;
+  }
+}
+
+function _vmExpectedNetLabelsForGeneratedName(proj, genName, idx) {
+  try {
+    const tag = String(proj?.tag || '').trim();
+    const suffix = `${tag}${idx}`;
+    let baseName = String(genName || '');
+    if (suffix && baseName.endsWith(suffix)) baseName = baseName.slice(0, baseName.length - suffix.length);
+    const vmCfg = (proj?.vms || []).find(v => String(v?.name || '') === baseName) || null;
+    const adaptors = Array.isArray(vmCfg?.internal_network_adaptors) ? vmCfg.internal_network_adaptors : [];
+    if (!adaptors.length) return null;
+    const nets = [];
+    for (let i = 0; i < adaptors.length; i++) {
+      const bridge = _vmExpectedBridgeName(adaptors[i], idx);
+      nets.push(`net${i}(${bridge})`);
+    }
+    return nets;
+  } catch {
+    return null;
+  }
+}
+
+function _vmOptimisticallyUpdateProjectNets(proj, targets, mode) {
+  try {
+    if (!proj || !Array.isArray(proj.instance_statuses)) return;
+    const statusMap = new Map((proj.instance_statuses || []).map(s => [Number(s?.index || 0), s]));
+    for (const t of (targets || [])) {
+      const idx = Number(t?.index || 0);
+      const genName = String(t?.name || '');
+      if (!idx || !genName) continue;
+      const st = statusMap.get(idx);
+      if (!st) continue;
+      const details = Array.isArray(st.vm_details) ? st.vm_details : [];
+      const d = details.find(x => String(x?.name || '') === genName) || null;
+      if (!d) continue;
+      if (mode === 'remove') {
+        d.nets = [];
+      } else {
+        const expected = _vmExpectedNetLabelsForGeneratedName(proj, genName, idx);
+        if (expected) d.nets = expected;
+      }
+    }
+  } catch {}
+}
+
+function _vmOptimisticallyUpdateMergedRows(byId, targetsByPid, mode) {
+  try {
+    const rows = Array.isArray(window.__MERGED_ROWS__) ? window.__MERGED_ROWS__ : null;
+    if (!rows) return;
+    for (const [pid, targets] of (targetsByPid || new Map()).entries()) {
+      const proj = byId ? byId[canonicalPid(pid)] : null;
+      for (const t of (targets || [])) {
+        const idx = Number(t?.index || 0);
+        const genName = String(t?.name || '');
+        if (!idx || !genName) continue;
+        for (const r of rows) {
+          if (canonicalPid(r?.pid) !== canonicalPid(pid)) continue;
+          if (Number(r?.index || 0) !== idx) continue;
+          if (String(r?.vmName || '') !== genName) continue;
+          if (!r.detail) continue;
+          if (mode === 'remove') {
+            r.detail.nets = [];
+          } else {
+            const expected = _vmExpectedNetLabelsForGeneratedName(proj, genName, idx);
+            if (expected) r.detail.nets = expected;
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
+function _vmOptimisticallyUpdateUserAccessProject(proj, bases, indices, enable) {
+  try {
+    if (!proj || !Array.isArray(proj.instance_statuses)) return;
+    const baseSet = new Set((bases || []).map(b => String(b || '')));
+    const idxSet = new Set((indices || []).map(i => Number(i || 0)));
+    const tag = String(proj?.tag || '').trim();
+    for (const st of (proj.instance_statuses || [])) {
+      const idx = Number(st?.index || 0);
+      if (!idxSet.has(idx)) continue;
+      const details = Array.isArray(st?.vm_details) ? st.vm_details : [];
+      for (const d of details) {
+        const genName = String(d?.name || '');
+        if (!genName) continue;
+        const suffix = `${tag}${idx}`;
+        let baseName = genName;
+        if (suffix && genName.endsWith(suffix)) baseName = genName.slice(0, genName.length - suffix.length);
+        if (!baseSet.has(baseName)) continue;
+        d.user_access = !!enable;
+      }
+    }
+  } catch {}
+}
+
+function _vmOptimisticallyUpdateMergedUserAccess(byId, accessPlanByPid, enable) {
+  try {
+    const rows = Array.isArray(window.__MERGED_ROWS__) ? window.__MERGED_ROWS__ : null;
+    if (!rows) return;
+    for (const [pid, plan] of (accessPlanByPid || new Map()).entries()) {
+      const proj = byId ? byId[canonicalPid(pid)] : null;
+      const baseSet = new Set((plan?.bases || []).map(b => String(b || '')));
+      const idxSet = new Set((plan?.indices || []).map(i => Number(i || 0)));
+      for (const r of rows) {
+        if (canonicalPid(r?.pid) !== canonicalPid(pid)) continue;
+        const idx = Number(r?.index || 0);
+        if (!idxSet.has(idx)) continue;
+        const baseName = String(r?.baseName || '');
+        if (!baseSet.has(baseName)) continue;
+        r.user_access = !!enable;
+        if (r.detail) r.detail.user_access = !!enable;
+      }
+      // Keep the per-project snapshot consistent if present.
+      try { _vmOptimisticallyUpdateUserAccessProject(proj, Array.from(baseSet), Array.from(idxSet), enable); } catch {}
+    }
+  } catch {}
 }
 
 // Emit detailed action results to bottom console dock
@@ -2399,7 +2543,10 @@ function getActionableSelections(){
 
 function friendlyActionName(action){
   const map = {
-    nets_assign: 'Assign Network Interfaces',
+    nets_set: 'Set Network Interfaces',
+    nets_remove: 'Remove Network Interfaces',
+    // Backward-compatible aliases
+    nets_assign: 'Set Network Interfaces',
     nets_clear: 'Remove Network Interfaces',
     run_startup_cmds: 'Run Startup Commands',
     run_stored_cmds: 'Run Stored Commands',
@@ -3778,6 +3925,15 @@ async function vmActionExec(action, opts = {}) {
         enable,
       });
 
+      // Optimistic table update: if no errors, flip the effective User Access indicator immediately.
+      try {
+        const errCount = Array.isArray(syncResp?.errors) ? syncResp.errors.length : 0;
+        if (errCount === 0) {
+          _vmOptimisticallyUpdateUserAccessProject(PROJ, bases, indices, enable);
+          try { renderVmTable(PROJ); } catch {}
+        }
+      } catch {}
+
       setAp(100, 'Done', `Updated ${bases.length} template(s) and synced permissions.`);
       const merged = { ...(syncResp || {}) };
       merged.infos = [ ...(Array.isArray(syncResp?.infos) ? syncResp.infos : []), ...infos ];
@@ -3790,7 +3946,10 @@ async function vmActionExec(action, opts = {}) {
       ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
       try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
       try { hideActionProgress(); } catch {}
-      try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+      try {
+        const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+        Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => {});
+      } catch {}
     }
     return;
   }
@@ -3814,14 +3973,16 @@ async function vmActionExec(action, opts = {}) {
   ACTION_RUN_ID += 1;
   updateRefreshState();
   try {
-    if (action === 'nets_assign' || action === 'nets_clear') {
-      const friendly = friendlyActionName(action) || action;
+    if (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear') {
+      // Normalize legacy action keys to the new endpoints.
+      const normalizedAction = (action === 'nets_assign') ? 'nets_set' : (action === 'nets_clear' ? 'nets_remove' : action);
+      const friendly = friendlyActionName(normalizedAction) || normalizedAction;
       try { shell.beginActionContext(friendly); } catch {}
       const setProg = (pct, text, detail) => setAp(pct, text, detail);
       const sess = readProxCreds(PROJ.id) || {};
-      const path = `/api/projects/${PROJ.id}/instances/actions/${action}`;
-      const startDetail = action === 'nets_assign' ? 'Assigning network interfaces…' : 'Removing network interfaces…';
-      const doneWord = action === 'nets_assign' ? 'Assigned' : 'Removed';
+      const path = `/api/projects/${PROJ.id}/instances/actions/${normalizedAction}`;
+      const startDetail = normalizedAction === 'nets_set' ? 'Setting network interfaces…' : 'Removing network interfaces…';
+      const doneWord = normalizedAction === 'nets_set' ? 'Set' : 'Removed';
       setProg(10, 'Preparing…', startDetail);
       try { shell.step('Submitting network action'); } catch {}
       const resp = await http('POST', path, {
@@ -3833,7 +3994,16 @@ async function vmActionExec(action, opts = {}) {
         targets,
       });
       try { shell.step('Network action response'); } catch {}
-      const successKey = action === 'nets_assign' ? 'updated' : 'cleared';
+      // Optimistic table update: if no errors, reflect expected adaptors immediately.
+      try {
+        const errCount = Array.isArray(resp?.errors) ? resp.errors.length : 0;
+        const applyErrCount = Array.isArray(resp?.network_apply_errors) ? resp.network_apply_errors.length : 0;
+        if (errCount === 0 && applyErrCount === 0) {
+          _vmOptimisticallyUpdateProjectNets(PROJ, targets, normalizedAction === 'nets_remove' ? 'remove' : 'set');
+          try { renderVmTable(PROJ); } catch {}
+        }
+      } catch {}
+      const successKey = normalizedAction === 'nets_set' ? 'updated' : 'cleared';
       const successArr = Array.isArray(resp[successKey]) ? resp[successKey] : [];
       const skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
       setProg(100, 'Done', `${doneWord} ${successArr.length}/${targets.length}${skippedCount ? ', skipped ' + skippedCount : ''}`);
@@ -4221,7 +4391,10 @@ async function vmActionExec(action, opts = {}) {
   try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
   try { hideActionProgress(); } catch {}
     // Always refresh after any action (even on failure) but do not block UI while pending
-    try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+    try {
+      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+      Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => {});
+    } catch {}
   }
 }
 
@@ -4325,6 +4498,7 @@ async function vmActionMultiExec(action, opts = {}){
   // Fast-path: user accessibility actions can be safely parallelized across projects (limited concurrency)
   if (action === 'users_access_enable' || action === 'users_access_disable') {
     const enable = action === 'users_access_enable';
+    const accessPlanByPid = new Map();
     const maxProjConcurrent = Math.min(3, totalProjects);
     const queue = pids.slice();
     const runProject = async () => {
@@ -4372,6 +4546,7 @@ async function vmActionMultiExec(action, opts = {}){
         }
         const bases = Array.from(unique);
         const indices = Array.from(idxSet).filter(n => Number.isFinite(n) && n > 0);
+        try { accessPlanByPid.set(pid, { bases: bases.slice(), indices: indices.slice() }); } catch {}
 
         const pct0 = Math.round((doneProjects / totalProjects) * 100);
         setAp(Math.max(10, pct0), 'Working…', `${enable ? 'Enabling' : 'Disabling'} in ${projName}…`);
@@ -4420,13 +4595,28 @@ async function vmActionMultiExec(action, opts = {}){
 
     await Promise.all(Array.from({ length: maxProjConcurrent }, () => runProject()));
 
+    // Optimistic table update: if no errors, flip User Access indicators immediately.
+    try {
+      const errCount = Array.isArray(agg?.errors) ? agg.errors.length : 0;
+      if (errCount === 0) {
+        _vmOptimisticallyUpdateMergedUserAccess(byId, accessPlanByPid, enable);
+        try {
+          if (Array.isArray(window.__MERGED_ROWS__)) renderMergedVmTable(window.__MERGED_ROWS__ || []);
+          else renderVmTable(PROJ);
+        } catch {}
+      }
+    } catch {}
+
     try { showActionSummary(`Multi ${friendly}`, agg || {}); } catch {}
     try { emitActionLogs(`Multi ${friendly}`, agg || {}); } catch {}
     try { shell.endActionContext(true); } catch {}
     ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
     try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
     try { hideActionProgress(); } catch {}
-    try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+    try {
+      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+      Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => {});
+    } catch {}
     return;
   }
 
@@ -4589,12 +4779,13 @@ async function vmActionMultiExec(action, opts = {}){
         }
         continue;
       }
-      if (action === 'nets_assign' || action === 'nets_clear') {
-        setAp(Math.max(20,pct), 'Working…', `${friendlyActionName(action) || action} in ${projName}…`);
-        const resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
-        const successKey = action === 'nets_assign' ? 'updated' : 'cleared';
+      if (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear') {
+        const normalizedAction = (action === 'nets_assign') ? 'nets_set' : (action === 'nets_clear' ? 'nets_remove' : action);
+        setAp(Math.max(20,pct), 'Working…', `${friendlyActionName(normalizedAction) || normalizedAction} in ${projName}…`);
+        const resp = await makeReq(`/instances/actions/${normalizedAction}`, { ...baseBody, targets });
+        const successKey = normalizedAction === 'nets_set' ? 'updated' : 'cleared';
         addArr(successKey, resp[successKey], projName);
-        ['skipped','errors','notices'].forEach(k=> addArr(k, resp[k], projName));
+        ['skipped','errors','notices','network_applied_nodes','network_apply_errors'].forEach(k=> addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'users_create' || action === 'users_delete') {
@@ -4678,11 +4869,33 @@ async function vmActionMultiExec(action, opts = {}){
   try { showActionSummary(summaryName, agg); } catch {}
   try { emitActionLogs(summaryName, agg); } catch {}
   try { shell.endActionContext(true); } catch {}
+  // Optimistic table update (multi): if no errors, reflect expected adaptors immediately.
+  try {
+    if (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear') {
+      const normalizedAction = (action === 'nets_assign') ? 'nets_set' : (action === 'nets_clear' ? 'nets_remove' : action);
+      const errCount = Array.isArray(agg?.errors) ? agg.errors.length : 0;
+      const applyErrCount = Array.isArray(agg?.network_apply_errors) ? agg.network_apply_errors.length : 0;
+      if (errCount === 0 && applyErrCount === 0) {
+        // Reuse the existing selection grouping to update just the selected rows.
+        const targetsByPid = new Map();
+        for (const entry of (selected || [])) {
+          if (!entry?.pid || !Number.isFinite(entry.index) || !entry.name) continue;
+          if (!targetsByPid.has(entry.pid)) targetsByPid.set(entry.pid, []);
+          targetsByPid.get(entry.pid).push({ index: Number(entry.index), name: String(entry.name) });
+        }
+        _vmOptimisticallyUpdateMergedRows(byId, targetsByPid, normalizedAction === 'nets_remove' ? 'remove' : 'set');
+        try { renderMergedVmTable(window.__MERGED_ROWS__ || []); } catch {}
+      }
+    }
+  } catch {}
   // Cleanup
   ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
   try { const prog=document.getElementById('vm-progress'); if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden','true'); } } catch {}
   try { hideActionProgress(); } catch {}
-  try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+  try {
+    const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+    Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => {});
+  } catch {}
 }
 
 async function vmCancelActions() {
@@ -4853,7 +5066,7 @@ function showActionSummary(actionName, resp) {
       const precision = num >= 10 || idx === 0 ? 0 : 1;
       return `${num.toFixed(precision)} ${units[idx]}`;
     };
-  const created = Array.isArray(resp.created) ? resp.created : [];
+    const created = Array.isArray(resp.created) ? resp.created : [];
     const deleted = Array.isArray(resp.deleted) ? resp.deleted : [];
     const skipped = Array.isArray(resp.skipped) ? resp.skipped : [];
   const allErrors = Array.isArray(resp.errors) ? resp.errors : [];
@@ -4862,6 +5075,7 @@ function showActionSummary(actionName, resp) {
   const appliedPerms = Array.isArray(resp.applied) ? resp.applied : [];
   const unchangedPerms = Array.isArray(resp.unchanged) ? resp.unchanged : [];
   const isUserAccess = /user accessibility/i.test(String(actionName||'')) || ((resp && typeof resp.enable === 'boolean') && (appliedPerms.length || unchangedPerms.length));
+  const isNetInterfacesAction = /network interfaces/i.test(String(actionName||''));
   // Historically, ACL-related items were filtered out to keep other action summaries tidy.
   // For User Accessibility actions, permission details are the primary output.
   const isAcl = (s) => String(s || '').toLowerCase().includes('acl');
@@ -4916,15 +5130,36 @@ function showActionSummary(actionName, resp) {
   if (poweredOff.length) sections.push(`<h6>Powered Off</h6>${list(poweredOff, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   if (snapshotted.length) sections.push(`<h6>Snapshots</h6>${list(snapshotted, i => `<li>${esc(i.name)} — ${esc(i.snapname||'snapshot')} ${i.vmid?`(#${esc(i.vmid)})`:''}</li>`)}`);
   if (restored.length) sections.push(`<h6>Restored</h6>${list(restored, i => `<li>${esc(i.name)} — ${esc(i.snapname||'snapshot')} ${i.started? '(started)': ''}</li>`)}`);
-  if (netsUpdated.length) sections.push(`<h6>Network Assigned</h6>${list(netsUpdated, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
-  if (netsCleared.length) sections.push(`<h6>Network Removed</h6>${list(netsCleared, i => `<li>${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  const netActionIcon = (kind) => {
+    try {
+      if (!isNetInterfacesAction) return '';
+      if (kind === 'enabled') return '<i class="bi bi-toggle-on text-success me-1" title="Enabled"></i>';
+      if (kind === 'disabled') return '<i class="bi bi-toggle-off text-secondary me-1" title="Disabled"></i>';
+    } catch {}
+    return '';
+  };
+  if (netsUpdated.length) sections.push(`<h6>Network Assigned</h6>${list(netsUpdated, i => `<li>${netActionIcon('enabled')}${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
+  if (netsCleared.length) sections.push(`<h6>Network Removed</h6>${list(netsCleared, i => `<li>${netActionIcon('disabled')}${esc(i.name)} ${i.vmid?`(#${esc(i.vmid)})`:''} ${i.node?`on ${esc(i.node)}`:''}</li>`)}`);
   // Users / Pools sections
   if (createdUsers.length) sections.push(`<h6>Users Created</h6>${list(createdUsers, i => `<li>${esc(i.userid||'')}</li>`)}`);
   if (createdPools.length) sections.push(`<h6>Pools Created</h6>${list(createdPools, i => `<li>${esc(i.pool||'')} ${i.index?`(instance ${esc(i.index)})`:''}</li>`)}`);
   if (addedMembers.length) sections.push(`<h6>Pool Members Added</h6>${list(addedMembers, i => `<li>${esc(i.pool||'')} — ${esc(i.name||'')} ${i.vmid?`(#${esc(i.vmid)})`:''}</li>`)}`);
   if (deletedUsers.length) sections.push(`<h6>Users Deleted</h6>${list(deletedUsers, i => `<li>${esc(i.userid||'')}</li>`)}`);
   if (deletedPools.length) sections.push(`<h6>Pools Deleted</h6>${list(deletedPools, i => `<li>${esc(i.pool||'')} ${i.index?`(instance ${esc(i.index)})`:''}</li>`)}`);
-    sections.push(`<h6>Skipped</h6>${list(skipped, s => `<li>${esc(s.name||s.index||'')} — ${esc(s.reason||'')}</li>`)}`);
+    const netSkipIcon = (s) => {
+      try {
+        if (!isNetInterfacesAction) return '';
+        const reason = String(s?.reason || '').toLowerCase();
+        if (reason.includes('no network interfaces found')) {
+          return '<i class="bi bi-toggle-off text-secondary me-1" title="Disabled"></i>';
+        }
+        if (reason.includes('already correct') || reason.includes('already exist')) {
+          return '<i class="bi bi-toggle-on text-success me-1" title="Enabled"></i>';
+        }
+      } catch {}
+      return '';
+    };
+    sections.push(`<h6>Skipped</h6>${list(skipped, s => `<li>${netSkipIcon(s)}${esc(s.name||s.index||'')} — ${esc(s.reason||'')}</li>`)}`);
     if (amb.length) sections.push(`<h6>Ambiguous</h6>${list(amb, a => `<li>${esc(a.name)} — candidates: ${(a.candidates||[]).map(c=>`#${esc(c.vmid)} on ${esc(c.node||'')}`).join(', ')}</li>`)}`);
     if (isUserAccess) {
       try {

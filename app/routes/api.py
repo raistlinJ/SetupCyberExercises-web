@@ -14,7 +14,7 @@ import logging
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import re
 import mimetypes
 from urllib.parse import urlparse, urlunparse
@@ -321,6 +321,24 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_p
 _VM_CONFIG_CACHE = {}  # {f"{node}:{vmid}": (timestamp, config_dict)}
 _POOL_CACHE = {}  # {poolid: (timestamp, set_of_vmids)}
 _CACHE_TTL_SECONDS = 60  # Cache VM configs for 60 seconds
+
+
+def _invalidate_vm_config_cache_entries(entries: "Iterable[tuple[str, int]]") -> None:
+    """Invalidate specific VM config cache entries.
+
+    VM refresh uses `_get_cached_vm_config` for performance. After actions that
+    mutate QEMU config (like nets_set/nets_remove), invalidate affected entries
+    so an immediate refresh reflects the new state.
+    """
+    try:
+        for node, vmid in entries or []:
+            try:
+                key = f"{str(node)}:{int(vmid)}"
+                _VM_CONFIG_CACHE.pop(key, None)
+            except Exception:
+                continue
+    except Exception:
+        return
 
 def _get_cached_vm_config(client, node: str, vmid: int, force_refresh: bool = False):
     """Get VM config with caching for performance"""
@@ -744,6 +762,11 @@ def instances_refresh_vm(pid: str):
         data = request.get_json(force=True) or {}
     except Exception:
         data = {}
+    force_refresh = False
+    try:
+        force_refresh = bool(data.get('forceRefresh'))
+    except Exception:
+        force_refresh = False
     username = data.get('username') or None
     password = data.get('password') or None
     body_base = (data.get('baseUrl') or '').strip()
@@ -1010,8 +1033,8 @@ def instances_refresh_vm(pid: str):
                 tmpl_name = ''
                 try:
                     if node and vmid is not None:
-                        # Use cached config for performance
-                        cfg = _get_cached_vm_config(client, node, vmid)
+                        # Use cached config for performance; allow bypass via request flag.
+                        cfg = _get_cached_vm_config(client, node, vmid, force_refresh=force_refresh)
                         nets = _extract_nets(cfg)
                         pool_val = str(cfg.get('pool') or '').strip() if isinstance(cfg, dict) else ''
                         # Try to detect clone template from disk config (best-effort)
@@ -3660,13 +3683,80 @@ def instances_restore(pid: str):
     return jsonify({ 'restored': restored, 'skipped': skipped, 'errors': errors, 'notice': notice })
 
 
-@api_bp.route("/projects/<pid>/instances/actions/nets_assign", methods=["POST"])
-def instances_nets_assign(pid: str):
-    """Retry network adaptor assignment (set_qemu_nets) for existing VMs.
-    Body: { username?, password?, baseUrl?, apiPort?, verifySSL?, targets: [ { index, name } ] }
-    Returns: { updated: [ { index, name, vmid, node } ], skipped: [], errors: [] }
+def _parse_qemu_net_spec(spec: Any) -> Dict[str, Any]:
+    """Parse a Proxmox QEMU netX string.
+
+    Examples:
+      - "e1000,bridge=vmbr0"
+      - "e1000=AA:BB:CC:DD:EE:FF,bridge=vmbr0,firewall=1"
     """
-    _start_job(pid, 'nets_assign')
+    try:
+        text = str(spec or '').strip()
+    except Exception:
+        text = ''
+    tokens = [t.strip() for t in text.split(',') if t.strip()]
+    if not tokens:
+        return { 'raw': text, 'tokens': [], 'model': '', 'first': '', 'kv': {}, 'extras': [] }
+    first = tokens[0]
+    model = first.split('=', 1)[0].strip()
+    kv: Dict[str, str] = {}
+    extras: List[str] = []
+    for t in tokens[1:]:
+        if '=' in t:
+            k, v = t.split('=', 1)
+            kv[k.strip()] = v.strip()
+        else:
+            extras.append(t)
+    return { 'raw': text, 'tokens': tokens, 'model': model, 'first': first, 'kv': kv, 'extras': extras }
+
+
+def _net_spec_matches(existing_spec: Any, expected_spec: str) -> bool:
+    ex = _parse_qemu_net_spec(existing_spec)
+    exp = _parse_qemu_net_spec(expected_spec)
+    if not exp.get('model') or not exp.get('kv', {}).get('bridge'):
+        return False
+    return (str(ex.get('model') or '') == str(exp.get('model') or '')) and (str(ex.get('kv', {}).get('bridge') or '') == str(exp.get('kv', {}).get('bridge') or ''))
+
+
+def _build_corrected_net_spec(existing_spec: Any, expected_spec: str) -> str:
+    """Return a spec that preserves MAC/options when possible but fixes model/bridge to expected."""
+    exp = _parse_qemu_net_spec(expected_spec)
+    exp_model = str(exp.get('model') or '').strip()
+    exp_bridge = str(exp.get('kv', {}).get('bridge') or '').strip()
+    if not exp_model or not exp_bridge:
+        return str(expected_spec)
+
+    ex = _parse_qemu_net_spec(existing_spec)
+    # Start with existing tokens if present; otherwise start fresh.
+    tokens = list(ex.get('tokens') or [])
+    if not tokens:
+        return f"{exp_model},bridge={exp_bridge}"
+
+    # Ensure model (keep MAC if it already matches expected model).
+    first = str(ex.get('first') or '').strip()
+    ex_model = str(ex.get('model') or '').strip()
+    if ex_model != exp_model:
+        tokens[0] = exp_model
+
+    # Drop any existing bridge token(s).
+    rest = [t for t in tokens[1:] if not str(t).strip().startswith('bridge=')]
+    # Re-insert bridge right after the first token.
+    new_tokens = [tokens[0], f"bridge={exp_bridge}"] + rest
+    return ','.join([t for t in new_tokens if str(t).strip()])
+
+
+@api_bp.route("/projects/<pid>/instances/actions/nets_set", methods=["POST"])
+@api_bp.route("/projects/<pid>/instances/actions/nets_assign", methods=["POST"])
+def instances_nets_set(pid: str):
+    """Set (idempotently) VM network interfaces for selected VMs.
+
+    - Ensures the expected netX entries exist and point at the expected bridges.
+    - If an interface already exists and matches (model + bridge), it is left unchanged.
+    - If an interface exists but mismatches, it is corrected.
+    - Any extra netX entries beyond the configured adaptor count are removed.
+    - If missing bridges are created on a node, the node networking is reloaded once after the batch.
+    """
+    _start_job(pid, 'nets_set')
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -3712,6 +3802,61 @@ def instances_nets_assign(pid: str):
 
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     updated = []
+    notices: List[Dict[str, Any]] = []
+    network_applied_nodes: List[str] = []
+    network_apply_errors: List[Dict[str, Any]] = []
+    nodes_with_vm_changes: Set[str] = set()
+
+    # 1) Pre-create missing bridges per node (batch), so VM netX specs can reference them.
+    bridges_needed: Dict[str, Set[str]] = {}
+    for m in mapped:
+        try:
+            idx = int(m.get('index') or 0)
+            gen_name = str(m.get('name') or '')
+            node = str(m.get('node') or '')
+            if not node or idx <= 0 or not gen_name:
+                continue
+            base_name = gen_name
+            suf = f"{tag}{idx}"
+            if suf and gen_name.endswith(suf):
+                base_name = gen_name[:len(gen_name) - len(suf)]
+            cfg = cfg_map.get(base_name) or cfg_map_lc.get(base_name.lower())
+            if not cfg:
+                continue
+            adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
+            for a in adaptors:
+                try:
+                    base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
+                    bname = f"{base}{idx}" if base else f"br{idx}"
+                    if len(bname) > 15:
+                        bname = bname[:15]
+                except Exception:
+                    bname = f"br{idx}"
+                if bname:
+                    bridges_needed.setdefault(node, set()).add(bname)
+        except Exception:
+            continue
+
+    bridges_to_reload: Set[str] = set()
+    for node, needed in bridges_needed.items():
+        existing = set()
+        try:
+            nets = client.list_network(node) or []
+            for net in nets:
+                iface = str((net or {}).get('iface') or '')
+                if iface:
+                    existing.add(iface)
+        except Exception:
+            existing = set()
+        for b in sorted(needed):
+            if b in existing:
+                continue
+            try:
+                client.create_bridge(node=node, iface=b, autostart=True, ports=None, comments="Auto-created (nets_set batch)")
+                bridges_to_reload.add(node)
+                notices.append({ 'node': node, 'reason': f'bridge created: {b}' })
+            except Exception as e:
+                errors.append({ 'node': node, 'reason': f'bridge create failed for {b}: {e}' })
 
     def _base_from_generated(gen_name: str, idx: int) -> str:
         try:
@@ -3721,6 +3866,15 @@ def instances_nets_assign(pid: str):
         except Exception:
             pass
         return gen_name
+
+    def _make_thread_client() -> ProxmoxClient:
+        return ProxmoxClient(
+            base_url=base_url,
+            token=getattr(proj, 'proxmox_api_token', '') or None,
+            username=username,
+            password=password,
+            verify=verify,
+        )
 
     def do_apply(m):
         if _is_cancelled(pid):
@@ -3733,7 +3887,7 @@ def instances_nets_assign(pid: str):
         cfg = cfg_map.get(base_name) or cfg_map_lc.get(base_name.lower())
         if not cfg:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'unknown base name for nets retry' })
-        # Build netspecs from configured adaptors
+        # Build expected netspecs from configured adaptors
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
         if not adaptors:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'no adaptors configured' })
@@ -3748,19 +3902,37 @@ def instances_nets_assign(pid: str):
                 bname = f"br{idx}"
             netspecs.append(f"e1000,bridge={bname}")
         try:
-            existing_cfg = {}
+            thread_client = _make_thread_client()
             try:
-                existing_cfg = client.get_qemu_config(node=node, vmid=vmid)
+                existing_cfg = thread_client.get_qemu_config(node=node, vmid=vmid) or {}
             except Exception:
                 existing_cfg = {}
-            delete_keys = [k for k in (existing_cfg or {}).keys() if str(k).startswith('net')]
+
+            desired_keys = [f'net{i}' for i in range(len(netspecs))]
+            existing_net_keys = [k for k in (existing_cfg or {}).keys() if str(k).startswith('net')]
+            delete_keys = [k for k in existing_net_keys if str(k) not in set(desired_keys)]
+
+            to_set: Dict[str, str] = {}
+            changed = []
+            for i, exp in enumerate(netspecs):
+                key = f'net{i}'
+                cur = (existing_cfg or {}).get(key)
+                if cur is not None and _net_spec_matches(cur, exp):
+                    continue
+                # Correct mismatch or create missing.
+                to_set[key] = _build_corrected_net_spec(cur, exp)
+                changed.append(key)
+
+            if not to_set and not delete_keys:
+                return ('skipped', { 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node, 'reason': 'already correct' })
+
+            payload: Dict[str, Any] = {}
             if delete_keys:
-                try:
-                    client.set_qemu_nets(node=node, vmid=vmid, nets=[], delete_keys=delete_keys)
-                except Exception:
-                    pass
-            client.set_qemu_nets(node=node, vmid=vmid, nets=netspecs, delete_keys=None)
-            return ('ok', { 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node })
+                payload['delete'] = ','.join([str(k) for k in delete_keys])
+            for k, v in to_set.items():
+                payload[str(k)] = str(v)
+            thread_client.set_qemu_options(node=node, vmid=vmid, options=payload)
+            return ('ok', { 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node, 'changed': changed, 'deleted': delete_keys })
         except Exception as e:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': f'set nets failed: {e}' })
 
@@ -3772,19 +3944,55 @@ def instances_nets_assign(pid: str):
                 kind, payload = fut.result()
                 if kind == 'ok':
                     updated.append(payload)
+                    try:
+                        node_name = str(payload.get('node') or '')
+                        if node_name:
+                            nodes_with_vm_changes.add(node_name)
+                    except Exception:
+                        pass
+                elif kind == 'skipped':
+                    skipped.append(payload)
                 else:
                     errors.append(payload)
             except Exception as e:
                 errors.append({ 'reason': f'network assign failed: {e}' })
 
+    # 2) Apply node network reload once after the batch.
+    # We reload if either:
+    #   - we created bridges on the node, or
+    #   - we changed VM netX config on the node (per user request to "apply" after enable/disable).
+    nodes_to_reload = set(bridges_to_reload) | set(nodes_with_vm_changes)
+    for node in sorted(nodes_to_reload):
+        try:
+            client.reload_network(node)
+            network_applied_nodes.append(node)
+        except Exception as e:
+            network_apply_errors.append({ 'node': node, 'reason': f'network reload failed: {e}' })
+
+    # Invalidate cached configs for VMs we changed so the post-action refresh reflects new adaptors.
+    try:
+        changed_entries = []
+        for u in (updated or []):
+            try:
+                n = str((u or {}).get('node') or '')
+                v = (u or {}).get('vmid')
+                if n and v is not None:
+                    changed_entries.append((n, int(v)))
+            except Exception:
+                continue
+        _invalidate_vm_config_cache_entries(changed_entries)
+    except Exception:
+        pass
+
     _end_job(pid)
-    return jsonify({ 'updated': updated, 'skipped': skipped, 'errors': errors })
+    return jsonify({ 'updated': updated, 'skipped': skipped, 'errors': errors, 'notices': notices, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors })
 
 
+@api_bp.route("/projects/<pid>/instances/actions/nets_remove", methods=["POST"])
 @api_bp.route("/projects/<pid>/instances/actions/nets_clear", methods=["POST"])
-def instances_nets_clear(pid: str):
+def instances_nets_remove(pid: str):
     """Remove all configured network adaptors (netX entries) from selected VMs."""
-    _start_job(pid, 'nets_clear')
+    _start_job(pid, 'nets_remove')
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -3825,6 +4033,9 @@ def instances_nets_clear(pid: str):
 
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     cleared = []
+    network_applied_nodes: List[str] = []
+    network_apply_errors: List[Dict[str, Any]] = []
+    nodes_with_vm_changes: Set[str] = set()
 
     def do_clear(m):
         if _is_cancelled(pid):
@@ -3842,7 +4053,8 @@ def instances_nets_clear(pid: str):
         if not delete_keys:
             return ('skipped', { 'index': idx, 'name': gen_name, 'reason': 'no network interfaces found' })
         try:
-            client.set_qemu_nets(node=node, vmid=vmid, nets=[], delete_keys=delete_keys)
+            # Remove all netX entries in one call.
+            client.delete_qemu_options(node=node, vmid=vmid, keys=delete_keys)
             return ('cleared', { 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node, 'removed': delete_keys })
         except Exception as e:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': f'clear nets failed: {e}' })
@@ -3856,6 +4068,12 @@ def instances_nets_clear(pid: str):
                 kind, payload = fut.result()
                 if kind == 'cleared':
                     cleared.append(payload)
+                    try:
+                        node_name = str(payload.get('node') or '')
+                        if node_name:
+                            nodes_with_vm_changes.add(node_name)
+                    except Exception:
+                        pass
                 elif kind == 'skipped':
                     skipped.append(payload)
                 else:
@@ -3866,8 +4084,31 @@ def instances_nets_clear(pid: str):
                 else:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'network clear failed: {e}' })
 
+    # Apply network reload once per affected node when we actually removed interfaces.
+    for node in sorted(nodes_with_vm_changes):
+        try:
+            client.reload_network(node)
+            network_applied_nodes.append(node)
+        except Exception as e:
+            network_apply_errors.append({ 'node': node, 'reason': f'network reload failed: {e}' })
+
+    # Invalidate cached configs for VMs we changed so the post-action refresh reflects new adaptors.
+    try:
+        changed_entries = []
+        for c in (cleared or []):
+            try:
+                n = str((c or {}).get('node') or '')
+                v = (c or {}).get('vmid')
+                if n and v is not None:
+                    changed_entries.append((n, int(v)))
+            except Exception:
+                continue
+        _invalidate_vm_config_cache_entries(changed_entries)
+    except Exception:
+        pass
+
     _end_job(pid)
-    return jsonify({ 'cleared': cleared, 'skipped': skipped, 'errors': errors })
+    return jsonify({ 'cleared': cleared, 'skipped': skipped, 'errors': errors, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/users_create", methods=["POST"])
