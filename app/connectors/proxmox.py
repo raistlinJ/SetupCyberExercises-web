@@ -529,6 +529,18 @@ class ProxmoxClient:
             raise RuntimeError(f"Proxmox get pool error {r.status_code}: {r.text}")
         return r.json().get('data')
 
+    def list_pools(self) -> List[Dict[str, Any]]:
+        """List pools.
+
+        Used by refresh endpoints to avoid N per-instance get_pool() calls.
+        """
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/pools"
+        r = s.get(url, timeout=20)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox list pools error {r.status_code}: {r.text}")
+        return list(r.json().get('data') or [])
+
     def create_pool(self, poolid: str, comment: Optional[str] = None):
         s = self._ensure_session()
         url = f"{self.base_url.rstrip('/')}/api2/json/pools"
@@ -774,6 +786,21 @@ class ProxmoxClient:
                 alt_path = f"vms/{int(vmid)}"  # no leading slash variant
                 try:
                     return self.set_acl(userid, alt_path, roles=roles, propagate=propagate)
+                except Exception:
+                    raise
+            raise
+
+    def delete_acl_user_vm(self, userid: str, vmid: int, roles: str = 'PVEVMUser', propagate: bool = True):
+        """Remove roles on a specific VM path for a user (revokes per-VM access)."""
+        vm_path = f"/vms/{int(vmid)}"
+        try:
+            return self.delete_acl(userid, vm_path, roles=roles, propagate=propagate)
+        except RuntimeError as e:
+            es = str(e)
+            if '501' in es and 'vms' in vm_path:
+                alt_path = f"vms/{int(vmid)}"  # no leading slash variant
+                try:
+                    return self.delete_acl(userid, alt_path, roles=roles, propagate=propagate)
                 except Exception:
                     raise
             raise

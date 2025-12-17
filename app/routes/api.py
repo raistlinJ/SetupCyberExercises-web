@@ -26,7 +26,7 @@ from dataclasses import asdict
 import time
 from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
-from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps
+from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps, _coerce_enabled
 from ..storage.runtime import RuntimeStore
 from ..storage.secrets import encrypt_str as _enc_secret, decrypt_str as _dec_secret
 from ..storage.user_secrets import UserSecretsStore
@@ -852,6 +852,100 @@ def instances_refresh_vm(pid: str):
     except Exception as e:
         return jsonify({"error": f"Proxmox: {e}"}), 502
 
+    # Pools list (single call) to avoid per-instance pool existence checks.
+    pool_ids = None
+    try:
+        pool_ids = { str((p or {}).get('poolid') or '') for p in (client.list_pools() or []) }
+        pool_ids = { p for p in pool_ids if p }
+    except Exception:
+        pool_ids = None
+
+    def _norm_userid(uname: str) -> str:
+        u = str(uname or '').strip()
+        if not u:
+            return ''
+        return u if '@' in u else f"{u}@pve"
+
+    def _poolid_from_uname(uname: str) -> str:
+        base = str(uname or '').strip().split('@', 1)[0]
+        return re.sub(r"[^A-Za-z0-9_-]+", "", base)
+
+    def _norm_acl_path(path: str) -> str:
+        p = str(path or '').strip()
+        if not p:
+            return ''
+        if not p.startswith('/'):
+            p = f"/{p}"
+        # Trim trailing slash except for root
+        if len(p) > 1:
+            p = p.rstrip('/')
+        return p
+
+    # Fetch ACLs once so we can report effective per-instance user access.
+    # Effective access can be inherited via propagate from ancestor paths (e.g., /vms).
+    acl_index = None
+    try:
+        entries = client.list_acls() or []
+        acl_index = {}
+        for e in entries:
+            try:
+                ugid = str(e.get('ugid') or '').strip().lower()
+                path = _norm_acl_path(e.get('path') or '')
+                roleid = str(e.get('roleid') or '').strip()
+                if not ugid or not path or not roleid:
+                    continue
+                propagate_raw = e.get('propagate')
+                propagate = bool(propagate_raw in (1, True, '1', 'true', 'True'))
+                acl_index.setdefault((ugid, path), []).append((roleid, propagate))
+            except Exception:
+                continue
+    except Exception:
+        acl_index = None
+
+    def _has_access_role_id(roleid: str) -> bool:
+        try:
+            return roleid in ('PVEUser', 'PVEVMUser')
+        except Exception:
+            return False
+
+    def _path_grants_access(ugid: str, path: str, require_propagate: bool) -> bool:
+        if acl_index is None:
+            return False
+        try:
+            key = (str(ugid or '').strip().lower(), _norm_acl_path(path))
+            entries = acl_index.get(key, [])
+            for roleid, propagate in entries:
+                if not _has_access_role_id(str(roleid)):
+                    continue
+                if require_propagate and not propagate:
+                    continue
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _effective_user_access(ugid: str, vmid: int, poolid: str | None) -> bool | None:
+        # If we couldn't fetch ACLs, leave as unknown (None).
+        if acl_index is None:
+            return None
+        try:
+            ug = str(ugid or '').strip().lower()
+            # Pool-level grant can also confer access.
+            if poolid:
+                if _path_grants_access(ug, f"/pool/{poolid}", require_propagate=False):
+                    return True
+            # Direct VM path
+            if _path_grants_access(ug, f"/vms/{int(vmid)}", require_propagate=False):
+                return True
+            # Inherited via propagate from /vms or /
+            if _path_grants_access(ug, "/vms", require_propagate=True):
+                return True
+            if _path_grants_access(ug, "/", require_propagate=True):
+                return True
+        except Exception:
+            return None
+        return False
+
     # Helper: extract network adaptor identifiers from VM config
     def _extract_nets(cfg: dict):
         nets = []
@@ -878,6 +972,19 @@ def instances_refresh_vm(pid: str):
         entry = current.get(i) or { 'index': i, 'created': False, 'managers': {} }
         mgrs = entry.get('managers') or {}
         names = expected[i]
+        # Pre-compute per-instance userid/poolid for access reporting
+        userid = None
+        poolid = None
+        try:
+            creds = list(getattr(proj, 'credentials', []) or [])
+            urec = creds[i-1] if i-1 < len(creds) else None
+            uname = (urec or {}).get('username') or ''
+            if uname:
+                userid = _norm_userid(uname)
+                poolid = _poolid_from_uname(uname)
+        except Exception:
+            userid = None
+            poolid = None
         # Mark created if all expected VM names exist; partial -> pending
         count = 0
         found_details = []
@@ -906,6 +1013,7 @@ def instances_refresh_vm(pid: str):
                         # Use cached config for performance
                         cfg = _get_cached_vm_config(client, node, vmid)
                         nets = _extract_nets(cfg)
+                        pool_val = str(cfg.get('pool') or '').strip() if isinstance(cfg, dict) else ''
                         # Try to detect clone template from disk config (best-effort)
                         try:
                             if cfg.get('template'):
@@ -955,6 +1063,7 @@ def instances_refresh_vm(pid: str):
                             pass
                 except Exception:
                     nets = []
+                    pool_val = ''
                 found_details.append({
                     'name': canon_name,
                     'vmid': vmid,
@@ -963,6 +1072,9 @@ def instances_refresh_vm(pid: str):
                     'node': node,
                     'template_id': tmpl_id,
                     'template_name': tmpl_name,
+                    'pool': pool_val,
+                    # Effective access for the instance user (credential username)
+                    'user_access': _effective_user_access(userid, int(vmid), poolid) if (userid and vmid is not None) else None,
                 })
         if count == len(names) and len(names) > 0:
             mgrs['vm'] = 'created'
@@ -979,51 +1091,24 @@ def instances_refresh_vm(pid: str):
         entry['vm_details'] = found_details
         # Determine pools status and membership completeness for this instance based on credential username
         try:
-            creds = list(getattr(proj, 'credentials', []) or [])
-            urec = creds[i-1] if i-1 < len(creds) else None
-            uname = (urec or {}).get('username') or ''
-            poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
+            # Reuse computed poolid above where possible
+            if poolid is None:
+                creds = list(getattr(proj, 'credentials', []) or [])
+                urec = creds[i-1] if i-1 < len(creds) else None
+                uname = (urec or {}).get('username') or ''
+                poolid = _poolid_from_uname(uname)
             if poolid:
                 try:
-                    pool_exists = bool(client.get_pool(poolid) is not None)
+                    if pool_ids is not None:
+                        pool_exists = poolid in pool_ids
+                    else:
+                        pool_exists = bool(client.get_pool(poolid) is not None)
                     mgrs['pools'] = 'ready' if pool_exists else 'missing'
                     # Compute membership details when pool exists
                     if pool_exists:
                         # All configured VMs for this instance count toward expected pool membership (reverted logic)
                         names_viewable = list(names)
-                        member_vmids = set()
-                        list_error = False
-                        try:
-                            members = client.list_pool_members(poolid) or []
-                            for m in members:
-                                try:
-                                    if str(m.get('type') or '').lower() == 'qemu' and m.get('vmid') is not None:
-                                        member_vmids.add(int(m.get('vmid')))
-                                except Exception:
-                                    continue
-                        except Exception:
-                            list_error = True
-                        # Fallback: infer via VM config 'pool' field if list failed or returned none
-                        if (list_error or not member_vmids) and found_details:
-                            try:
-                                # Build map of vmid->node for quick lookup
-                                vm_node_map = {}
-                                for fd in found_details:
-                                    try:
-                                        if fd.get('vmid') is not None and fd.get('node'):
-                                            vm_node_map[int(fd['vmid'])] = fd['node']
-                                    except Exception:
-                                        continue
-                                for vmid, node in vm_node_map.items():
-                                    try:
-                                        # Use cached config for performance
-                                        cfg = _get_cached_vm_config(client, node, int(vmid))
-                                        if str(cfg.get('pool') or '') == poolid:
-                                            member_vmids.add(int(vmid))
-                                    except Exception:
-                                        continue
-                            except Exception:
-                                pass
+                        # Membership: rely on per-VM config pool field (already fetched for nets).
                         # Total expected VMs for this instance (all VMs here)
                         total_expected = len(names_viewable)
                         # Count of expected VMs that both exist and are in the pool
@@ -1033,7 +1118,7 @@ def instances_refresh_vm(pid: str):
                                 spec_name = spec.get('name') or ''
                                 # Match found_details to spec_name to get vmid (if created)
                                 fd = next((d for d in found_details if str(d.get('name') or '') == spec_name), None)
-                                if fd and fd.get('vmid') is not None and int(fd.get('vmid')) in member_vmids:
+                                if fd and str(fd.get('pool') or '') == str(poolid):
                                     in_count += 1
                             except Exception:
                                 continue
@@ -1511,14 +1596,21 @@ def instances_create(pid: str):
                         if user_rec is not None:
                             try:
                                 if current_app.config.get('ACL_DEBUG'):
-                                    current_app.logger.info(f"[create][ACL] applying role=PVEVMUser user={userid} vmid={newid}")
+                                    current_app.logger.info(f"[create][ACL] applying role=PVEUser user={userid} vmid={newid}")
                             except Exception:
                                 pass
                             try:
-                                client.set_acl_user_vm(userid, int(newid), roles='PVEVMUser', propagate=True)
+                                try:
+                                    client.set_acl_user_vm(userid, int(newid), roles='PVEUser', propagate=True)
+                                except Exception as e:
+                                    msg_low = str(e).lower()
+                                    if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
+                                        client.set_acl_user_vm(userid, int(newid), roles='PVEVMUser', propagate=True)
+                                    else:
+                                        raise
                                 assignment_info['acl_set'] = True
                                 try:
-                                    debug_msgs.append(f"acl_set: user={userid} vmid={int(newid)} role=PVEVMUser")
+                                    debug_msgs.append(f"acl_set: user={userid} vmid={int(newid)} role=PVEUser")
                                 except Exception:
                                     pass
                                 # Verify presence in ACL list (best effort)
@@ -3150,26 +3242,49 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
     vms_cfg = proj.vms or []
     cfg_map = { getattr(v, 'name', ''): v for v in vms_cfg }
     cfg_map_lc = { str(getattr(v, 'name', '')).lower(): v for v in vms_cfg }
-    # Build map of current VMs
+    # Build map of current VMs (parallel per-node fetch for speed)
     name_to_info = {}
     try:
-        nodes = client.list_nodes()
-        for n in nodes:
-            node = n.get('node') or n.get('id') or ''
+        nodes = client.list_nodes() or []
+
+        def _fetch_node_vms(node_info):
+            node = (node_info or {}).get('node') or (node_info or {}).get('id') or ''
+            node = str(node)
             if not node:
-                continue
+                return (None, [], None)
             try:
-                for q in client.list_qemu_vms(node):
-                    nm = str(q.get('name') or '')
-                    if nm:
-                        name_to_info[nm.lower()] = {
-                            'node': node,
-                            'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None,
-                            'name': nm,
-                            'status': (q.get('status') or q.get('qmpstatus') or '').lower(),
-                        }
-            except Exception:
-                continue
+                # Session objects are not thread-safe; create a new client per worker.
+                thread_client = ProxmoxClient(
+                    base_url=client.base_url,
+                    token=client.token,
+                    username=client.username,
+                    password=client.password,
+                    verify=client.verify,
+                )
+                qemus = thread_client.list_qemu_vms(node) or []
+                return (node, qemus, None)
+            except Exception as e:
+                return (node, [], e)
+
+        max_workers = min(len(nodes) or 1, 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_fetch_node_vms, n) for n in nodes]
+            for fut in as_completed(futures):
+                node, qemus, err = fut.result()
+                if err:
+                    continue
+                if not node:
+                    continue
+                for q in qemus:
+                    nm = str((q or {}).get('name') or '')
+                    if not nm:
+                        continue
+                    name_to_info[nm.lower()] = {
+                        'node': node,
+                        'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None,
+                        'name': nm,
+                        'status': (q.get('status') or q.get('qmpstatus') or '').lower(),
+                    }
     except Exception:
         return [], [], [{ 'reason': 'failed to list nodes' }]
     mapped = []
@@ -4016,7 +4131,14 @@ def instances_users_create(pid: str):
                                         current_app.logger.info(f"[users_create][ACL] applying user={userid} vmid={m.get('vmid')} name={gen_name}")
                                 except Exception:
                                     pass
-                                client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser', propagate=True)
+                                try:
+                                    client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEUser', propagate=True)
+                                except Exception as e:
+                                    msg_low = str(e).lower()
+                                    if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
+                                        client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser', propagate=True)
+                                    else:
+                                        raise
                                 applied += 1
                             except Exception as e2:
                                 if '501' in str(e2) and 'not implemented' not in str(e2).lower():
@@ -4257,6 +4379,285 @@ def instances_users_delete(pid: str):
             errors.append({ 'index': idx, 'reason': f'users_delete failed: {e}' })
     _end_job(pid)
     return jsonify({ 'deleted_users': deleted_users, 'deleted_pools': deleted_pools, 'errors': errors, 'notices': notices })
+
+
+@api_bp.route("/projects/<pid>/instances/actions/users_access_sync", methods=["POST"])
+def instances_users_access_sync(pid: str):
+    """Sync per-VM ACLs to match the current user accessibility setting.
+
+    This is used after toggling `viewable_to_user` so users immediately gain/lose
+    access to affected VMs in Proxmox.
+
+        Body:
+            - templates: ["baseTemplateName", ...]
+            - enable: bool
+            - indices: [1, 2, ...] (optional; when provided, only sync those instance rows)
+      - proxmox connection fields: baseUrl, apiPort, verifySSL, username/password (optional if API token configured)
+    """
+    _start_job(pid, 'users_access_sync')
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    body = request.get_json(force=True) or {}
+    enable = bool(body.get('enable'))
+    templates = body.get('templates') or []
+    if not isinstance(templates, list) or not templates:
+        return jsonify({"error": "No templates provided"}), 400
+    # Normalize templates to non-empty strings
+    norm_templates: List[str] = []
+    for t in templates:
+        try:
+            name = str(t or '').strip()
+        except Exception:
+            name = ''
+        if name:
+            norm_templates.append(name)
+    # De-dupe while preserving order
+    seen_tpl = set()
+    norm_templates = [t for t in norm_templates if not (t in seen_tpl or seen_tpl.add(t))]
+    if not norm_templates:
+        return jsonify({"error": "No templates provided"}), 400
+
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+    if not base_url or (not (username and password) and not getattr(proj, 'proxmox_api_token', '')):
+        return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+
+    client = ProxmoxClient(
+        base_url=base_url,
+        token=getattr(proj, 'proxmox_api_token', '') or None,
+        username=username,
+        password=password,
+        verify=verify,
+    )
+
+    def _norm_userid(uname: str) -> str:
+        u = str(uname or '').strip()
+        if not u:
+            return ''
+        return u if '@' in u else f"{u}@pve"
+
+    def _poolid_from_uname(uname: str) -> str:
+        base = str(uname or '').strip().split('@', 1)[0]
+        return re.sub(r"[^A-Za-z0-9_-]+", "", base)
+
+    tag_local = str(proj.tag or '').strip()
+    total_instances = int(getattr(proj, 'instances', 0) or 0)
+    if total_instances < 1:
+        total_instances = 1
+
+    # If indices were provided, only sync those instance rows; otherwise default to all.
+    indices_in = body.get('indices')
+    indices: List[int] = []
+    if isinstance(indices_in, list) and indices_in:
+        for raw in indices_in:
+            try:
+                idx = int(raw)
+            except Exception:
+                continue
+            if 1 <= idx <= total_instances:
+                indices.append(idx)
+        # De-dupe while preserving order
+        seen_idx = set()
+        indices = [i for i in indices if not (i in seen_idx or seen_idx.add(i))]
+    if not indices:
+        indices = list(range(1, total_instances + 1))
+
+    # Build target list: for each template, sync only the selected indices.
+    targets = []
+    for base in norm_templates:
+        for idx in indices:
+            targets.append({ 'index': idx, 'name': f"{base}{tag_local}{idx}" })
+
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+
+    applied: List[Dict[str, Any]] = []
+    unchanged: List[Dict[str, Any]] = []
+    infos: List[Dict[str, Any]] = []
+
+    # Cache: userid -> exists?
+    user_exists_cache: Dict[str, bool] = {}
+
+    # Build an index of existing ACL roles so we can:
+    # - avoid re-applying already-granted permissions (mark as unchanged)
+    # - avoid slow per-VM calls when nothing needs changing
+    existing_roles: Dict[tuple, set] = {}
+    have_acl_index = False
+    try:
+        entries = client.list_acls() or []
+        for e in entries:
+            try:
+                ugid = str(e.get('ugid') or '').strip()
+                path = str(e.get('path') or '').strip()
+                roleid = str(e.get('roleid') or '').strip()
+                if not ugid or not path or not roleid:
+                    continue
+                if not path.startswith('/'):
+                    path = f"/{path}"
+                key = (ugid, path)
+                if key not in existing_roles:
+                    existing_roles[key] = set()
+                existing_roles[key].add(roleid)
+            except Exception:
+                continue
+        have_acl_index = True
+    except Exception:
+        have_acl_index = False
+
+    def _has_access_role(roles_set: Any) -> bool:
+        try:
+            return ('PVEUser' in roles_set) or ('PVEVMUser' in roles_set)
+        except Exception:
+            return False
+
+    # Sync permissions for each mapped VM
+    for m in (mapped or []):
+        try:
+            idx = int(m.get('index') or 0)
+            vmid = int(m.get('vmid'))
+            name = str(m.get('name') or '')
+        except Exception:
+            continue
+        # Find credential username for this instance index
+        try:
+            cred = (proj.credentials or [])[idx-1] if idx-1 < len(proj.credentials or []) else None
+            uname = (cred or {}).get('username') or ''
+        except Exception:
+            uname = ''
+        if not uname:
+            skipped.append({ 'index': idx, 'name': name, 'reason': 'no credential username for instance' })
+            continue
+        userid = _norm_userid(uname)
+        poolid = None
+        try:
+            poolid = _poolid_from_uname(uname)
+        except Exception:
+            poolid = None
+        # Only update permissions if the user exists (cache result for speed)
+        try:
+            if userid in user_exists_cache:
+                exists = user_exists_cache[userid]
+            else:
+                user_rec = client.get_user(userid)
+                exists = user_rec is not None
+                user_exists_cache[userid] = exists
+            if not exists:
+                skipped.append({ 'index': idx, 'name': name, 'reason': f'user {userid} not found; skipping permission update' })
+                continue
+        except Exception as e:
+            errors.append({ 'index': idx, 'name': name, 'reason': f'user lookup failed: {e}' })
+            continue
+
+        vm_path = f"/vms/{int(vmid)}"
+        current_roles = existing_roles.get((userid, vm_path), set()) if have_acl_index else None
+
+        try:
+            if enable:
+                if current_roles is not None and _has_access_role(current_roles):
+                    unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permission already granted' })
+                else:
+                    role_used = 'PVEUser'
+                    # Prefer PVEUser; fall back to legacy role if missing.
+                    try:
+                        client.set_acl_user_vm(userid, vmid, roles='PVEUser', propagate=True)
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if 'role' in msg and ('not found' in msg or 'no such' in msg or 'does not exist' in msg):
+                            client.set_acl_user_vm(userid, vmid, roles='PVEVMUser', propagate=True)
+                            role_used = 'PVEVMUser'
+                        else:
+                            raise
+                    applied.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'action': 'grant', 'role': role_used })
+                    if have_acl_index:
+                        try:
+                            existing_roles.setdefault((userid, vm_path), set()).add(role_used)
+                        except Exception:
+                            pass
+            else:
+                if current_roles is not None and not _has_access_role(current_roles):
+                    unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permission already absent' })
+                else:
+                    roles_to_remove: List[str]
+                    if current_roles is not None:
+                        roles_to_remove = [r for r in ('PVEUser', 'PVEVMUser') if r in current_roles]
+                        # If ACL listing exists but is missing role info, be defensive.
+                        if not roles_to_remove:
+                            roles_to_remove = ['PVEUser', 'PVEVMUser']
+                    else:
+                        roles_to_remove = ['PVEUser', 'PVEVMUser']
+                    removed: List[str] = []
+                    for role in roles_to_remove:
+                        try:
+                            client.delete_acl_user_vm(userid, vmid, roles=role, propagate=True)
+                            removed.append(role)
+                            if have_acl_index:
+                                try:
+                                    existing_roles.setdefault((userid, vm_path), set()).discard(role)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            # delete_acl() treats "already absent" as success in most cases;
+                            # but if a particular Proxmox build errors, we continue best-effort.
+                            continue
+                    if not removed:
+                        unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permission already absent' })
+                    else:
+                        applied.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'action': 'revoke', 'roles_removed': removed })
+
+                # Legacy cleanup: older setups may grant access via pool ACLs.
+                # Best-effort revoke on the pool path so disabled accessibility truly removes visibility.
+                try:
+                    if poolid:
+                        for role in ('PVEUser', 'PVEVMUser'):
+                            try:
+                                client.delete_acl_user_pool(userid, poolid, roles=role, propagate=True)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+        except Exception as e:
+            errors.append({ 'index': idx, 'name': name, 'vmid': vmid, 'reason': f'Permission update failed: {e}' })
+
+    # Add an informational message to make result intent clear
+    try:
+        infos.append({
+            'reason': f"Permissions synced for selected rows only ({len(indices)} row(s), {len(norm_templates)} template(s))."
+        })
+    except Exception:
+        pass
+
+    _end_job(pid)
+    return jsonify({
+        'templates': norm_templates,
+        'indices': indices,
+        'enable': enable,
+        'applied': applied,
+        'unchanged': unchanged,
+        'skipped': skipped,
+        'errors': errors,
+        'infos': infos,
+    })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/run_startup_cmds", methods=["POST"])
@@ -9247,7 +9648,7 @@ def update_vm(pid: str, name: str):
         if "vmid" in data:
             fields["vmid"] = data.get("vmid")
         if "viewable_to_user" in data:
-            fields["viewable_to_user"] = bool(data.get("viewable_to_user"))
+            fields["viewable_to_user"] = _coerce_enabled(data.get("viewable_to_user"), True)
         if "start_commands" in data:
             fields["start_commands"] = data.get("start_commands")
         if "stored_commands" in data:

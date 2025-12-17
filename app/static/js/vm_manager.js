@@ -21,6 +21,19 @@ let CURRENT_ACTION = null;
 let ACTION_RUN_ID = 0;
 let FIX_CREDS_IN_PROGRESS = false;
 
+function _coerceEnabled(value, def = true) {
+  if (value === null || value === undefined) return def;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return def;
+    if (['false', '0', 'no', 'off', 'disabled'].includes(normalized)) return false;
+    if (['true', '1', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+  }
+  return !!value;
+}
+
 const VM_SCROLL_KEY = 'toolhub.vmManager.scrollTop';
 const STORED_CMD_SAMPLE_LIMIT = 3;
 const VM_DEFAULT_COMMAND_TIMEOUT_SECONDS = (() => {
@@ -773,7 +786,7 @@ async function refreshVmView(){
           const inst = Number(p.instances||0); const tag = String(p.tag||'').trim(); const vms = p.vms||[]; const creds = p.credentials||[];
           for (let i=1;i<=inst;i++){
             const suffix = `${tag}${i}`; const cred = creds[i-1]||{}; const uname=(cred.username??'').trim(); const pword=cred.password??''; const st = statusMap.get(i)||{}; const details = Array.isArray(st.vm_details)? st.vm_details : []; const detailMap = new Map(details.map(d=> [String(d.name||''), d]));
-            for (const v of vms){ const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; const d2 = detailMap.get(vmName)||null; const rowStatus = hasAnyStatus ? (d2 ? 'created':'missing') : 'n/a'; rows.push({ pid, project:p.name, index:i, vmName, baseName, viewable_to_user: !!(v && v.viewable_to_user), uname, pword, status: rowStatus, detail:d2, instStatus: st }); }
+            for (const v of vms){ const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; const d2 = detailMap.get(vmName)||null; const rowStatus = hasAnyStatus ? (d2 ? 'created':'missing') : 'n/a'; const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null; rows.push({ pid, project:p.name, index:i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail:d2, instStatus: st }); }
           }
         } catch (e) { try { (window.shell && shell.logWarn)? shell.logWarn(`Refresh skipped for ${p?.name||pid}: ${e?.message||e}`) : console.warn('Refresh skipped', pid, e); } catch {} }
         resolve();
@@ -788,7 +801,7 @@ async function refreshVmView(){
       const inst = Number(p.instances||0); const tag = String(p.tag||'').trim(); const vms = p.vms||[]; const creds = p.credentials||[];
       for (let i=1;i<=inst;i++){
         const suffix = `${tag}${i}`; const cred = creds[i-1]||{}; const uname=(cred.username??'').trim(); const pword=cred.password??'';
-  for (const v of vms){ const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; rows.push({ pid, project:p.name, index:i, vmName, baseName, viewable_to_user: !!(v && v.viewable_to_user), uname, pword, status: 'n/a', detail:null, instStatus: null }); }
+  for (const v of vms){ const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; rows.push({ pid, project:p.name, index:i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: null, uname, pword, status: 'n/a', detail:null, instStatus: null }); }
       }
     }
   } catch {}
@@ -830,7 +843,7 @@ function renderMergedVmTable(rows){
     host.innerHTML = '<div class="alert alert-info mb-0">No VM definitions are available for the selected projects. Configure VMs on the Configuration page or adjust the project selection.</div>';
     return;
   }
-  let filtered = allRows;
+    let filtered = allRows;
   if (f) {
     if (FILTER_IS_REGEX) {
       let re = null; try { re = new RegExp(FILTER_TEXT, 'i'); } catch { re = null; }
@@ -938,11 +951,12 @@ function renderMergedVmTable(rows){
         const tid = d&&d.template_id!=null? `#${d.template_id}`:'';
         const tn = d&&d.template_name? escHtml(d.template_name):'';
         const both = [tn, tid].filter(Boolean).join(' ');
-        const accessBadge = r.viewable_to_user
-          ? '<span class="badge bg-info text-dark" title="User-Accessible">User-Accessible</span>'
-          : '<span class="badge bg-secondary" title="Admin-only">Admin-only</span>';
-        return `<div>${both || '—'}</div><div class="mt-1">${accessBadge}</div>`;
+        return both || '—';
       })();
+      const effAccess = (r.user_access !== undefined && r.user_access !== null) ? _coerceEnabled(r.user_access, false) : _coerceEnabled(r.viewable_to_user, true);
+      const accessIcon = effAccess
+        ? '<i class="bi bi-sunglasses ms-1 text-success" title="User Access: Granted"></i>'
+        : '<i class="bi bi-sunglasses ms-1 text-white" style="-webkit-text-stroke: 0.5px #6c757d; text-shadow: 0 0 1px #6c757d;" title="User Access: Not granted"></i>';
       let adaptorsCell = '<span class="text-muted">—</span>';
       const nets = Array.isArray(d?.nets) ? d.nets : [];
       if (nets.length) {
@@ -960,7 +974,7 @@ function renderMergedVmTable(rows){
             `<div class="ms-2">${credExtras}</div>`+
           `</div>`+
         `</td>` : '') : '')+
-        (VM_COLS.status? `<td>${badgeForStatus('vm', r.status)}</td>`:'')+
+        (VM_COLS.status? `<td>${badgeForStatus('vm', r.status)}${accessIcon}</td>`:'')+
         (VM_COLS.state? `<td>${stateHtml}</td>`:'')+
         (VM_COLS.id? `<td>${idHtml}</td>`:'')+
         (VM_COLS.node? `<td>${nodeHtml}</td>`:'')+
@@ -1248,6 +1262,9 @@ function emitActionLogs(actionName, resp) {
     const deletedUsers = Array.isArray(resp?.deleted_users) ? resp.deleted_users : [];
     const deletedPools = Array.isArray(resp?.deleted_pools) ? resp.deleted_pools : [];
     const notices = Array.isArray(resp?.notices) ? resp.notices : [];
+    const infos = Array.isArray(resp?.infos) ? resp.infos : [];
+    const applied = Array.isArray(resp?.applied) ? resp.applied : [];
+    const unchanged = Array.isArray(resp?.unchanged) ? resp.unchanged : [];
     if (created.length) created.forEach(i => {
       try { shell.logSuccess(`${name}: created ${i?.name || ''} ${i?.vmid?`(#${i.vmid})`:''} ${i?.node?`on ${i.node}`:''}`); } catch {}
       try {
@@ -1275,6 +1292,16 @@ function emitActionLogs(actionName, resp) {
     });
     if (deletedUsers.length) deletedUsers.forEach(i => { try { shell.logSuccess(`${name}: user deleted ${i?.userid || ''}`); } catch {} });
     if (deletedPools.length) deletedPools.forEach(i => { try { shell.logSuccess(`${name}: pool deleted ${i?.pool || ''}${i?.index?` (instance ${i.index})`:''}`); } catch {} });
+    if (infos.length) infos.forEach(n => { try { shell.logInfo(`${name}: info — ${n?.reason || n}`); } catch {} });
+    if (applied.length) applied.forEach(a => {
+      try {
+        const verb = String(a?.action || '').toLowerCase() === 'revoke' ? 'revoked' : 'granted';
+        shell.logSuccess(`${name}: ${verb} — ${a?.name || ''} (instance ${a?.index || '?'})`);
+      } catch {}
+    });
+    if (unchanged.length) unchanged.forEach(u => {
+      try { shell.logWarn(`${name}: unchanged — ${u?.name || ''} (instance ${u?.index || '?'}) ${u?.reason?('('+u.reason+')'):''}`); } catch {}
+    });
     if (notices.length) notices.forEach(n => { try { shell.logWarn(`${name}: notice — ${n?.reason || n}`); } catch {} });
     if (skipped.length) skipped.forEach(s => { try { shell.logWarn(`${name}: skipped — ${s?.name || s?.index || ''} ${s?.reason?('('+s.reason+')'):''}`); } catch {} });
     if (errors.length) errors.forEach(e => { try { shell.logError(`${name}: error — ${e?.name || e?.node || ''} ${e?.reason || ''}`); } catch {} });
@@ -1309,7 +1336,7 @@ function renderVmTable(proj) {
       const key = `${projectKey}|${i}|${vmName}`;
       // Before first refresh, default to N/A; afterwards, show created/missing
       const rowStatus = hasAnyStatus ? (d ? 'created' : 'missing') : 'n/a';
-      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: !!(v && v.viewable_to_user), uname, pword, status: rowStatus, detail: d });
+      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: (d && d.user_access !== undefined && d.user_access !== null) ? _coerceEnabled(d.user_access, false) : null, uname, pword, status: rowStatus, detail: d });
     }
   }
   // Apply filter
@@ -1467,11 +1494,12 @@ function renderVmTable(proj) {
       const tid = (d && d.template_id !== undefined && d.template_id !== null) ? `#${d.template_id}` : '';
       const tn = (d && d.template_name) ? escHtml(d.template_name) : '';
       const both = [tn, tid].filter(Boolean).join(' ');
-      const accessBadge = r.viewable_to_user
-        ? '<span class="badge bg-info text-dark" title="User-Accessible">User-Accessible</span>'
-        : '<span class="badge bg-secondary" title="Admin-only">Admin-only</span>';
-      return `<div>${both || '—'}</div><div class="mt-1">${accessBadge}</div>`;
+      return both || '—';
     })();
+    const effAccess = (r.user_access !== undefined && r.user_access !== null) ? _coerceEnabled(r.user_access, false) : _coerceEnabled(r.viewable_to_user, true);
+    const accessIcon = effAccess
+      ? '<i class="bi bi-sunglasses ms-1 text-success" title="User Access: Granted"></i>'
+      : '<i class="bi bi-sunglasses ms-1 text-white" style="-webkit-text-stroke: 0.5px #6c757d; text-shadow: 0 0 1px #6c757d;" title="User Access: Not granted"></i>';
     // Adaptors list (single VM)
     let adaptorsCell = '<span class="text-muted">—</span>';
     const nets = Array.isArray(d?.nets) ? d.nets : [];
@@ -1520,7 +1548,7 @@ function renderVmTable(proj) {
                   `<div class=\"ms-2\">${credExtras}</div>`+
                 `</div>`+
               `</td>` : '') : '')+
-              (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}</td>` : '')+
+              (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}${accessIcon}</td>` : '')+
               (VM_COLS.state ? `<td>${stateHtml}</td>` : '')+
               (VM_COLS.id ? `<td>${idHtml}</td>` : '')+
               (VM_COLS.node ? `<td>${nodeHtml}</td>` : '')+
@@ -3696,8 +3724,10 @@ async function vmActionExec(action, opts = {}) {
 
     try {
       const uniqueBases = new Set();
+      const uniqueIndices = new Set();
       const skipped = [];
       for (const t of selected) {
+        try { uniqueIndices.add(Number(t.index)); } catch {}
         const base = toBaseName(t);
         if (!base || !baseNames.has(base)) {
           skipped.push({ name: String(t.name || ''), reason: 'template not found in project configuration' });
@@ -3706,27 +3736,53 @@ async function vmActionExec(action, opts = {}) {
         uniqueBases.add(base);
       }
       const bases = Array.from(uniqueBases);
+      const indices = Array.from(uniqueIndices).filter(n => Number.isFinite(n) && n > 0);
       if (!bases.length) {
         try { showActionSummary(prettyAction, { skipped, notices: [{ reason: 'No VM templates were updated.' }] }); } catch {}
         return;
       }
 
-      const notices = [];
-      let done = 0;
-      for (const base of bases) {
-        done += 1;
-        const pct = Math.round(10 + (done / bases.length) * 80);
-        setAp(pct, 'Working…', `${enable ? 'Enabling' : 'Disabling'} user accessibility for ${base}…`);
-        await http('PATCH', `/api/projects/${proj.id}/vms/${encodeURIComponent(base)}`, { viewable_to_user: enable });
-        // Update local snapshot so subsequent actions use the new state without a full refresh
-        try {
-          const vmCfg = (PROJ?.vms || []).find(v => String(v?.name || '') === base);
-          if (vmCfg) vmCfg.viewable_to_user = enable;
-        } catch {}
-        notices.push({ name: base, reason: `set user-accessible=${enable ? 'true' : 'false'}` });
-      }
-      setAp(100, 'Done', `Updated ${bases.length} template(s).`);
-      try { showActionSummary(prettyAction, { notices, skipped }); } catch {}
+      const infos = [];
+      const maxConcurrent = 4;
+      let completed = 0;
+      const queue = bases.slice();
+      const worker = async () => {
+        for (;;) {
+          const base = queue.shift();
+          if (!base) return;
+          const pct = Math.round(10 + (completed / Math.max(1, bases.length)) * 60);
+          setAp(pct, 'Working…', `${enable ? 'Enabling' : 'Disabling'} user accessibility for ${base}…`);
+          await http('PATCH', `/api/projects/${proj.id}/vms/${encodeURIComponent(base)}`, { viewable_to_user: enable });
+          // Update local snapshot so subsequent actions use the new state without a full refresh
+          try {
+            const vmCfg = (PROJ?.vms || []).find(v => String(v?.name || '') === base);
+            if (vmCfg) vmCfg.viewable_to_user = enable;
+          } catch {}
+          completed += 1;
+          infos.push({ name: base, reason: `set viewable_to_user=${enable ? 'true' : 'false'}` });
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(maxConcurrent, bases.length) }, () => worker()));
+
+      // Sync Proxmox ACLs so users immediately gain/lose access.
+      setAp(80, 'Syncing…', `${enable ? 'Granting' : 'Revoking'} Proxmox access…`);
+      const sess = readProxCreds(PROJ.id) || {};
+      const syncResp = await http('POST', `/api/projects/${PROJ.id}/instances/actions/users_access_sync`, {
+        username: sess.username || undefined,
+        password: sess.password || undefined,
+        baseUrl: PROJ.proxmox_url || undefined,
+        apiPort: PROJ.proxmox_api_port || undefined,
+        verifySSL: PROJ.proxmox_verify_ssl !== false,
+        templates: bases,
+        indices,
+        enable,
+      });
+
+      setAp(100, 'Done', `Updated ${bases.length} template(s) and synced permissions.`);
+      const merged = { ...(syncResp || {}) };
+      merged.infos = [ ...(Array.isArray(syncResp?.infos) ? syncResp.infos : []), ...infos ];
+      if (skipped.length) merged.skipped = [ ...(Array.isArray(syncResp?.skipped) ? syncResp.skipped : []), ...skipped ];
+      try { showActionSummary(prettyAction, merged); } catch {}
     } catch (e) {
       alert('Action failed: ' + (e?.message || e));
       try { showActionSummary(prettyAction, { errors: [{ reason: e?.message || String(e) }] }); } catch {}
@@ -4215,13 +4271,11 @@ async function vmActionMultiExec(action, opts = {}){
     byPid.get(entry.pid).push({ index: Number(entry.index), name: entry.name });
   }
   if (byPid.size===0) { alert('No valid selections.'); return; }
-  // Validate auth for Proxmox-backed actions; configuration-only actions do not require Proxmox credentials.
-  if (!(action === 'users_access_enable' || action === 'users_access_disable')) {
-    for (const pid of byPid.keys()) {
-      if (!hasAuthForPid(pid)) {
-        alert('Some selected projects are missing Proxmox credentials or token. Fix credentials and try again.');
-        return;
-      }
+  // Validate auth for actions.
+  for (const pid of byPid.keys()) {
+    if (!hasAuthForPid(pid)) {
+      alert('Some selected projects are missing Proxmox credentials or token. Fix credentials and try again.');
+      return;
     }
   }
   // Progress indicator routed through shared helpers
@@ -4267,6 +4321,115 @@ async function vmActionMultiExec(action, opts = {}){
   // Fetch latest projects list to ensure data
   try { const d = await http('GET','/api/projects'); ALL_PROJECTS = d.projects || ALL_PROJECTS; } catch {}
   const byId = {}; (ALL_PROJECTS||[]).forEach(p=> { const key = canonicalPid(p.id); if (key) byId[key] = p; });
+
+  // Fast-path: user accessibility actions can be safely parallelized across projects (limited concurrency)
+  if (action === 'users_access_enable' || action === 'users_access_disable') {
+    const enable = action === 'users_access_enable';
+    const maxProjConcurrent = Math.min(3, totalProjects);
+    const queue = pids.slice();
+    const runProject = async () => {
+      for (;;) {
+        const pid = queue.shift();
+        if (!pid) return;
+        const key = canonicalPid(pid);
+        const proj = byId[key];
+        if (!proj) {
+          doneProjects++;
+          continue;
+        }
+        const projName = String(proj.name || pid);
+        const sess = readProxCreds(pid) || {};
+        const baseBody = { username: sess.username || undefined, password: sess.password || undefined, baseUrl: proj.proxmox_url || undefined, apiPort: proj.proxmox_api_port || undefined, verifySSL: proj.proxmox_verify_ssl !== false };
+
+        let targets = (byPid.get(pid) || []).map(t => ({ index: Number(t.index), name: String(t.name) }));
+        const tagLocal = String(proj.tag || '').trim();
+        const baseNameSet = new Set((proj.vms || []).map(v => String(v.name || '')));
+        const toBaseLocal = (t) => {
+          const idxStr = String(t.index);
+          const suffix = `${tagLocal}${idxStr}`;
+          const full = String(t.name || '');
+          let base = full;
+          if (suffix && full.endsWith(suffix)) base = full.slice(0, full.length - suffix.length);
+          if (!baseNameSet.has(base)) {
+            for (const v of (proj.vms || [])) {
+              if (String(v.name || '') + suffix === full) { base = String(v.name || ''); break; }
+            }
+          }
+          return base;
+        };
+
+        const unique = new Set();
+        const idxSet = new Set();
+        const skippedLocal = [];
+        for (const t of targets) {
+          try { idxSet.add(Number(t.index)); } catch {}
+          const base = toBaseLocal(t);
+          if (!base || !baseNameSet.has(base)) {
+            skippedLocal.push({ name: String(t.name || ''), reason: 'template not found in project configuration' });
+            continue;
+          }
+          unique.add(base);
+        }
+        const bases = Array.from(unique);
+        const indices = Array.from(idxSet).filter(n => Number.isFinite(n) && n > 0);
+
+        const pct0 = Math.round((doneProjects / totalProjects) * 100);
+        setAp(Math.max(10, pct0), 'Working…', `${enable ? 'Enabling' : 'Disabling'} in ${projName}…`);
+
+        const infos = [];
+        const makeReq = async (path, body) => http('POST', `/api/projects/${encodeURIComponent(pid)}${path}`, body);
+        try {
+          if (bases.length) {
+            const maxConcurrent = 4;
+            let completed = 0;
+            const bq = bases.slice();
+            const worker = async () => {
+              for (;;) {
+                const base = bq.shift();
+                if (!base) return;
+                await http('PATCH', `/api/projects/${encodeURIComponent(pid)}/vms/${encodeURIComponent(base)}`, { viewable_to_user: enable });
+                try {
+                  const vmCfg = (proj?.vms || []).find(v => String(v?.name || '') === base);
+                  if (vmCfg) vmCfg.viewable_to_user = enable;
+                } catch {}
+                completed += 1;
+                infos.push({ name: base, reason: `set viewable_to_user=${enable ? 'true' : 'false'}` });
+              }
+            };
+            await Promise.all(Array.from({ length: Math.min(maxConcurrent, bases.length) }, () => worker()));
+          }
+
+          // Sync Proxmox ACLs
+          const syncResp = await makeReq('/instances/actions/users_access_sync', { ...baseBody, templates: bases, indices, enable });
+          addArr('applied', syncResp?.applied, projName);
+          addArr('unchanged', syncResp?.unchanged, projName);
+          addArr('errors', syncResp?.errors, projName);
+          addArr('skipped', syncResp?.skipped, projName);
+          addArr('infos', syncResp?.infos, projName);
+          addArr('infos', infos, projName);
+          addArr('skipped', skippedLocal, projName);
+        } catch (e) {
+          addArr('errors', [{ reason: e?.message || String(e) }], projName);
+        } finally {
+          doneProjects += 1;
+          const pct = Math.round((doneProjects / totalProjects) * 100);
+          setAp(Math.max(10, pct), 'Working…', `Completed ${doneProjects}/${totalProjects}: ${projName}`);
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: maxProjConcurrent }, () => runProject()));
+
+    try { showActionSummary(`Multi ${friendly}`, agg || {}); } catch {}
+    try { emitActionLogs(`Multi ${friendly}`, agg || {}); } catch {}
+    try { shell.endActionContext(true); } catch {}
+    ACTION_IN_FLIGHT = false; CURRENT_ACTION = null; updateRefreshState();
+    try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden','true'); } } catch {}
+    try { hideActionProgress(); } catch {}
+    try { Promise.resolve().then(() => vmRefresh()).catch(() => {}); } catch {}
+    return;
+  }
+
   // Iterate projects sequentially to keep UI manageable
   for (const pid of pids){
   const key = canonicalPid(pid);
@@ -4338,8 +4501,10 @@ async function vmActionMultiExec(action, opts = {}){
           return base;
         };
         const unique = new Set();
+        const idxSet = new Set();
         const skippedLocal = [];
         for (const t of targets) {
+          try { idxSet.add(Number(t.index)); } catch {}
           const base = toBaseLocal(t);
           if (!base || !baseNameSet.has(base)) {
             skippedLocal.push({ name: String(t.name||''), reason: 'template not found in project configuration' });
@@ -4348,16 +4513,38 @@ async function vmActionMultiExec(action, opts = {}){
           unique.add(base);
         }
         const bases = Array.from(unique);
+        const indices = Array.from(idxSet).filter(n => Number.isFinite(n) && n > 0);
         setAp(Math.max(20,pct), 'Working…', `${enable ? 'Enabling' : 'Disabling'} user accessibility in ${projName}…`);
-        const notices = [];
-        let k = 0;
-        for (const base of bases) {
-          k += 1;
-          setAp(Math.max(20,pct), 'Working…', `${enable ? 'Enabling' : 'Disabling'} ${base} (${k}/${bases.length || 1}) in ${projName}…`);
-          await http('PATCH', `/api/projects/${encodeURIComponent(pid)}/vms/${encodeURIComponent(base)}`, { viewable_to_user: enable });
-          notices.push({ name: base, reason: `set user-accessible=${enable ? 'true' : 'false'}` });
-        }
-        addArr('notices', notices, projName);
+        const infos = [];
+        const maxConcurrent = 4;
+        let completed = 0;
+        const queue = bases.slice();
+        const worker = async () => {
+          for (;;) {
+            const base = queue.shift();
+            if (!base) return;
+            setAp(Math.max(20,pct), 'Working…', `${enable ? 'Enabling' : 'Disabling'} ${base} (${completed+1}/${bases.length || 1}) in ${projName}…`);
+            await http('PATCH', `/api/projects/${encodeURIComponent(pid)}/vms/${encodeURIComponent(base)}`, { viewable_to_user: enable });
+            // Update in-memory snapshot for this project
+            try {
+              const vmCfg = (proj?.vms || []).find(v => String(v?.name || v?.name || '') === base);
+              if (vmCfg) vmCfg.viewable_to_user = enable;
+            } catch {}
+            completed += 1;
+            infos.push({ name: base, reason: `set viewable_to_user=${enable ? 'true' : 'false'}` });
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(maxConcurrent, bases.length) }, () => worker()));
+
+        // Sync Proxmox ACLs so user visibility matches the new flag.
+        setAp(Math.max(20,pct), 'Syncing…', `${enable ? 'Granting' : 'Revoking'} Proxmox access in ${projName}…`);
+        const syncResp = await makeReq('/instances/actions/users_access_sync', { ...baseBody, templates: bases, indices, enable });
+        addArr('applied', syncResp?.applied, projName);
+        addArr('unchanged', syncResp?.unchanged, projName);
+        addArr('errors', syncResp?.errors, projName);
+        addArr('skipped', syncResp?.skipped, projName);
+        addArr('infos', syncResp?.infos, projName);
+        addArr('infos', infos, projName);
         addArr('skipped', skippedLocal, projName);
         continue;
       }
@@ -4671,10 +4858,15 @@ function showActionSummary(actionName, resp) {
     const skipped = Array.isArray(resp.skipped) ? resp.skipped : [];
   const allErrors = Array.isArray(resp.errors) ? resp.errors : [];
   const notices = Array.isArray(resp.notices) ? resp.notices : [];
-  // Exclude ACL-related items from popup
+  const infos = Array.isArray(resp.infos) ? resp.infos : [];
+  const appliedPerms = Array.isArray(resp.applied) ? resp.applied : [];
+  const unchangedPerms = Array.isArray(resp.unchanged) ? resp.unchanged : [];
+  const isUserAccess = /user accessibility/i.test(String(actionName||'')) || ((resp && typeof resp.enable === 'boolean') && (appliedPerms.length || unchangedPerms.length));
+  // Historically, ACL-related items were filtered out to keep other action summaries tidy.
+  // For User Accessibility actions, permission details are the primary output.
   const isAcl = (s) => String(s || '').toLowerCase().includes('acl');
-  const errors = allErrors.filter(e => !isAcl(e?.reason));
-  const visibleNotices = notices.filter(n => !isAcl(n?.reason || n));
+  const errors = isUserAccess ? allErrors : allErrors.filter(e => !isAcl(e?.reason));
+  const visibleNotices = isUserAccess ? notices : notices.filter(n => !isAcl(n?.reason || n));
     const amb = Array.isArray(resp.ambiguous) ? resp.ambiguous : [];
   const appliedNodes = Array.isArray(resp.network_applied_nodes) ? resp.network_applied_nodes : [];
   const applyErrors = Array.isArray(resp.network_apply_errors) ? resp.network_apply_errors : [];
@@ -4734,6 +4926,80 @@ function showActionSummary(actionName, resp) {
   if (deletedPools.length) sections.push(`<h6>Pools Deleted</h6>${list(deletedPools, i => `<li>${esc(i.pool||'')} ${i.index?`(instance ${esc(i.index)})`:''}</li>`)}`);
     sections.push(`<h6>Skipped</h6>${list(skipped, s => `<li>${esc(s.name||s.index||'')} — ${esc(s.reason||'')}</li>`)}`);
     if (amb.length) sections.push(`<h6>Ambiguous</h6>${list(amb, a => `<li>${esc(a.name)} — candidates: ${(a.candidates||[]).map(c=>`#${esc(c.vmid)} on ${esc(c.node||'')}`).join(', ')}</li>`)}`);
+    if (isUserAccess) {
+      try {
+        const hasProject = [...appliedPerms, ...unchangedPerms, ...skipped, ...errors].some(x => x && typeof x === 'object' && x.project);
+        const keyFor = (item, idx) => {
+          const project = hasProject ? String(item?.project || '') : '';
+          return hasProject ? `${project}@@${idx}` : String(idx);
+        };
+        const labelFor = (key) => {
+          if (!hasProject) return { project: '', index: Number(key) };
+          const [p, raw] = String(key).split('@@');
+          return { project: p || '', index: Number(raw) };
+        };
+        const keySet = new Set();
+        (Array.isArray(resp.indices) ? resp.indices : []).forEach(i => {
+          const n = Number(i);
+          if (!Number.isFinite(n) || n <= 0) return;
+          // Single-project call: no project dimension
+          keySet.add(String(n));
+        });
+        const collect = (arr) => {
+          (Array.isArray(arr) ? arr : []).forEach(item => {
+            const idx = Number(item?.index);
+            if (!Number.isFinite(idx) || idx <= 0) return;
+            keySet.add(keyFor(item, idx));
+          });
+        };
+        collect(appliedPerms);
+        collect(unchangedPerms);
+        collect(skipped);
+        collect(errors);
+        const keys = Array.from(keySet).sort((a, b) => {
+          const aa = labelFor(a); const bb = labelFor(b);
+          if ((aa.project || '') !== (bb.project || '')) return String(aa.project || '').localeCompare(String(bb.project || ''));
+          return (aa.index || 0) - (bb.index || 0);
+        });
+        const byKey = (arr) => {
+          const m = new Map();
+          (Array.isArray(arr) ? arr : []).forEach(item => {
+            const idx = Number(item?.index);
+            if (!Number.isFinite(idx) || idx <= 0) return;
+            const k = keyFor(item, idx);
+            if (!m.has(k)) m.set(k, []);
+            m.get(k).push(item);
+          });
+          return m;
+        };
+        const appliedBy = byKey(appliedPerms);
+        const unchangedBy = byKey(unchangedPerms);
+        const skippedBy = byKey(skipped);
+        const errorsBy = byKey(errors);
+        const rows = keys.map(k => {
+          const meta = labelFor(k);
+          const a = appliedBy.get(k) || [];
+          const u = unchangedBy.get(k) || [];
+          const s = skippedBy.get(k) || [];
+          const e = errorsBy.get(k) || [];
+          const grants = a.filter(x => String(x?.action||'').toLowerCase()==='grant').length;
+          const revokes = a.filter(x => String(x?.action||'').toLowerCase()==='revoke').length;
+          const parts = [];
+          if (grants) parts.push(`${grants} granted`);
+          if (revokes) parts.push(`${revokes} revoked`);
+          if (u.length) parts.push(`${u.length} unchanged`);
+          if (s.length) parts.push(`${s.length} skipped`);
+          if (e.length) parts.push(`${e.length} error(s)`);
+          const label = hasProject ? `[${meta.project}] Instance ${meta.index}` : `Instance ${meta.index}`;
+          return { label, text: parts.length ? parts.join(' · ') : 'no matching VMs' };
+        });
+        if (rows.length) sections.push(`<h6>User Accessibility</h6>${list(rows, r => `<li>${esc(r.label)} — ${esc(r.text)}</li>`)}`);
+      } catch {}
+    }
+    // For User Accessibility actions, keep the summary focused on per-row permission results.
+    if (!isUserAccess && infos.length) {
+      sections.push(`<h6 class="text-muted">Info</h6>${list(infos, i => `<li>${esc(i.name||i.node||'')} — ${esc(i.reason||i)}</li>`)}`);
+    }
   if (visibleNotices.length) sections.push(`<h6 class="text-warning">Warnings</h6>${list(visibleNotices, w => `<li>${esc(w.name||w.node||'')} — ${esc(w.reason||w)}</li>`)}`);
   if (errors.length) sections.push(`<h6 class="text-danger">Errors</h6>${list(errors, e => `<li>${esc(e.name||e.node||'')} — ${esc(e.reason||'')}</li>`)}`);
   if (ran.length) sections.push(`<h6>Commands Run</h6>${list(ran, i => {
@@ -4763,7 +5029,9 @@ function showActionSummary(actionName, resp) {
       poweredOff.length ? `${poweredOff.length} powered off` : null,
       snapshotted.length ? `${snapshotted.length} snapshotted` : null,
       restored.length ? `${restored.length} restored` : null,
-      skipped.length ? `${skipped.length} skipped` : null,
+        skipped.length ? `${skipped.length} skipped` : null,
+        (isUserAccess && appliedPerms.length) ? `${appliedPerms.length} permission updates` : null,
+        (isUserAccess && unchangedPerms.length) ? `${unchangedPerms.length} unchanged` : null,
   errors.length ? `${errors.length} errors` : null,
   ran.length ? `${ran.length} hosts with cmds` : null,
       createdUsers.length ? `${createdUsers.length} user(s)` : null,

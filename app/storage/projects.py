@@ -728,6 +728,11 @@ class ProjectStore:
             for k, val in v.items():
                 if k in base:
                     base[k] = val
+            # Ensure viewable_to_user is a real bool (older data may store strings)
+            try:
+                base["viewable_to_user"] = _coerce_enabled(base.get("viewable_to_user"), True)
+            except Exception:
+                base["viewable_to_user"] = True
             # Normalize vmid to int if present
             if base.get("vmid") is not None:
                 try:
