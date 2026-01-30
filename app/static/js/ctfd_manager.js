@@ -17,7 +17,7 @@ let CTFD_SELECTED_KEYS = new Set(); // strings "pid:index"
 let CTFD_LAST_VISIBLE_KEYS = []; // visible keys for select-all in merged view
 // Existence cache: username -> boolean (exists on CTFd)
 // Map username -> metadata: { exists, user_rank, team_name, team_rank }
-let CTFD_USER_META = {}; 
+let CTFD_USER_META = {};
 // Sort mode toggles for headers
 let CTFD_USER_SORT_MODE = 'name'; // 'name' | 'rank'
 let CTFD_TEAM_SORT_MODE = 'name'; // 'name' | 'rank'
@@ -38,14 +38,14 @@ let CTFD_ACTIVE_AUDIO_PLAYBACK = null;
 let CTFD_ACTIVE_PLAY_BUTTON = null;
 let CTFD_ACTIVE_PLAY_TOKEN = 0;
 
-function ctfdStopActiveAudioPlayback(){
+function ctfdStopActiveAudioPlayback() {
   const active = CTFD_ACTIVE_AUDIO_PLAYBACK;
   if (!active) return;
   CTFD_ACTIVE_AUDIO_PLAYBACK = null;
-  try { if (active && typeof active.stop === 'function') active.stop(); } catch {}
+  try { if (active && typeof active.stop === 'function') active.stop(); } catch { }
 }
 
-function ctfdSetPlayStopButtonState(btn, playing){
+function ctfdSetPlayStopButtonState(btn, playing) {
   if (!btn) return;
   const isPlaying = !!playing;
   if (!btn.dataset.playTitle) btn.dataset.playTitle = btn.getAttribute('title') || 'Play';
@@ -54,10 +54,10 @@ function ctfdSetPlayStopButtonState(btn, playing){
   const playAria = btn.dataset.playAria || 'Play';
   const stopTitle = (playTitle === 'Preview audio') ? 'Stop audio'
     : (playTitle === 'Preview TTS') ? 'Stop'
-    : 'Stop';
+      : 'Stop';
   const stopAria = (playAria === 'Preview audio') ? 'Stop audio'
     : (playAria === 'Preview TTS') ? 'Stop'
-    : 'Stop';
+      : 'Stop';
 
   if (isPlaying) btn.dataset.playing = '1';
   else delete btn.dataset.playing;
@@ -67,44 +67,44 @@ function ctfdSetPlayStopButtonState(btn, playing){
     try {
       icon.classList.toggle('bi-play-fill', !isPlaying);
       icon.classList.toggle('bi-stop-fill', isPlaying);
-    } catch {}
+    } catch { }
   }
 
   const nextTitle = isPlaying ? stopTitle : playTitle;
   const nextAria = isPlaying ? stopAria : playAria;
-  try { btn.setAttribute('title', nextTitle); } catch {}
-  try { btn.setAttribute('aria-label', nextAria); } catch {}
-  try { btn.setAttribute('data-bs-original-title', nextTitle); } catch {}
+  try { btn.setAttribute('title', nextTitle); } catch { }
+  try { btn.setAttribute('aria-label', nextAria); } catch { }
+  try { btn.setAttribute('data-bs-original-title', nextTitle); } catch { }
 }
 
-function ctfdClearActivePlayButton(){
+function ctfdClearActivePlayButton() {
   if (!CTFD_ACTIVE_PLAY_BUTTON) return;
-  try { ctfdSetPlayStopButtonState(CTFD_ACTIVE_PLAY_BUTTON, false); } catch {}
+  try { ctfdSetPlayStopButtonState(CTFD_ACTIVE_PLAY_BUTTON, false); } catch { }
   CTFD_ACTIVE_PLAY_BUTTON = null;
 }
 
-function ctfdStopActiveSpeechPlayback(){
+function ctfdStopActiveSpeechPlayback() {
   try {
     const synth = window.speechSynthesis;
     if (synth && typeof synth.cancel === 'function') synth.cancel();
-  } catch {}
+  } catch { }
 }
 
-function ctfdStopActivePlayback(){
+function ctfdStopActivePlayback() {
   // Invalidate any in-flight playback loops (TTS/audio sequences) so delayed
   // segments don't resume after the user presses Stop.
-  try { CTFD_ACTIVE_PLAY_TOKEN = Number(CTFD_ACTIVE_PLAY_TOKEN || 0) + 1; } catch {}
+  try { CTFD_ACTIVE_PLAY_TOKEN = Number(CTFD_ACTIVE_PLAY_TOKEN || 0) + 1; } catch { }
   ctfdStopActiveAudioPlayback();
   ctfdStopActiveSpeechPlayback();
   ctfdClearActivePlayButton();
-  try { if (typeof window !== 'undefined' && typeof window.appStopActivePlayback === 'function') window.appStopActivePlayback(); } catch {}
+  try { if (typeof window !== 'undefined' && typeof window.appStopActivePlayback === 'function') window.appStopActivePlayback(); } catch { }
 }
 
 try {
   window.ctfdStopActivePlayback = ctfdStopActivePlayback;
   window.ctfdStopActiveAudioPlayback = ctfdStopActiveAudioPlayback;
   window.ctfdStopActiveSpeechPlayback = ctfdStopActiveSpeechPlayback;
-} catch {}
+} catch { }
 const CTFD_AUDIO_FALLBACKS = {
   ctfdFirstUser: [
     { freq: 784, dur: 0.18, gap: 0.08, type: 'square', gain: 0.22 },
@@ -152,7 +152,7 @@ const CTFD_AUDIO_FALLBACKS = {
   ]
 };
 
-function setButtonBusyState(btn, busy, label){
+function setButtonBusyState(btn, busy, label) {
   if (!btn) return;
   if (busy) {
     if (btn.dataset.busyState === '1') return;
@@ -173,13 +173,13 @@ function setButtonBusyState(btn, busy, label){
     delete btn.dataset.busyState;
   }
 }
-function setCtfdLoginBusy(busy){
+function setCtfdLoginBusy(busy) {
   setButtonBusyState(document.getElementById('btn-ctfd-save'), busy, 'Saving…');
 }
-function setCtfdMultiLoginBusy(busy){
+function setCtfdMultiLoginBusy(busy) {
   setButtonBusyState(document.getElementById('btn-ctfd-multi-save'), busy, 'Saving…');
 }
-function isCtfdLoginBusy(){
+function isCtfdLoginBusy() {
   const btn = document.getElementById('btn-ctfd-save');
   return !!(btn && btn.dataset.busyState === '1');
 }
@@ -203,11 +203,11 @@ let CTFD_CONFIG_REQUEST_TOKEN = 0;
 
 const CTFD_SCROLL_KEY = 'toolhub.ctfdManager.scrollTop';
 
-function ctfdScrollContainer(){
+function ctfdScrollContainer() {
   try { return document.getElementById('ctfd-table'); } catch { return null; }
 }
 
-function ctfdRestoreScrollPosition(){
+function ctfdRestoreScrollPosition() {
   try {
     const el = ctfdScrollContainer();
     if (!el) return;
@@ -219,38 +219,38 @@ function ctfdRestoreScrollPosition(){
       const max = Math.max(0, el.scrollHeight - el.clientHeight);
       el.scrollTop = Math.max(0, Math.min(top, max));
     });
-  } catch {}
+  } catch { }
 }
 
-function ctfdInitScrollPersistence(){
+function ctfdInitScrollPersistence() {
   const el = ctfdScrollContainer();
   if (!el || el._scrollPersistBound) return;
   el._scrollPersistBound = true;
   const save = () => {
-    try { sessionStorage.setItem(CTFD_SCROLL_KEY, String(el.scrollTop || 0)); } catch {}
+    try { sessionStorage.setItem(CTFD_SCROLL_KEY, String(el.scrollTop || 0)); } catch { }
   };
   el.addEventListener('scroll', save);
   window.addEventListener('beforeunload', save);
   ctfdRestoreScrollPosition();
 }
 
-function ctfdEnsureScrollPersistence(){
+function ctfdEnsureScrollPersistence() {
   ctfdInitScrollPersistence();
   ctfdRestoreScrollPosition();
 }
 
 document.addEventListener('DOMContentLoaded', ctfdEnsureScrollPersistence);
 
-function ctfdResetAudioCache(){
+function ctfdResetAudioCache() {
   Object.keys(CTFD_AUDIO_CACHE).forEach(key => { delete CTFD_AUDIO_CACHE[key]; });
   Object.keys(CTFD_AUDIO_ROTATION).forEach(key => { delete CTFD_AUDIO_ROTATION[key]; });
 }
-document.addEventListener('settings-changed', ()=>{
+document.addEventListener('settings-changed', () => {
   ctfdResetAudioCache();
   ctfdReschedulePeriodicForCurrent();
 });
 
-document.addEventListener('project-audio-updated', (ev)=>{
+document.addEventListener('project-audio-updated', (ev) => {
   try {
     if (CTFD_NOTIFY_MIGRATE_IN_PROGRESS) return;
     const pid = ev?.detail?.pid ? String(ev.detail.pid) : '';
@@ -259,15 +259,15 @@ document.addEventListener('project-audio-updated', (ev)=>{
     ctfdResetAudioCache();
     ctfdReschedulePeriodicForCurrent();
     ctfdRenderNotifyConfig();
-  } catch {}
+  } catch { }
 });
 
-function ctfdNotifyMigrationSessionKey(pid){
+function ctfdNotifyMigrationSessionKey(pid) {
   const id = String(pid || '').trim() || 'none';
   return `toolhub.ctfd.notify.templates.migrated.v1.${id}`;
 }
 
-function ctfdMigrateNotifyTemplatesToStringsInStore(audioStore){
+function ctfdMigrateNotifyTemplatesToStringsInStore(audioStore) {
   const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
   let changed = false;
   const outStore = { ...store };
@@ -308,7 +308,7 @@ function ctfdMigrateNotifyTemplatesToStringsInStore(audioStore){
 
     const nextEntry = { ...entry, speakTemplates: nextTemplates };
     // Prefer speakTemplates if present.
-    try { delete nextEntry.speakTemplate; } catch {}
+    try { delete nextEntry.speakTemplate; } catch { }
     outStore[key] = nextEntry;
     changed = true;
   });
@@ -316,14 +316,14 @@ function ctfdMigrateNotifyTemplatesToStringsInStore(audioStore){
   return { changed, audioStore: outStore };
 }
 
-function ctfdReadSettingsSafe(){
+function ctfdReadSettingsSafe() {
   try {
     if (typeof readSettings === 'function') return readSettings() || {};
-  } catch {}
+  } catch { }
   return {};
 }
 
-function ctfdSplitProjectAudioStore(audioStore){
+function ctfdSplitProjectAudioStore(audioStore) {
   const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
   const media = {};
   const events = {};
@@ -342,7 +342,7 @@ function ctfdSplitProjectAudioStore(audioStore){
   return { media, events };
 }
 
-function ctfdNormalizeMediaSound(entry){
+function ctfdNormalizeMediaSound(entry) {
   if (!entry || typeof entry !== 'object') return null;
   const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
 
@@ -375,7 +375,7 @@ function ctfdNormalizeMediaSound(entry){
   return null;
 }
 
-function ctfdListProjectMediaOptions(audioStore){
+function ctfdListProjectMediaOptions(audioStore) {
   const { media } = ctfdSplitProjectAudioStore(audioStore);
   const items = [];
   Object.entries(media).forEach(([key, entry]) => {
@@ -387,7 +387,7 @@ function ctfdListProjectMediaOptions(audioStore){
   return items;
 }
 
-function ctfdNotifyAudioTokenTitle(audioStore, soundKey){
+function ctfdNotifyAudioTokenTitle(audioStore, soundKey) {
   const key = String(soundKey || '').trim();
   if (!key) return 'Built-in tone (no uploaded clip selected).';
   try {
@@ -400,7 +400,7 @@ function ctfdNotifyAudioTokenTitle(audioStore, soundKey){
   }
 }
 
-function ctfdNotifyMediaLabelForKey(audioStore, soundKey){
+function ctfdNotifyMediaLabelForKey(audioStore, soundKey) {
   const key = String(soundKey || '').trim();
   if (!key) return '';
   try {
@@ -413,7 +413,7 @@ function ctfdNotifyMediaLabelForKey(audioStore, soundKey){
   }
 }
 
-function ctfdSelectHasValue(select, value){
+function ctfdSelectHasValue(select, value) {
   if (!select) return false;
   const desired = String(value || '').trim();
   if (!desired) return true;
@@ -422,11 +422,11 @@ function ctfdSelectHasValue(select, value){
     for (let i = 0; i < opts.length; i++) {
       if (String(opts[i].value || '') === desired) return true;
     }
-  } catch {}
+  } catch { }
   return false;
 }
 
-function ctfdSelectEnsureValue(select, value, label){
+function ctfdSelectEnsureValue(select, value, label) {
   if (!select) return;
   const desired = String(value || '').trim();
   if (!desired) return;
@@ -436,15 +436,15 @@ function ctfdSelectEnsureValue(select, value, label){
     opt.value = desired;
     opt.textContent = String(label || desired);
     select.appendChild(opt);
-  } catch {}
+  } catch { }
 }
 
-function ctfdSetBootstrapTooltipTitle(el, title){
+function ctfdSetBootstrapTooltipTitle(el, title) {
   if (!el) return;
   const next = String(title || '').trim() || 'Audio';
-  try { el.setAttribute('title', next); } catch {}
-  try { el.setAttribute('data-bs-original-title', next); } catch {}
-  try { el.setAttribute('data-bs-title', next); } catch {}
+  try { el.setAttribute('title', next); } catch { }
+  try { el.setAttribute('data-bs-original-title', next); } catch { }
+  try { el.setAttribute('data-bs-title', next); } catch { }
   try {
     if (!window.bootstrap) return;
     const inst = bootstrap.Tooltip.getInstance(el);
@@ -453,22 +453,22 @@ function ctfdSetBootstrapTooltipTitle(el, title){
       return;
     }
     if (inst) {
-      try { inst.dispose(); } catch {}
+      try { inst.dispose(); } catch { }
     }
     bootstrap.Tooltip.getInstance(el) || new bootstrap.Tooltip(el);
-  } catch {}
+  } catch { }
 }
 
-function ctfdGetProjectAudioStore(pid){
+function ctfdGetProjectAudioStore(pid) {
   const id = String(pid || '').trim();
   if (!id) return {};
   try {
     if (typeof getProjectAudio === 'function') return getProjectAudio(id) || {};
-  } catch {}
+  } catch { }
   return {};
 }
 
-function ctfdGetSettingsAudio(){
+function ctfdGetSettingsAudio() {
   // Notifications are now project-scoped and backed by /api/projects/<pid>/audio.
   const pid = ctfdCurrentPid();
   const audioStore = ctfdGetProjectAudioStore(pid);
@@ -520,20 +520,20 @@ const CTFD_NOTIFY_WHEN = {
   ctfdPeriodic: 'Plays on the periodic timer at the configured interval while enabled.'
 };
 
-function ctfdNotifyWhenDescriptionFor(key){
+function ctfdNotifyWhenDescriptionFor(key) {
   const k = String(key || '').trim();
   return CTFD_NOTIFY_WHEN[k] || 'Plays when this event triggers.';
 }
 
 let CTFD_NOTIFY_ACTIVE_EVENT_KEY = '';
 
-function ctfdNotifySetActiveEventKey(key){
+function ctfdNotifySetActiveEventKey(key) {
   const next = String(key || '').trim();
   if (!next) return;
   CTFD_NOTIFY_ACTIVE_EVENT_KEY = next;
 }
 
-function ctfdNotifyGetActiveEventKey(){
+function ctfdNotifyGetActiveEventKey() {
   const current = String(CTFD_NOTIFY_ACTIVE_EVENT_KEY || '').trim();
   if (current) return current;
   try {
@@ -544,7 +544,7 @@ function ctfdNotifyGetActiveEventKey(){
   } catch { return ''; }
 }
 
-function ctfdNotifyTemplateVarsForEvent(eventKey){
+function ctfdNotifyTemplateVarsForEvent(eventKey) {
   const key = String(eventKey || '').trim();
   if (!key) return [];
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
@@ -555,11 +555,11 @@ function ctfdNotifyTemplateVarsForEvent(eventKey){
   try {
     const defaultTemplate = ctfdNotifyDefaultSpeakTemplateFor(key);
     if (defaultTemplate) sources.push(defaultTemplate);
-  } catch {}
+  } catch { }
 
   const seen = new Set();
   const out = [];
-  const push = (name)=>{
+  const push = (name) => {
     const v = String(name || '').trim();
     if (!v) return;
     if (seen.has(v)) return;
@@ -574,7 +574,7 @@ function ctfdNotifyTemplateVarsForEvent(eventKey){
   // complete even when an event's default template doesn't reference them.
   try {
     Object.keys(CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS).forEach(push);
-  } catch {}
+  } catch { }
 
   const re = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
   sources.forEach(text => {
@@ -590,7 +590,7 @@ function ctfdNotifyTemplateVarsForEvent(eventKey){
   return out;
 }
 
-function ctfdNotifyTemplateVarDescription(name){
+function ctfdNotifyTemplateVarDescription(name) {
   const key = String(name || '').trim();
   return CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS[key] || 'Template variable.';
 }
@@ -603,7 +603,7 @@ const CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS = {
   user_first: 'User name (when available).',
   team_first: 'Team name (when available).',
   team_clause: 'Convenience text like “ from team <team>”.',
-  first_team: 'Leaderboard #1 team name (when available).',
+
   second_team: 'Leaderboard #2 team name (when available).',
   third_team: 'Leaderboard #3 team name (when available).',
   challenge: 'Challenge name (when available).',
@@ -631,7 +631,254 @@ const CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS = {
   pause_10: 'Pause for 10 seconds.'
 };
 
-function ctfdRenderNotifyTemplateVarsModal(){
+// Template Variable Autocomplete
+// ================================
+// Shows a dropdown with template variable suggestions when the user types {{
+
+let CTFD_AUTOCOMPLETE_ACTIVE_INPUT = null;
+let CTFD_AUTOCOMPLETE_DROPDOWN = null;
+let CTFD_AUTOCOMPLETE_SELECTED_INDEX = -1;
+
+function ctfdGetTemplateVariableNames() {
+  return Object.keys(CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS);
+}
+
+function ctfdCreateAutocompleteDropdown() {
+  if (CTFD_AUTOCOMPLETE_DROPDOWN) return CTFD_AUTOCOMPLETE_DROPDOWN;
+  const dropdown = document.createElement('div');
+  dropdown.id = 'ctfd-tpl-autocomplete';
+  dropdown.className = 'ctfd-autocomplete-dropdown';
+  dropdown.style.cssText = `
+    position: absolute;
+    z-index: 9999;
+    background: white;
+    border: 1px solid #dee2e6;
+    border-radius: 0.375rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+    max-height: 250px;
+    overflow-y: auto;
+    min-width: 280px;
+    display: none;
+  `;
+  document.body.appendChild(dropdown);
+  CTFD_AUTOCOMPLETE_DROPDOWN = dropdown;
+  return dropdown;
+}
+
+function ctfdHideAutocompleteDropdown() {
+  CTFD_AUTOCOMPLETE_ACTIVE_INPUT = null;
+  CTFD_AUTOCOMPLETE_SELECTED_INDEX = -1;
+  if (CTFD_AUTOCOMPLETE_DROPDOWN) {
+    CTFD_AUTOCOMPLETE_DROPDOWN.style.display = 'none';
+    CTFD_AUTOCOMPLETE_DROPDOWN.innerHTML = '';
+  }
+}
+
+function ctfdShowAutocompleteDropdown(input, filter) {
+  const dropdown = ctfdCreateAutocompleteDropdown();
+  const allVars = ctfdGetTemplateVariableNames();
+  const filterLower = (filter || '').toLowerCase();
+
+  // Filter variables based on what the user has typed after {{
+  const matches = allVars.filter(v => {
+    if (!filterLower) return true;
+    return v.toLowerCase().includes(filterLower);
+  });
+
+  if (!matches.length) {
+    ctfdHideAutocompleteDropdown();
+    return;
+  }
+
+  CTFD_AUTOCOMPLETE_ACTIVE_INPUT = input;
+  CTFD_AUTOCOMPLETE_SELECTED_INDEX = 0;
+
+  dropdown.innerHTML = matches.map((v, idx) => {
+    const desc = CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS[v] || '';
+    const isSelected = idx === 0;
+    return `<div class="ctfd-autocomplete-item${isSelected ? ' selected' : ''}" data-var="${escHtml(v)}" data-index="${idx}" style="
+      padding: 8px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid #f0f0f0;
+      ${isSelected ? 'background: #e9ecef;' : ''}
+    ">
+      <div style="font-weight: 500; color: #495057;"><code style="background: #f8f9fa; padding: 2px 6px; border-radius: 3px;">{{${escHtml(v)}}}</code></div>
+      <div style="font-size: 0.8em; color: #6c757d; margin-top: 2px;">${escHtml(desc)}</div>
+    </div>`;
+  }).join('');
+
+  // Position the dropdown below the input
+  const rect = input.getBoundingClientRect();
+  dropdown.style.left = rect.left + window.scrollX + 'px';
+  dropdown.style.top = (rect.bottom + window.scrollY + 2) + 'px';
+  dropdown.style.minWidth = Math.max(280, rect.width) + 'px';
+  dropdown.style.display = 'block';
+
+  // Add click handlers to items
+  dropdown.querySelectorAll('.ctfd-autocomplete-item').forEach(item => {
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const varName = item.getAttribute('data-var');
+      if (varName) ctfdInsertAutocompleteVariable(varName);
+    });
+    item.addEventListener('mouseenter', () => {
+      dropdown.querySelectorAll('.ctfd-autocomplete-item').forEach(el => {
+        el.style.background = '';
+        el.classList.remove('selected');
+      });
+      item.style.background = '#e9ecef';
+      item.classList.add('selected');
+      CTFD_AUTOCOMPLETE_SELECTED_INDEX = parseInt(item.getAttribute('data-index') || '0', 10);
+    });
+  });
+}
+
+function ctfdInsertAutocompleteVariable(varName) {
+  const input = CTFD_AUTOCOMPLETE_ACTIVE_INPUT;
+  if (!input) {
+    ctfdHideAutocompleteDropdown();
+    return;
+  }
+
+  const value = input.value || '';
+  const cursorPos = input.selectionStart || value.length;
+
+  // Find the position of the {{ that triggered autocomplete
+  const beforeCursor = value.substring(0, cursorPos);
+  const matchIndex = beforeCursor.lastIndexOf('{{');
+
+  if (matchIndex === -1) {
+    ctfdHideAutocompleteDropdown();
+    return;
+  }
+
+  // Replace from {{ to cursor with the complete variable
+  const beforeMatch = value.substring(0, matchIndex);
+  const afterCursor = value.substring(cursorPos);
+  const insertion = `{{${varName}}}`;
+
+  input.value = beforeMatch + insertion + afterCursor;
+
+  // Set cursor position after the inserted variable
+  const newCursorPos = beforeMatch.length + insertion.length;
+  input.setSelectionRange(newCursorPos, newCursorPos);
+  input.focus();
+
+  ctfdHideAutocompleteDropdown();
+}
+
+function ctfdHandleAutocompleteKeydown(e) {
+  if (!CTFD_AUTOCOMPLETE_DROPDOWN || CTFD_AUTOCOMPLETE_DROPDOWN.style.display === 'none') return;
+
+  const items = CTFD_AUTOCOMPLETE_DROPDOWN.querySelectorAll('.ctfd-autocomplete-item');
+  if (!items.length) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    CTFD_AUTOCOMPLETE_SELECTED_INDEX = Math.min(CTFD_AUTOCOMPLETE_SELECTED_INDEX + 1, items.length - 1);
+    ctfdUpdateAutocompleteSelection(items);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    CTFD_AUTOCOMPLETE_SELECTED_INDEX = Math.max(CTFD_AUTOCOMPLETE_SELECTED_INDEX - 1, 0);
+    ctfdUpdateAutocompleteSelection(items);
+  } else if (e.key === 'Enter' || e.key === 'Tab') {
+    const selected = items[CTFD_AUTOCOMPLETE_SELECTED_INDEX];
+    if (selected) {
+      e.preventDefault();
+      e.stopPropagation();
+      const varName = selected.getAttribute('data-var');
+      if (varName) ctfdInsertAutocompleteVariable(varName);
+    }
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    ctfdHideAutocompleteDropdown();
+  }
+}
+
+function ctfdUpdateAutocompleteSelection(items) {
+  items.forEach((item, idx) => {
+    if (idx === CTFD_AUTOCOMPLETE_SELECTED_INDEX) {
+      item.style.background = '#e9ecef';
+      item.classList.add('selected');
+      item.scrollIntoView({ block: 'nearest' });
+    } else {
+      item.style.background = '';
+      item.classList.remove('selected');
+    }
+  });
+}
+
+function ctfdHandleAutocompleteInput(e) {
+  const input = e.target;
+  if (!input) return;
+
+  const value = input.value || '';
+  const cursorPos = input.selectionStart || value.length;
+  const beforeCursor = value.substring(0, cursorPos);
+
+  // Check if we're inside an unclosed {{ pattern
+  const lastOpenBrace = beforeCursor.lastIndexOf('{{');
+  const lastCloseBrace = beforeCursor.lastIndexOf('}}');
+
+  // There's an open {{ after the last closing }}
+  if (lastOpenBrace > lastCloseBrace) {
+    const partial = beforeCursor.substring(lastOpenBrace + 2);
+    // Only show if no special characters except underscore (valid variable chars)
+    if (/^[a-zA-Z0-9_]*$/.test(partial)) {
+      ctfdShowAutocompleteDropdown(input, partial);
+      return;
+    }
+  }
+
+  ctfdHideAutocompleteDropdown();
+}
+
+function ctfdIsTemplateInput(el) {
+  if (!el) return false;
+  const role = el.getAttribute('data-role');
+  return role === 'notify-tts-new' || role === 'notify-tts-text';
+}
+
+function ctfdWireAutocomplete() {
+  // Use event delegation on the document for template inputs
+  document.addEventListener('input', (e) => {
+    if (ctfdIsTemplateInput(e.target)) {
+      ctfdHandleAutocompleteInput(e);
+    }
+  });
+
+  // Use capture phase so autocomplete intercepts Enter before "Add" button handler
+  document.addEventListener('keydown', (e) => {
+    if (ctfdIsTemplateInput(e.target)) {
+      ctfdHandleAutocompleteKeydown(e);
+    }
+  }, true);
+
+  // Hide autocomplete when clicking outside
+  document.addEventListener('click', (e) => {
+    if (CTFD_AUTOCOMPLETE_DROPDOWN && CTFD_AUTOCOMPLETE_DROPDOWN.style.display !== 'none') {
+      if (!CTFD_AUTOCOMPLETE_DROPDOWN.contains(e.target) && !ctfdIsTemplateInput(e.target)) {
+        ctfdHideAutocompleteDropdown();
+      }
+    }
+  });
+
+  // Hide on blur with a small delay to allow click on dropdown
+  document.addEventListener('focusout', (e) => {
+    if (ctfdIsTemplateInput(e.target)) {
+      setTimeout(() => {
+        if (CTFD_AUTOCOMPLETE_ACTIVE_INPUT === e.target) {
+          ctfdHideAutocompleteDropdown();
+        }
+      }, 150);
+    }
+  });
+}
+
+// Initialize autocomplete when DOM is ready
+document.addEventListener('DOMContentLoaded', ctfdWireAutocomplete);
+
+function ctfdRenderNotifyTemplateVarsModal() {
   const body = document.getElementById('ctfd-template-vars-body');
   if (!body) return;
 
@@ -649,32 +896,32 @@ function ctfdRenderNotifyTemplateVarsModal(){
   }).join('');
 }
 
-function ctfdWireNotifyTemplateVarsModal(){
+function ctfdWireNotifyTemplateVarsModal() {
   const modal = document.getElementById('ctfdTemplateVarsModal');
   if (!modal || modal._toolhubBound) return;
   modal.addEventListener('show.bs.modal', () => {
     try {
       ctfdRenderNotifyTemplateVarsModal();
-    } catch {}
+    } catch { }
   });
   modal._toolhubBound = true;
 }
 
-function ctfdOpenNotifyTemplateVarsModal(){
+function ctfdOpenNotifyTemplateVarsModal() {
   try {
     const modalEl = document.getElementById('ctfdTemplateVarsModal');
     if (!modalEl || !window.bootstrap) return;
     try {
       ctfdRenderNotifyTemplateVarsModal();
-    } catch {}
+    } catch { }
     try {
       const inst = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
       inst.show();
-    } catch {}
-  } catch {}
+    } catch { }
+  } catch { }
 }
 
-function ctfdNotifyEventKeys(){
+function ctfdNotifyEventKeys() {
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
   const keys = Object.keys(meta);
   // Prefer stable ordering when meta is missing.
@@ -684,29 +931,29 @@ function ctfdNotifyEventKeys(){
   return keys;
 }
 
-function ctfdNotifyLabelFor(key){
+function ctfdNotifyLabelFor(key) {
   return CTFD_NOTIFY_LABELS[key] || key;
 }
 
-function ctfdNotifyIsMultiMode(){
+function ctfdNotifyIsMultiMode() {
   return Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
 }
 
-function ctfdNotifyDefaultSpeakTemplateFor(eventKey){
+function ctfdNotifyDefaultSpeakTemplateFor(eventKey) {
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
   const cfg = meta && typeof meta === 'object' ? meta[eventKey] : {};
   const tpl = cfg && typeof cfg.defaultSpeakTemplate === 'string' ? cfg.defaultSpeakTemplate : '';
   return String(tpl || '');
 }
 
-function ctfdNotifyDefaultSpeakEnabledFor(eventKey){
+function ctfdNotifyDefaultSpeakEnabledFor(eventKey) {
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
   const cfg = meta && typeof meta === 'object' ? meta[eventKey] : {};
   if (cfg && cfg.defaultSpeak !== undefined) return !!cfg.defaultSpeak;
   return false;
 }
 
-function ctfdNotifySampleNewTemplateFor(eventKey){
+function ctfdNotifySampleNewTemplateFor(eventKey) {
   const key = String(eventKey || '').trim();
   // Samples should only use placeholders that exist in the Template Variables modal.
   if (key === 'ctfdFirstUser') return '{{audio}} New #1 user: {{user_first}} ({{points}} points).';
@@ -720,7 +967,7 @@ function ctfdNotifySampleNewTemplateFor(eventKey){
   return '{{audio}} Event update.';
 }
 
-function ctfdNotifyNormalizeTemplateItemsForUi(source){
+function ctfdNotifyNormalizeTemplateItemsForUi(source) {
   const out = [];
   const entry = source && typeof source === 'object' ? source : {};
   if (Array.isArray(entry.speakTemplates)) {
@@ -750,14 +997,14 @@ function ctfdNotifyNormalizeTemplateItemsForUi(source){
   return out;
 }
 
-function ctfdNotifyClipOptionsHtml(mediaItems, rowSoundKey, audioStore){
+function ctfdNotifyClipOptionsHtml(mediaItems, rowSoundKey, audioStore) {
   const items = Array.isArray(mediaItems) ? mediaItems : [];
   // Per-item selection is explicit (no inheritance). Empty means "no uploaded clip".
   const clipOptions = items.map(item => `<option value="${escHtml(item.key)}">${escHtml(item.name || 'Audio')}</option>`).join('');
   return `<option value="">No clip</option>${clipOptions}`;
 }
 
-function ctfdNotifyTemplateItemHtml(tplItem, rowSoundKey, audioStore, clipOptionsHtml){
+function ctfdNotifyTemplateItemHtml(tplItem, rowSoundKey, audioStore, clipOptionsHtml) {
   const obj = (tplItem && typeof tplItem === 'object') ? tplItem : { text: tplItem };
   const text = obj.text !== undefined ? String(obj.text || '') : '';
   const itemSoundKey = typeof obj.soundKey === 'string' ? String(obj.soundKey || '').trim() : '';
@@ -785,7 +1032,7 @@ function ctfdNotifyTemplateItemHtml(tplItem, rowSoundKey, audioStore, clipOption
 </div>`;
 }
 
-function ctfdNotifyTemplatesListHtml(templates, defaultTemplate, rowSoundKey, audioStore){
+function ctfdNotifyTemplatesListHtml(templates, defaultTemplate, rowSoundKey, audioStore) {
   const list = Array.isArray(templates) ? templates : [];
   if (!list.length) {
     const hint = defaultTemplate ? `Uses default: ${defaultTemplate}` : 'No templates.';
@@ -796,7 +1043,7 @@ function ctfdNotifyTemplatesListHtml(templates, defaultTemplate, rowSoundKey, au
   return list.map(t => ctfdNotifyTemplateItemHtml(t, rowSoundKey, audioStore, clipOptionsHtml)).join('');
 }
 
-async function ctfdRenderNotifyConfig(options){
+async function ctfdRenderNotifyConfig(options) {
   const rows = document.getElementById('ctfd-notify-rows');
   const status = document.getElementById('ctfd-notify-status');
   const saveBtn = document.getElementById('ctfd-notify-save');
@@ -829,7 +1076,7 @@ async function ctfdRenderNotifyConfig(options){
       // on every refresh. Use cached store unless the user explicitly hits Reload.
       await loadProjectAudio(pid, { force: forceReload, silent: true });
     }
-  } catch {}
+  } catch { }
   let audioStore = ctfdGetProjectAudioStore(pid);
   const { events } = ctfdSplitProjectAudioStore(audioStore);
   const mediaItems = ctfdListProjectMediaOptions(audioStore);
@@ -902,10 +1149,10 @@ async function ctfdRenderNotifyConfig(options){
   try {
     if (window.bootstrap) {
       rows.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
-        try { bootstrap.Tooltip.getInstance(el) || new bootstrap.Tooltip(el); } catch {}
+        try { bootstrap.Tooltip.getInstance(el) || new bootstrap.Tooltip(el); } catch { }
       });
     }
-  } catch {}
+  } catch { }
 
   // Apply selected values after row HTML exists.
   rows.querySelectorAll('tr[data-event-key]').forEach(tr => {
@@ -920,16 +1167,16 @@ async function ctfdRenderNotifyConfig(options){
       const desired = init !== null ? String(init || '').trim() : '';
       ctfdSelectEnsureValue(sel, desired, ctfdNotifyMediaLabelForKey(audioStore, desired));
       if (desired) {
-        try { sel.value = desired; } catch {}
+        try { sel.value = desired; } catch { }
       } else {
-        try { sel.value = ''; } catch {}
+        try { sel.value = ''; } catch { }
       }
       try {
         const item = sel.closest('[data-role="notify-tts-item"]');
         const hidden = item ? item.querySelector('input[data-role="notify-tts-soundkey"]') : null;
         if (hidden) hidden.value = String(sel.value || '').trim();
-      } catch {}
-      try { sel.removeAttribute('data-initial-sound-key'); } catch {}
+      } catch { }
+      try { sel.removeAttribute('data-initial-sound-key'); } catch { }
     });
     tr.querySelectorAll('code[data-role="notify-audio-token"][data-sound-source="item"]').forEach(token => {
       try {
@@ -938,14 +1185,14 @@ async function ctfdRenderNotifyConfig(options){
         const effective = hidden ? String(hidden.value || '').trim() : '';
         const title = ctfdNotifyAudioTokenTitle(audioStore, effective);
         ctfdSetBootstrapTooltipTitle(token, title);
-      } catch {}
+      } catch { }
     });
   });
 
   if (status) status.textContent = mediaItems.length ? '' : 'No uploaded audio yet. Upload files in Settings → Media Manager.';
 }
 
-async function ctfdSaveNotifyConfig(){
+async function ctfdSaveNotifyConfig() {
   const status = document.getElementById('ctfd-notify-status');
   const pid = ctfdCurrentPid();
   if (!pid) return;
@@ -1007,7 +1254,7 @@ async function ctfdSaveNotifyConfig(){
     next.speak = speak;
     next.playOrder = playOrder;
     // Row-level clip selection is disabled; clips are configured per-template item only.
-    try { delete next.soundKey; } catch {}
+    try { delete next.soundKey; } catch { }
 
     // Periodic interval (seconds) — stored only for the periodic event.
     if (eventKey === 'ctfdPeriodic') {
@@ -1015,15 +1262,15 @@ async function ctfdSaveNotifyConfig(){
       if (Number.isFinite(raw) && raw > 0) {
         next.intervalSeconds = Math.max(1, Math.round(raw));
       } else {
-        try { delete next.intervalSeconds; } catch {}
+        try { delete next.intervalSeconds; } catch { }
       }
     } else {
-      try { delete next.intervalSeconds; } catch {}
+      try { delete next.intervalSeconds; } catch { }
     }
 
     // Store templates as strings (TTS only) OR dicts ({ text, soundKey }) when a per-item clip is selected.
     next.speakTemplates = templates;
-    try { delete next.speakTemplate; } catch {}
+    try { delete next.speakTemplate; } catch { }
 
     audioStore[storeKey] = next;
   });
@@ -1032,7 +1279,7 @@ async function ctfdSaveNotifyConfig(){
     if (typeof saveProjectAudio === 'function') {
       await saveProjectAudio(pid, audioStore);
       if (status) status.textContent = 'Saved.';
-      setTimeout(() => { try { if (status && status.textContent === 'Saved.') status.textContent = ''; } catch {} }, 1500);
+      setTimeout(() => { try { if (status && status.textContent === 'Saved.') status.textContent = ''; } catch { } }, 1500);
     } else {
       if (status) status.textContent = 'Save is unavailable.';
     }
@@ -1041,16 +1288,16 @@ async function ctfdSaveNotifyConfig(){
   }
 }
 
-function ctfdWireNotifyConfig(){
+function ctfdWireNotifyConfig() {
   const reloadBtn = document.getElementById('ctfd-notify-reload');
   const saveBtn = document.getElementById('ctfd-notify-save');
   const rows = document.getElementById('ctfd-notify-rows');
   if (reloadBtn && !reloadBtn._toolhubBound) {
-    reloadBtn.addEventListener('click', ()=> ctfdRenderNotifyConfig({ force: true }));
+    reloadBtn.addEventListener('click', () => ctfdRenderNotifyConfig({ force: true }));
     reloadBtn._toolhubBound = true;
   }
   if (saveBtn && !saveBtn._toolhubBound) {
-    saveBtn.addEventListener('click', ()=> ctfdSaveNotifyConfig());
+    saveBtn.addEventListener('click', () => ctfdSaveNotifyConfig());
     saveBtn._toolhubBound = true;
   }
   if (rows && !rows._toolhubBound) {
@@ -1081,7 +1328,7 @@ function ctfdWireNotifyConfig(){
         try {
           const empty = list.querySelector('[data-role="notify-tts-empty"]');
           if (empty) empty.remove();
-        } catch {}
+        } catch { }
         let audioStore = {};
         try {
           const pid = ctfdCurrentPid();
@@ -1101,14 +1348,14 @@ function ctfdWireNotifyConfig(){
             const sel = newItem.querySelector('select[data-role="notify-tts-sound"]');
             if (sel) {
               const init = sel.getAttribute('data-initial-sound-key');
-              try { sel.value = init !== null ? String(init || '').trim() : ''; } catch {}
-              try { sel.removeAttribute('data-initial-sound-key'); } catch {}
+              try { sel.value = init !== null ? String(init || '').trim() : ''; } catch { }
+              try { sel.removeAttribute('data-initial-sound-key'); } catch { }
 
               // Persist the per-item selection into the hidden field.
               try {
                 const hidden = newItem.querySelector('input[data-role="notify-tts-soundkey"]');
                 if (hidden) hidden.value = String(sel.value || '').trim();
-              } catch {}
+              } catch { }
             }
             const token = newItem.querySelector('code[data-role="notify-audio-token"]');
             if (token) {
@@ -1117,17 +1364,17 @@ function ctfdWireNotifyConfig(){
               ctfdSetBootstrapTooltipTitle(token, ctfdNotifyAudioTokenTitle(audioStore, effective));
             }
           }
-        } catch {}
+        } catch { }
         if (input) input.value = '';
 
         // Tooltips for newly inserted controls.
         try {
           if (window.bootstrap) {
             list.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
-              try { bootstrap.Tooltip.getInstance(el) || new bootstrap.Tooltip(el); } catch {}
+              try { bootstrap.Tooltip.getInstance(el) || new bootstrap.Tooltip(el); } catch { }
             });
           }
-        } catch {}
+        } catch { }
         return;
       }
 
@@ -1164,14 +1411,14 @@ function ctfdWireNotifyConfig(){
           try {
             if (CTFD_ACTIVE_PLAY_BUTTON === ttsPlayBtn) CTFD_ACTIVE_PLAY_BUTTON = null;
             ctfdSetPlayStopButtonState(ttsPlayBtn, false);
-          } catch {}
+          } catch { }
         };
         try {
           if (window.shell && shell.isRemote && shell.isRemote()) {
             revert();
             return;
           }
-        } catch {}
+        } catch { }
         const item = ttsPlayBtn.closest('[data-role="notify-tts-item"]');
         const tr = ttsPlayBtn.closest('tr[data-event-key]');
         if (!item || !tr) {
@@ -1197,7 +1444,29 @@ function ctfdWireNotifyConfig(){
         const skipAudioSegments = !soundKey || !sound || !sound.dataUrl;
 
         const payload = {
-          context: { name: 'Example', team: 'Example', category: 'Example', points: 0, rank: 1 },
+          context: {
+            leader: 'CHIRPies',
+            user_first: 'Alex Jordan',
+            team_first: 'CHIRPies',
+            team_clause: ' from CHIRPies',
+            project: 'Cyber Shield',
+            project_clause: ' in Cyber Shield',
+            second_team: 'Sigma Squad',
+            third_team: 'Byte Force',
+            challenge: 'Forensics Intro',
+            challenge_clause: ' on Forensics Intro',
+            category: 'Forensics',
+            category_clause: ' in Forensics',
+            points: '100',
+            points_clause: ' worth 100 points',
+            reason: 'scoreboard reveal',
+            reason_clause: ' for scoreboard reveal',
+            countdown_seconds: '10',
+            interval_minutes: '30',
+            interval_seconds: '1800',
+            interval_minutes_clause: ' 30 minutes',
+            interval_seconds_clause: ' 1800 seconds'
+          },
           fallbackText: label
         };
 
@@ -1214,13 +1483,13 @@ function ctfdWireNotifyConfig(){
               return { played: false, duration: 0 };
             }
           }
-        }).catch(()=>{}).finally(() => {
+        }).catch(() => { }).finally(() => {
           try {
             if (CTFD_ACTIVE_PLAY_BUTTON !== ttsPlayBtn) return;
             if (ttsPlayBtn.dataset.playToken !== token) return;
             ctfdSetPlayStopButtonState(ttsPlayBtn, false);
             CTFD_ACTIVE_PLAY_BUTTON = null;
-          } catch {}
+          } catch { }
         });
         return;
       }
@@ -1240,7 +1509,7 @@ function ctfdWireNotifyConfig(){
         try {
           const hidden = item.querySelector('input[data-role="notify-tts-soundkey"]');
           if (hidden) hidden.value = selectedKey;
-        } catch {}
+        } catch { }
         const title = ctfdNotifyAudioTokenTitle(audioStore, selectedKey);
         item.querySelectorAll('code[data-role="notify-audio-token"]').forEach(token => {
           ctfdSetBootstrapTooltipTitle(token, title);
@@ -1253,7 +1522,7 @@ function ctfdWireNotifyConfig(){
       try {
         const tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-event-key]') : null;
         if (tr) ctfdNotifySetActiveEventKey(tr.getAttribute('data-event-key') || '');
-      } catch {}
+      } catch { }
       const input = ev.target && ev.target.closest ? ev.target.closest('input[data-role="notify-tts-new"]') : null;
       if (!input) return;
       if (ev.key !== 'Enter') return;
@@ -1268,7 +1537,7 @@ function ctfdWireNotifyConfig(){
   document.addEventListener('project-selected', () => ctfdRenderNotifyConfig());
   ctfdRenderNotifyConfig();
 }
-function ctfdClearPeriodicTimer(){
+function ctfdClearPeriodicTimer() {
   if (CTFD_PERIODIC_TIMER) {
     clearTimeout(CTFD_PERIODIC_TIMER);
     CTFD_PERIODIC_TIMER = null;
@@ -1276,7 +1545,7 @@ function ctfdClearPeriodicTimer(){
   CTFD_PERIODIC_ACTIVE_PID = '';
 }
 
-function ctfdPeriodicIntervalSeconds(entry){
+function ctfdPeriodicIntervalSeconds(entry) {
   const obj = entry && typeof entry === 'object' ? entry : {};
   const sec = Number(obj.intervalSeconds);
   if (Number.isFinite(sec) && sec > 0) return sec;
@@ -1285,7 +1554,7 @@ function ctfdPeriodicIntervalSeconds(entry){
   return NaN;
 }
 
-function ctfdSchedulePeriodicTimer(pid){
+function ctfdSchedulePeriodicTimer(pid) {
   const targetPid = pid || ctfdCurrentPid() || '';
   if (!targetPid) {
     ctfdClearPeriodicTimer();
@@ -1301,7 +1570,7 @@ function ctfdSchedulePeriodicTimer(pid){
   const delayMs = Math.max(1000, Math.round(intervalSeconds * 1000));
   ctfdClearPeriodicTimer();
   CTFD_PERIODIC_ACTIVE_PID = String(targetPid);
-  CTFD_PERIODIC_TIMER = setTimeout(()=>{
+  CTFD_PERIODIC_TIMER = setTimeout(() => {
     const activePid = CTFD_PERIODIC_ACTIVE_PID || ctfdCurrentPid() || '';
     if (!activePid) {
       ctfdClearPeriodicTimer();
@@ -1311,7 +1580,7 @@ function ctfdSchedulePeriodicTimer(pid){
     ctfdSchedulePeriodicTimer(activePid);
   }, delayMs);
 }
-function ctfdReschedulePeriodicForProject(pid){
+function ctfdReschedulePeriodicForProject(pid) {
   const targetPid = pid || ctfdCurrentPid() || '';
   if (!targetPid) {
     ctfdClearPeriodicTimer();
@@ -1326,10 +1595,10 @@ function ctfdReschedulePeriodicForProject(pid){
   }
   ctfdSchedulePeriodicTimer(targetPid);
 }
-function ctfdReschedulePeriodicForCurrent(){
+function ctfdReschedulePeriodicForCurrent() {
   ctfdReschedulePeriodicForProject(ctfdCurrentPid());
 }
-function ctfdCategoryState(pid){
+function ctfdCategoryState(pid) {
   const key = String(pid || '').trim();
   if (!key) return { user: {}, team: {} };
   if (!CTFD_CATEGORY_FIRSTS[key]) {
@@ -1342,15 +1611,15 @@ function ctfdCategoryState(pid){
   if (state.seededTeam === undefined) state.seededTeam = false;
   return state;
 }
-function ctfdNormalizeCategoryName(name){
+function ctfdNormalizeCategoryName(name) {
   const raw = typeof name === 'string' ? name.trim() : '';
   if (!raw) return 'Uncategorized';
   return raw;
 }
-function ctfdCategoryKey(name){
+function ctfdCategoryKey(name) {
   return ctfdNormalizeCategoryName(name).toLowerCase();
 }
-function ctfdNormalizeCategorySolve(kind, item){
+function ctfdNormalizeCategorySolve(kind, item) {
   if (!item) return null;
   const category = ctfdNormalizeCategoryName(item.category);
   const key = ctfdCategoryKey(item.category);
@@ -1376,12 +1645,12 @@ function ctfdNormalizeCategorySolve(kind, item){
   };
   return normalized;
 }
-function ctfdDefaultAudioEnabled(key){
+function ctfdDefaultAudioEnabled(key) {
   const defaults = window.SETTINGS_AUDIO_DEFAULTS || {};
   if (Object.prototype.hasOwnProperty.call(defaults, key)) return !!defaults[key];
   return true;
 }
-function ctfdGetAudioEntry(key){
+function ctfdGetAudioEntry(key) {
   const audio = ctfdGetSettingsAudio();
   const raw = audio && typeof audio[key] === 'object' ? audio[key] : null;
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
@@ -1392,7 +1661,7 @@ function ctfdGetAudioEntry(key){
   if (entry.enabled === undefined) entry.enabled = ctfdDefaultAudioEnabled(key);
   if (entry.speak === undefined) entry.speak = cfg && cfg.defaultSpeak !== undefined ? !!cfg.defaultSpeak : false;
   if (typeof settingsAudioNormalizeLegacyTemplate === 'function') {
-    try { settingsAudioNormalizeLegacyTemplate(entry, key); } catch {}
+    try { settingsAudioNormalizeLegacyTemplate(entry, key); } catch { }
   }
   const defaultTemplate = cfg && typeof cfg.defaultSpeakTemplate === 'string' ? cfg.defaultSpeakTemplate : '';
   const sounds = [];
@@ -1462,18 +1731,18 @@ function ctfdGetAudioEntry(key){
   entry.defaultSpeakTemplate = defaultTemplate;
   delete entry.speakTemplate;
   if (typeof settingsAudioApplyNumericFields === 'function') {
-    try { settingsAudioApplyNumericFields(entry, key); } catch {}
+    try { settingsAudioApplyNumericFields(entry, key); } catch { }
   }
   return entry;
 }
-function ctfdListValidSounds(entry){
+function ctfdListValidSounds(entry) {
   const list = entry && Array.isArray(entry.sounds) ? entry.sounds : [];
   return list.map((sound, idx) => ({ sound, idx })).filter(item => {
     const dataUrl = item && item.sound && typeof item.sound.dataUrl === 'string' ? item.sound.dataUrl : '';
     return dataUrl.startsWith('data:');
   });
 }
-function ctfdListValidTemplates(entry){
+function ctfdListValidTemplates(entry) {
   const list = entry && Array.isArray(entry.speakTemplates) ? entry.speakTemplates : [];
   return list.map((tpl, idx) => {
     if (tpl === null || tpl === undefined) return { tpl: '', idx, enabled: false };
@@ -1492,21 +1761,21 @@ function ctfdListValidTemplates(entry){
     return { tpl: str, idx, enabled: true, soundKey: '' };
   }).filter(item => !!item.tpl && !!item.enabled);
 }
-function ctfdRotationState(key){
+function ctfdRotationState(key) {
   if (!CTFD_AUDIO_ROTATION[key]) {
     CTFD_AUDIO_ROTATION[key] = { soundsQueue: [], templatesQueue: [] };
   }
   return CTFD_AUDIO_ROTATION[key];
 }
 
-function ctfdPlayOrderMode(entry){
+function ctfdPlayOrderMode(entry) {
   const raw = entry && typeof entry === 'object' && typeof entry.playOrder === 'string'
     ? String(entry.playOrder || '').trim().toLowerCase()
     : '';
   return raw === 'sequential' ? 'sequential' : 'random';
 }
 
-function ctfdShuffleIndices(count){
+function ctfdShuffleIndices(count) {
   const arr = [];
   for (let i = 0; i < count; i++) arr.push(i);
   for (let i = arr.length - 1; i > 0; i--) {
@@ -1517,59 +1786,59 @@ function ctfdShuffleIndices(count){
   }
   return arr;
 }
-function ctfdSelectNextSoundSlot(key, entry){
+function ctfdSelectNextSoundSlot(key, entry) {
   const list = ctfdListValidSounds(entry);
   if (!list.length) return null;
   const state = ctfdRotationState(key);
   const active = new Set(list.map(item => item.idx));
   state.soundsQueue = (state.soundsQueue || []).filter(idx => active.has(idx));
   if (!state.soundsQueue.length) {
-	const mode = ctfdPlayOrderMode(entry);
-	if (mode === 'sequential') {
-	  state.soundsQueue = list.map(item => item.idx);
-	} else {
-	  const order = ctfdShuffleIndices(list.length);
-	  state.soundsQueue = order.map(i => list[i].idx);
-	}
+    const mode = ctfdPlayOrderMode(entry);
+    if (mode === 'sequential') {
+      state.soundsQueue = list.map(item => item.idx);
+    } else {
+      const order = ctfdShuffleIndices(list.length);
+      state.soundsQueue = order.map(i => list[i].idx);
+    }
   }
   const nextIdx = state.soundsQueue.shift();
   const selected = list.find(item => item.idx === nextIdx) || list[0];
   return selected || null;
 }
-function ctfdSelectNextTemplateText(key, entry, fallback){
+function ctfdSelectNextTemplateText(key, entry, fallback) {
   const list = ctfdListValidTemplates(entry);
   if (!list.length) return fallback || '';
   const state = ctfdRotationState(key);
   const active = new Set(list.map(item => item.idx));
   state.templatesQueue = (state.templatesQueue || []).filter(idx => active.has(idx));
   if (!state.templatesQueue.length) {
-	const mode = ctfdPlayOrderMode(entry);
-	if (mode === 'sequential') {
-	  state.templatesQueue = list.map(item => item.idx);
-	} else {
-	  const order = ctfdShuffleIndices(list.length);
-	  state.templatesQueue = order.map(i => list[i].idx);
-	}
+    const mode = ctfdPlayOrderMode(entry);
+    if (mode === 'sequential') {
+      state.templatesQueue = list.map(item => item.idx);
+    } else {
+      const order = ctfdShuffleIndices(list.length);
+      state.templatesQueue = order.map(i => list[i].idx);
+    }
   }
   const nextIdx = state.templatesQueue.shift();
   const selected = list.find(item => item.idx === nextIdx) || list[0];
   return selected ? selected.tpl : (fallback || '');
 }
 
-function ctfdSelectNextTemplateSelection(key, entry, fallback){
+function ctfdSelectNextTemplateSelection(key, entry, fallback) {
   const list = ctfdListValidTemplates(entry);
   if (!list.length) return { tpl: fallback || '', soundKey: '' };
   const state = ctfdRotationState(key);
   const active = new Set(list.map(item => item.idx));
   state.templatesQueue = (state.templatesQueue || []).filter(idx => active.has(idx));
   if (!state.templatesQueue.length) {
-	const mode = ctfdPlayOrderMode(entry);
-	if (mode === 'sequential') {
-	  state.templatesQueue = list.map(item => item.idx);
-	} else {
-	  const order = ctfdShuffleIndices(list.length);
-	  state.templatesQueue = order.map(i => list[i].idx);
-	}
+    const mode = ctfdPlayOrderMode(entry);
+    if (mode === 'sequential') {
+      state.templatesQueue = list.map(item => item.idx);
+    } else {
+      const order = ctfdShuffleIndices(list.length);
+      state.templatesQueue = order.map(i => list[i].idx);
+    }
   }
   const nextIdx = state.templatesQueue.shift();
   const selected = list.find(item => item.idx === nextIdx) || list[0];
@@ -1578,16 +1847,16 @@ function ctfdSelectNextTemplateSelection(key, entry, fallback){
     soundKey: selected && typeof selected.soundKey === 'string' ? selected.soundKey : ''
   };
 }
-function ctfdHasCustomAudio(key){
+function ctfdHasCustomAudio(key) {
   const entry = ctfdGetAudioEntry(key);
   return ctfdListValidSounds(entry).length > 0;
 }
-function ctfdIsAudioEnabled(key){
+function ctfdIsAudioEnabled(key) {
   const entry = ctfdGetAudioEntry(key);
   if (entry && entry.enabled !== undefined) return !!entry.enabled;
   return ctfdDefaultAudioEnabled(key);
 }
-function ctfdShouldSpeak(key){
+function ctfdShouldSpeak(key) {
   const entry = ctfdGetAudioEntry(key);
   if (entry && entry.speak !== undefined) return !!entry.speak;
   const meta = window.SETTINGS_AUDIO_FIELDS_META || {};
@@ -1596,7 +1865,7 @@ function ctfdShouldSpeak(key){
   // Default to speaking when unset.
   return true;
 }
-function ctfdSpeechSupported(){
+function ctfdSpeechSupported() {
   try {
     return typeof window !== 'undefined'
       && 'speechSynthesis' in window
@@ -1605,12 +1874,12 @@ function ctfdSpeechSupported(){
       && typeof window.SpeechSynthesisUtterance === 'function';
   } catch { return false; }
 }
-function ctfdSpeechTrimTeamName(name){
+function ctfdSpeechTrimTeamName(name) {
   const raw = typeof name === 'string' ? name.trim() : String(name || '').trim();
   if (!raw) return '';
   return raw.length > CTFD_SPEECH_TEAM_NAME_MAX ? raw.slice(0, CTFD_SPEECH_TEAM_NAME_MAX) : raw;
 }
-function ctfdDataUrlToBuffer(dataUrl){
+function ctfdDataUrlToBuffer(dataUrl) {
   try {
     const parts = String(dataUrl || '').split(',');
     if (parts.length < 2) return null;
@@ -1622,28 +1891,28 @@ function ctfdDataUrlToBuffer(dataUrl){
     return bytes.buffer.slice(0);
   } catch { return null; }
 }
-async function ctfdDecodeAudioBuffer(ctx, arrayBuffer){
+async function ctfdDecodeAudioBuffer(ctx, arrayBuffer) {
   if (!ctx || !arrayBuffer) return null;
   if (ctx.decodeAudioData && ctx.decodeAudioData.length === 1) {
     try { return await ctx.decodeAudioData(arrayBuffer.slice(0)); } catch { return null; }
   }
   if (ctx.decodeAudioData) {
-    return await new Promise((resolve, reject)=> ctx.decodeAudioData(arrayBuffer.slice(0), resolve, reject));
+    return await new Promise((resolve, reject) => ctx.decodeAudioData(arrayBuffer.slice(0), resolve, reject));
   }
   return null;
 }
-function ctfdSpeechTemplateFor(key){
+function ctfdSpeechTemplateFor(key) {
   const entry = ctfdGetAudioEntry(key);
   const fallback = entry && typeof entry.defaultSpeakTemplate === 'string' ? entry.defaultSpeakTemplate : '';
   return ctfdSelectNextTemplateText(key, entry, fallback);
 }
 
-function ctfdSpeechTemplateSelectionFor(key){
+function ctfdSpeechTemplateSelectionFor(key) {
   const entry = ctfdGetAudioEntry(key);
   const fallback = entry && typeof entry.defaultSpeakTemplate === 'string' ? entry.defaultSpeakTemplate : '';
   return ctfdSelectNextTemplateSelection(key, entry, fallback);
 }
-function ctfdCompileSpeechTemplate(template, context){
+function ctfdCompileSpeechTemplate(template, context) {
   const ctx = context && typeof context === 'object' ? context : {};
   const raw = template != null ? String(template) : '';
   const result = {
@@ -1657,14 +1926,14 @@ function ctfdCompileSpeechTemplate(template, context){
   if (!raw) return result;
   const regex = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
   let cursor = 0;
-  const pushText = (value)=>{
+  const pushText = (value) => {
     if (!value) return;
     const last = result.segments[result.segments.length - 1];
     if (last && last.type === 'text') last.text += value;
     else result.segments.push({ type: 'text', text: value });
     if (!result.hasSpeech && value.trim()) result.hasSpeech = true;
   };
-  const markFallbackTarget = ()=>{
+  const markFallbackTarget = () => {
     const idx = result.segments.length;
     if (!result.fallbackTargets.includes(idx)) result.fallbackTargets.push(idx);
   };
@@ -1718,7 +1987,7 @@ function ctfdCompileSpeechTemplate(template, context){
   }
   return result;
 }
-function ctfdBuildSpeechPlan(key, context, fallbackText){
+function ctfdBuildSpeechPlan(key, context, fallbackText) {
   const template = ctfdSpeechTemplateFor(key);
   const compiled = ctfdCompileSpeechTemplate(template, context);
   const segments = compiled.segments.slice();
@@ -1742,8 +2011,8 @@ function ctfdBuildSpeechPlan(key, context, fallbackText){
   }
   return { segments, hasSpeech, hasAudio: compiled.hasAudio };
 }
-async function ctfdTryPlayCustomAudio(key, delaySeconds){
-  try { if (window.shell && shell.isRemote && shell.isRemote()) return { played: false, duration: 0 }; } catch {}
+async function ctfdTryPlayCustomAudio(key, delaySeconds) {
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return { played: false, duration: 0 }; } catch { }
   try {
     const entry = ctfdGetAudioEntry(key);
     if (!ctfdIsAudioEnabled(key)) return { played: false, duration: 0 };
@@ -1787,8 +2056,8 @@ async function ctfdTryPlayCustomAudio(key, delaySeconds){
           CTFD_ACTIVE_AUDIO_PLAYBACK = {
             stop: () => {
               if (settled) return;
-              try { source.onended = null; } catch {}
-              try { source.stop(); } catch {}
+              try { source.onended = null; } catch { }
+              try { source.stop(); } catch { }
               finish(false);
             }
           };
@@ -1827,7 +2096,7 @@ async function ctfdTryPlayCustomAudio(key, delaySeconds){
         try {
           const playPromise = audioEl.play();
           if (playPromise && typeof playPromise.then === 'function') {
-            playPromise.catch(()=> onError());
+            playPromise.catch(() => onError());
           }
         } catch {
           onError();
@@ -1838,14 +2107,14 @@ async function ctfdTryPlayCustomAudio(key, delaySeconds){
     });
   } catch { return { played: false, duration: 0 }; }
 }
-function ctfdBuildFallbackPattern(key){
+function ctfdBuildFallbackPattern(key) {
   const base = Array.isArray(CTFD_AUDIO_FALLBACKS[key]) ? CTFD_AUDIO_FALLBACKS[key] : [];
   const clone = base.map(note => ({ ...note }));
   clone.key = key;
   return clone;
 }
-function ctfdPlayFallbackPattern(pattern, delaySeconds){
-  try { if (window.shell && shell.isRemote && shell.isRemote()) return Promise.resolve({ played: false, duration: 0 }); } catch {}
+function ctfdPlayFallbackPattern(pattern, delaySeconds) {
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return Promise.resolve({ played: false, duration: 0 }); } catch { }
   try {
     if (!Array.isArray(pattern) || !pattern.length) return Promise.resolve({ played: false, duration: 0 });
     const key = pattern.key;
@@ -1885,14 +2154,14 @@ function ctfdPlayFallbackPattern(pattern, delaySeconds){
         osc.connect(gain).connect(ctx.destination);
         osc.start(startTime);
         osc.stop(endTime + 0.05);
-      } catch {}
+      } catch { }
     });
     return new Promise(resolve => {
-      setTimeout(()=> resolve({ played: true, duration: totalDuration }), totalDuration * 1000);
+      setTimeout(() => resolve({ played: true, duration: totalDuration }), totalDuration * 1000);
     });
   } catch { return Promise.resolve({ played: false, duration: 0 }); }
 }
-async function ctfdPlayNamedSound(key, fallbackPattern, delaySeconds){
+async function ctfdPlayNamedSound(key, fallbackPattern, delaySeconds) {
   // Mirror Preview behavior: only play a configured (selected) audio clip.
   // No fallback tones/patterns when a clip is not selected or fails to play.
   if (!ctfdIsAudioEnabled(key)) return { played: false, duration: 0 };
@@ -1901,7 +2170,7 @@ async function ctfdPlayNamedSound(key, fallbackPattern, delaySeconds){
   return { played: false, duration: 0 };
 }
 
-function ctfdBuildSpeechPlanFromTemplate(template, context, fallbackText, opts){
+function ctfdBuildSpeechPlanFromTemplate(template, context, fallbackText, opts) {
   const options = opts && typeof opts === 'object' ? opts : {};
   const compiled = ctfdCompileSpeechTemplate(template, context);
   let segments = compiled.segments.slice();
@@ -1939,7 +2208,7 @@ function ctfdBuildSpeechPlanFromTemplate(template, context, fallbackText, opts){
   return { segments, hasSpeech, hasAudio };
 }
 
-async function ctfdSpeakFromTemplate(template, payload, delaySeconds, opts){
+async function ctfdSpeakFromTemplate(template, payload, delaySeconds, opts) {
   const { context, fallbackText } = ctfdNormalizeSpeechPayload(payload);
   const plan = ctfdBuildSpeechPlanFromTemplate(template, context, fallbackText, opts);
   const segments = plan.segments || [];
@@ -1971,7 +2240,7 @@ async function ctfdSpeakFromTemplate(template, payload, delaySeconds, opts){
         const result = await audioHandler(0);
         const duration = Number(result && result.duration);
         if (Number.isFinite(duration) && duration > 0) elapsed += duration;
-      } catch {}
+      } catch { }
       timeline = elapsed + CTFD_AUDIO_SEGMENT_BUFFER;
       nextSpeechBaseline = Math.max(nextSpeechBaseline, timeline);
     } else if (segment.type === 'pause') {
@@ -2010,7 +2279,7 @@ async function ctfdSpeakFromTemplate(template, payload, delaySeconds, opts){
   }
   return { spoke: spokeAny, wantsAudio: plan.hasAudio };
 }
-function ctfdNormalizeSpeechPayload(payload){
+function ctfdNormalizeSpeechPayload(payload) {
   if (typeof payload === 'string') {
     return { context: {}, fallbackText: payload };
   }
@@ -2024,17 +2293,17 @@ function ctfdNormalizeSpeechPayload(payload){
   }
   return { context: {}, fallbackText: '' };
 }
-function ctfdComputeSpeechDelay(base){
+function ctfdComputeSpeechDelay(base) {
   const val = Number(base);
   return (Number.isFinite(val) && val > 0 ? val : 0) + CTFD_SPEECH_DEFAULT_DELAY;
 }
-function ctfdWaitSeconds(seconds){
+function ctfdWaitSeconds(seconds) {
   const delay = Math.max(0, Number(seconds) || 0);
   if (delay <= 0) return Promise.resolve();
   return new Promise(resolve => setTimeout(resolve, delay * 1000));
 }
 
-function ctfdWaitSecondsInterruptible(seconds, isCancelled){
+function ctfdWaitSecondsInterruptible(seconds, isCancelled) {
   const delay = Math.max(0, Number(seconds) || 0);
   if (delay <= 0) return Promise.resolve(false);
   const totalMs = Math.round(delay * 1000);
@@ -2042,7 +2311,7 @@ function ctfdWaitSecondsInterruptible(seconds, isCancelled){
   return new Promise(resolve => {
     const started = Date.now();
     const step = () => {
-      try { if (typeof isCancelled === 'function' && isCancelled()) return resolve(true); } catch {}
+      try { if (typeof isCancelled === 'function' && isCancelled()) return resolve(true); } catch { }
       const elapsed = Date.now() - started;
       if (elapsed >= totalMs) return resolve(false);
       setTimeout(step, Math.min(tickMs, Math.max(0, totalMs - elapsed)));
@@ -2050,8 +2319,8 @@ function ctfdWaitSecondsInterruptible(seconds, isCancelled){
     setTimeout(step, Math.min(tickMs, totalMs));
   });
 }
-function ctfdSpeakTextSegment(text, opts){
-  try { if (window.shell && shell.isRemote && shell.isRemote()) return Promise.resolve({ spoke: false, elapsed: 0 }); } catch {}
+function ctfdSpeakTextSegment(text, opts) {
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return Promise.resolve({ spoke: false, elapsed: 0 }); } catch { }
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return Promise.resolve({ spoke: false, elapsed: 0 });
   return new Promise((resolve) => {
@@ -2064,16 +2333,16 @@ function ctfdSpeakTextSegment(text, opts){
       if (opts.lang) utterance.lang = opts.lang;
       if (opts.voice) utterance.voice = opts.voice;
     }
-    utterance.onend = (ev)=>{
+    utterance.onend = (ev) => {
       const elapsed = ev && typeof ev.elapsedTime === 'number' ? Math.max(0, ev.elapsedTime) : 0;
       resolve({ spoke: true, elapsed });
     };
-    utterance.onerror = ()=> resolve({ spoke: false, elapsed: 0 });
+    utterance.onerror = () => resolve({ spoke: false, elapsed: 0 });
     try {
       const synth = window.speechSynthesis;
       if (!synth) { resolve({ spoke: false, elapsed: 0 }); return; }
       if (opts && opts.interrupt) {
-        try { synth.cancel(); } catch {}
+        try { synth.cancel(); } catch { }
       }
       synth.speak(utterance);
     } catch {
@@ -2082,7 +2351,7 @@ function ctfdSpeakTextSegment(text, opts){
   });
 }
 
-function ctfdResolveProjectMediaSound(soundKey){
+function ctfdResolveProjectMediaSound(soundKey) {
   const key = String(soundKey || '').trim();
   if (!key) return null;
   const pid = ctfdCurrentPid();
@@ -2091,8 +2360,8 @@ function ctfdResolveProjectMediaSound(soundKey){
   return ctfdNormalizeMediaSound(mediaEntry);
 }
 
-async function ctfdPlayProjectMediaSoundKey(soundKey, delaySeconds){
-  try { if (window.shell && shell.isRemote && shell.isRemote()) return { played: false, duration: 0 }; } catch {}
+async function ctfdPlayProjectMediaSoundKey(soundKey, delaySeconds) {
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return { played: false, duration: 0 }; } catch { }
   const clip = ctfdResolveProjectMediaSound(soundKey);
   if (!clip || !clip.dataUrl) return { played: false, duration: 0 };
   const offset = Math.max(0, Number(delaySeconds) || 0);
@@ -2101,9 +2370,9 @@ async function ctfdPlayProjectMediaSoundKey(soundKey, delaySeconds){
     let settled = false;
     const audio = new Audio(clip.dataUrl);
     const cleanup = () => {
-      try { audio.removeEventListener('ended', onEnded); } catch {}
-      try { audio.removeEventListener('error', onError); } catch {}
-      try { audio.removeEventListener('abort', onError); } catch {}
+      try { audio.removeEventListener('ended', onEnded); } catch { }
+      try { audio.removeEventListener('error', onError); } catch { }
+      try { audio.removeEventListener('abort', onError); } catch { }
     };
     const finish = (played) => {
       if (settled) return;
@@ -2123,8 +2392,8 @@ async function ctfdPlayProjectMediaSoundKey(soundKey, delaySeconds){
       _audio: audio,
       stop: () => {
         if (settled) return;
-        try { audio.pause(); } catch {}
-        try { audio.currentTime = 0; } catch {}
+        try { audio.pause(); } catch { }
+        try { audio.currentTime = 0; } catch { }
         finish(false);
       }
     };
@@ -2133,7 +2402,7 @@ async function ctfdPlayProjectMediaSoundKey(soundKey, delaySeconds){
       if (settled) return;
       try {
         const p = audio.play();
-        if (p && typeof p.catch === 'function') p.catch(()=> finish(false));
+        if (p && typeof p.catch === 'function') p.catch(() => finish(false));
       } catch { finish(false); }
     };
     if (offset > 0) setTimeout(startPlayback, offset * 1000);
@@ -2141,7 +2410,7 @@ async function ctfdPlayProjectMediaSoundKey(soundKey, delaySeconds){
   });
 }
 
-async function ctfdSpeakForEvent(key, payload, delaySeconds, opts){
+async function ctfdSpeakForEvent(key, payload, delaySeconds, opts) {
   const { context, fallbackText } = ctfdNormalizeSpeechPayload(payload);
   const selection = ctfdSpeechTemplateSelectionFor(key);
   const template = selection && typeof selection.tpl === 'string' ? selection.tpl : ctfdSpeechTemplateFor(key);
@@ -2162,11 +2431,11 @@ async function ctfdSpeakForEvent(key, payload, delaySeconds, opts){
       const sounds = ctfdListValidSounds(entry);
       hasSelectedClip = !!(soundKey && sounds && sounds.length);
     }
-  } catch {}
+  } catch { }
   let audioEnabled = false;
-  try { audioEnabled = ctfdIsAudioEnabled(key); } catch {}
+  try { audioEnabled = ctfdIsAudioEnabled(key); } catch { }
   let skipAudioSegments = !audioEnabled || !hasSelectedClip;
-  try { if (window.shell && shell.isRemote && shell.isRemote()) skipAudioSegments = true; } catch {}
+  try { if (window.shell && shell.isRemote && shell.isRemote()) skipAudioSegments = true; } catch { }
 
   const forceSpeak = !!ctfdShouldSpeak(key);
 
@@ -2184,28 +2453,28 @@ async function ctfdSpeakForEvent(key, payload, delaySeconds, opts){
     ...(onAudioRequest ? { onAudioRequest } : {}),
   });
 }
-function ctfdCountdownReasonLabel(reason){
+function ctfdCountdownReasonLabel(reason) {
   if (!reason) return '';
   if (reason === 'scoreboard') return ' for scoreboard reveal';
   if (reason === 'challenges') return ' for challenge list reveal';
   if (reason === 'challenges_hidden') return ' while challenges are hidden';
   return ` (${reason})`;
 }
-function ctfdCountdownNotificationActive(){
+function ctfdCountdownNotificationActive() {
   try {
     const audioEnabled = ctfdIsAudioEnabled('ctfdCountdown');
     const speechEnabled = ctfdSpeechSupported() && ctfdShouldSpeak('ctfdCountdown');
     return !!(audioEnabled || speechEnabled);
   } catch { return false; }
 }
-function ctfdCountdownStopNotificationActive(){
+function ctfdCountdownStopNotificationActive() {
   try {
     const audioEnabled = ctfdIsAudioEnabled('ctfdCountdownStop');
     const speechEnabled = ctfdSpeechSupported() && ctfdShouldSpeak('ctfdCountdownStop');
     return !!(audioEnabled || speechEnabled);
   } catch { return false; }
 }
-async function ctfdPlayCountdownCueForChallenges(){
+async function ctfdPlayCountdownCueForChallenges() {
   if (!ctfdCountdownNotificationActive()) return;
   const reason = 'challenges';
   const context = {
@@ -2216,11 +2485,11 @@ async function ctfdPlayCountdownCueForChallenges(){
   const fallback = `Countdown complete${context.reason_clause}.`;
   try {
     await ctfdSpeakForEvent('ctfdCountdown', { context, fallbackText: fallback }, 0, {
-      onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdCountdown', CTFD_AUDIO_FALLBACKS.ctfdCountdownFinal || [], startDelay)
+      onAudioRequest: (startDelay) => ctfdPlayNamedSound('ctfdCountdown', CTFD_AUDIO_FALLBACKS.ctfdCountdownFinal || [], startDelay)
     });
-  } catch {}
+  } catch { }
 }
-async function ctfdPlayCountdownStopForChallenges(){
+async function ctfdPlayCountdownStopForChallenges() {
   if (!ctfdCountdownStopNotificationActive()) return;
   const reason = 'challenges_hidden';
   const baseContext = ctfdSpeechContextProject(ctfdCurrentPid());
@@ -2235,30 +2504,30 @@ async function ctfdPlayCountdownStopForChallenges(){
   const fallback = `Countdown cancelled${extra}.`;
   try {
     await ctfdSpeakForEvent('ctfdCountdownStop', { context, fallbackText: fallback }, 0, {
-      onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdCountdownStop', CTFD_AUDIO_FALLBACKS.ctfdCountdownStop || [], startDelay)
+      onAudioRequest: (startDelay) => ctfdPlayNamedSound('ctfdCountdownStop', CTFD_AUDIO_FALLBACKS.ctfdCountdownStop || [], startDelay)
     });
-  } catch {}
+  } catch { }
 }
-function ctfdSpeechContextProject(projectId){
+function ctfdSpeechContextProject(projectId) {
   const project = ctfdProjectLabel(projectId);
   const leaderboard = ctfdLeaderboardSnapshot();
   const trimmed = leaderboard.map(name => ctfdSpeechTrimTeamName(name));
   return {
     project,
     project_clause: project ? ` in ${project}` : '',
-    first_team: trimmed[0] || '',
+    team_first: trimmed[0] || '',
     second_team: trimmed[1] || '',
     third_team: trimmed[2] || ''
   };
 }
-function ctfdSpeechContextPeriodic(projectId){
+function ctfdSpeechContextPeriodic(projectId) {
   const base = ctfdSpeechContextProject(projectId);
   let intervalSeconds = 0;
   try {
     const entry = ctfdGetAudioEntry('ctfdPeriodic');
     const sec = ctfdPeriodicIntervalSeconds(entry);
     if (Number.isFinite(sec)) intervalSeconds = Number(sec);
-  } catch {}
+  } catch { }
   if (Number.isFinite(intervalSeconds) && intervalSeconds > 0) {
     const roundedSec = Math.max(1, Math.round(intervalSeconds));
     base.interval_seconds = String(roundedSec);
@@ -2276,7 +2545,7 @@ function ctfdSpeechContextPeriodic(projectId){
   }
   return base;
 }
-function ctfdSpeechContextCategoryFirst(projectId, kind, info){
+function ctfdSpeechContextCategoryFirst(projectId, kind, info) {
   const base = ctfdSpeechContextProject(projectId);
   const categoryRaw = info && info.category ? String(info.category).trim() : '';
   const category = ctfdNormalizeCategoryName(categoryRaw);
@@ -2301,7 +2570,7 @@ function ctfdSpeechContextCategoryFirst(projectId, kind, info){
   }
   return base;
 }
-function ctfdAnnouncePeriodic(projectId){
+function ctfdAnnouncePeriodic(projectId) {
   const pid = projectId || ctfdCurrentPid() || '';
   if (!pid) return;
   const entry = ctfdGetAudioEntry('ctfdPeriodic');
@@ -2320,15 +2589,15 @@ function ctfdAnnouncePeriodic(projectId){
   }
   const fallback = `Periodic update${projectClause}. Next check in ${intervalLabel}.`;
   void ctfdSpeakForEvent('ctfdPeriodic', { context, fallbackText: fallback }, 0, {
-    onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdPeriodic', CTFD_AUDIO_FALLBACKS.ctfdPeriodic || [], startDelay)
+    onAudioRequest: (startDelay) => ctfdPlayNamedSound('ctfdPeriodic', CTFD_AUDIO_FALLBACKS.ctfdPeriodic || [], startDelay)
   });
   try {
     const label = ctfdProjectLabel(pid);
     const suffix = label ? ` — ${label}` : '';
     shell.logInfo(`[CTFd] Periodic update${suffix}.`);
-  } catch {}
+  } catch { }
 }
-function ctfdAnnounceFirstCategorySolve(projectId, kind, info){
+function ctfdAnnounceFirstCategorySolve(projectId, kind, info) {
   if (!info) return;
   const pid = projectId || ctfdCurrentPid() || '';
   if (!pid) return;
@@ -2348,7 +2617,7 @@ function ctfdAnnounceFirstCategorySolve(projectId, kind, info){
   }
   const audioKey = kind === 'user' ? 'ctfdFirstCategoryUser' : 'ctfdFirstCategoryTeam';
   void ctfdSpeakForEvent(audioKey, { context, fallbackText: fallback }, 0, {
-    onAudioRequest: (startDelay)=> ctfdPlayNamedSound(audioKey, CTFD_AUDIO_FALLBACKS[audioKey] || [], startDelay)
+    onAudioRequest: (startDelay) => ctfdPlayNamedSound(audioKey, CTFD_AUDIO_FALLBACKS[audioKey] || [], startDelay)
   });
   try {
     const label = ctfdProjectLabel(pid);
@@ -2360,9 +2629,9 @@ function ctfdAnnounceFirstCategorySolve(projectId, kind, info){
       const team = context.team_first || 'A team';
       shell.logSuccess(`[CTFd] ${team} solved the first ${categoryLabel} challenge${suffix}.`);
     }
-  } catch {}
+  } catch { }
 }
-function ctfdLeaderboardSnapshot(){
+function ctfdLeaderboardSnapshot() {
   try {
     const meta = CTFD_USER_META && typeof CTFD_USER_META === 'object' ? CTFD_USER_META : {};
     const bestByTeam = new Map();
@@ -2379,14 +2648,14 @@ function ctfdLeaderboardSnapshot(){
         bestByTeam.set(team, { team, rank });
       }
     });
-    const ordered = Array.from(bestByTeam.values()).sort((a, b)=>{
+    const ordered = Array.from(bestByTeam.values()).sort((a, b) => {
       if (a.rank !== b.rank) return a.rank - b.rank;
       return a.team.localeCompare(b.team);
     });
     return ordered.slice(0, 3).map(entry => entry.team || '');
   } catch { return ['', '', '']; }
 }
-function ctfdSpeechContextFirstPlace(projectId, kind, name){
+function ctfdSpeechContextFirstPlace(projectId, kind, name) {
   const base = ctfdSpeechContextProject(projectId);
   const ctx = { ...base };
   const meta = CTFD_USER_META && typeof CTFD_USER_META === 'object' ? CTFD_USER_META : {};
@@ -2406,11 +2675,10 @@ function ctfdSpeechContextFirstPlace(projectId, kind, name){
     ctx.team_first = teamName;
     ctx.team_clause = teamRaw && teamRaw !== nameRaw ? ` from team ${teamName}` : '';
   }
-  if (!ctx.first_team) ctx.first_team = ctx.team_first || ctx.leader || '';
-  ctx.first_team = ctfdSpeechTrimTeamName(ctx.first_team);
+
   return ctx;
 }
-function ctfdStartCountdown(seconds, opts){
+function ctfdStartCountdown(seconds, opts) {
   ctfdStopCountdown(false);
   let audioEnabled = false;
   try { audioEnabled = ctfdIsAudioEnabled('ctfdCountdown'); } catch { audioEnabled = false; }
@@ -2430,7 +2698,7 @@ function ctfdStartCountdown(seconds, opts){
   CTFD_COUNTDOWN_USE_TICKS = audioEnabled && !ctfdHasCustomAudio('ctfdCountdown');
   CTFD_COUNTDOWN_REASON = opts && opts.reason ? String(opts.reason) : '';
   if (CTFD_COUNTDOWN_USE_TICKS) {
-    try { ctfdPlayFallbackPattern(ctfdBuildFallbackPattern('ctfdCountdown'), 0); } catch {}
+    try { ctfdPlayFallbackPattern(ctfdBuildFallbackPattern('ctfdCountdown'), 0); } catch { }
     CTFD_COUNTDOWN_REMAINING -= 1;
   }
   if (CTFD_COUNTDOWN_REMAINING <= 0) {
@@ -2440,10 +2708,10 @@ function ctfdStartCountdown(seconds, opts){
   try {
     if (CTFD_COUNTDOWN_TIMER) { clearInterval(CTFD_COUNTDOWN_TIMER); CTFD_COUNTDOWN_TIMER = null; }
     CTFD_COUNTDOWN_TIMER = setInterval(ctfdCountdownTick, 1000);
-  } catch {}
-  try { shell.logInfo(`[CTFd] Countdown started (${total}s)${ctfdCountdownReasonLabel(CTFD_COUNTDOWN_REASON)}.`); } catch {}
+  } catch { }
+  try { shell.logInfo(`[CTFd] Countdown started (${total}s)${ctfdCountdownReasonLabel(CTFD_COUNTDOWN_REASON)}.`); } catch { }
 }
-function ctfdCountdownTick(){
+function ctfdCountdownTick() {
   if (CTFD_COUNTDOWN_REMAINING <= 0) {
     ctfdStopCountdown(true);
     return;
@@ -2454,14 +2722,14 @@ function ctfdCountdownTick(){
     return;
   }
   if (CTFD_COUNTDOWN_USE_TICKS) {
-    try { ctfdPlayFallbackPattern(ctfdBuildFallbackPattern('ctfdCountdown'), 0); } catch {}
+    try { ctfdPlayFallbackPattern(ctfdBuildFallbackPattern('ctfdCountdown'), 0); } catch { }
   }
 }
-function ctfdStopCountdown(playFinal){
+function ctfdStopCountdown(playFinal) {
   const wasActive = !!CTFD_COUNTDOWN_TIMER || CTFD_COUNTDOWN_REMAINING > 0;
   const reason = CTFD_COUNTDOWN_REASON;
   if (CTFD_COUNTDOWN_TIMER) {
-    try { clearInterval(CTFD_COUNTDOWN_TIMER); } catch {}
+    try { clearInterval(CTFD_COUNTDOWN_TIMER); } catch { }
     CTFD_COUNTDOWN_TIMER = null;
   }
   CTFD_COUNTDOWN_REMAINING = 0;
@@ -2475,15 +2743,15 @@ function ctfdStopCountdown(playFinal){
     };
     const fallback = `Countdown complete${ctfdCountdownReasonLabel(reason)}.`;
     void ctfdSpeakForEvent('ctfdCountdown', { context: speechCtx, fallbackText: fallback }, 0, {
-      onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdCountdown', CTFD_AUDIO_FALLBACKS.ctfdCountdownFinal || [], startDelay)
+      onAudioRequest: (startDelay) => ctfdPlayNamedSound('ctfdCountdown', CTFD_AUDIO_FALLBACKS.ctfdCountdownFinal || [], startDelay)
     });
-    try { shell.logSuccess(`[CTFd] Countdown complete${ctfdCountdownReasonLabel(reason)}.`); } catch {}
+    try { shell.logSuccess(`[CTFd] Countdown complete${ctfdCountdownReasonLabel(reason)}.`); } catch { }
   } else if (wasActive && reason) {
-    try { shell.logInfo(`[CTFd] Countdown cancelled${ctfdCountdownReasonLabel(reason)}.`); } catch {}
+    try { shell.logInfo(`[CTFd] Countdown cancelled${ctfdCountdownReasonLabel(reason)}.`); } catch { }
   }
   CTFD_COUNTDOWN_TOTAL_SECONDS = 0;
 }
-function ctfdHandleChallengesStateChange(newState){
+function ctfdHandleChallengesStateChange(newState) {
   const prev = CTFD_LAST_CHALLENGES_STATE;
   const next = !!newState;
   CTFD_LAST_CHALLENGES_STATE = next;
@@ -2495,7 +2763,7 @@ function ctfdHandleChallengesStateChange(newState){
         chToggle.indeterminate = false;
         chToggle.removeAttribute('data-ctfd-pending-reveal');
       }
-    } catch {}
+    } catch { }
   }
   if (next && !previous) {
     if (CTFD_CHALLENGE_REVEAL_EXPECTED) {
@@ -2523,7 +2791,7 @@ function ctfdHandleChallengesStateChange(newState){
 
 // --- Persist last rendered view so switching pages doesn't clear data ---
 const CTFD_CACHE_KEY = 'toolhub.ctfd.mgr.cache.v1';
-function ctfdCacheSnapshot(mode){
+function ctfdCacheSnapshot(mode) {
   try {
     const payload = {
       ts: Date.now(),
@@ -2533,14 +2801,14 @@ function ctfdCacheSnapshot(mode){
       // Back-compat: still store selectedPids snapshot for immediate restore
       selectedPids: Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS : null,
       // New: persist per-project associations and base project for multi mode
-      basePid: (function(){ try { return ctfdCurrentPid(); } catch { return ''; } })(),
-      assocMap: (function(){ try { return ctfdReadAssocMap(); } catch { return {}; } })(),
+      basePid: (function () { try { return ctfdCurrentPid(); } catch { return ''; } })(),
+      assocMap: (function () { try { return ctfdReadAssocMap(); } catch { return {}; } })(),
       userMeta: CTFD_USER_META || {}
     };
     sessionStorage.setItem(CTFD_CACHE_KEY, JSON.stringify(payload));
-  } catch {}
+  } catch { }
 }
-function ctfdRestoreSnapshot(){
+function ctfdRestoreSnapshot() {
   try {
     const raw = sessionStorage.getItem(CTFD_CACHE_KEY);
     if (!raw) return false;
@@ -2550,7 +2818,7 @@ function ctfdRestoreSnapshot(){
     if (!data || !data.ts || (Date.now() - data.ts) > maxAgeMs) return false;
     CTFD_ALL_PROJECTS = Array.isArray(data.allProjects) ? data.allProjects : [];
     // Prefer assocMap+basePid when restoring multi selection; fall back to snapshot list
-    const snapBase = String(data.basePid || '') || String(ctfdCurrentPid()||'');
+    const snapBase = String(data.basePid || '') || String(ctfdCurrentPid() || '');
     const snapAssoc = (data.assocMap && typeof data.assocMap === 'object') ? data.assocMap : {};
     const derived = (snapBase && Array.isArray(snapAssoc[snapBase]) && snapAssoc[snapBase].length)
       ? [snapBase, ...snapAssoc[snapBase].map(String)]
@@ -2562,17 +2830,17 @@ function ctfdRestoreSnapshot(){
     }
     if (data.mode === 'multi') {
       PROJ = null;
-      try { ctfdProjectsBadgeUpdate(); } catch {}
+      try { ctfdProjectsBadgeUpdate(); } catch { }
       ctfdRenderTableMerged();
       return true;
     }
     if (data.mode === 'single' && data.proj) {
       PROJ = data.proj;
       try {
-  const info = document.getElementById('ctfd-info');
-  if (info && PROJ) info.textContent = '';
-      } catch {}
-      try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
+        const info = document.getElementById('ctfd-info');
+        if (info && PROJ) info.textContent = '';
+      } catch { }
+      try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
       renderCtfdTable(PROJ);
       return true;
     }
@@ -2582,58 +2850,64 @@ function ctfdRestoreSnapshot(){
 
 // Column visibility (persisted per project)
 // Add 'project' column (default hidden). When a multi-project view is added, this can default to shown.
-const CTFD_COL_DEFAULTS = { project:false, cred:true, team:true, user_points:true, team_points:true, user_last:true, team_last:true };
+const CTFD_COL_DEFAULTS = { project: false, cred: true, team: true, user_points: true, team_points: true, user_last: true, team_last: true };
 let CTFD_COLS = { ...CTFD_COL_DEFAULTS };
-function ctfdColsKey(pid){ return `toolhub.ctfd.cols.${pid||'none'}`; }
-function readCtfdCols(pid){ try { const raw = sessionStorage.getItem(ctfdColsKey(pid)); return raw? { ...CTFD_COL_DEFAULTS, ...JSON.parse(raw) } : { ...CTFD_COL_DEFAULTS }; } catch { return { ...CTFD_COL_DEFAULTS }; } }
-function writeCtfdCols(pid, obj){ try { sessionStorage.setItem(ctfdColsKey(pid), JSON.stringify(obj||{})); } catch {} }
-function wireCtfdCols(){
+function ctfdColsKey(pid) { return `toolhub.ctfd.cols.${pid || 'none'}`; }
+function readCtfdCols(pid) { try { const raw = sessionStorage.getItem(ctfdColsKey(pid)); return raw ? { ...CTFD_COL_DEFAULTS, ...JSON.parse(raw) } : { ...CTFD_COL_DEFAULTS }; } catch { return { ...CTFD_COL_DEFAULTS }; } }
+function writeCtfdCols(pid, obj) { try { sessionStorage.setItem(ctfdColsKey(pid), JSON.stringify(obj || {})); } catch { } }
+function wireCtfdCols() {
   try {
-    const ids = ['project','cred','team','user_points','team_points','user_last','team_last'];
-    ids.forEach(id=>{
+    const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'];
+    ids.forEach(id => {
       const el = document.getElementById(`ctfd-col-${id}`);
       if (el && !el._toolhubBound) {
-        el.addEventListener('change', ()=>{
+        el.addEventListener('change', () => {
           try {
             const multi = Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
             const keyPid = multi ? 'multi' : (PROJ ? PROJ.id : 'multi');
             CTFD_COLS[id] = !!el.checked;
             writeCtfdCols(keyPid, CTFD_COLS);
             renderCtfdTable(PROJ);
-          } catch {}
+          } catch { }
         });
         el._toolhubBound = true;
       }
     });
-  } catch {}
+  } catch { }
 }
 
 // --- Projects selector (multi-project associations are per base project) ---
 // Legacy global selection key (for migration only)
 const CTFD_STORE_SELECTED = 'toolhub.ctfd.mgr.selectedPids.v1';
-function ctfdReadSelected(){ try { const raw = sessionStorage.getItem(CTFD_STORE_SELECTED); const arr = raw? JSON.parse(raw): null; return Array.isArray(arr)? arr: null; } catch { return null; } }
-function ctfdWriteSelected(arr){ try { sessionStorage.setItem(CTFD_STORE_SELECTED, JSON.stringify(arr||[])); } catch {} }
+function ctfdReadSelected() { try { const raw = sessionStorage.getItem(CTFD_STORE_SELECTED); const arr = raw ? JSON.parse(raw) : null; return Array.isArray(arr) ? arr : null; } catch { return null; } }
+function ctfdWriteSelected(arr) { try { sessionStorage.setItem(CTFD_STORE_SELECTED, JSON.stringify(arr || [])); } catch { } }
 // New storage: a map of basePid -> [associatedPid, ...]
 const CTFD_STORE_ASSOC_MAP = 'toolhub.ctfd.mgr.assocMap.v1';
-function ctfdReadAssocMap(){ try { const raw = sessionStorage.getItem(CTFD_STORE_ASSOC_MAP); const obj = raw? JSON.parse(raw): {}; return (obj && typeof obj==='object')? obj: {}; } catch { return {}; } }
-function ctfdWriteAssocMap(obj){ try { sessionStorage.setItem(CTFD_STORE_ASSOC_MAP, JSON.stringify(obj||{})); } catch {} }
-function ctfdReadAssoc(basePid){ try { const map = ctfdReadAssocMap(); const arr = map && Array.isArray(map[String(basePid)]) ? map[String(basePid)] : []; return arr.map(String); } catch { return []; } }
-function ctfdWriteAssoc(basePid, list){ try { const map = ctfdReadAssocMap(); const pid = String(basePid||''); if (!pid) return; const arr = Array.isArray(list)? list.map(String): []; const clean = arr.filter(x => x && x !== pid);
-  map[pid] = clean; ctfdWriteAssocMap(map); } catch {} }
-function ctfdMigrateSelectedToAssoc(basePid){ try {
-  const pid = String(basePid||''); if (!pid) return;
-  const legacy = ctfdReadSelected(); if (!Array.isArray(legacy)) return;
-  const assoc = legacy.map(String).filter(x => x && x !== pid);
-  const curMap = ctfdReadAssocMap();
-  if (!Array.isArray(curMap[pid]) || (curMap[pid]||[]).length===0) {
-    curMap[pid] = assoc;
-    ctfdWriteAssocMap(curMap);
-  }
-  try { sessionStorage.removeItem(CTFD_STORE_SELECTED); } catch {}
-} catch {} }
-function ctfdCurrentPid(){ try { return (window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : (PROJ?.id||''); } catch { return PROJ?.id||''; } }
+function ctfdReadAssocMap() { try { const raw = sessionStorage.getItem(CTFD_STORE_ASSOC_MAP); const obj = raw ? JSON.parse(raw) : {}; return (obj && typeof obj === 'object') ? obj : {}; } catch { return {}; } }
+function ctfdWriteAssocMap(obj) { try { sessionStorage.setItem(CTFD_STORE_ASSOC_MAP, JSON.stringify(obj || {})); } catch { } }
+function ctfdReadAssoc(basePid) { try { const map = ctfdReadAssocMap(); const arr = map && Array.isArray(map[String(basePid)]) ? map[String(basePid)] : []; return arr.map(String); } catch { return []; } }
+function ctfdWriteAssoc(basePid, list) {
+  try {
+    const map = ctfdReadAssocMap(); const pid = String(basePid || ''); if (!pid) return; const arr = Array.isArray(list) ? list.map(String) : []; const clean = arr.filter(x => x && x !== pid);
+    map[pid] = clean; ctfdWriteAssocMap(map);
+  } catch { }
+}
+function ctfdMigrateSelectedToAssoc(basePid) {
+  try {
+    const pid = String(basePid || ''); if (!pid) return;
+    const legacy = ctfdReadSelected(); if (!Array.isArray(legacy)) return;
+    const assoc = legacy.map(String).filter(x => x && x !== pid);
+    const curMap = ctfdReadAssocMap();
+    if (!Array.isArray(curMap[pid]) || (curMap[pid] || []).length === 0) {
+      curMap[pid] = assoc;
+      ctfdWriteAssocMap(curMap);
+    }
+    try { sessionStorage.removeItem(CTFD_STORE_SELECTED); } catch { }
+  } catch { }
+}
+function ctfdCurrentPid() { try { return (window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : (PROJ?.id || ''); } catch { return PROJ?.id || ''; } }
 
-function _ctfdBuildServerHref(proj){
+function _ctfdBuildServerHref(proj) {
   try {
     const baseRaw = (proj && proj.challenge_url != null) ? String(proj.challenge_url).trim()
       : ((proj && proj.ctfd_url != null) ? String(proj.ctfd_url).trim() : '');
@@ -2648,7 +2922,7 @@ function _ctfdBuildServerHref(proj){
   }
 }
 
-function ctfdUpdateServerNavLinkForCurrent(){
+function ctfdUpdateServerNavLinkForCurrent() {
   const link = document.getElementById('nav-ctfd-link');
   if (!link) return;
   let proj = PROJ;
@@ -2657,10 +2931,10 @@ function ctfdUpdateServerNavLinkForCurrent(){
     if (cur && (!proj || String(proj.id) !== cur)) {
       proj = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === cur) || null;
     }
-  } catch {}
+  } catch { }
   const href = _ctfdBuildServerHref(proj);
   if (href) {
-    try { link.classList.remove('d-none'); } catch {}
+    try { link.classList.remove('d-none'); } catch { }
     link.href = href;
     try {
       const u = new URL(href);
@@ -2675,24 +2949,24 @@ function ctfdUpdateServerNavLinkForCurrent(){
     try {
       link.classList.remove('border-secondary', 'text-muted');
       link.classList.add('border-primary', 'text-primary');
-    } catch {}
+    } catch { }
     link.removeAttribute('aria-disabled');
     link.removeAttribute('tabindex');
   } else {
     link.href = '#';
     link.textContent = 'Server: —';
-    try { link.classList.add('d-none'); } catch {}
+    try { link.classList.add('d-none'); } catch { }
     link.classList.add('disabled');
     try {
       link.classList.remove('border-primary', 'text-primary');
       link.classList.add('border-secondary', 'text-muted');
-    } catch {}
+    } catch { }
     link.setAttribute('aria-disabled', 'true');
     link.setAttribute('tabindex', '-1');
   }
 }
 
-function ctfdSelectionMatches(expectedPid){
+function ctfdSelectionMatches(expectedPid) {
   const target = String(expectedPid || '').trim();
   if (!target) return true;
   const current = String(ctfdCurrentPid() || '').trim();
@@ -2700,53 +2974,53 @@ function ctfdSelectionMatches(expectedPid){
   return current === target;
 }
 
-function ctfdSelectionChanged(expectedPid){
+function ctfdSelectionChanged(expectedPid) {
   return !ctfdSelectionMatches(expectedPid);
 }
-function ctfdProjectsBadgeUpdate(){ try { const c = document.getElementById('projects-count'); if (!c) return; const arr = CTFD_SELECTED_PIDS; const n = Array.isArray(arr)? arr.length : 1; c.textContent = String(n); c.className = 'badge '+(n>1?'bg-primary':'bg-secondary'); } catch {} }
-async function ctfdEnsureProjects(){ if (CTFD_ALL_PROJECTS && CTFD_ALL_PROJECTS.length) return; try { const resp = await http('GET','/api/projects'); CTFD_ALL_PROJECTS = Array.isArray(resp?.projects)? resp.projects: []; } catch { CTFD_ALL_PROJECTS = []; } }
-function ctfdRenderProjectsList(filter){
+function ctfdProjectsBadgeUpdate() { try { const c = document.getElementById('projects-count'); if (!c) return; const arr = CTFD_SELECTED_PIDS; const n = Array.isArray(arr) ? arr.length : 1; c.textContent = String(n); c.className = 'badge ' + (n > 1 ? 'bg-primary' : 'bg-secondary'); } catch { } }
+async function ctfdEnsureProjects() { if (CTFD_ALL_PROJECTS && CTFD_ALL_PROJECTS.length) return; try { const resp = await http('GET', '/api/projects'); CTFD_ALL_PROJECTS = Array.isArray(resp?.projects) ? resp.projects : []; } catch { CTFD_ALL_PROJECTS = []; } }
+function ctfdRenderProjectsList(filter) {
   const host = document.getElementById('projects-list'); if (!host) return;
-  const f = String(filter||'').toLowerCase();
-  const items = (CTFD_ALL_PROJECTS||[]).filter(p => !f || (String(p.name||'').toLowerCase().includes(f) || String(p.tag||'').toLowerCase().includes(f)));
-  const cur = String(ctfdCurrentPid()||'');
+  const f = String(filter || '').toLowerCase();
+  const items = (CTFD_ALL_PROJECTS || []).filter(p => !f || (String(p.name || '').toLowerCase().includes(f) || String(p.tag || '').toLowerCase().includes(f)));
+  const cur = String(ctfdCurrentPid() || '');
   // Selection = current base project + its stored associated projects
   const assoc = cur ? ctfdReadAssoc(cur) : [];
-  const sel = new Set([...(assoc||[]), ...(cur?[cur]:[]) ]);
-  host.innerHTML = items.map(p => { 
-    const isCur = cur && String(p.id)===cur;
+  const sel = new Set([...(assoc || []), ...(cur ? [cur] : [])]);
+  host.innerHTML = items.map(p => {
+    const isCur = cur && String(p.id) === cur;
     const on = sel.has(String(p.id)) ? 'checked' : '';
     const dis = isCur ? 'disabled' : '';
     const tip = isCur ? 'title="Current project (always selected)"' : '';
     return `<label class="list-group-item d-flex align-items-center gap-2">`
-         + `<input type="checkbox" class="form-check-input" data-pid="${p.id}" ${on} ${dis} ${tip} />`
-         + `<div class="flex-grow-1">`
-         + `<div><strong>${escHtml(p.name)}</strong></div>`
-         + `<div class="small text-muted">${escHtml(p.tag||'')}</div>`
-         + `</div>`
-         + `<span class="badge bg-secondary" title="Instances">${Number(p.instances||0)}</span>`
-         + `</label>`;
+      + `<input type="checkbox" class="form-check-input" data-pid="${p.id}" ${on} ${dis} ${tip} />`
+      + `<div class="flex-grow-1">`
+      + `<div><strong>${escHtml(p.name)}</strong></div>`
+      + `<div class="small text-muted">${escHtml(p.tag || '')}</div>`
+      + `</div>`
+      + `<span class="badge bg-secondary" title="Instances">${Number(p.instances || 0)}</span>`
+      + `</label>`;
   }).join('');
 }
-async function ctfdSetupProjectsUi(){
+async function ctfdSetupProjectsUi() {
   await ctfdEnsureProjects();
   // Read per-project associations; migrate any legacy global selection
   try {
-    const cur = String(ctfdCurrentPid()||'');
+    const cur = String(ctfdCurrentPid() || '');
     if (cur) ctfdMigrateSelectedToAssoc(cur);
     let assoc = cur ? ctfdReadAssoc(cur) : [];
     // Prefer backend-provided associations when available
     try {
-      const proj = (CTFD_ALL_PROJECTS||[]).find(p => String(p.id)===cur);
+      const proj = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === cur);
       const backend = Array.isArray(proj?.associated_projects) ? proj.associated_projects.map(String) : [];
       if (backend && backend.length) {
         // Sync to session cache
         ctfdWriteAssoc(cur, backend);
         assoc = backend.slice();
       }
-    } catch {}
+    } catch { }
     CTFD_SELECTED_PIDS = (cur && assoc.length) ? [cur, ...assoc] : null;
-  } catch {}
+  } catch { }
   ctfdProjectsBadgeUpdate();
   const filter = document.getElementById('projects-filter');
   const clearBtn = document.getElementById('projects-filter-clear');
@@ -2755,43 +3029,43 @@ async function ctfdSetupProjectsUi(){
   const clr = document.getElementById('projects-clear');
   const apply = document.getElementById('projects-apply');
   ctfdRenderProjectsList('');
-  if (filter) filter.addEventListener('input', ()=> ctfdRenderProjectsList(filter.value||''));
-  if (clearBtn) clearBtn.addEventListener('click', ()=>{ if (filter) filter.value=''; ctfdRenderProjectsList(''); });
-  if (selCur) selCur.addEventListener('click', ()=>{ const pid = ctfdCurrentPid(); CTFD_SELECTED_PIDS = pid? [pid]: []; ctfdRenderProjectsList(filter?filter.value:''); });
-  if (selAll) selAll.addEventListener('click', ()=>{ const cur = ctfdCurrentPid(); const list = (CTFD_ALL_PROJECTS||[]).map(p=> String(p.id)); if (cur && !list.includes(cur)) list.push(cur); CTFD_SELECTED_PIDS = list; ctfdRenderProjectsList(filter?filter.value:''); });
-  if (clr) clr.addEventListener('click', ()=>{ const cur = ctfdCurrentPid(); CTFD_SELECTED_PIDS = cur? [cur] : []; ctfdRenderProjectsList(filter?filter.value:''); });
-  if (apply) apply.addEventListener('click', ()=>{
+  if (filter) filter.addEventListener('input', () => ctfdRenderProjectsList(filter.value || ''));
+  if (clearBtn) clearBtn.addEventListener('click', () => { if (filter) filter.value = ''; ctfdRenderProjectsList(''); });
+  if (selCur) selCur.addEventListener('click', () => { const pid = ctfdCurrentPid(); CTFD_SELECTED_PIDS = pid ? [pid] : []; ctfdRenderProjectsList(filter ? filter.value : ''); });
+  if (selAll) selAll.addEventListener('click', () => { const cur = ctfdCurrentPid(); const list = (CTFD_ALL_PROJECTS || []).map(p => String(p.id)); if (cur && !list.includes(cur)) list.push(cur); CTFD_SELECTED_PIDS = list; ctfdRenderProjectsList(filter ? filter.value : ''); });
+  if (clr) clr.addEventListener('click', () => { const cur = ctfdCurrentPid(); CTFD_SELECTED_PIDS = cur ? [cur] : []; ctfdRenderProjectsList(filter ? filter.value : ''); });
+  if (apply) apply.addEventListener('click', () => {
     try {
       const host = document.getElementById('projects-list');
       const boxes = host ? Array.from(host.querySelectorAll('input[type="checkbox"][data-pid]')) : [];
       const cur = ctfdCurrentPid();
-      let ids = boxes.filter(b=>b.checked).map(b=> String(b.getAttribute('data-pid')));
+      let ids = boxes.filter(b => b.checked).map(b => String(b.getAttribute('data-pid')));
       if (cur && !ids.includes(cur)) ids.push(cur);
       // Persist per-base associations (exclude current from stored list)
-      const assoc = (ids||[]).filter(x => x !== cur);
+      const assoc = (ids || []).filter(x => x !== cur);
       if (cur) ctfdWriteAssoc(cur, assoc);
       // Persist to backend (best-effort)
-      try { if (cur) { http('PATCH', `/api/projects/${encodeURIComponent(cur)}`, { associated_projects: assoc }).catch(()=>{}); } } catch {}
+      try { if (cur) { http('PATCH', `/api/projects/${encodeURIComponent(cur)}`, { associated_projects: assoc }).catch(() => { }); } } catch { }
       // If only current is selected, treat as single-project mode (null)
-      CTFD_SELECTED_PIDS = (cur && assoc.length>0) ? [cur, ...assoc] : null;
+      CTFD_SELECTED_PIDS = (cur && assoc.length > 0) ? [cur, ...assoc] : null;
       ctfdProjectsBadgeUpdate();
       // Auto-enable Project column only when multiple are selected
       try {
         const multi = Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
-        const cols = readCtfdCols(PROJ?PROJ.id:'multi');
+        const cols = readCtfdCols(PROJ ? PROJ.id : 'multi');
         cols.project = !!(multi || cols.project);
         // Reflect checkbox if present
         const chk = document.getElementById('ctfd-col-project'); if (chk) chk.checked = !!cols.project;
         // Persist under current project scope (or a shared key). Using current PROJ if available.
-        writeCtfdCols(PROJ?PROJ.id:'multi', cols);
+        writeCtfdCols(PROJ ? PROJ.id : 'multi', cols);
         CTFD_COLS = cols;
         renderCtfdTable(PROJ);
-      } catch {}
-      try { const el = document.getElementById('projectsModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el); m.hide(); } } catch {}
-    } catch {}
+      } catch { }
+      try { const el = document.getElementById('projectsModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el); m.hide(); } } catch { }
+    } catch { }
   });
   const host = document.getElementById('projects-list');
-  if (host) host.addEventListener('change', (e)=>{
+  if (host) host.addEventListener('change', (e) => {
     const cb = e.target && e.target.matches && e.target.matches('input[type="checkbox"][data-pid]') ? e.target : null;
     if (!cb) return;
     const pid = String(cb.getAttribute('data-pid'));
@@ -2806,7 +3080,7 @@ async function ctfdSetupProjectsUi(){
 }
 
 // --- Progress helpers (like VM Manager) ---
-function ctfdSetProgress(text, percent=100, active=true){
+function ctfdSetProgress(text, percent = 100, active = true) {
   try {
     const wrap = document.getElementById('ctfd-progress');
     const bar = document.getElementById('ctfd-progress-bar');
@@ -2815,46 +3089,46 @@ function ctfdSetProgress(text, percent=100, active=true){
     wrap.removeAttribute('aria-hidden');
     bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
     bar.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, percent))));
-  const label = text || (CTFD_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Working…');
-  bar.textContent = label;
-    if (active) bar.classList.add('progress-bar-striped','progress-bar-animated');
-    else bar.classList.remove('progress-bar-striped','progress-bar-animated');
-  } catch {}
+    const label = text || (CTFD_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Working…');
+    bar.textContent = label;
+    if (active) bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+    else bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+  } catch { }
 }
-function ctfdHideProgress(){
+function ctfdHideProgress() {
   try {
     const wrap = document.getElementById('ctfd-progress');
     const bar = document.getElementById('ctfd-progress-bar');
     if (!wrap || !bar) return;
     wrap.classList.add('d-none');
-    wrap.setAttribute('aria-hidden','true');
+    wrap.setAttribute('aria-hidden', 'true');
     bar.style.width = '100%';
     bar.textContent = 'Ready';
-    bar.classList.remove('progress-bar-striped','progress-bar-animated');
-  } catch {}
+    bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+  } catch { }
 }
 
-function sortIconCtfd(key){ if(CTFD_SORT.key!==key) return ''; const cls = CTFD_SORT.dir==='asc'?'bi-caret-up-fill':'bi-caret-down-fill'; return ' <i class="bi '+cls+'"></i>'; }
-function ariaSortCtfd(key){ if(CTFD_SORT.key!==key) return 'none'; return CTFD_SORT.dir==='asc'?'ascending':'descending'; }
+function sortIconCtfd(key) { if (CTFD_SORT.key !== key) return ''; const cls = CTFD_SORT.dir === 'asc' ? 'bi-caret-up-fill' : 'bi-caret-down-fill'; return ' <i class="bi ' + cls + '"></i>'; }
+function ariaSortCtfd(key) { if (CTFD_SORT.key !== key) return 'none'; return CTFD_SORT.dir === 'asc' ? 'ascending' : 'descending'; }
 
-function applyCtfdFilter(list){
-  if(!CTFD_FILTER_TEXT) return list;
+function applyCtfdFilter(list) {
+  if (!CTFD_FILTER_TEXT) return list;
   try {
-    const norm = (v) => String(v==null? '': v).toLowerCase();
-    if(CTFD_FILTER_IS_REGEX){
+    const norm = (v) => String(v == null ? '' : v).toLowerCase();
+    if (CTFD_FILTER_IS_REGEX) {
       const re = new RegExp(CTFD_FILTER_TEXT, 'i');
-      return list.filter(r => Object.values(r||{}).some(v => re.test(String(v==null?'':v))));
+      return list.filter(r => Object.values(r || {}).some(v => re.test(String(v == null ? '' : v))));
     }
     const t = CTFD_FILTER_TEXT.toLowerCase();
-    return list.filter(r => Object.values(r||{}).some(v => norm(v).includes(t)));
-  } catch(e){
-    const err = document.getElementById('ctfd-filter-error'); if(err) err.classList.remove('d-none');
+    return list.filter(r => Object.values(r || {}).some(v => norm(v).includes(t)));
+  } catch (e) {
+    const err = document.getElementById('ctfd-filter-error'); if (err) err.classList.remove('d-none');
     return list;
   }
 }
 
-function sanitizeSimple(s){ return (s||'').replace(/[<>]/g,''); }
-function escHtml(s){ return (s||'').replace(/[&<>"]/g,c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+function sanitizeSimple(s) { return (s || '').replace(/[<>]/g, ''); }
+function escHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 // Format an ISO-like timestamp into "<x> hours <y> minutes ago" (or minutes-only when < 1 hour)
 function formatRelativeTime(ts) {
@@ -2877,7 +3151,7 @@ function formatRelativeTime(ts) {
       return `${mins} ${mLabel} ago`;
     }
     return 'just now';
-  } catch { return String(ts||''); }
+  } catch { return String(ts || ''); }
 }
 
 // Return age in seconds since timestamp; Infinity if invalid/missing
@@ -2900,17 +3174,17 @@ function rankNumber(val) {
   } catch { return Number.POSITIVE_INFINITY; }
 }
 
-function ctfdProjectLabel(pid){
+function ctfdProjectLabel(pid) {
   try {
-    const id = String(pid||'').trim();
+    const id = String(pid || '').trim();
     if (!id) return '';
     if (PROJ && String(PROJ.id) === id) return PROJ.name || id;
-    const match = (CTFD_ALL_PROJECTS||[]).find(p => String(p.id) === id);
+    const match = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === id);
     return (match && match.name) ? match.name : id;
-  } catch { return String(pid||''); }
+  } catch { return String(pid || ''); }
 }
 
-function ctfdEnsureAudioContext(){
+function ctfdEnsureAudioContext() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return null;
@@ -2918,18 +3192,18 @@ function ctfdEnsureAudioContext(){
       CTFD_AUDIO_CONTEXT = new Ctx();
     }
     if (CTFD_AUDIO_CONTEXT.state === 'suspended') {
-      CTFD_AUDIO_CONTEXT.resume().catch(()=>{});
+      CTFD_AUDIO_CONTEXT.resume().catch(() => { });
     }
     return CTFD_AUDIO_CONTEXT;
   } catch { return null; }
 }
 
-async function ctfdPlayFirstPlaceSound(kind, delaySeconds){
+async function ctfdPlayFirstPlaceSound(kind, delaySeconds) {
   const key = kind === 'team' ? 'ctfdFirstTeam' : 'ctfdFirstUser';
   const fallback = CTFD_AUDIO_FALLBACKS[key] || [];
   return await ctfdPlayNamedSound(key, fallback, delaySeconds);
 }
-function ctfdCompareScoreCandidates(a, b){
+function ctfdCompareScoreCandidates(a, b) {
   const timeA = Number.isFinite(a?.solvedAt) ? a.solvedAt : Number.POSITIVE_INFINITY;
   const timeB = Number.isFinite(b?.solvedAt) ? b.solvedAt : Number.POSITIVE_INFINITY;
   if (timeA !== timeB) return timeA < timeB ? -1 : 1;
@@ -2942,7 +3216,7 @@ function ctfdCompareScoreCandidates(a, b){
   if (labelA > labelB) return 1;
   return 0;
 }
-function ctfdSummarizeScore(meta){
+function ctfdSummarizeScore(meta) {
   const summary = { hasScore: false, firstUser: null, firstTeam: null, firstPoints: null, firstChallenge: null, firstSolveTime: null };
   let bestUser = null;
   let bestTeam = null;
@@ -2978,7 +3252,7 @@ function ctfdSummarizeScore(meta){
         if (!bestTeam || ctfdCompareScoreCandidates(candidate, bestTeam) < 0) bestTeam = candidate;
       }
     });
-  } catch {}
+  } catch { }
   const pick = bestUser || bestTeam;
   if (pick) {
     summary.firstUser = pick.username;
@@ -2989,7 +3263,7 @@ function ctfdSummarizeScore(meta){
   }
   return summary;
 }
-function ctfdSpeechContextFirstScore(projectId, summary){
+function ctfdSpeechContextFirstScore(projectId, summary) {
   const base = ctfdSpeechContextProject(projectId);
   const ctx = { ...base };
   const data = summary || {};
@@ -3025,11 +3299,10 @@ function ctfdSpeechContextFirstScore(projectId, summary){
   }
   ctx.project = base.project;
   ctx.project_clause = base.project_clause;
-  if (!ctx.first_team) ctx.first_team = teamName || leader || '';
-  ctx.first_team = ctfdSpeechTrimTeamName(ctx.first_team);
+
   return ctx;
 }
-function ctfdSeedFirstScoreState(projectId, meta){
+function ctfdSeedFirstScoreState(projectId, meta) {
   try {
     const pid = String(projectId || '').trim();
     if (!pid || pid === 'multi') return;
@@ -3041,9 +3314,9 @@ function ctfdSeedFirstScoreState(projectId, meta){
       lastTeam: snapshot.firstTeam || '',
       lastPoints: Number(snapshot.firstPoints) || 0
     };
-  } catch {}
+  } catch { }
 }
-function ctfdAnnounceFirstScore(projectId, summary){
+function ctfdAnnounceFirstScore(projectId, summary) {
   if (!summary || !summary.hasScore) return;
   const projectLabel = ctfdProjectLabel(projectId);
   const scope = projectLabel ? ` — ${projectLabel}` : '';
@@ -3054,7 +3327,7 @@ function ctfdAnnounceFirstScore(projectId, summary){
   const challengeSegment = summary.firstChallenge ? ` — ${summary.firstChallenge}` : '';
   const pts = Number(summary.firstPoints);
   const pointsSegment = Number.isFinite(pts) && pts > 0 ? ` (+${pts} pts)` : '';
-  try { shell.logSuccess(`[CTFd] First score${scope}: ${leader}${teamSegment}${challengeSegment}${pointsSegment}`); } catch {}
+  try { shell.logSuccess(`[CTFd] First score${scope}: ${leader}${teamSegment}${challengeSegment}${pointsSegment}`); } catch { }
   const speechScope = projectLabel ? ` in ${projectLabel}` : '';
   const speechTeamName = ctfdSpeechTrimTeamName(summary.firstTeam || '');
   const leaderSpeech = summary.firstUser || speechTeamName || 'Unknown competitor';
@@ -3071,10 +3344,10 @@ function ctfdAnnounceFirstScore(projectId, summary){
   const speechCtx = ctfdSpeechContextFirstScore(projectId, summary);
   const fallbackSpeech = `First score${speechScope} goes to ${leaderSpeech}${teamSpeech}${challengeSpeech}${pointsSpeech}.`;
   void ctfdSpeakForEvent('ctfdFirstScore', { context: speechCtx, fallbackText: fallbackSpeech }, 0, {
-    onAudioRequest: (startDelay)=> ctfdPlayNamedSound('ctfdFirstScore', CTFD_AUDIO_FALLBACKS.ctfdFirstScore || [], startDelay)
+    onAudioRequest: (startDelay) => ctfdPlayNamedSound('ctfdFirstScore', CTFD_AUDIO_FALLBACKS.ctfdFirstScore || [], startDelay)
   });
 }
-function ctfdHandleCategoryFirsts(projectId, payload){
+function ctfdHandleCategoryFirsts(projectId, payload) {
   try {
     const pid = String(projectId || '').trim();
     if (!pid || pid === 'multi') return;
@@ -3083,11 +3356,11 @@ function ctfdHandleCategoryFirsts(projectId, payload){
     const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
     if (errors.length) {
       errors.slice(0, 3).forEach(msg => {
-        try { shell.logWarn(`[CTFd] Category firsts warning: ${msg}`); } catch {}
+        try { shell.logWarn(`[CTFd] Category firsts warning: ${msg}`); } catch { }
       });
     }
     const newEvents = [];
-    const process = (list, kind)=>{
+    const process = (list, kind) => {
       if (!Array.isArray(list)) return;
       list.forEach(item => {
         const normalized = ctfdNormalizeCategorySolve(kind, item);
@@ -3111,7 +3384,7 @@ function ctfdHandleCategoryFirsts(projectId, payload){
     process(data.user, 'user');
     process(data.team, 'team');
     if (!newEvents.length) return;
-    newEvents.sort((a, b)=>{
+    newEvents.sort((a, b) => {
       const aEpoch = Number(a.info.timestampEpoch || 0);
       const bEpoch = Number(b.info.timestampEpoch || 0);
       if (Number.isFinite(aEpoch) && Number.isFinite(bEpoch) && aEpoch !== bEpoch) return aEpoch - bEpoch;
@@ -3123,9 +3396,9 @@ function ctfdHandleCategoryFirsts(projectId, payload){
       const ref = store[evt.info.key];
       if (ref) ref.announced = true;
     });
-  } catch {}
+  } catch { }
 }
-function ctfdDetectFirstScore(projectId, meta){
+function ctfdDetectFirstScore(projectId, meta) {
   try {
     const pid = String(projectId || '').trim();
     if (!pid || pid === 'multi') return;
@@ -3157,26 +3430,26 @@ function ctfdDetectFirstScore(projectId, meta){
     state.lastTeam = summary.firstTeam || state.lastTeam || '';
     state.lastPoints = Number(summary.firstPoints) || state.lastPoints || 0;
     CTFD_SCORE_STATE[pid] = state;
-  } catch {}
+  } catch { }
 }
 
-function ctfdAnnounceFirstPlace(projectId, kind, name, delaySeconds){
+function ctfdAnnounceFirstPlace(projectId, kind, name, delaySeconds) {
   if (!name) return;
   const projectLabel = ctfdProjectLabel(projectId);
   const scope = projectLabel ? ` — ${projectLabel}` : '';
   const prefix = kind === 'team' ? 'Team' : 'User';
-  try { shell.logSuccess(`[CTFd] ${prefix} now in first place${scope}: ${name}`); } catch {}
+  try { shell.logSuccess(`[CTFd] ${prefix} now in first place${scope}: ${name}`); } catch { }
   const key = kind === 'team' ? 'ctfdFirstTeam' : 'ctfdFirstUser';
   const speechScope = projectLabel ? ` in ${projectLabel}` : '';
   const speechCtx = ctfdSpeechContextFirstPlace(projectId, kind, name);
   const fallback = `${prefix} ${name} is now in first place${speechScope}.`;
   const baseDelay = Number(delaySeconds) || 0;
   void ctfdSpeakForEvent(key, { context: speechCtx, fallbackText: fallback }, baseDelay, {
-    onAudioRequest: (startDelay)=> ctfdPlayFirstPlaceSound(kind, startDelay)
+    onAudioRequest: (startDelay) => ctfdPlayFirstPlaceSound(kind, startDelay)
   });
 }
 
-function ctfdComputeFirstPlace(meta){
+function ctfdComputeFirstPlace(meta) {
   const result = { user: null, userRank: null, team: null, teamRank: null };
   let topUserRank = Number.POSITIVE_INFINITY;
   let topTeamRank = Number.POSITIVE_INFINITY;
@@ -3200,15 +3473,15 @@ function ctfdComputeFirstPlace(meta){
         }
       }
     });
-  } catch {}
+  } catch { }
   if (!Number.isFinite(topUserRank)) { result.user = null; result.userRank = null; }
   if (!Number.isFinite(topTeamRank)) { result.team = null; result.teamRank = null; }
   return result;
 }
 
-function ctfdDetectFirstPlaceChange(projectId, meta){
+function ctfdDetectFirstPlaceChange(projectId, meta) {
   try {
-    const pid = String(projectId||'').trim();
+    const pid = String(projectId || '').trim();
     if (!pid || pid === 'multi') return;
     const next = ctfdComputeFirstPlace(meta);
     const prev = CTFD_FIRST_PLACE_HISTORY[pid];
@@ -3223,21 +3496,21 @@ function ctfdDetectFirstPlaceChange(projectId, meta){
       ctfdAnnounceFirstPlace(pid, 'team', next.team, 0.25);
     }
     CTFD_FIRST_PLACE_HISTORY[pid] = next;
-  } catch {}
+  } catch { }
 }
 
-function ctfdSeedFirstPlaceHistory(projectId, meta){
+function ctfdSeedFirstPlaceHistory(projectId, meta) {
   try {
-    const pid = String(projectId||'').trim();
+    const pid = String(projectId || '').trim();
     if (!pid || pid === 'multi') return;
     CTFD_FIRST_PLACE_HISTORY[pid] = ctfdComputeFirstPlace(meta);
     ctfdSeedFirstScoreState(pid, meta);
-  } catch {}
+  } catch { }
 }
 
-function ctfdApplyUserMeta(projectId, meta){
+function ctfdApplyUserMeta(projectId, meta) {
   const data = meta && typeof meta === 'object' ? meta : {};
-  const pid = String(projectId||'').trim();
+  const pid = String(projectId || '').trim();
   if (pid && pid !== 'multi') {
     ctfdDetectFirstPlaceChange(pid, data);
     ctfdDetectFirstScore(pid, data);
@@ -3245,55 +3518,55 @@ function ctfdApplyUserMeta(projectId, meta){
   CTFD_USER_META = data;
 }
 
-function ctfdUnlockAudioContext(){
+function ctfdUnlockAudioContext() {
   try {
     const ctx = ctfdEnsureAudioContext();
-    if (ctx && ctx.state === 'suspended') ctx.resume().catch(()=>{});
-  } catch {}
+    if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => { });
+  } catch { }
 }
 
 try {
   document.addEventListener('pointerdown', ctfdUnlockAudioContext, { once: true, passive: true });
   document.addEventListener('keydown', ctfdUnlockAudioContext, { once: true });
-} catch {}
+} catch { }
 
 // --- Persist/restore simple UI state per project ---
-function ctfdUiKey(pid){ return `toolhub.ctfd.ui.${pid}`; }
-function readCtfdUiState(pid){ try { return JSON.parse(sessionStorage.getItem(ctfdUiKey(pid))||'{}'); } catch { return {}; } }
-function writeCtfdUiState(pid, obj){
+function ctfdUiKey(pid) { return `toolhub.ctfd.ui.${pid}`; }
+function readCtfdUiState(pid) { try { return JSON.parse(sessionStorage.getItem(ctfdUiKey(pid)) || '{}'); } catch { return {}; } }
+function writeCtfdUiState(pid, obj) {
   try {
     const cur = readCtfdUiState(pid);
     sessionStorage.setItem(ctfdUiKey(pid), JSON.stringify({
       ...cur,
       filterText: (obj.filterText !== undefined ? obj.filterText : cur.filterText) || '',
-      filterIsRegex: !!(obj.filterIsRegex !== undefined ? obj.filterIsRegex : (cur.filterIsRegex||false)),
-      showPasswords: !!(obj.showPasswords !== undefined ? obj.showPasswords : (cur.showPasswords||false)),
+      filterIsRegex: !!(obj.filterIsRegex !== undefined ? obj.filterIsRegex : (cur.filterIsRegex || false)),
+      showPasswords: !!(obj.showPasswords !== undefined ? obj.showPasswords : (cur.showPasswords || false)),
       selectedIndices: Array.isArray(obj.selectedIndices) ? obj.selectedIndices : (Array.isArray(cur.selectedIndices) ? cur.selectedIndices : []),
       sort: (obj.sort !== undefined ? obj.sort : (cur.sort || { key: CTFD_SORT.key, dir: CTFD_SORT.dir })),
       userSortMode: (obj.userSortMode !== undefined ? obj.userSortMode : (cur.userSortMode || CTFD_USER_SORT_MODE)),
       teamSortMode: (obj.teamSortMode !== undefined ? obj.teamSortMode : (cur.teamSortMode || CTFD_TEAM_SORT_MODE)),
       sortNA: (obj.sortNA !== undefined ? obj.sortNA : (cur.sortNA !== undefined ? cur.sortNA : CTFD_SORT_NA))
     }));
-  } catch {}
+  } catch { }
 }
 
 // Map VM power state to a styled badge (mirror VM Manager)
-function mapProxmoxPowerState(raw){
+function mapProxmoxPowerState(raw) {
   const s = String(raw || '').toLowerCase();
   const mk = (label, cls, weight) => ({ label, cls, weight });
   if (!s) return mk('n/a', 'bg-secondary', 6);
-  if (['running','ok'].includes(s)) return mk('running','bg-success',0);
-  if (['starting','prelaunch','booting','launching'].includes(s)) return mk('starting','bg-info text-dark',1);
-  if (['paused','pause','suspended','suspend'].includes(s)) return mk('suspended','bg-warning text-dark',2);
-  if (['stopped','down','shutoff','off','halted'].includes(s)) return mk('stopped','bg-secondary',3);
-  if (['stopping','shutdown','shutting down'].includes(s)) return mk('stopping','bg-info text-dark',4);
-  if (['resetting','rebooting','reboot'].includes(s)) return mk('rebooting','bg-info text-dark',1);
-  if (['error','failed','failure','crashed','internal-error'].includes(s)) return mk('error','bg-danger',5);
-  return mk(s,'bg-secondary',6);
+  if (['running', 'ok'].includes(s)) return mk('running', 'bg-success', 0);
+  if (['starting', 'prelaunch', 'booting', 'launching'].includes(s)) return mk('starting', 'bg-info text-dark', 1);
+  if (['paused', 'pause', 'suspended', 'suspend'].includes(s)) return mk('suspended', 'bg-warning text-dark', 2);
+  if (['stopped', 'down', 'shutoff', 'off', 'halted'].includes(s)) return mk('stopped', 'bg-secondary', 3);
+  if (['stopping', 'shutdown', 'shutting down'].includes(s)) return mk('stopping', 'bg-info text-dark', 4);
+  if (['resetting', 'rebooting', 'reboot'].includes(s)) return mk('rebooting', 'bg-info text-dark', 1);
+  if (['error', 'failed', 'failure', 'crashed', 'internal-error'].includes(s)) return mk('error', 'bg-danger', 5);
+  return mk(s, 'bg-secondary', 6);
 }
 
 // Status badge for created/missing/n/a
-function mapRowStatus(raw){
+function mapRowStatus(raw) {
   const s = String(raw || '').toLowerCase();
   if (s === 'created') return { label: 'created', cls: 'badge bg-success', weight: 0 };
   if (s === 'missing') return { label: 'missing', cls: 'badge bg-danger', weight: 2 };
@@ -3301,16 +3574,16 @@ function mapRowStatus(raw){
   return { label: 'n/a', cls: 'badge bg-secondary', weight: 3 };
 }
 
-function renderCtfdTable(proj){
+function renderCtfdTable(proj) {
   // If multiple projects selected, delegate to merged renderer
   try {
     if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
       return ctfdRenderTableMerged();
     }
-  } catch {}
+  } catch { }
   const host = document.getElementById('ctfd-table');
-  if(!host) return;
-  if(!proj){
+  if (!host) return;
+  if (!proj) {
     host.innerHTML = '<div class="text-center text-muted py-4">Select a project from the left to begin.</div>';
     return;
   }
@@ -3319,10 +3592,10 @@ function renderCtfdTable(proj){
   const creds = Array.isArray(proj.credentials) ? proj.credentials : [];
   const rows = [];
   for (let i = 1; i <= inst; i++) {
-    const cred = creds[i-1] || {};
+    const cred = creds[i - 1] || {};
     const uname = (cred.username ?? '').trim();
     const pword = cred.password ?? '';
-    rows.push({ index:i, uname, pword, key: `${i}` });
+    rows.push({ index: i, uname, pword, key: `${i}` });
   }
 
   // Filter across all visible columns by building a searchable record per row
@@ -3344,7 +3617,7 @@ function renderCtfdTable(proj){
   }).filter(Boolean);
 
   // Sort within groups using CTFD_SORT
-  const compare = (a,b)=>{
+  const compare = (a, b) => {
     const dir = CTFD_SORT.dir === 'desc' ? -1 : 1;
     const k = CTFD_SORT.key;
     const numPresent = (v) => {
@@ -3414,9 +3687,9 @@ function renderCtfdTable(proj){
         const mb = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
         va = rankNumber(ma && ma.user_rank);
         vb = rankNumber(mb && mb.user_rank);
-        if (va === vb) { va = (a.uname||'').toLowerCase(); vb = (b.uname||'').toLowerCase(); }
+        if (va === vb) { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); }
       } else {
-        va = (a.uname||'').toLowerCase(); vb = (b.uname||'').toLowerCase();
+        va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase();
       }
     }
     else if (k === 'team') {
@@ -3458,16 +3731,16 @@ function renderCtfdTable(proj){
       va = ageSeconds(ma && ma.team_last_solve_time);
       vb = ageSeconds(mb && mb.team_last_solve_time);
     }
-    else { va = (a.uname||'').toLowerCase(); vb = (b.uname||'').toLowerCase(); }
+    else { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); }
 
     // Final numeric/string compare
-    if (va < vb) return -1*dir;
-    if (va > vb) return 1*dir;
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
     return 0;
   };
 
   // Sort all filtered rows directly (no per-instance grouping)
-  try { filtered.sort(compare); } catch {}
+  try { filtered.sort(compare); } catch { }
 
   // Render
   CTFD_LAST_VISIBLE_INDICES = [];
@@ -3475,16 +3748,16 @@ function renderCtfdTable(proj){
   html += '<thead><tr>';
   if (CTFD_COLS.project) html += `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('project')}" style="cursor:pointer;min-width:220px;white-space:nowrap" onclick="ctfdSort('project')">Project${sortIconCtfd('project')}</th>`;
   if (CTFD_COLS.cred) html +=
-    `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('cred')}" style="cursor:pointer;min-width:220px;white-space:nowrap">`+
-      `<input type="checkbox" id="ctfd-chk-all" class="form-check-input me-2" title="Select all" />`+
-      `<span role="button" onclick="ctfdSort('cred')">User${sortIconCtfd('cred')}</span>`+
-      `<button type="button" class="btn btn-sm btn-link p-0 ms-2" title="Toggle User sort (currently ${CTFD_USER_SORT_MODE})" onclick="toggleUserSortMode(event)">⇅</button>`+
-      `<button type="button" class="btn btn-sm btn-link p-0 ms-2" title="Show/Hide passwords" onclick="toggleCtfdPasswords()">&#128065;&#xFE0E;</button>`+
+    `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('cred')}" style="cursor:pointer;min-width:220px;white-space:nowrap">` +
+    `<input type="checkbox" id="ctfd-chk-all" class="form-check-input me-2" title="Select all" />` +
+    `<span role="button" onclick="ctfdSort('cred')">User${sortIconCtfd('cred')}</span>` +
+    `<button type="button" class="btn btn-sm btn-link p-0 ms-2" title="Toggle User sort (currently ${CTFD_USER_SORT_MODE})" onclick="toggleUserSortMode(event)">⇅</button>` +
+    `<button type="button" class="btn btn-sm btn-link p-0 ms-2" title="Show/Hide passwords" onclick="toggleCtfdPasswords()">&#128065;&#xFE0E;</button>` +
     `</th>`;
   if (CTFD_COLS.team) html +=
-    `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('team')}" style="cursor:pointer;min-width:200px;white-space:nowrap">`+
-      `<span role="button" onclick="ctfdSort('team')">Team${sortIconCtfd('team')}</span>`+
-      `<button type="button" class="btn btn-sm btn-link p-0 ms-2" title="Toggle Team sort (currently ${CTFD_TEAM_SORT_MODE})" onclick="toggleTeamSortMode(event)">⇅</button>`+
+    `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('team')}" style="cursor:pointer;min-width:200px;white-space:nowrap">` +
+    `<span role="button" onclick="ctfdSort('team')">Team${sortIconCtfd('team')}</span>` +
+    `<button type="button" class="btn btn-sm btn-link p-0 ms-2" title="Toggle Team sort (currently ${CTFD_TEAM_SORT_MODE})" onclick="toggleTeamSortMode(event)">⇅</button>` +
     `</th>`;
   if (CTFD_COLS.user_points) html += `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('user_points')}" style="cursor:pointer;min-width:120px;white-space:nowrap" onclick="ctfdSort('user_points')">User Points${sortIconCtfd('user_points')}</th>`;
   if (CTFD_COLS.team_points) html += `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('team_points')}" style="cursor:pointer;min-width:120px;white-space:nowrap" onclick="ctfdSort('team_points')">Team Points${sortIconCtfd('team_points')}</th>`;
@@ -3492,7 +3765,7 @@ function renderCtfdTable(proj){
   if (CTFD_COLS.team_last) html += `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('team_last')}" style="cursor:pointer;min-width:220px;white-space:nowrap" onclick="ctfdSort('team_last')">Team Last Solved${sortIconCtfd('team_last')}</th>`;
   html += '</tr></thead>';
   html += '<tbody>';
-  const colCount = ['project','cred','team','user_points','team_points','user_last','team_last'].filter(id=>CTFD_COLS[id]).length || 1;
+  const colCount = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'].filter(id => CTFD_COLS[id]).length || 1;
   if (filtered.length === 0) {
     html += `<tr><td colspan="${colCount}" class="text-center text-muted">No rows</td></tr>`;
   } else {
@@ -3503,9 +3776,9 @@ function renderCtfdTable(proj){
       const masked = r.pword ? '•'.repeat(Math.min(String(r.pword).length, 12)) : 'n/a';
       const meta = (r.uname && CTFD_USER_META[r.uname]) ? CTFD_USER_META[r.uname] : null;
       const urank = (meta && meta.user_rank != null && meta.user_rank !== '') ? ` <span class="text-muted">(#${escHtml(String(meta.user_rank))})</span>` : '';
-      const baseUrl = (PROJ?.challenge_url||'').replace(/\/$/, '');
+      const baseUrl = (PROJ?.challenge_url || '').replace(/\/$/, '');
       const uAttrs = '';
-      const ulink = (meta && meta.user_id!=null)
+      const ulink = (meta && meta.user_id != null)
         ? `<a href="${escHtml(baseUrl)}/users/${encodeURIComponent(String(meta.user_id))}" target="_blank" rel="noopener"${uAttrs}>${escHtml(r.uname || 'n/a')}</a>`
         : `<span${uAttrs}>${escHtml(r.uname || 'n/a')}</span>`;
       const credText = (r.uname || r.pword)
@@ -3525,14 +3798,14 @@ function renderCtfdTable(proj){
       const tname = meta && meta.team_name ? escHtml(String(meta.team_name)) : '';
       const tTips = [];
       if (meta && meta.team_captain) tTips.push(`Captain: ${escHtml(String(meta.team_captain))}`);
-      if (meta && (meta.team_size!==null && meta.team_size!==undefined)) tTips.push(`Size: ${escHtml(String(meta.team_size))}`);
+      if (meta && (meta.team_size !== null && meta.team_size !== undefined)) tTips.push(`Size: ${escHtml(String(meta.team_size))}`);
       const tTitle = tTips.join(' ');
       const tAttrs = tTitle ? ` data-bs-toggle=\"tooltip\" data-bs-placement=\"top\" title=\"${tTitle}\"` : '';
-      const tlink = (meta && meta.team_id!=null)
-        ? `<a href="${escHtml(baseUrl)}/teams/${encodeURIComponent(String(meta.team_id))}" target="_blank" rel="noopener"${tAttrs}>${tname||'team'}</a>`
-        : (tTitle?`<span${tAttrs}>${tname||''}</span>`:tname);
+      const tlink = (meta && meta.team_id != null)
+        ? `<a href="${escHtml(baseUrl)}/teams/${encodeURIComponent(String(meta.team_id))}" target="_blank" rel="noopener"${tAttrs}>${tname || 'team'}</a>`
+        : (tTitle ? `<span${tAttrs}>${tname || ''}</span>` : tname);
       const trank = meta && meta.team_rank != null && meta.team_rank !== '' ? ` <span class="text-muted">(#${escHtml(String(meta.team_rank))})</span>` : '';
-      const teamHtml = (tname || (meta && meta.team_id!=null)) ? `${tlink}${trank}` : 'n/a';
+      const teamHtml = (tname || (meta && meta.team_id != null)) ? `${tlink}${trank}` : 'n/a';
       // Points
       const fmtPts = (x) => {
         if (x === null || x === undefined || x === '' || isNaN(Number(x))) return 'n/a';
@@ -3544,22 +3817,22 @@ function renderCtfdTable(proj){
       // Last solved
       const uTime = (meta && meta.user_last_solve_time) ? formatRelativeTime(String(meta.user_last_solve_time)) : '';
       const uChal = (meta && meta.user_last_solve_challenge) ? String(meta.user_last_solve_challenge) : '';
-      const userLastHtml = (uTime || uChal) ? `${escHtml(uTime)}${(uTime&&uChal)?' / ':''}${escHtml(uChal)}` : 'n/a';
+      const userLastHtml = (uTime || uChal) ? `${escHtml(uTime)}${(uTime && uChal) ? ' / ' : ''}${escHtml(uChal)}` : 'n/a';
       const tTime = (meta && meta.team_last_solve_time) ? formatRelativeTime(String(meta.team_last_solve_time)) : '';
       const tChal = (meta && meta.team_last_solve_challenge) ? String(meta.team_last_solve_challenge) : '';
-      const teamLastHtml = (tTime || tChal) ? `${escHtml(tTime)}${(tTime&&tChal)?' / ':''}${escHtml(tChal)}` : 'n/a';
+      const teamLastHtml = (tTime || tChal) ? `${escHtml(tTime)}${(tTime && tChal) ? ' / ' : ''}${escHtml(tChal)}` : 'n/a';
 
       html += '<tr>';
-      if (CTFD_COLS.project) html += `<td>${escHtml(PROJ?.name||'')}<div class="small text-muted">${escHtml(PROJ?.tag||'')}</div></td>`;
+      if (CTFD_COLS.project) html += `<td>${escHtml(PROJ?.name || '')}<div class="small text-muted">${escHtml(PROJ?.tag || '')}</div></td>`;
       if (CTFD_COLS.cred) html +=
-        `<td>`+
-          `<div class=\"d-flex align-items-center\">`+
-            `<div class=\"flex-grow-1\">`+
-              `<input type=\"checkbox\" class=\"ctfd-cred-chk form-check-input me-2\" data-index=\"${idx}\" ${checked} />`+
-              `${credText}`+
-            `</div>`+
-            `<div class=\"ms-2\">${existIcon}</div>`+
-          `</div>`+
+        `<td>` +
+        `<div class=\"d-flex align-items-center\">` +
+        `<div class=\"flex-grow-1\">` +
+        `<input type=\"checkbox\" class=\"ctfd-cred-chk form-check-input me-2\" data-index=\"${idx}\" ${checked} />` +
+        `${credText}` +
+        `</div>` +
+        `<div class=\"ms-2\">${existIcon}</div>` +
+        `</div>` +
         `</td>`;
       if (CTFD_COLS.team) html += `<td>${teamHtml}</td>`;
       if (CTFD_COLS.user_points) html += `<td>${userPts}</td>`;
@@ -3573,7 +3846,7 @@ function renderCtfdTable(proj){
   host.innerHTML = html;
   ctfdEnsureScrollPersistence();
   // Snapshot latest single-project render
-  try { ctfdCacheSnapshot('single'); } catch {}
+  try { ctfdCacheSnapshot('single'); } catch { }
 
   // Wire selection handlers
   try {
@@ -3581,12 +3854,12 @@ function renderCtfdTable(proj){
     if (window.bootstrap) {
       try {
         document.querySelectorAll('#ctfd-table [data-bs-toggle="tooltip"]').forEach(el => {
-          try { bootstrap.Tooltip.getOrCreateInstance(el); } catch {}
+          try { bootstrap.Tooltip.getOrCreateInstance(el); } catch { }
         });
-      } catch {}
+      } catch { }
     }
     const all = document.getElementById('ctfd-chk-all');
-    const allSelected = (CTFD_LAST_VISIBLE_INDICES.length>0) && CTFD_LAST_VISIBLE_INDICES.every(i => CTFD_SELECTED_INDICES.has(i));
+    const allSelected = (CTFD_LAST_VISIBLE_INDICES.length > 0) && CTFD_LAST_VISIBLE_INDICES.every(i => CTFD_SELECTED_INDICES.has(i));
     if (all) all.checked = allSelected;
     if (all) {
       all.addEventListener('change', () => {
@@ -3597,7 +3870,7 @@ function renderCtfdTable(proj){
         }
         // Update all credential checkboxes to reflect new state without full re-render
         document.querySelectorAll('#ctfd-table .ctfd-cred-chk').forEach(cb => {
-          const idx = Number(cb.getAttribute('data-index')||'0');
+          const idx = Number(cb.getAttribute('data-index') || '0');
           cb.checked = CTFD_SELECTED_INDICES.has(idx);
         });
         // Persist selection
@@ -3606,41 +3879,41 @@ function renderCtfdTable(proj){
     }
     document.querySelectorAll('#ctfd-table .ctfd-cred-chk').forEach(cb => {
       cb.addEventListener('change', () => {
-        const idx = Number(cb.getAttribute('data-index')||'0');
+        const idx = Number(cb.getAttribute('data-index') || '0');
         if (cb.checked) CTFD_SELECTED_INDICES.add(idx); else CTFD_SELECTED_INDICES.delete(idx);
         // Update header checkbox state
-        const allSel = (CTFD_LAST_VISIBLE_INDICES.length>0) && CTFD_LAST_VISIBLE_INDICES.every(i => CTFD_SELECTED_INDICES.has(i));
+        const allSel = (CTFD_LAST_VISIBLE_INDICES.length > 0) && CTFD_LAST_VISIBLE_INDICES.every(i => CTFD_SELECTED_INDICES.has(i));
         const hdr = document.getElementById('ctfd-chk-all'); if (hdr) hdr.checked = allSel;
         // Persist selection
         if (PROJ) writeCtfdUiState(PROJ.id, { selectedIndices: Array.from(CTFD_SELECTED_INDICES) });
       });
     });
-  } catch {}
+  } catch { }
 }
 
 // --- Merged table renderer for multi-project view ---
-function ctfdRenderTableMerged(){
+function ctfdRenderTableMerged() {
   const host = document.getElementById('ctfd-table');
   if (!host) return;
   const pids = Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS.slice() : [];
   if (!pids.length) { host.innerHTML = '<div class="text-muted">Select projects to merge.</div>'; return; }
   // Build rows by merging credentials layout across selected projects
   // We rely on PROJ for column preferences when single; for multi, use a shared 'multi' key.
-  try { CTFD_COLS = readCtfdCols('multi'); const ids=['project','cred','team','user_points','team_points','user_last','team_last']; ids.forEach(id=>{ const el=document.getElementById(`ctfd-col-${id}`); if(el) el.checked = !!CTFD_COLS[id]; }); } catch {}
+  try { CTFD_COLS = readCtfdCols('multi'); const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last']; ids.forEach(id => { const el = document.getElementById(`ctfd-col-${id}`); if (el) el.checked = !!CTFD_COLS[id]; }); } catch { }
   // Read persisted multi selection keys
   try {
     const raw = sessionStorage.getItem('toolhub.ctfd.mgr.selectedKeys.v1') || '[]';
     const arr = JSON.parse(raw); if (Array.isArray(arr)) CTFD_SELECTED_KEYS = new Set(arr);
-  } catch {}
+  } catch { }
   // Construct a merged flat row list
   const rows = [];
-  const byId = {}; (CTFD_ALL_PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
+  const byId = {}; (CTFD_ALL_PROJECTS || []).forEach(p => byId[String(p.id)] = p);
   pids.forEach(pid => {
     const proj = byId[String(pid)]; if (!proj) return;
     const inst = Number(proj.instances || 0);
     const creds = Array.isArray(proj.credentials) ? proj.credentials : [];
     for (let i = 1; i <= inst; i++) {
-      const cred = creds[i-1] || {};
+      const cred = creds[i - 1] || {};
       const uname = (cred.username ?? '').trim();
       const pword = cred.password ?? '';
       rows.push({ pid: String(proj.id), _proj: proj, index: i, uname, pword, key: `${proj.id}:${i}` });
@@ -3652,8 +3925,8 @@ function ctfdRenderTableMerged(){
     return {
       key: r.key,
       pid: r.pid,
-      project_name: r._proj?.name||'',
-      project_tag: r._proj?.tag||'',
+      project_name: r._proj?.name || '',
+      project_tag: r._proj?.tag || '',
       index: r.index,
       user: r.uname,
       team: meta?.team_name ?? '',
@@ -3665,42 +3938,42 @@ function ctfdRenderTableMerged(){
   });
   const filtered = applyCtfdFilter(filterIndex).map(f => rows.find(r => r.key === f.key)).filter(Boolean);
   // Sorting across projects: reuse same compare but adapt lookups
-  const compare = (a,b)=>{
+  const compare = (a, b) => {
     const dir = CTFD_SORT.dir === 'desc' ? -1 : 1;
     const k = CTFD_SORT.key;
-    const numPresent = (v) => { if (v === null || v === undefined) return false; const s = String(v); if (s.trim()==='') return false; const n = Number(s); return Number.isFinite(n); };
+    const numPresent = (v) => { if (v === null || v === undefined) return false; const s = String(v); if (s.trim() === '') return false; const n = Number(s); return Number.isFinite(n); };
     const metaA = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
     const metaB = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
     // Always place rows missing the active sort field at the end
     const missing = (row, meta) => {
-      if (k==='cred') { if (CTFD_USER_SORT_MODE==='rank') return !isFinite(rankNumber(meta && meta.user_rank)); return !(row.uname && row.uname.trim()); }
-      if (k==='team') { if (CTFD_TEAM_SORT_MODE==='rank') return !isFinite(rankNumber(meta && meta.team_rank)); return !(meta && meta.team_name); }
-      if (k==='user_points') return !(meta && numPresent(meta.user_points));
-      if (k==='team_points') return !(meta && numPresent(meta.team_points));
-      if (k==='user_last') return !Number.isFinite(ageSeconds(meta && meta.user_last_solve_time));
-      if (k==='team_last') return !Number.isFinite(ageSeconds(meta && meta.team_last_solve_time));
+      if (k === 'cred') { if (CTFD_USER_SORT_MODE === 'rank') return !isFinite(rankNumber(meta && meta.user_rank)); return !(row.uname && row.uname.trim()); }
+      if (k === 'team') { if (CTFD_TEAM_SORT_MODE === 'rank') return !isFinite(rankNumber(meta && meta.team_rank)); return !(meta && meta.team_name); }
+      if (k === 'user_points') return !(meta && numPresent(meta.user_points));
+      if (k === 'team_points') return !(meta && numPresent(meta.team_points));
+      if (k === 'user_last') return !Number.isFinite(ageSeconds(meta && meta.user_last_solve_time));
+      if (k === 'team_last') return !Number.isFinite(ageSeconds(meta && meta.team_last_solve_time));
       return false;
     };
-    const aNA = missing(a, metaA), bNA = missing(b, metaB); if (aNA!==bNA) return aNA?1:-1;
+    const aNA = missing(a, metaA), bNA = missing(b, metaB); if (aNA !== bNA) return aNA ? 1 : -1;
     let va, vb;
-    if (k==='project') {
-      va = String(a._proj?.name||'').toLowerCase();
-      vb = String(b._proj?.name||'').toLowerCase();
+    if (k === 'project') {
+      va = String(a._proj?.name || '').toLowerCase();
+      vb = String(b._proj?.name || '').toLowerCase();
     }
-    else if (k==='cred') {
-      if (CTFD_USER_SORT_MODE==='rank') { va = rankNumber(metaA && metaA.user_rank); vb = rankNumber(metaB && metaB.user_rank); if (va===vb){ va=(a.uname||'').toLowerCase(); vb=(b.uname||'').toLowerCase(); } }
-      else { va=(a.uname||'').toLowerCase(); vb=(b.uname||'').toLowerCase(); }
-    } else if (k==='team') {
-      if (CTFD_TEAM_SORT_MODE==='rank') { va=rankNumber(metaA && metaA.team_rank); vb=rankNumber(metaB && metaB.team_rank); if (va===vb){ va=String(metaA&&metaA.team_name||'').toLowerCase(); vb=String(metaB&&metaB.team_name||'').toLowerCase(); } }
-      else { va=String(metaA&&metaA.team_name||'').toLowerCase(); vb=String(metaB&&metaB.team_name||'').toLowerCase(); }
-    } else if (k==='user_points') { va=Number(metaA&&metaA.user_points); vb=Number(metaB&&metaB.user_points); }
-    else if (k==='team_points') { va=Number(metaA&&metaA.team_points); vb=Number(metaB&&metaB.team_points); }
-    else if (k==='user_last') { va=ageSeconds(metaA&&metaA.user_last_solve_time); vb=ageSeconds(metaB&&metaB.user_last_solve_time); }
-    else if (k==='team_last') { va=ageSeconds(metaA&&metaA.team_last_solve_time); vb=ageSeconds(metaB&&metaB.team_last_solve_time); }
-    else { va=(a.uname||'').toLowerCase(); vb=(b.uname||'').toLowerCase(); }
-    if (va<vb) return -1*dir; if (va>vb) return 1*dir; return 0;
+    else if (k === 'cred') {
+      if (CTFD_USER_SORT_MODE === 'rank') { va = rankNumber(metaA && metaA.user_rank); vb = rankNumber(metaB && metaB.user_rank); if (va === vb) { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); } }
+      else { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); }
+    } else if (k === 'team') {
+      if (CTFD_TEAM_SORT_MODE === 'rank') { va = rankNumber(metaA && metaA.team_rank); vb = rankNumber(metaB && metaB.team_rank); if (va === vb) { va = String(metaA && metaA.team_name || '').toLowerCase(); vb = String(metaB && metaB.team_name || '').toLowerCase(); } }
+      else { va = String(metaA && metaA.team_name || '').toLowerCase(); vb = String(metaB && metaB.team_name || '').toLowerCase(); }
+    } else if (k === 'user_points') { va = Number(metaA && metaA.user_points); vb = Number(metaB && metaB.user_points); }
+    else if (k === 'team_points') { va = Number(metaA && metaA.team_points); vb = Number(metaB && metaB.team_points); }
+    else if (k === 'user_last') { va = ageSeconds(metaA && metaA.user_last_solve_time); vb = ageSeconds(metaB && metaB.user_last_solve_time); }
+    else if (k === 'team_last') { va = ageSeconds(metaA && metaA.team_last_solve_time); vb = ageSeconds(metaB && metaB.team_last_solve_time); }
+    else { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); }
+    if (va < vb) return -1 * dir; if (va > vb) return 1 * dir; return 0;
   };
-  try { filtered.sort(compare); } catch {}
+  try { filtered.sort(compare); } catch { }
   // Render
   CTFD_LAST_VISIBLE_KEYS = []; // track visible keys for header select-all
   let html = '<table class="table table-sm align-middle">';
@@ -3724,7 +3997,7 @@ function ctfdRenderTableMerged(){
   if (CTFD_COLS.team_last) html += `<th role="columnheader" scope="col" aria-sort="${ariaSortCtfd('team_last')}" style="cursor:pointer;min-width:220px;white-space:nowrap" onclick="ctfdSort('team_last')">Team Last Solved${sortIconCtfd('team_last')}</th>`;
   html += '</tr></thead>';
   html += '<tbody>';
-  const colCount = ['project','cred','team','user_points','team_points','user_last','team_last'].filter(id=>CTFD_COLS[id]).length || 1;
+  const colCount = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'].filter(id => CTFD_COLS[id]).length || 1;
   if (filtered.length === 0) {
     html += `<tr><td colspan="${colCount}" class="text-center text-muted">No rows</td></tr>`;
   } else {
@@ -3732,8 +4005,8 @@ function ctfdRenderTableMerged(){
       const meta = (r.uname && CTFD_USER_META[r.uname]) ? CTFD_USER_META[r.uname] : null;
       const masked = r.pword ? '•'.repeat(Math.min(String(r.pword).length, 12)) : 'n/a';
       const urank = (meta && meta.user_rank != null && meta.user_rank !== '') ? ` <span class="text-muted">(#${escHtml(String(meta.user_rank))})</span>` : '';
-      const baseUrl = (r._proj?.challenge_url||'').replace(/\/$/, '');
-      const ulink = (meta && meta.user_id!=null)
+      const baseUrl = (r._proj?.challenge_url || '').replace(/\/$/, '');
+      const ulink = (meta && meta.user_id != null)
         ? `<a href="${escHtml(baseUrl)}/users/${encodeURIComponent(String(meta.user_id))}" target="_blank" rel="noopener">${escHtml(r.uname || 'n/a')}</a>`
         : `${escHtml(r.uname || 'n/a')}`;
       const credText = (r.uname || r.pword)
@@ -3753,28 +4026,28 @@ function ctfdRenderTableMerged(){
       const tname = meta && meta.team_name ? escHtml(String(meta.team_name)) : '';
       const tTips = [];
       if (meta && meta.team_captain) tTips.push(`Captain: ${escHtml(String(meta.team_captain))}`);
-      if (meta && (meta.team_size!==null && meta.team_size!==undefined)) tTips.push(`Size: ${escHtml(String(meta.team_size))}`);
+      if (meta && (meta.team_size !== null && meta.team_size !== undefined)) tTips.push(`Size: ${escHtml(String(meta.team_size))}`);
       const tTitle = tTips.join(' ');
       const tAttrs = tTitle ? ` data-bs-toggle=\"tooltip\" data-bs-placement=\"top\" title=\"${tTitle}\"` : '';
-      const tlink = (meta && meta.team_id!=null)
-        ? `<a href="${escHtml(baseUrl)}/teams/${encodeURIComponent(String(meta.team_id))}" target="_blank" rel="noopener"${tAttrs}>${tname||'team'}</a>`
-        : (tTitle?`<span${tAttrs}>${tname||''}</span>`:tname);
+      const tlink = (meta && meta.team_id != null)
+        ? `<a href="${escHtml(baseUrl)}/teams/${encodeURIComponent(String(meta.team_id))}" target="_blank" rel="noopener"${tAttrs}>${tname || 'team'}</a>`
+        : (tTitle ? `<span${tAttrs}>${tname || ''}</span>` : tname);
       const trank = meta && meta.team_rank != null && meta.team_rank !== '' ? ` <span class="text-muted">(#${escHtml(String(meta.team_rank))})</span>` : '';
-      const teamHtml = (tname || (meta && meta.team_id!=null)) ? `${tlink}${trank}` : 'n/a';
+      const teamHtml = (tname || (meta && meta.team_id != null)) ? `${tlink}${trank}` : 'n/a';
       // Points and last solved
-      const fmtPts = (x)=>{ if (x===null||x===undefined||x===''||isNaN(Number(x))) return 'n/a'; const n=Number(x); return Number.isInteger(n)? String(n): n.toFixed(2); };
+      const fmtPts = (x) => { if (x === null || x === undefined || x === '' || isNaN(Number(x))) return 'n/a'; const n = Number(x); return Number.isInteger(n) ? String(n) : n.toFixed(2); };
       const userPts = fmtPts(meta && meta.user_points);
       const teamPts = fmtPts(meta && meta.team_points);
       const uTime = (meta && meta.user_last_solve_time) ? formatRelativeTime(String(meta.user_last_solve_time)) : '';
       const uChal = (meta && meta.user_last_solve_challenge) ? String(meta.user_last_solve_challenge) : '';
-      const userLastHtml = (uTime || uChal) ? `${escHtml(uTime)}${(uTime&&uChal)?' / ':''}${escHtml(uChal)}` : 'n/a';
+      const userLastHtml = (uTime || uChal) ? `${escHtml(uTime)}${(uTime && uChal) ? ' / ' : ''}${escHtml(uChal)}` : 'n/a';
       const tTime = (meta && meta.team_last_solve_time) ? formatRelativeTime(String(meta.team_last_solve_time)) : '';
       const tChal = (meta && meta.team_last_solve_challenge) ? String(meta.team_last_solve_challenge) : '';
-      const teamLastHtml = (tTime || tChal) ? `${escHtml(tTime)}${(tTime&&tChal)?' / ':''}${escHtml(tChal)}` : 'n/a';
+      const teamLastHtml = (tTime || tChal) ? `${escHtml(tTime)}${(tTime && tChal) ? ' / ' : ''}${escHtml(tChal)}` : 'n/a';
       html += '<tr>';
-      if (CTFD_COLS.project) html += `<td>${escHtml(r._proj?.name||'')}<div class=\"small text-muted\">${escHtml(r._proj?.tag||'')}</div></td>`;
-      if (CTFD_COLS.cred) html += `<td><div class=\"d-flex align-items-center\"><div class=\"flex-grow-1\">`+
-        `<input type=\"checkbox\" class=\"ctfd-cred-chk-multi form-check-input me-2\" data-key=\"${key}\" ${checked} />`+
+      if (CTFD_COLS.project) html += `<td>${escHtml(r._proj?.name || '')}<div class=\"small text-muted\">${escHtml(r._proj?.tag || '')}</div></td>`;
+      if (CTFD_COLS.cred) html += `<td><div class=\"d-flex align-items-center\"><div class=\"flex-grow-1\">` +
+        `<input type=\"checkbox\" class=\"ctfd-cred-chk-multi form-check-input me-2\" data-key=\"${key}\" ${checked} />` +
         `${credText}</div><div class=\"ms-2\">${existIcon}</div></div></td>`;
       if (CTFD_COLS.team) html += `<td>${teamHtml}</td>`;
       if (CTFD_COLS.user_points) html += `<td>${userPts}</td>`;
@@ -3788,103 +4061,103 @@ function ctfdRenderTableMerged(){
   host.innerHTML = html;
   ctfdEnsureScrollPersistence();
   // Initialize tooltips for any rendered elements
-  try { if (window.bootstrap) { document.querySelectorAll('#ctfd-table [data-bs-toggle="tooltip"]').forEach(el => { try { bootstrap.Tooltip.getOrCreateInstance(el); } catch {} }); } } catch {}
+  try { if (window.bootstrap) { document.querySelectorAll('#ctfd-table [data-bs-toggle="tooltip"]').forEach(el => { try { bootstrap.Tooltip.getOrCreateInstance(el); } catch { } }); } } catch { }
   // Snapshot latest merged render
-  try { ctfdCacheSnapshot('multi'); } catch {}
+  try { ctfdCacheSnapshot('multi'); } catch { }
   // Wire selection handlers (multi)
   try {
     const all = document.getElementById('ctfd-chk-all-multi');
-    const allSel = (CTFD_LAST_VISIBLE_KEYS.length>0) && CTFD_LAST_VISIBLE_KEYS.every(k => CTFD_SELECTED_KEYS.has(k));
+    const allSel = (CTFD_LAST_VISIBLE_KEYS.length > 0) && CTFD_LAST_VISIBLE_KEYS.every(k => CTFD_SELECTED_KEYS.has(k));
     if (all) all.checked = allSel;
     if (all) {
-      all.addEventListener('change', ()=>{
+      all.addEventListener('change', () => {
         try {
           if (all.checked) { CTFD_LAST_VISIBLE_KEYS.forEach(k => CTFD_SELECTED_KEYS.add(k)); }
           else { CTFD_LAST_VISIBLE_KEYS.forEach(k => CTFD_SELECTED_KEYS.delete(k)); }
           document.querySelectorAll('#ctfd-table .ctfd-cred-chk-multi').forEach(cb => {
-            const key = String(cb.getAttribute('data-key')||'');
+            const key = String(cb.getAttribute('data-key') || '');
             cb.checked = CTFD_SELECTED_KEYS.has(key);
           });
           sessionStorage.setItem('toolhub.ctfd.mgr.selectedKeys.v1', JSON.stringify(Array.from(CTFD_SELECTED_KEYS)));
-        } catch {}
+        } catch { }
       });
     }
     document.querySelectorAll('#ctfd-table .ctfd-cred-chk-multi').forEach(cb => {
-      cb.addEventListener('change', ()=>{
-        const key = String(cb.getAttribute('data-key')||'');
+      cb.addEventListener('change', () => {
+        const key = String(cb.getAttribute('data-key') || '');
         if (cb.checked) CTFD_SELECTED_KEYS.add(key); else CTFD_SELECTED_KEYS.delete(key);
-        const allSel2 = (CTFD_LAST_VISIBLE_KEYS.length>0) && CTFD_LAST_VISIBLE_KEYS.every(k => CTFD_SELECTED_KEYS.has(k));
+        const allSel2 = (CTFD_LAST_VISIBLE_KEYS.length > 0) && CTFD_LAST_VISIBLE_KEYS.every(k => CTFD_SELECTED_KEYS.has(k));
         const hdr = document.getElementById('ctfd-chk-all-multi'); if (hdr) hdr.checked = allSel2;
         sessionStorage.setItem('toolhub.ctfd.mgr.selectedKeys.v1', JSON.stringify(Array.from(CTFD_SELECTED_KEYS)));
       });
     });
-  } catch {}
+  } catch { }
 }
 
 // Lightweight: load project configuration only (no CTFd calls, no progress modal)
-async function ctfdLoadProjectConfig(pid){
+async function ctfdLoadProjectConfig(pid) {
   try {
-    const id = String(pid||'').trim(); if(!id) return;
+    const id = String(pid || '').trim(); if (!id) return;
     const token = ++CTFD_CONFIG_REQUEST_TOKEN;
-    const data = await http('GET','/api/projects');
+    const data = await http('GET', '/api/projects');
     if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
-    const proj = (data.projects||[]).find(p => String(p.id) === id);
+    const proj = (data.projects || []).find(p => String(p.id) === id);
     const info = document.getElementById('ctfd-info');
-    if(!proj){
+    if (!proj) {
       ctfdStopCountdown(false);
       CTFD_LAST_CHALLENGES_STATE = null;
-      if(info) info.textContent='Project not found.';
+      if (info) info.textContent = 'Project not found.';
       ctfdClearSkipped();
       ctfdRenderSkippedIndicatorRaw([], '');
       return;
     }
     if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
     PROJ = proj;
-    try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
+    try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
-  if(info) info.textContent = '';
+    if (info) info.textContent = '';
     // Restore UI state for this project (filters/sort etc.)
     try {
-      const st = readCtfdUiState(PROJ.id)||{};
-      CTFD_FILTER_TEXT = String(st.filterText||'');
+      const st = readCtfdUiState(PROJ.id) || {};
+      CTFD_FILTER_TEXT = String(st.filterText || '');
       CTFD_FILTER_IS_REGEX = !!st.filterIsRegex;
       CTFD_SHOW_PASSWORDS = !!st.showPasswords;
-      CTFD_SELECTED_INDICES = new Set(Array.isArray(st.selectedIndices)?st.selectedIndices:[]);
+      CTFD_SELECTED_INDICES = new Set(Array.isArray(st.selectedIndices) ? st.selectedIndices : []);
       if (st.sort && st.sort.key && st.sort.dir) { CTFD_SORT.key = st.sort.key; CTFD_SORT.dir = st.sort.dir; }
       if (st.userSortMode) CTFD_USER_SORT_MODE = st.userSortMode;
       if (st.teamSortMode) CTFD_TEAM_SORT_MODE = st.teamSortMode;
       const input = document.getElementById('ctfd-filter'); if (input) input.value = CTFD_FILTER_TEXT;
       const reg = document.getElementById('ctfd-filter-regex'); if (reg) reg.checked = CTFD_FILTER_IS_REGEX;
-    } catch {}
+    } catch { }
     // Load column visibility and reflect Columns dropdown
     try {
       CTFD_COLS = readCtfdCols(PROJ.id);
-      const ids = ['project','cred','team','user_points','team_points','user_last','team_last'];
-      ids.forEach(id=>{ const el = document.getElementById(`ctfd-col-${id}`); if (el) el.checked = !!CTFD_COLS[id]; });
-    } catch {}
+      const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'];
+      ids.forEach(id => { const el = document.getElementById(`ctfd-col-${id}`); if (el) el.checked = !!CTFD_COLS[id]; });
+    } catch { }
     // Render table; most meta columns will show 'n/a' as intended
     renderCtfdTable(PROJ);
     updateCtfdControlsEnabled();
     ctfdRestoreSkippedIndicator();
-  } catch (e) { try { shell.logError(`CTFd config load failed: ${e?.message||e}`); } catch {} }
+  } catch (e) { try { shell.logError(`CTFd config load failed: ${e?.message || e}`); } catch { } }
 }
 
-function toggleCtfdPasswords(){
+function toggleCtfdPasswords() {
   CTFD_SHOW_PASSWORDS = !CTFD_SHOW_PASSWORDS;
   if (PROJ) writeCtfdUiState(PROJ.id, { showPasswords: CTFD_SHOW_PASSWORDS });
   renderCtfdTable(PROJ);
 }
 
-function toggleUserSortMode(ev){
-  try { ev?.stopPropagation?.(); } catch {}
+function toggleUserSortMode(ev) {
+  try { ev?.stopPropagation?.(); } catch { }
   CTFD_USER_SORT_MODE = (CTFD_USER_SORT_MODE === 'name') ? 'rank' : 'name';
   if (PROJ) writeCtfdUiState(PROJ.id, { userSortMode: CTFD_USER_SORT_MODE });
   renderCtfdTable(PROJ);
 }
 
-function toggleTeamSortMode(ev){
-  try { ev?.stopPropagation?.(); } catch {}
+function toggleTeamSortMode(ev) {
+  try { ev?.stopPropagation?.(); } catch { }
   CTFD_TEAM_SORT_MODE = (CTFD_TEAM_SORT_MODE === 'name') ? 'rank' : 'name';
   if (PROJ) writeCtfdUiState(PROJ.id, { teamSortMode: CTFD_TEAM_SORT_MODE });
   renderCtfdTable(PROJ);
@@ -3892,16 +4165,16 @@ function toggleTeamSortMode(ev){
 
 // toggleSortNA removed
 
-function ctfdSort(key){
-  if(CTFD_SORT.key===key){ CTFD_SORT.dir = CTFD_SORT.dir==='asc'?'desc':'asc'; }
-  else { CTFD_SORT.key=key; CTFD_SORT.dir='asc'; }
+function ctfdSort(key) {
+  if (CTFD_SORT.key === key) { CTFD_SORT.dir = CTFD_SORT.dir === 'asc' ? 'desc' : 'asc'; }
+  else { CTFD_SORT.key = key; CTFD_SORT.dir = 'asc'; }
   if (PROJ) writeCtfdUiState(PROJ.id, { sort: { key: CTFD_SORT.key, dir: CTFD_SORT.dir } });
   renderCtfdTable(PROJ);
 }
 
-async function ctfdLoadProjectById(pid){
+async function ctfdLoadProjectById(pid) {
   // Prevent any implicit auto-refresh on initial page load
-  if (!CTFD_ALLOW_LOAD) { try { shell.logDebug('CTFd: load blocked until user action'); } catch {} return; }
+  if (!CTFD_ALLOW_LOAD) { try { shell.logDebug('CTFd: load blocked until user action'); } catch { } return; }
   const id = String(pid || '').trim();
   if (!id) return;
   const loadToken = ++CTFD_LOAD_REQUEST_COUNTER;
@@ -3911,7 +4184,7 @@ async function ctfdLoadProjectById(pid){
     if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
       return await ctfdRefreshMulti({ loadToken, basePid: id });
     }
-  } catch {}
+  } catch { }
   const info = document.getElementById('ctfd-info');
   const totalSteps = 3;
   let categoryPayload = null;
@@ -3922,31 +4195,31 @@ async function ctfdLoadProjectById(pid){
     const newerLoad = loadToken !== CTFD_LOAD_ACTIVE_TOKEN;
     const selectionMoved = ctfdSelectionChanged(id);
     if (!newerLoad && !selectionMoved) return false;
-    if (animTimer) { try { clearInterval(animTimer); } catch {} animTimer = null; }
+    if (animTimer) { try { clearInterval(animTimer); } catch { } animTimer = null; }
     if (!abortLogged && (selectionMoved || newerLoad)) {
       const current = String(ctfdCurrentPid() || '');
-      try { shell?.logDebug?.(`CTFd load cancelled for ${id} (current selection ${current || 'none'}, newer=${newerLoad})`); } catch {}
+      try { shell?.logDebug?.(`CTFd load cancelled for ${id} (current selection ${current || 'none'}, newer=${newerLoad})`); } catch { }
       abortLogged = true;
     }
     if (selectionMoved && !newerLoad) {
-      try { ctfdHideProgress(); } catch {}
+      try { ctfdHideProgress(); } catch { }
       updateCtfdControlsEnabled();
     }
     aborted = true;
     return true;
   };
   // Use inline progress bar instead of modal
-  try { ctfdSetProgress(`Step 1/${totalSteps}: Loading project…`, 10, true); } catch {}
+  try { ctfdSetProgress(`Step 1/${totalSteps}: Loading project…`, 10, true); } catch { }
   if (abortIfStale()) return;
   try {
-    const data = await http('GET','/api/projects');
+    const data = await http('GET', '/api/projects');
     if (abortIfStale()) return;
-    const proj = (data.projects||[]).find(p=>p.id===id);
-    if(!proj){
+    const proj = (data.projects || []).find(p => p.id === id);
+    if (!proj) {
       ctfdStopCountdown(false);
       CTFD_LAST_CHALLENGES_STATE = null;
-      if(info) info.textContent='Project not found.';
-      PROJ=null;
+      if (info) info.textContent = 'Project not found.';
+      PROJ = null;
       renderCtfdTable(null);
       ctfdClearPeriodicTimer();
       ctfdClearSkipped();
@@ -3954,17 +4227,17 @@ async function ctfdLoadProjectById(pid){
       return;
     }
     if (abortIfStale()) return;
-  PROJ = proj; if(info) info.textContent = '';
-    try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
+    PROJ = proj; if (info) info.textContent = '';
+    try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
     // Restore UI state for this project
     try {
-      const st = readCtfdUiState(PROJ.id)||{};
-      CTFD_FILTER_TEXT = String(st.filterText||'');
+      const st = readCtfdUiState(PROJ.id) || {};
+      CTFD_FILTER_TEXT = String(st.filterText || '');
       CTFD_FILTER_IS_REGEX = !!st.filterIsRegex;
       CTFD_SHOW_PASSWORDS = !!st.showPasswords;
-      CTFD_SELECTED_INDICES = new Set(Array.isArray(st.selectedIndices)?st.selectedIndices:[]);
+      CTFD_SELECTED_INDICES = new Set(Array.isArray(st.selectedIndices) ? st.selectedIndices : []);
       if (st.sort && st.sort.key && st.sort.dir) {
         CTFD_SORT.key = st.sort.key;
         CTFD_SORT.dir = st.sort.dir;
@@ -3974,46 +4247,46 @@ async function ctfdLoadProjectById(pid){
       // reflect in filter controls without clearing
       const input = document.getElementById('ctfd-filter'); if (input) input.value = CTFD_FILTER_TEXT;
       const reg = document.getElementById('ctfd-filter-regex'); if (reg) reg.checked = CTFD_FILTER_IS_REGEX;
-    } catch {}
+    } catch { }
     if (abortIfStale()) return;
     ctfdSetProgress(`Step 2/${totalSteps}: Rendering table…`, 50, true);
     // Load column visibility and reflect Columns dropdown
     try {
       CTFD_COLS = readCtfdCols(PROJ.id);
-      const ids = ['project','cred','team','user_points','team_points','user_last','team_last'];
-      ids.forEach(cid=>{ const el = document.getElementById(`ctfd-col-${cid}`); if (el) el.checked = !!CTFD_COLS[cid]; });
-    } catch {}
+      const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'];
+      ids.forEach(cid => { const el = document.getElementById(`ctfd-col-${cid}`); if (el) el.checked = !!CTFD_COLS[cid]; });
+    } catch { }
     renderCtfdTable(PROJ);
-    try { ctfdCacheSnapshot('single'); } catch {}
+    try { ctfdCacheSnapshot('single'); } catch { }
     ctfdSetProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true);
     if (abortIfStale()) return;
     try {
       if (window.bootstrap) {
         document.querySelectorAll('#ctfd-table [data-bs-toggle="tooltip"]').forEach(el => {
-          try { bootstrap.Tooltip.getOrCreateInstance(el); } catch {}
+          try { bootstrap.Tooltip.getOrCreateInstance(el); } catch { }
         });
       }
-    } catch {}
+    } catch { }
     if (abortIfStale()) return;
     // Progressive per-user existence check with x/y
     const creds = Array.isArray(PROJ.credentials) ? PROJ.credentials : [];
-    const usernames = creds.map(c => String(c?.username||'').trim()).filter(Boolean);
+    const usernames = creds.map(c => String(c?.username || '').trim()).filter(Boolean);
     const total = usernames.length;
-    const sess = readCtfdCreds(PROJ.id)||{};
+    const sess = readCtfdCreds(PROJ.id) || {};
     const hasValidatedAuth = !!(sess?.validated && (sess.token || (sess.username && sess.password)));
     if (!hasValidatedAuth) {
-      try { shell?.logInfo?.(`CTFd: skipping state refresh for ${PROJ.name || PROJ.id}; credentials not validated.`); } catch {}
-      try { ctfdSetProgress('CTFd credentials not validated. Showing configuration only.', 95, false); } catch {}
-      try { ctfdHideProgress(); } catch {}
+      try { shell?.logInfo?.(`CTFd: skipping state refresh for ${PROJ.name || PROJ.id}; credentials not validated.`); } catch { }
+      try { ctfdSetProgress('CTFd credentials not validated. Showing configuration only.', 95, false); } catch { }
+      try { ctfdHideProgress(); } catch { }
       updateCtfdControlsEnabled();
       return;
     }
-    const baseUrl = (PROJ.challenge_url||'').trim();
-    const port = Number(PROJ.challenge_port||443);
+    const baseUrl = (PROJ.challenge_url || '').trim();
+    const port = Number(PROJ.challenge_port || 443);
     const verifyEl = document.getElementById('ctfd-verify-ssl');
     const verifySSL = verifyEl ? !!verifyEl.checked : true;
-    const payloadBase = { baseUrl, port, token: sess.token||'', verifySSL };
-    const metaMap = { ...(CTFD_USER_META||{}) };
+    const payloadBase = { baseUrl, port, token: sess.token || '', verifySSL };
+    const metaMap = { ...(CTFD_USER_META || {}) };
     // Optimization: perform a single bulk users_check (omit 'only') instead of one request per username.
     // Fallback: if bulk fails, revert to legacy per-username loop to preserve functionality.
     let bulkSucceeded = false;
@@ -4022,11 +4295,11 @@ async function ctfdLoadProjectById(pid){
     } else {
       ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, 72, true);
       let animPct = 72;
-      animTimer = setInterval(()=>{
+      animTimer = setInterval(() => {
         try {
           animPct = Math.min(animPct + 2, 88);
           ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, animPct, true);
-        } catch {}
+        } catch { }
       }, 500);
       try {
         let resp;
@@ -4061,18 +4334,18 @@ async function ctfdLoadProjectById(pid){
         });
         bulkSucceeded = true;
         ctfdSetProgress(`Step 3/${totalSteps}: Users loaded (${list.length})`, 90, false);
-      } catch(bulkErr){
-        try { console.warn('CTFd users bulk check failed; falling back to per-user mode:', bulkErr); } catch {}
-        if (animTimer) { try { clearInterval(animTimer); } catch {} animTimer = null; }
+      } catch (bulkErr) {
+        try { console.warn('CTFd users bulk check failed; falling back to per-user mode:', bulkErr); } catch { }
+        if (animTimer) { try { clearInterval(animTimer); } catch { } animTimer = null; }
       }
       if (!bulkSucceeded) {
         if (abortIfStale()) return;
         // Legacy fallback loop
         let done = 0;
         const baseStart = 70, baseEnd = 90;
-        const computePercent = () => { if (total <= 0) return baseEnd; const frac = Math.min(1, Math.max(0, done/total)); return Math.floor(baseStart + frac*(baseEnd-baseStart)); };
+        const computePercent = () => { if (total <= 0) return baseEnd; const frac = Math.min(1, Math.max(0, done / total)); return Math.floor(baseStart + frac * (baseEnd - baseStart)); };
         ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (0/${total})…`, computePercent(), true);
-        for (const name of usernames){
+        for (const name of usernames) {
           if (abortIfStale()) return;
           try {
             let resp;
@@ -4104,7 +4377,7 @@ async function ctfdLoadProjectById(pid){
                 team_last_solve_challenge: (u?.team_last_solve_challenge ?? null),
               };
             });
-          } catch(e){ /* continue */ }
+          } catch (e) { /* continue */ }
           done += 1;
           ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (${done}/${total})…`, computePercent(), true);
         }
@@ -4120,42 +4393,42 @@ async function ctfdLoadProjectById(pid){
     renderCtfdTable(PROJ);
     ctfdSetProgress('Done', 100, false);
     if (abortIfStale()) return;
-    try { await ctfdLoadSettings(); } catch {}
+    try { await ctfdLoadSettings(); } catch { }
   } catch (e) {
     if (!aborted) {
-      try { shell.logError(`CTFd Refresh failed: ${e?.message||e}`); } catch {}
+      try { shell.logError(`CTFd Refresh failed: ${e?.message || e}`); } catch { }
     }
   } finally {
-    if (animTimer) { try { clearInterval(animTimer); } catch {} }
+    if (animTimer) { try { clearInterval(animTimer); } catch { } }
     if (!aborted && loadToken === CTFD_LOAD_ACTIVE_TOKEN) {
-      try { ctfdHideProgress(); } catch {}
-      try { ctfdReschedulePeriodicForProject(PROJ?.id); } catch {}
+      try { ctfdHideProgress(); } catch { }
+      try { ctfdReschedulePeriodicForProject(PROJ?.id); } catch { }
     }
     updateCtfdControlsEnabled();
   }
 }
 
 // Preflight helper: ensure tokens/urls exist for each pid selected
-async function ctfdPreflightPids(pids){
+async function ctfdPreflightPids(pids) {
   try {
-    await ctfdEnsureProjects(); const byId = {}; (CTFD_ALL_PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
+    await ctfdEnsureProjects(); const byId = {}; (CTFD_ALL_PROJECTS || []).forEach(p => byId[String(p.id)] = p);
     const missing = []; const invalid = [];
-    for (const pid of pids){
+    for (const pid of pids) {
       const proj = byId[String(pid)] || null; if (!proj) { invalid.push(String(pid)); continue; }
       const sess = readCtfdCreds(String(pid)) || {};
-      const url = (proj.challenge_url||'').trim();
+      const url = (proj.challenge_url || '').trim();
       if (!url) invalid.push(String(pid));
       if (!(sess && (sess.token || (sess.username && sess.password)) && sess.validated)) missing.push(String(pid));
     }
-    return { ok: !(missing.length||invalid.length), missing, invalid };
+    return { ok: !(missing.length || invalid.length), missing, invalid };
   } catch { return { ok: true, missing: [], invalid: [] }; }
 }
 
 // Multi-project refresh path: bulk users_check per pid and merge
 // opts: { suppressLoginModal?: boolean }
-async function ctfdRefreshMulti(opts){
+async function ctfdRefreshMulti(opts) {
   const options = opts || {};
-  const pids = Array.isArray(CTFD_SELECTED_PIDS)? CTFD_SELECTED_PIDS.slice(): [];
+  const pids = Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS.slice() : [];
   if (!pids.length) return;
   const loadToken = options.loadToken || ++CTFD_LOAD_REQUEST_COUNTER;
   if (!options.loadToken) CTFD_LOAD_ACTIVE_TOKEN = loadToken;
@@ -4166,7 +4439,7 @@ async function ctfdRefreshMulti(opts){
     const selectionMoved = basePid ? ctfdSelectionChanged(basePid) : false;
     if (!newerLoad && !selectionMoved) return false;
     if (selectionMoved && !newerLoad) {
-      try { ctfdHideProgress(); } catch {}
+      try { ctfdHideProgress(); } catch { }
       updateCtfdControlsEnabled();
     }
     aborted = true;
@@ -4174,7 +4447,7 @@ async function ctfdRefreshMulti(opts){
   };
   ctfdClearPeriodicTimer();
   if (abortIfStale()) return;
-  try { ctfdSetProgress('Preparing multi-project refresh…', 10, true); } catch {}
+  try { ctfdSetProgress('Preparing multi-project refresh…', 10, true); } catch { }
   if (abortIfStale()) return;
   // Preflight credentials
   const pf = await ctfdPreflightPids(pids);
@@ -4182,12 +4455,12 @@ async function ctfdRefreshMulti(opts){
   if (!pf.ok) {
     try {
       // Render visible indicator with Fix Tokens button
-      ctfdRenderSkippedIndicator([...(pf.invalid||[]), ...(pf.missing||[])], pf.missing?.length? 'invalid or missing token' : 'configuration issue');
+      ctfdRenderSkippedIndicator([...(pf.invalid || []), ...(pf.missing || [])], pf.missing?.length ? 'invalid or missing token' : 'configuration issue');
       if (pf.invalid.length) shell.logWarn(`Projects missing CTFd URL: ${pf.invalid.join(', ')}`);
       // In auto-refresh mode, do not interrupt with login modal
       if (pf.missing.length && !options.suppressLoginModal) {
         try {
-          const targets = Array.from(new Set((pf.missing||[]).map(pid => String(pid||'')).filter(Boolean)));
+          const targets = Array.from(new Set((pf.missing || []).map(pid => String(pid || '')).filter(Boolean)));
           if (targets.length > 0) {
             openCtfdLoginMultiForPids(targets);
           } else {
@@ -4195,26 +4468,26 @@ async function ctfdRefreshMulti(opts){
           }
         } catch { openCtfdLoginModal(); }
       }
-    } catch {}
-    try { ctfdHideProgress(); } catch {}
+    } catch { }
+    try { ctfdHideProgress(); } catch { }
     return;
   }
   if (abortIfStale()) return;
   // Clear any previous indicator
-  try { ctfdRenderSkippedIndicator([], ''); } catch {}
-  const metaMap = { ...(CTFD_USER_META||{}) };
+  try { ctfdRenderSkippedIndicator([], ''); } catch { }
+  const metaMap = { ...(CTFD_USER_META || {}) };
   const failures = [];
   let done = 0; const total = pids.length;
-  for (const pid of pids){
+  for (const pid of pids) {
     if (abortIfStale()) return;
     try {
-      const proj = (CTFD_ALL_PROJECTS||[]).find(p=> String(p.id)===String(pid)); if (!proj) { failures.push(pid); continue; }
+      const proj = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === String(pid)); if (!proj) { failures.push(pid); continue; }
       const sess = readCtfdCreds(String(pid)) || {};
-      const baseUrl = (proj.challenge_url||'').trim(); const port = Number(proj.challenge_port||443);
-      ctfdSetProgress(`Checking CTFd users for ${proj.name}…`, Math.min(90, 20 + Math.floor((done/Math.max(1,total))*70)), true);
+      const baseUrl = (proj.challenge_url || '').trim(); const port = Number(proj.challenge_port || 443);
+      ctfdSetProgress(`Checking CTFd users for ${proj.name}…`, Math.min(90, 20 + Math.floor((done / Math.max(1, total)) * 70)), true);
       let resp;
       await runQueued(`CTFd multi-check users for ${proj.name || pid}`, async () => {
-        resp = await http('POST', `/api/projects/${pid}/ctfd/users_check`, { baseUrl, port, token: sess.token||'', verifySSL: true });
+        resp = await http('POST', `/api/projects/${pid}/ctfd/users_check`, { baseUrl, port, token: sess.token || '', verifySSL: true });
       }, { projectId: pid });
       if (abortIfStale()) return;
       const list = Array.isArray(resp?.users) ? resp.users : [];
@@ -4223,7 +4496,7 @@ async function ctfdRefreshMulti(opts){
       }
       const projectMeta = {};
       list.forEach(u => {
-        const uname = String(u?.username||'').trim();
+        const uname = String(u?.username || '').trim();
         if (!uname) return;
         const entry = {
           exists: !!u?.exists,
@@ -4254,7 +4527,7 @@ async function ctfdRefreshMulti(opts){
   if (abortIfStale()) return;
   ctfdSetProgress('Applying updates…', 95, false);
   ctfdRenderTableMerged();
-  try { ctfdCacheSnapshot('multi'); } catch {}
+  try { ctfdCacheSnapshot('multi'); } catch { }
   ctfdSetProgress('Done', 100, false);
   if (abortIfStale()) return;
   // Minimal indicator via console for now; can add UI alert similar to Challenges page in a follow-up
@@ -4265,22 +4538,22 @@ async function ctfdRefreshMulti(opts){
     } else {
       ctfdRenderSkippedIndicator([], '');
     }
-  } catch {}
+  } catch { }
   if (!aborted && loadToken === CTFD_LOAD_ACTIVE_TOKEN) {
-    try { ctfdHideProgress(); } catch {}
+    try { ctfdHideProgress(); } catch { }
   }
   // Refresh settings toggles for the currently focused project (if any & validated)
   if (!aborted) {
-    try { if (PROJ) await ctfdLoadSettings(); } catch {}
+    try { if (PROJ) await ctfdLoadSettings(); } catch { }
   }
 }
 
-function ctfdSkippedKey(){
+function ctfdSkippedKey() {
   const base = String(ctfdCurrentPid() || '').trim();
   return base ? `toolhub.ctfd.skipped.${base}` : 'toolhub.ctfd.skipped.global';
 }
 
-function ctfdReadSkipped(){
+function ctfdReadSkipped() {
   try {
     const raw = sessionStorage.getItem(ctfdSkippedKey());
     if (!raw) return { projects: [], reason: '' };
@@ -4292,49 +4565,49 @@ function ctfdReadSkipped(){
   } catch { return { projects: [], reason: '' }; }
 }
 
-function ctfdWriteSkipped(projects, reason){
+function ctfdWriteSkipped(projects, reason) {
   try {
-    const payload = { projects: (projects||[]).map(id => String(id)).filter(Boolean), reason: reason ? String(reason) : '' };
+    const payload = { projects: (projects || []).map(id => String(id)).filter(Boolean), reason: reason ? String(reason) : '' };
     sessionStorage.setItem(ctfdSkippedKey(), JSON.stringify(payload));
-  } catch {}
+  } catch { }
 }
 
-function ctfdClearSkipped(){
-  try { sessionStorage.removeItem(ctfdSkippedKey()); } catch {}
+function ctfdClearSkipped() {
+  try { sessionStorage.removeItem(ctfdSkippedKey()); } catch { }
 }
 
-function ctfdRenderSkippedIndicatorRaw(pids, reason){
+function ctfdRenderSkippedIndicatorRaw(pids, reason) {
   try {
     const box = document.getElementById('ctfd-proj-errors');
     if (!box) return;
     if (!pids || pids.length === 0) { box.classList.add('d-none'); box.textContent = ''; return; }
-    const byId = {}; (CTFD_ALL_PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
-    const names = pids.map(id=> (byId[String(id)]?.name || String(id)) );
-    box.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-2"><div><strong>Some projects were skipped</strong>:</div><div>${names.map(n=>`<span class="badge bg-light text-dark me-1">${escHtml(n)}</span>`).join(' ')}</div><button id="ctfd-proj-errors-fix" type="button" class="btn btn-sm btn-outline-primary" title="Enter/Update tokens">Fix tokens</button></div><div class="mt-1">Reason: ${escHtml(reason||'credential or connection issue')}.</div>`;
+    const byId = {}; (CTFD_ALL_PROJECTS || []).forEach(p => byId[String(p.id)] = p);
+    const names = pids.map(id => (byId[String(id)]?.name || String(id)));
+    box.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-2"><div><strong>Some projects were skipped</strong>:</div><div>${names.map(n => `<span class="badge bg-light text-dark me-1">${escHtml(n)}</span>`).join(' ')}</div><button id="ctfd-proj-errors-fix" type="button" class="btn btn-sm btn-outline-primary" title="Enter/Update tokens">Fix tokens</button></div><div class="mt-1">Reason: ${escHtml(reason || 'credential or connection issue')}.</div>`;
     box.classList.remove('d-none');
     const btn = document.getElementById('ctfd-proj-errors-fix');
-      if (btn && !btn._bound){
-        btn._bound = true;
-        btn.addEventListener('click', ()=>{
-          try {
-            // Prefer multi-token modal if multiple PIDs, otherwise fall back to single login
-            if (pids && pids.length > 1) {
-              openCtfdLoginMultiForPids(pids);
-            } else {
-              const targetPid = String(pids[0]||'');
-              if (targetPid) {
-                try { if (window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(targetPid); } catch {}
-                try { ctfdLoadProjectConfig(targetPid); } catch {}
-              }
-              openCtfdLoginModal();
+    if (btn && !btn._bound) {
+      btn._bound = true;
+      btn.addEventListener('click', () => {
+        try {
+          // Prefer multi-token modal if multiple PIDs, otherwise fall back to single login
+          if (pids && pids.length > 1) {
+            openCtfdLoginMultiForPids(pids);
+          } else {
+            const targetPid = String(pids[0] || '');
+            if (targetPid) {
+              try { if (window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(targetPid); } catch { }
+              try { ctfdLoadProjectConfig(targetPid); } catch { }
             }
-          } catch {}
-        });
-      }
-  } catch {}
+            openCtfdLoginModal();
+          }
+        } catch { }
+      });
+    }
+  } catch { }
 }
 
-function ctfdRenderSkippedIndicator(pids, reason){
+function ctfdRenderSkippedIndicator(pids, reason) {
   try {
     const list = Array.isArray(pids) ? Array.from(new Set(pids.map(id => String(id)).filter(Boolean))) : [];
     if (!list.length) {
@@ -4344,59 +4617,59 @@ function ctfdRenderSkippedIndicator(pids, reason){
     }
     ctfdWriteSkipped(list, reason || '');
     ctfdRenderSkippedIndicatorRaw(list, reason);
-  } catch {}
+  } catch { }
 }
 
-function ctfdRestoreSkippedIndicator(){
+function ctfdRestoreSkippedIndicator() {
   const state = ctfdReadSkipped();
   if (state.projects.length) ctfdRenderSkippedIndicatorRaw(state.projects, state.reason);
   else ctfdRenderSkippedIndicatorRaw([], '');
 }
 
-async function ctfdRefresh(){
+async function ctfdRefresh() {
   try {
     CTFD_ALLOW_LOAD = true;
     const target = PROJ && PROJ.id !== undefined ? PROJ.id : ctfdCurrentPid();
     if (!target) {
-      try { shell.logWarn('CTFd refresh skipped: no project selected.'); } catch {}
+      try { shell.logWarn('CTFd refresh skipped: no project selected.'); } catch { }
       return;
     }
     await ctfdLoadProjectById(target);
-  } catch(e){ console.error('CTFd refresh failed', e); }
+  } catch (e) { console.error('CTFd refresh failed', e); }
 }
 // Ensure the Refresh button is a user action that enables loading
 document.addEventListener('DOMContentLoaded', () => {
   try {
     const btn = document.getElementById('btn-ctfd-refresh');
     if (btn) btn.addEventListener('click', () => { CTFD_ALLOW_LOAD = true; });
-  } catch {}
+  } catch { }
 });
 
-function openImportOptionsCTFd(){ // reuse VM modal logic simplified
+function openImportOptionsCTFd() { // reuse VM modal logic simplified
   const input = document.getElementById('import-file');
-  if(!input || !input.files || !input.files[0]) return;
+  if (!input || !input.files || !input.files[0]) return;
   // Direct import (no specialized modal for now)
   importProjectSidebar();
 }
 
 // Sidebar create/import reuse from vm_manager.js if loaded; otherwise provide minimal fallbacks
-async function createProjectSidebar(){
-  const input = document.getElementById('proj-name'); const name = (input && input.value || '').trim(); if(!name) return alert('Enter a project name.');
-  const res = await http('POST','/api/projects',{ name }); if(input) input.value=''; const pid = res && (res.id||res.pid);
-  if(window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid);
-  try { if(window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch {}
+async function createProjectSidebar() {
+  const input = document.getElementById('proj-name'); const name = (input && input.value || '').trim(); if (!name) return alert('Enter a project name.');
+  const res = await http('POST', '/api/projects', { name }); if (input) input.value = ''; const pid = res && (res.id || res.pid);
+  if (window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid);
+  try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
   // Redirect to configuration page to display new project
-  try { location.href = '/'; } catch {}
+  try { location.href = '/'; } catch { }
 }
-async function importProjectSidebar(){
-  const input = document.getElementById('import-file'); if(!input||!input.files||!input.files[0]) return;
+async function importProjectSidebar() {
+  const input = document.getElementById('import-file'); if (!input || !input.files || !input.files[0]) return;
   const toggleBusy = (flag) => {
     try {
       if (window.shell && typeof shell.setSidebarImportBusy === 'function') {
         shell.setSidebarImportBusy(flag);
         return;
       }
-    } catch {}
+    } catch { }
     try {
       input.disabled = !!flag;
       const label = input.closest('label');
@@ -4406,18 +4679,18 @@ async function importProjectSidebar(){
         label.style.pointerEvents = flag ? 'none' : '';
         label.style.opacity = flag ? '0.65' : '';
       }
-    } catch {}
+    } catch { }
   };
   toggleBusy(true);
   try {
     const fd = new FormData(); fd.append('file', input.files[0]);
-    const resp = await http('POST','/api/projects/import', fd); input.value='';
+    const resp = await http('POST', '/api/projects/import', fd); input.value = '';
     const importedId = (resp && resp.id) || (resp && resp.imported && resp.imported[0] && resp.imported[0].id) || '';
-    if(importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
-    if(window.shell && shell.refreshSidebar) await shell.refreshSidebar('vm');
-  } catch(e){
+    if (importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
+    if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('vm');
+  } catch (e) {
     alert('Failed to import project: ' + (e && e.message ? e.message : 'Unknown error'));
-    try { (window.shell && shell.logError) ? shell.logError('CTFd: import project failed: ' + (e && e.message ? e.message : e)) : console.error('CTFd import project failed:', e); } catch {}
+    try { (window.shell && shell.logError) ? shell.logError('CTFd: import project failed: ' + (e && e.message ? e.message : e)) : console.error('CTFd import project failed:', e); } catch { }
   } finally {
     toggleBusy(false);
   }
@@ -4425,66 +4698,66 @@ async function importProjectSidebar(){
 }
 
 // Filter wiring
-function wireCtfdFilter(){
+function wireCtfdFilter() {
   const input = document.getElementById('ctfd-filter');
   const reg = document.getElementById('ctfd-filter-regex');
-  if(input){ input.addEventListener('input', ()=>{ CTFD_FILTER_TEXT = input.value.trim(); const err = document.getElementById('ctfd-filter-error'); if(err) err.classList.add('d-none'); if (PROJ) writeCtfdUiState(PROJ.id, { filterText: CTFD_FILTER_TEXT }); renderCtfdTable(PROJ); }); }
-  if(reg){ reg.addEventListener('change', ()=>{ CTFD_FILTER_IS_REGEX = !!reg.checked; const err = document.getElementById('ctfd-filter-error'); if(err) err.classList.add('d-none'); if (PROJ) writeCtfdUiState(PROJ.id, { filterIsRegex: CTFD_FILTER_IS_REGEX }); renderCtfdTable(PROJ); }); }
+  if (input) { input.addEventListener('input', () => { CTFD_FILTER_TEXT = input.value.trim(); const err = document.getElementById('ctfd-filter-error'); if (err) err.classList.add('d-none'); if (PROJ) writeCtfdUiState(PROJ.id, { filterText: CTFD_FILTER_TEXT }); renderCtfdTable(PROJ); }); }
+  if (reg) { reg.addEventListener('change', () => { CTFD_FILTER_IS_REGEX = !!reg.checked; const err = document.getElementById('ctfd-filter-error'); if (err) err.classList.add('d-none'); if (PROJ) writeCtfdUiState(PROJ.id, { filterIsRegex: CTFD_FILTER_IS_REGEX }); renderCtfdTable(PROJ); }); }
 }
 
 // Initialization
 document.addEventListener('DOMContentLoaded', async () => {
-  try { shell.logDebug('CTFd: init DOMContentLoaded'); } catch {}
+  try { shell.logDebug('CTFd: init DOMContentLoaded'); } catch { }
   await shell.initShell('vm'); // reuse same sidebar population logic
   // First try to restore previous in-session view so page switch won't blank the table
-  try { if (ctfdRestoreSnapshot()) { updateCtfdControlsEnabled(); } } catch {}
-  try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
+  try { if (ctfdRestoreSnapshot()) { updateCtfdControlsEnabled(); } } catch { }
+  try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
   wireCtfdFilter();
   wireCtfdLogin();
   wireCtfdCols();
-  try { ctfdWireNotifyConfig(); } catch {}
-  try { ctfdWireNotifyTemplateVarsModal(); } catch {}
+  try { ctfdWireNotifyConfig(); } catch { }
+  try { ctfdWireNotifyTemplateVarsModal(); } catch { }
 
   // Single TTS info help button (Notifications header)
   try {
     const btn = document.getElementById('ctfd-notify-template-vars');
     if (btn && !btn._toolhubBound) {
       btn.addEventListener('click', (e) => {
-        try { e.preventDefault(); } catch {}
+        try { e.preventDefault(); } catch { }
         ctfdOpenNotifyTemplateVarsModal();
       });
       btn._toolhubBound = true;
       try {
         if (window.bootstrap) bootstrap.Tooltip.getInstance(btn) || new bootstrap.Tooltip(btn);
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
 
   // Projects selector UI (does not alter single-project flow yet)
-  try { await ctfdSetupProjectsUi(); } catch {}
+  try { await ctfdSetupProjectsUi(); } catch { }
   ctfdRestoreSkippedIndicator();
   // Auto-refresh wiring with pause/resume controls
-  (function(){
+  (function () {
     let timer = null;
     const pausedReasons = new Set();
-    function isPaused(){ return pausedReasons.size > 0; }
-    function key(){ try { return `toolhub.ctfd.mgr.auto.${PROJ?PROJ.id:'none'}`; } catch { return 'toolhub.ctfd.mgr.auto.none'; } }
-    function readAuto(){ try { const v = sessionStorage.getItem(key()); return parseInt(v||'0',10)||0; } catch { return 0; } }
-    function writeAuto(v){ try { sessionStorage.setItem(key(), String(v||0)); } catch {} }
-    function hasAuth(){ try { const s = PROJ? readCtfdCreds(PROJ.id):{}; return !!(PROJ && s?.validated && (s.token || (s.username && s.password))); } catch { return false; } }
-    function busy(){
+    function isPaused() { return pausedReasons.size > 0; }
+    function key() { try { return `toolhub.ctfd.mgr.auto.${PROJ ? PROJ.id : 'none'}`; } catch { return 'toolhub.ctfd.mgr.auto.none'; } }
+    function readAuto() { try { const v = sessionStorage.getItem(key()); return parseInt(v || '0', 10) || 0; } catch { return 0; } }
+    function writeAuto(v) { try { sessionStorage.setItem(key(), String(v || 0)); } catch { } }
+    function hasAuth() { try { const s = PROJ ? readCtfdCreds(PROJ.id) : {}; return !!(PROJ && s?.validated && (s.token || (s.username && s.password))); } catch { return false; } }
+    function busy() {
       try {
         const wrap = document.getElementById('ctfd-progress');
         if (wrap && !wrap.classList.contains('d-none')) return true;
-      } catch {}
+      } catch { }
       try {
         const m = document.getElementById('actionProgressModal');
         if (m && m.classList.contains('show')) return true;
-      } catch {}
+      } catch { }
       return false;
     }
-    function stopTimer(){ if (timer) { clearInterval(timer); timer = null; } }
-    function setAutoBadge(state){
+    function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+    function setAutoBadge(state) {
       try {
         const badge = document.getElementById('ctfd-auto-badge');
         if (!badge) return;
@@ -4493,9 +4766,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (state === 'busy') { badge.textContent = 'Busy'; badge.className = 'badge bg-info text-dark align-self-center ms-1'; return; }
         if (state === 'paused') { badge.textContent = 'Pause'; badge.className = 'badge bg-dark align-self-center ms-1'; return; }
         if (state === 'on') { badge.textContent = 'On'; badge.className = 'badge bg-success align-self-center ms-1'; return; }
-      } catch {}
+      } catch { }
     }
-    function tick(){
+    function tick() {
       try {
         if (!PROJ) { setAutoBadge('off'); return; }
         if (!hasAuth()) { setAutoBadge('auth'); return; }
@@ -4514,13 +4787,13 @@ document.addEventListener('DOMContentLoaded', async () => {
           CTFD_AUTO_REFRESH_ACTIVE = false;
           throw err;
         }
-        Promise.resolve(task).catch(()=>{}).finally(()=>{ CTFD_AUTO_REFRESH_ACTIVE = false; });
-      } catch {}
+        Promise.resolve(task).catch(() => { }).finally(() => { CTFD_AUTO_REFRESH_ACTIVE = false; });
+      } catch { }
     }
-    function apply(){
+    function apply() {
       stopTimer();
       const sel = document.getElementById('ctfd-auto-interval');
-      const interval = parseInt(sel?.value||'0',10)||0;
+      const interval = parseInt(sel?.value || '0', 10) || 0;
       writeAuto(interval);
       if (interval <= 0) { setAutoBadge('off'); return; }
       if (isPaused()) { setAutoBadge('paused'); return; }
@@ -4530,48 +4803,48 @@ document.addEventListener('DOMContentLoaded', async () => {
       else { setAutoBadge('on'); }
       timer = setInterval(tick, interval * 1000);
     }
-    function pause(reason){ if (reason) pausedReasons.add(reason); stopTimer(); if (readAuto() > 0) setAutoBadge('paused'); }
-    function resume(reason){ if (reason) pausedReasons.delete(reason); if (!isPaused()) apply(); }
-    document.addEventListener('project-selected', (e)=>{
+    function pause(reason) { if (reason) pausedReasons.add(reason); stopTimer(); if (readAuto() > 0) setAutoBadge('paused'); }
+    function resume(reason) { if (reason) pausedReasons.delete(reason); if (!isPaused()) apply(); }
+    document.addEventListener('project-selected', (e) => {
       try {
         const pid = e.detail || '';
-        try { ctfdUpdateServerNavLinkForCurrent(); } catch {}
+        try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
         ctfdStopCountdown(false);
         CTFD_LAST_CHALLENGES_STATE = null;
         CTFD_CHALLENGE_REVEAL_EXPECTED = false;
         if (pid) {
-          try { ctfdLoadProjectConfig(pid); } catch {}
+          try { ctfdLoadProjectConfig(pid); } catch { }
           try {
             ctfdMigrateSelectedToAssoc(pid);
             const assoc = ctfdReadAssoc(pid);
             CTFD_SELECTED_PIDS = (assoc && assoc.length) ? [String(pid), ...assoc.map(String)] : null;
             ctfdProjectsBadgeUpdate();
-          } catch {}
+          } catch { }
         }
         const sel = document.getElementById('ctfd-auto-interval');
-        if (sel) { const v = readAuto(); sel.value = String(v||0); }
+        if (sel) { const v = readAuto(); sel.value = String(v || 0); }
         apply();
-      } catch {}
+      } catch { }
     });
     try {
       const sel = document.getElementById('ctfd-auto-interval');
       if (sel) {
-        const v = readAuto(); sel.value = String(v||0);
+        const v = readAuto(); sel.value = String(v || 0);
         sel.addEventListener('change', apply);
       }
       apply();
-    } catch {}
+    } catch { }
     window.CTFD_AUTO_CTRL = { pause, resume, apply, isPaused };
   })();
   // Sort Missing Fields toggle removed; no initialization needed
   const apply = async (pid) => {
-    if(!pid){ try { shell.logDebug('CTFd: apply called with empty pid'); } catch {} return; }
-    try { try { shell.logInfo(`CTFd: loading project ${pid}`); } catch {} await ctfdLoadProjectById(pid); } catch(e){ try { shell.logError(`CTFd: load project failed: ${e?.message||e}`); } catch {} }
+    if (!pid) { try { shell.logDebug('CTFd: apply called with empty pid'); } catch { } return; }
+    try { try { shell.logInfo(`CTFd: loading project ${pid}`); } catch { } await ctfdLoadProjectById(pid); } catch (e) { try { shell.logError(`CTFd: load project failed: ${e?.message || e}`); } catch { } }
   };
   // Do not auto-load on initial page open or background selection changes.
   // Users should explicitly click a project or press Refresh to load.
   // Initialize controls so login button is clickable before project selection
-  try { updateCtfdControlsEnabled(); } catch {}
+  try { updateCtfdControlsEnabled(); } catch { }
   // If a project is already selected (via query or saved), render its config immediately
   try {
     const pid = (window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : '';
@@ -4583,7 +4856,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const assoc = ctfdReadAssoc(pid);
         CTFD_SELECTED_PIDS = (assoc && assoc.length) ? [String(pid), ...assoc.map(String)] : null;
         ctfdProjectsBadgeUpdate();
-      } catch {}
+      } catch { }
       // Mirror VM Manager: perform a best-effort initial refresh on load (non-interrupting)
       try {
         CTFD_ALLOW_LOAD = true;
@@ -4592,9 +4865,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else {
           ctfdLoadProjectById(pid);
         }
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
   // Wire settings toggles to updates
   try {
     const ch = document.getElementById('ctfd-toggle-chals');
@@ -4605,22 +4878,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (pa) pa.addEventListener('change', () => ctfdUpdateSettings({ ctfd_paused: !!pa.checked }));
     // Initialize tooltips on the toggle controls
     if (window.bootstrap) {
-      [ch, sc, pa].forEach(el => { if (el) { try { const wrap = el.closest('[data-bs-toggle="tooltip"]'); if (wrap) bootstrap.Tooltip.getOrCreateInstance(wrap); } catch {} } });
+      [ch, sc, pa].forEach(el => { if (el) { try { const wrap = el.closest('[data-bs-toggle="tooltip"]'); if (wrap) bootstrap.Tooltip.getOrCreateInstance(wrap); } catch { } } });
     }
-  } catch {}
+  } catch { }
   // Sort Missing Fields tooltip removed
 });
 
 // --- CTFd Settings: load + update ---
-async function ctfdLoadSettings(){
+async function ctfdLoadSettings() {
   if (!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id)||{};
-  if(!(sess?.validated && (sess.token || (sess.username && sess.password)))) return;
-  const baseUrl = (PROJ.challenge_url||'').trim();
-  const port = Number(PROJ.challenge_port||443);
+  const sess = readCtfdCreds(PROJ.id) || {};
+  if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) return;
+  const baseUrl = (PROJ.challenge_url || '').trim();
+  const port = Number(PROJ.challenge_port || 443);
   const verifyEl = document.getElementById('ctfd-verify-ssl');
   const verifySSL = verifyEl ? !!verifyEl.checked : true;
-  const payload = { baseUrl, port, token: sess.token||'', verifySSL };
+  const payload = { baseUrl, port, token: sess.token || '', verifySSL };
   try {
     let res;
     await runQueued(`CTFd load settings for ${PROJ?.name || PROJ?.id || ''}`, async () => {
@@ -4642,24 +4915,24 @@ async function ctfdLoadSettings(){
       ctfdHandleChallengesStateChange(challengesVisible);
     }
   } catch (e) {
-    try { shell.logWarn(`CTFd settings load failed: ${e?.message||e}`); } catch {}
+    try { shell.logWarn(`CTFd settings load failed: ${e?.message || e}`); } catch { }
   }
 }
 
-async function ctfdUpdateSettings(updates){
+async function ctfdUpdateSettings(updates) {
   if (!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id)||{};
-  if(!(sess?.validated && (sess.token || (sess.username && sess.password)))) return;
-  const baseUrl = (PROJ.challenge_url||'').trim();
-  const port = Number(PROJ.challenge_port||443);
+  const sess = readCtfdCreds(PROJ.id) || {};
+  if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) return;
+  const baseUrl = (PROJ.challenge_url || '').trim();
+  const port = Number(PROJ.challenge_port || 443);
   const verifyEl = document.getElementById('ctfd-verify-ssl');
   const verifySSL = verifyEl ? !!verifyEl.checked : true;
-  const payload = { baseUrl, port, token: sess.token||'', verifySSL, ...updates };
+  const payload = { baseUrl, port, token: sess.token || '', verifySSL, ...updates };
   const statusEl = document.getElementById('ctfd-settings-status');
   const tgls = [document.getElementById('ctfd-toggle-chals'), document.getElementById('ctfd-toggle-scoreboard'), document.getElementById('ctfd-toggle-paused')];
   const chToggle = document.getElementById('ctfd-toggle-chals');
   // Temporarily disable toggles to prevent flapping
-  try { tgls.forEach(el => { if (el) el.disabled = true; }); } catch {}
+  try { tgls.forEach(el => { if (el) el.disabled = true; }); } catch { }
   const togglingChallenges = updates && Object.prototype.hasOwnProperty.call(updates, 'challenges_visible');
   const targetChallenges = togglingChallenges ? !!updates.challenges_visible : null;
   const lastChallengesVisible = !!CTFD_LAST_CHALLENGES_STATE;
@@ -4680,7 +4953,7 @@ async function ctfdUpdateSettings(updates){
       await ctfdPlayCountdownCueForChallenges();
     } catch (err) {
       countdownCuePlayed = false;
-      try { shell.logWarn(`[CTFd] Countdown cue failed: ${err?.message||err}`); } catch {}
+      try { shell.logWarn(`[CTFd] Countdown cue failed: ${err?.message || err}`); } catch { }
     }
     if (!countdownCuePlayed) CTFD_CHALLENGE_REVEAL_EXPECTED = false;
   } else if (shouldDelayHide) {
@@ -4698,7 +4971,7 @@ async function ctfdUpdateSettings(updates){
       await ctfdPlayCountdownStopForChallenges();
     } catch (err) {
       countdownStopPlayed = false;
-      try { shell.logWarn(`[CTFd] Countdown stop cue failed: ${err?.message||err}`); } catch {}
+      try { shell.logWarn(`[CTFd] Countdown stop cue failed: ${err?.message || err}`); } catch { }
     }
     if (!countdownStopPlayed) CTFD_CHALLENGE_HIDE_EXPECTED = false;
   } else if (togglingChallenges && targetChallenges === false) {
@@ -4710,7 +4983,7 @@ async function ctfdUpdateSettings(updates){
     }
   }
   // Mark the update as in-flight once any pre-reveal cue has completed
-  try { if (statusEl) { statusEl.textContent = 'Applying…'; statusEl.className = 'small text-muted'; } } catch {}
+  try { if (statusEl) { statusEl.textContent = 'Applying…'; statusEl.className = 'small text-muted'; } } catch { }
   try {
     let res;
     await runQueued(`CTFd update settings for ${PROJ?.name || PROJ?.id || ''}`, async () => {
@@ -4728,8 +5001,8 @@ async function ctfdUpdateSettings(updates){
     const pa = document.getElementById('ctfd-toggle-paused'); if (pa) pa.checked = !!st.ctfd_paused;
     ctfdHandleChallengesStateChange(!!st.challenges_visible);
     try {
-      if (statusEl) { statusEl.textContent = 'Applied'; statusEl.className = 'small text-success'; setTimeout(()=>{ try{ statusEl.textContent=''; statusEl.className='small text-muted'; }catch{} }, 1200); }
-    } catch {}
+      if (statusEl) { statusEl.textContent = 'Applied'; statusEl.className = 'small text-success'; setTimeout(() => { try { statusEl.textContent = ''; statusEl.className = 'small text-muted'; } catch { } }, 1200); }
+    } catch { }
   } catch (e) {
     CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
     CTFD_CHALLENGE_REVEAL_EXPECTED = false;
@@ -4739,9 +5012,9 @@ async function ctfdUpdateSettings(updates){
       chToggle.removeAttribute('data-ctfd-pending-reveal');
     }
     // Reload last-known-good
-    try { await ctfdLoadSettings(); } catch {}
-    try { shell.logError(`CTFd settings update failed: ${e?.message||e}`); } catch {}
-    try { if (statusEl) { statusEl.textContent = 'Error'; statusEl.className = 'small text-danger'; setTimeout(()=>{ try{ statusEl.textContent=''; statusEl.className='small text-muted'; }catch{} }, 2000); } } catch {}
+    try { await ctfdLoadSettings(); } catch { }
+    try { shell.logError(`CTFd settings update failed: ${e?.message || e}`); } catch { }
+    try { if (statusEl) { statusEl.textContent = 'Error'; statusEl.className = 'small text-danger'; setTimeout(() => { try { statusEl.textContent = ''; statusEl.className = 'small text-muted'; } catch { } }, 2000); } } catch { }
   }
   finally {
     // Re-enable toggles based on auth state
@@ -4751,27 +5024,27 @@ async function ctfdUpdateSettings(updates){
     try {
       if (chToggle) chToggle.indeterminate = false;
       updateCtfdControlsEnabled();
-    } catch {}
+    } catch { }
   }
 }
 
 // --- CSV Download ---
-function ctfdDownloadCsv(opts){
+function ctfdDownloadCsv(opts) {
   try {
     const includePasswords = !!(opts && opts.includePasswords);
     const onlyVisible = !!(opts && opts.onlyVisible);
     const inst = Number(PROJ?.instances || 0);
     const creds = Array.isArray(PROJ?.credentials) ? PROJ.credentials : [];
     const header = [
-      'Index','Username','Password','User Rank','User Points','User Last Solve Time','User Last Solve Challenge',
-      'Team Name','Team Rank','Team Points','Team Captain','Team Size','Team Last Solve Time','Team Last Solve Challenge'
+      'Index', 'Username', 'Password', 'User Rank', 'User Points', 'User Last Solve Time', 'User Last Solve Challenge',
+      'Team Name', 'Team Rank', 'Team Points', 'Team Captain', 'Team Size', 'Team Last Solve Time', 'Team Last Solve Challenge'
     ];
     const rows = [];
     const indices = onlyVisible && Array.isArray(CTFD_LAST_VISIBLE_INDICES) && CTFD_LAST_VISIBLE_INDICES.length
       ? CTFD_LAST_VISIBLE_INDICES
-      : Array.from({length: inst}, (_,k)=>k+1);
+      : Array.from({ length: inst }, (_, k) => k + 1);
     for (const i of indices) {
-      const cred = creds[i-1] || {};
+      const cred = creds[i - 1] || {};
       const uname = (cred.username ?? '').trim();
       const pword = cred.password ?? '';
       const meta = (uname && CTFD_USER_META[uname]) ? CTFD_USER_META[uname] : {};
@@ -4792,70 +5065,70 @@ function ctfdDownloadCsv(opts){
         meta?.team_last_solve_challenge ?? '',
       ]);
     }
-    const escapeCsv = (v)=>{
-      const s = String(v==null?'':v);
-      if (/[",\n]/.test(s)) return '"'+s.replace(/"/g,'""')+'"';
+    const escapeCsv = (v) => {
+      const s = String(v == null ? '' : v);
+      if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
       return s;
     };
-    const csv = [header.map(escapeCsv).join(','), ...rows.map(r=>r.map(escapeCsv).join(','))].join('\n');
+    const csv = [header.map(escapeCsv).join(','), ...rows.map(r => r.map(escapeCsv).join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const projName = (PROJ?.name || 'ctfd').replace(/[^A-Za-z0-9_-]+/g,'_');
+    const projName = (PROJ?.name || 'ctfd').replace(/[^A-Za-z0-9_-]+/g, '_');
     a.href = url; a.download = `${projName}_ctfd_data.csv`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  } catch (e) { try { shell.logError(`CSV download failed: ${e?.message||e}`);} catch {} }
+  } catch (e) { try { shell.logError(`CSV download failed: ${e?.message || e}`); } catch { } }
 }
 
-function openCtfdDownloadModal(){
-  const el = document.getElementById('ctfdDownloadModal'); if(!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); m.show();
+function openCtfdDownloadModal() {
+  const el = document.getElementById('ctfdDownloadModal'); if (!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); m.show();
 }
 
-function confirmCtfdDownload(){
+function confirmCtfdDownload() {
   try {
     const inc = document.getElementById('ctfd-dl-include-passwords');
     const vis = document.getElementById('ctfd-dl-only-visible');
     ctfdDownloadCsv({ includePasswords: !!(inc && inc.checked), onlyVisible: !!(vis && vis.checked) });
-  } catch {}
+  } catch { }
   try {
-    const el = document.getElementById('ctfdDownloadModal'); if(el && window.bootstrap){ const m=bootstrap.Modal.getInstance(el); if(m) m.hide(); }
-  } catch {}
+    const el = document.getElementById('ctfdDownloadModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el); if (m) m.hide(); }
+  } catch { }
 }
 
 // --- CTFd session creds management ---
-function ctfdCredKey(pid){ return `toolhub.session.ctfd.${pid}`; }
-function readCtfdCreds(pid){ try { return JSON.parse(sessionStorage.getItem(ctfdCredKey(pid))||'{}'); } catch { return {}; } }
-function writeCtfdCreds(pid, obj){
+function ctfdCredKey(pid) { return `toolhub.session.ctfd.${pid}`; }
+function readCtfdCreds(pid) { try { return JSON.parse(sessionStorage.getItem(ctfdCredKey(pid)) || '{}'); } catch { return {}; } }
+function writeCtfdCreds(pid, obj) {
   try {
     sessionStorage.setItem(ctfdCredKey(pid), JSON.stringify({
-      username: obj.username||'',
-      password: obj.password||'',
-      token: obj.token||'',
+      username: obj.username || '',
+      password: obj.password || '',
+      token: obj.token || '',
       validated: !!obj.validated,
     }));
     // Also persist a same-origin cookie so popups can read creds without window.opener
     try {
       const name = ctfdCredKey(pid);
-      const payload = encodeURIComponent(JSON.stringify({ token: obj.token||'', validated: !!obj.validated }));
+      const payload = encodeURIComponent(JSON.stringify({ token: obj.token || '', validated: !!obj.validated }));
       const secure = (location.protocol === 'https:') ? '; Secure' : '';
       // Session cookie (no Max-Age) with SameSite=Lax for same-site requests
       document.cookie = `${name}=${payload}; Path=/; SameSite=Lax${secure}`;
-    } catch {}
-  } catch {}
+    } catch { }
+  } catch { }
 }
 
-function deleteCtfdCreds(pid){
-  try { sessionStorage.removeItem(ctfdCredKey(pid)); } catch {}
+function deleteCtfdCreds(pid) {
+  try { sessionStorage.removeItem(ctfdCredKey(pid)); } catch { }
   try {
     const name = ctfdCredKey(pid);
     const secure = (location.protocol === 'https:') ? '; Secure' : '';
     // Expire cookie immediately
     document.cookie = `${name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax${secure}`;
-  } catch {}
+  } catch { }
 }
-function normalizeUrl(s){ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
-function updateCtfdControlsEnabled(){
+function normalizeUrl(s) { if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
+function updateCtfdControlsEnabled() {
   const btnLogin = document.getElementById('btn-ctfd-login');
   const refresh = document.getElementById('btn-ctfd-refresh');
   const wrap = document.getElementById('ctfd-refresh-wrapper');
@@ -4882,35 +5155,35 @@ function updateCtfdControlsEnabled(){
   try {
     const notice = document.getElementById('ctfd-config-only-alert');
     if (notice) {
-      if (hasAuth) { notice.classList.add('d-none'); notice.setAttribute('aria-hidden','true'); }
+      if (hasAuth) { notice.classList.add('d-none'); notice.setAttribute('aria-hidden', 'true'); }
       else { notice.classList.remove('d-none'); notice.removeAttribute('aria-hidden'); }
     }
-  } catch {}
+  } catch { }
   if (wrap && window.bootstrap) {
     const tip = bootstrap.Tooltip.getInstance(wrap) || new bootstrap.Tooltip(wrap);
     if (refreshEnabled) {
-      try { tip.hide(); } catch {}
+      try { tip.hide(); } catch { }
       tip.disable();
-      ['title','data-bs-original-title','aria-label'].forEach(attr => wrap.removeAttribute(attr));
+      ['title', 'data-bs-original-title', 'aria-label'].forEach(attr => wrap.removeAttribute(attr));
       wrap.removeAttribute('tabindex');
     } else {
       tip.enable();
-      wrap.setAttribute('tabindex','0');
-      wrap.setAttribute('title','Please set a CTFd API token first.');
-      wrap.setAttribute('data-bs-original-title','Please set a CTFd API token first.');
+      wrap.setAttribute('tabindex', '0');
+      wrap.setAttribute('title', 'Please set a CTFd API token first.');
+      wrap.setAttribute('data-bs-original-title', 'Please set a CTFd API token first.');
     }
   }
   // Download button tooltip behavior mirrors refresh tooltip
   if (dlBtn && window.bootstrap) {
     const tip = bootstrap.Tooltip.getInstance(dlBtn) || new bootstrap.Tooltip(dlBtn);
     if (hasAuth) {
-      try { tip.hide(); } catch {}
+      try { tip.hide(); } catch { }
       tip.disable();
-      ['title','data-bs-original-title','aria-label'].forEach(attr => dlBtn.removeAttribute(attr));
+      ['title', 'data-bs-original-title', 'aria-label'].forEach(attr => dlBtn.removeAttribute(attr));
     } else {
       tip.enable();
-      dlBtn.setAttribute('title','Please set a CTFd API token first.');
-      dlBtn.setAttribute('data-bs-original-title','Please set a CTFd API token first.');
+      dlBtn.setAttribute('title', 'Please set a CTFd API token first.');
+      dlBtn.setAttribute('data-bs-original-title', 'Please set a CTFd API token first.');
     }
   }
   // Settings toggles enablement
@@ -4919,56 +5192,56 @@ function updateCtfdControlsEnabled(){
   const pa = document.getElementById('ctfd-toggle-paused');
   [ch, sc, pa].forEach(el => { if (el) el.disabled = !singleReady; });
 }
-async function handleCtfdLoginClick(ev){
-  try { ev?.preventDefault?.(); } catch {}
+async function handleCtfdLoginClick(ev) {
+  try { ev?.preventDefault?.(); } catch { }
   const selection = Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS : [];
-  const unique = Array.from(new Set(selection.map(pid => String(pid||'')).filter(Boolean)));
+  const unique = Array.from(new Set(selection.map(pid => String(pid || '')).filter(Boolean)));
   if (unique.length > 1) {
-    try { await ctfdEnsureProjects(); } catch {}
+    try { await ctfdEnsureProjects(); } catch { }
     return openCtfdLoginMultiForPids(unique);
   }
   return openCtfdLoginModal();
 }
 // Ensure login button opens modal and tooltip is initialized
-function wireCtfdLogin(){
+function wireCtfdLogin() {
   const btn = document.getElementById('btn-ctfd-login');
   if (btn && !btn._toolhubBound) {
     btn.addEventListener('click', handleCtfdLoginClick);
     btn._toolhubBound = true;
   }
   const wrap = document.getElementById('ctfd-refresh-wrapper');
-  if (wrap && window.bootstrap) { try { new bootstrap.Tooltip(wrap); } catch {} }
+  if (wrap && window.bootstrap) { try { new bootstrap.Tooltip(wrap); } catch { } }
 }
 // Stats menu handler: fetch quick info like Challenges list or current User
-async function ctfdStats(kind){
-  if(!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id)||{};
-  if(!(sess?.validated && (sess.token || (sess.username && sess.password)))){
+async function ctfdStats(kind) {
+  if (!PROJ) return;
+  const sess = readCtfdCreds(PROJ.id) || {};
+  if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) {
     return alert('Please set a CTFd API token first.');
   }
-  const baseUrl = (PROJ.challenge_url||'').trim();
-  const port = Number(PROJ.challenge_port||443);
+  const baseUrl = (PROJ.challenge_url || '').trim();
+  const port = Number(PROJ.challenge_port || 443);
   const verifyEl = document.getElementById('ctfd-verify-ssl');
   const verifySSL = verifyEl ? !!verifyEl.checked : true;
   try {
     shell.beginActionContext('CTFd Stats');
     showActionProgress('CTFd Stats', 'Fetching…');
     updateActionProgress(25, 'Submitting…');
-    if (kind === 'challenges'){
+    if (kind === 'challenges') {
       let res;
       await runQueued(`CTFd stats challenges`, async () => {
-        res = await http('POST', `/api/ctfd/challenges`, { baseUrl, token: sess.token||'' });
+        res = await http('POST', `/api/ctfd/challenges`, { baseUrl, token: sess.token || '' });
       }, { projectId: PROJ?.id });
       updateActionProgress(80, 'Processing…');
       const items = Array.isArray(res?.challenges) ? res.challenges : [];
-      const rows = items.map(c => `<tr><td>${escHtml(String(c?.id??''))}</td><td>${escHtml(String(c?.name??''))}</td><td>${escHtml(String(c?.category??''))}</td><td>${escHtml(String(c?.value??''))}</td></tr>`).join('');
-      const table = `<div class="table-responsive"><table class="table table-sm"><thead><tr><th>ID</th><th>Name</th><th>Category</th><th>Value</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="text-muted">No challenges</td></tr>'}</tbody></table></div>`;
+      const rows = items.map(c => `<tr><td>${escHtml(String(c?.id ?? ''))}</td><td>${escHtml(String(c?.name ?? ''))}</td><td>${escHtml(String(c?.category ?? ''))}</td><td>${escHtml(String(c?.value ?? ''))}</td></tr>`).join('');
+      const table = `<div class="table-responsive"><table class="table table-sm"><thead><tr><th>ID</th><th>Name</th><th>Category</th><th>Value</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="text-muted">No challenges</td></tr>'}</tbody></table></div>`;
       showActionSummary('CTFd Challenges', `<div class="mb-2">Total: <strong>${items.length}</strong></div>${table}`);
       shell.endActionContext(true);
-    } else if (kind === 'user'){
+    } else if (kind === 'user') {
       let res;
       await runQueued(`CTFd stats user for ${PROJ?.name || PROJ?.id || ''}`, async () => {
-        res = await http('POST', `/api/projects/${PROJ.id}/ctfd/login`, { baseUrl, port, token: sess.token||'', verifySSL });
+        res = await http('POST', `/api/projects/${PROJ.id}/ctfd/login`, { baseUrl, port, token: sess.token || '', verifySSL });
       }, { projectId: PROJ?.id });
       updateActionProgress(80, 'Processing…');
       const me = res?.me || {};
@@ -4980,14 +5253,15 @@ async function ctfdStats(kind){
       showActionSummary('CTFd Stats', '<div class="text-muted">Unknown option.</div>');
       shell.endActionContext(false);
     }
-  } catch(e){
-    showActionSummary('CTFd Stats', `<div class="text-danger">${escHtml(e?.message||e)}</div>`);
-    try { shell.endActionContext(false); } catch {}
+  } catch (e) {
+    showActionSummary('CTFd Stats', `<div class="text-danger">${escHtml(e?.message || e)}</div>`);
+    try { shell.endActionContext(false); } catch { }
   } finally {
-    try { updateActionProgress(100, 'Done'); hideActionProgress(); } catch {}
+    try { updateActionProgress(100, 'Done'); hideActionProgress(); } catch { }
   }
 }
-async function openCtfdLoginModal(){ const el = document.getElementById('ctfdLoginModal'); if(!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); // prefill
+async function openCtfdLoginModal() {
+  const el = document.getElementById('ctfdLoginModal'); if (!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); // prefill
   try {
     const url = document.getElementById('ctfd-url');
     const port = document.getElementById('ctfd-port');
@@ -5000,10 +5274,10 @@ async function openCtfdLoginModal(){ const el = document.getElementById('ctfdLog
         // Load lightweight config to prefill, without contacting CTFd (no await inside non-async)
         ctfdLoadProjectConfig(pid);
       }
-    } catch {}
-    if(PROJ){ if(url) url.value = PROJ.challenge_url || ''; if(port) port.value = PROJ.challenge_port ?? 443; }
-    const sess = PROJ? readCtfdCreds(PROJ.id) : {};
-    if(tokenEl) tokenEl.value = sess.token || '';
+    } catch { }
+    if (PROJ) { if (url) url.value = PROJ.challenge_url || ''; if (port) port.value = PROJ.challenge_port ?? 443; }
+    const sess = PROJ ? readCtfdCreds(PROJ.id) : {};
+    if (tokenEl) tokenEl.value = sess.token || '';
     // Load project-saved token if session empty
     try {
       if (PROJ && tokenEl && !tokenEl.value) {
@@ -5011,14 +5285,14 @@ async function openCtfdLoginModal(){ const el = document.getElementById('ctfdLog
           if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
             await CREDS.fetchProjectSecrets(PROJ.id);
           }
-        } catch {}
+        } catch { }
 
         let persisted = '';
         try {
           if (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') {
             persisted = CREDS.readPersistCtfdToken(PROJ.id) || '';
           }
-        } catch {}
+        } catch { }
         if (persisted) {
           tokenEl.value = persisted;
           const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = true;
@@ -5026,12 +5300,12 @@ async function openCtfdLoginModal(){ const el = document.getElementById('ctfdLog
           const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = false;
         }
       }
-    } catch {}
+    } catch { }
     if (fb) { fb.textContent = ''; fb.className = 'me-auto small'; }
-  } catch {}
+  } catch { }
   m.show();
 }
-async function saveCtfdCredsFromModal(){
+async function saveCtfdCredsFromModal() {
   try {
     if (isCtfdLoginBusy()) return;
     const url = document.getElementById('ctfd-url')?.value.trim();
@@ -5039,25 +5313,25 @@ async function saveCtfdCredsFromModal(){
     const token = document.getElementById('ctfd-token')?.value.trim() || '';
     const verify = !!document.getElementById('ctfd-verify-ssl')?.checked;
     const fb = document.getElementById('ctfd-login-feedback');
-    if(PROJ){
+    if (PROJ) {
       setCtfdLoginBusy(true);
       // Save project-side URL/port if changed
       const norm = normalizeUrl(url);
       const patch = {};
-      if(norm && norm !== (PROJ.challenge_url||'')) patch['challenge_url'] = norm;
-      if(port && port !== Number(PROJ.challenge_port||0)) patch['challenge_port'] = port;
-  if(Object.keys(patch).length){ await http('PATCH', `/api/projects/${PROJ.id}`, patch); }
-  // Save token in session storage (not yet validated)
-  writeCtfdCreds(PROJ.id, { username: '', password: '', token, validated: false });
+      if (norm && norm !== (PROJ.challenge_url || '')) patch['challenge_url'] = norm;
+      if (port && port !== Number(PROJ.challenge_port || 0)) patch['challenge_port'] = port;
+      if (Object.keys(patch).length) { await http('PATCH', `/api/projects/${PROJ.id}`, patch); }
+      // Save token in session storage (not yet validated)
+      writeCtfdCreds(PROJ.id, { username: '', password: '', token, validated: false });
       try {
         const saveBox = document.getElementById('ctfd-save-creds');
         const wantsPersist = !!(saveBox && saveBox.checked);
         if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
           await CREDS.setPersistCtfdToken(PROJ.id, token, wantsPersist);
         }
-      } catch {}
+      } catch { }
       updateCtfdControlsEnabled();
-  // Provide status feedback and attempt a server-side token "login" (validation)
+      // Provide status feedback and attempt a server-side token "login" (validation)
       if (fb) { fb.textContent = 'Validating API token…'; fb.className = 'me-auto small text-muted'; }
       try {
         let res;
@@ -5077,10 +5351,10 @@ async function saveCtfdCredsFromModal(){
               } else {
                 shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`);
               }
-            } catch {}
+            } catch { }
           });
-          if (typeof res?.using_token !== 'undefined') { try { shell.logInfo(`[CTFd] auth mode: using_token=${!!res.using_token}`); } catch {} }
-        } catch {}
+          if (typeof res?.using_token !== 'undefined') { try { shell.logInfo(`[CTFd] auth mode: using_token=${!!res.using_token}`); } catch { } }
+        } catch { }
         if (res && res.ok) {
           // Mark as validated and enable controls
           writeCtfdCreds(PROJ.id, { username: '', password: '', token, validated: true });
@@ -5091,7 +5365,7 @@ async function saveCtfdCredsFromModal(){
             const usersBtn = document.getElementById('act-ctf-users'); if (usersBtn) usersBtn.disabled = false;
             const dlBtn = document.getElementById('ctfd-download'); if (dlBtn) dlBtn.disabled = false;
             const refreshBtn = document.getElementById('btn-ctfd-refresh'); if (refreshBtn) refreshBtn.disabled = false;
-          } catch {}
+          } catch { }
           updateCtfdControlsEnabled();
           if (fb) { fb.textContent = 'API token verified. Updating status…'; fb.className = 'me-auto small text-success'; }
           // After successful validation, allow and perform a full load
@@ -5103,13 +5377,13 @@ async function saveCtfdCredsFromModal(){
             } else {
               await ctfdLoadProjectById(PROJ.id);
             }
-          } catch {}
+          } catch { }
           // Hide modal after a short delay to allow the user to see success
           setTimeout(() => {
             try {
               const el = document.getElementById('ctfdLoginModal');
-              if(el && window.bootstrap){ const m=bootstrap.Modal.getInstance(el); if(m) m.hide(); }
-            } catch {}
+              if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el); if (m) m.hide(); }
+            } catch { }
             if (fb) { fb.textContent = ''; fb.className = 'me-auto small'; }
             setCtfdLoginBusy(false);
           }, 500);
@@ -5118,7 +5392,7 @@ async function saveCtfdCredsFromModal(){
           const msg = (res && res.error) ? String(res.error) : 'Login failed';
           if (fb) { fb.textContent = msg; fb.className = 'me-auto small text-danger'; }
           // Clear stored session creds on failure
-          try { sessionStorage.removeItem(ctfdCredKey(PROJ.id)); } catch {}
+          try { sessionStorage.removeItem(ctfdCredKey(PROJ.id)); } catch { }
           updateCtfdControlsEnabled();
           setCtfdLoginBusy(false);
           return;
@@ -5130,37 +5404,37 @@ async function saveCtfdCredsFromModal(){
           if (/403/.test(msg) || /<!DOCTYPE html>/i.test(msg)) {
             msg = msg + ' — Hint: ensure the CTFd Base URL is the site root (e.g., https://ctf.example.edu) without a path, and that Verify SSL matches your server.';
           }
-        } catch {}
+        } catch { }
         if (fb) { fb.textContent = 'Login failed: ' + msg; fb.className = 'me-auto small text-danger'; }
-        try { deleteCtfdCreds(PROJ.id); } catch {}
+        try { deleteCtfdCreds(PROJ.id); } catch { }
         updateCtfdControlsEnabled();
         setCtfdLoginBusy(false);
         return;
       }
     }
-    const el = document.getElementById('ctfdLoginModal'); if(el && window.bootstrap){ const m=bootstrap.Modal.getInstance(el); if(m) m.hide(); }
-  } catch(e){
+    const el = document.getElementById('ctfdLoginModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el); if (m) m.hide(); }
+  } catch (e) {
     console.error('Failed to save CTFd creds', e);
     try {
-      const fb=document.getElementById('ctfd-login-feedback');
-      if(fb){ fb.textContent='Save failed'; fb.className='me-auto small text-danger'; }
-    } catch{}
+      const fb = document.getElementById('ctfd-login-feedback');
+      if (fb) { fb.textContent = 'Save failed'; fb.className = 'me-auto small text-danger'; }
+    } catch { }
     setCtfdLoginBusy(false);
   }
 }
 
 // --- Multi-project CTFd login modal ---
-function openCtfdLoginMultiForPids(pids){
+function openCtfdLoginMultiForPids(pids) {
   try {
     const listEl = document.getElementById('ctfd-multi-creds-list');
     if (!listEl) return;
-    const byId = {}; (CTFD_ALL_PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
-    const items = (pids||[]).map(pid => {
+    const byId = {}; (CTFD_ALL_PROJECTS || []).forEach(p => byId[String(p.id)] = p);
+    const items = (pids || []).map(pid => {
       const proj = byId[String(pid)];
       if (!proj) return '';
       const sess = readCtfdCreds(String(pid)) || {};
       const url = proj.challenge_url || '';
-      const port = Number(proj.challenge_port||443);
+      const port = Number(proj.challenge_port || 443);
       // Use project-saved token (if already cached) when session token absent
       let persistedToken = '';
       if (!sess.token) {
@@ -5168,15 +5442,15 @@ function openCtfdLoginMultiForPids(pids){
           if (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') {
             persistedToken = String(CREDS.readPersistCtfdToken(String(pid)) || '');
           }
-        } catch {}
+        } catch { }
       }
       const tokenValue = sess.token || persistedToken || '';
       return `<div class=\"card\"><div class=\"card-body\">`
-        + `<div class=\"mb-2\"><strong>${escHtml(proj.name||String(pid))}</strong><div class=\"small text-muted\">${escHtml(proj.tag||'')}</div></div>`
+        + `<div class=\"mb-2\"><strong>${escHtml(proj.name || String(pid))}</strong><div class=\"small text-muted\">${escHtml(proj.tag || '')}</div></div>`
         + `<div class=\"row g-2\">`
         + `<div class=\"col-md-6\"><label class=\"form-label\">CTFd URL</label><input class=\"form-control\" data-pid=\"${pid}\" data-field=\"url\" value=\"${escHtml(url)}\" placeholder=\"https://ctfd.example.com\" /></div>`
         + `<div class=\"col-md-3\"><label class=\"form-label\">Port</label><input type=\"number\" class=\"form-control\" data-pid=\"${pid}\" data-field=\"port\" value=\"${port}\" /></div>`
-  + `<div class=\"col-md-12\"><label class=\"form-label\">API Token</label><div class=\"input-group\"><input type=\"password\" class=\"form-control\" data-pid=\"${pid}\" data-field=\"token\" value=\"${escHtml(tokenValue)}\" placeholder=\"ctfd_...\" /><button class=\"btn btn-outline-secondary\" type=\"button\" data-act=\"toggle-visible\" title=\"Show\">\u{1F576}\u{FE0E}</button></div></div>`
+        + `<div class=\"col-md-12\"><label class=\"form-label\">API Token</label><div class=\"input-group\"><input type=\"password\" class=\"form-control\" data-pid=\"${pid}\" data-field=\"token\" value=\"${escHtml(tokenValue)}\" placeholder=\"ctfd_...\" /><button class=\"btn btn-outline-secondary\" type=\"button\" data-act=\"toggle-visible\" title=\"Show\">\u{1F576}\u{FE0E}</button></div></div>`
         + `</div>`
         + `</div></div>`;
     }).filter(Boolean).join('');
@@ -5185,23 +5459,23 @@ function openCtfdLoginMultiForPids(pids){
     // After showing, fetch server secrets to prefill empty token inputs
     try {
       if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
-        (pids||[]).forEach(pid => {
+        (pids || []).forEach(pid => {
           try {
-            CREDS.fetchProjectSecrets(String(pid)).then(()=>{
+            CREDS.fetchProjectSecrets(String(pid)).then(() => {
               try {
                 const t = (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') ? (CREDS.readPersistCtfdToken(String(pid)) || '') : '';
                 const inp = document.querySelector(`#ctfd-multi-creds-list [data-pid="${CSS.escape(String(pid))}"][data-field="token"]`);
                 if (inp && !inp.value && t) inp.value = t;
-              } catch {}
-            }).catch(()=>{});
-          } catch {}
+              } catch { }
+            }).catch(() => { });
+          } catch { }
         });
       }
-    } catch {}
+    } catch { }
     const btn = document.getElementById('btn-ctfd-multi-save');
     if (btn && !btn._bound) {
       btn._bound = true;
-      btn.addEventListener('click', async ()=>{
+      btn.addEventListener('click', async () => {
         if (btn.dataset.busyState === '1') return;
         setCtfdMultiLoginBusy(true);
         const fb = document.getElementById('ctfd-multi-login-feedback');
@@ -5215,93 +5489,93 @@ function openCtfdLoginMultiForPids(pids){
             const pid = String(inp.getAttribute('data-pid'));
             const field = String(inp.getAttribute('data-field'));
             const val = inp.value || '';
-            if (!map.has(pid)) map.set(pid, { url:'', port:443, token:'' });
+            if (!map.has(pid)) map.set(pid, { url: '', port: 443, token: '' });
             const obj = map.get(pid);
-            if (field==='url') obj.url = val;
-            else if (field==='port') obj.port = Number(val||443);
-            else if (field==='token') obj.token = val;
+            if (field === 'url') obj.url = val;
+            else if (field === 'port') obj.port = Number(val || 443);
+            else if (field === 'token') obj.token = val;
           });
           // Validate each via backend login
           let okCount = 0; let failCount = 0;
-          for (const [pid, obj] of map.entries()){
+          for (const [pid, obj] of map.entries()) {
             try {
               // Save URL/port to the project if changed
-              const proj = (CTFD_ALL_PROJECTS||[]).find(p=> String(p.id)===String(pid));
-              const normUrl = normalizeUrl(obj.url||'');
+              const proj = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === String(pid));
+              const normUrl = normalizeUrl(obj.url || '');
               const patch = {};
               if (proj) {
-                if (normUrl && normUrl !== (proj.challenge_url||'')) patch['challenge_url'] = normUrl;
-                if (obj.port && obj.port !== Number(proj.challenge_port||0)) patch['challenge_port'] = obj.port;
+                if (normUrl && normUrl !== (proj.challenge_url || '')) patch['challenge_url'] = normUrl;
+                if (obj.port && obj.port !== Number(proj.challenge_port || 0)) patch['challenge_port'] = obj.port;
               }
               if (proj && Object.keys(patch).length) {
                 await http('PATCH', `/api/projects/${pid}`, patch);
               }
               // Optimistically write creds then validate
-              writeCtfdCreds(String(pid), { username:'', password:'', token: obj.token||'', validated:false });
+              writeCtfdCreds(String(pid), { username: '', password: '', token: obj.token || '', validated: false });
               let res;
               await runQueued(`CTFd multi-login for project ${pid}`, async () => {
-                res = await http('POST', `/api/projects/${pid}/ctfd/login`, { baseUrl: normUrl, port: Number(obj.port||443), token: obj.token||'', verifySSL: true });
+                res = await http('POST', `/api/projects/${pid}/ctfd/login`, { baseUrl: normUrl, port: Number(obj.port || 443), token: obj.token || '', verifySSL: true });
               }, { projectId: pid });
               if (res && res.ok) {
-                writeCtfdCreds(String(pid), { username:'', password:'', token: obj.token||'', validated:true });
+                writeCtfdCreds(String(pid), { username: '', password: '', token: obj.token || '', validated: true });
                 okCount += 1;
                 try {
                   if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
-                    await CREDS.setPersistCtfdToken(String(pid), obj.token||'', persist);
+                    await CREDS.setPersistCtfdToken(String(pid), obj.token || '', persist);
                   }
-                } catch {}
+                } catch { }
               } else { failCount += 1; }
             } catch { failCount += 1; }
           }
           try {
             if (fb) {
-              if (failCount===0) { fb.textContent = `Saved ${okCount} token(s)`; fb.className = 'me-auto small text-success'; }
+              if (failCount === 0) { fb.textContent = `Saved ${okCount} token(s)`; fb.className = 'me-auto small text-success'; }
               else { fb.textContent = `Saved ${okCount}, ${failCount} failed`; fb.className = 'me-auto small text-warning'; }
             }
-          } catch {}
+          } catch { }
           // Re-evaluate control enablement (Stats, Users, Download, Refresh) now that tokens may be validated
-          try { updateCtfdControlsEnabled(); } catch {}
+          try { updateCtfdControlsEnabled(); } catch { }
           // Auto-retry: if multi selection, run multi refresh
           try {
             if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
               CTFD_ALLOW_LOAD = true;
               await ctfdRefreshMulti();
             }
-          } catch {}
+          } catch { }
           // Close after short delay
-          setTimeout(()=>{
+          setTimeout(() => {
             try {
               const el = document.getElementById('ctfdLoginMultiModal'); if (el && window.bootstrap) { const m = bootstrap.Modal.getInstance(el); if (m) m.hide(); }
-            } catch {}
-            try { if (fb) { fb.textContent=''; fb.className='me-auto small'; } } catch {}
+            } catch { }
+            try { if (fb) { fb.textContent = ''; fb.className = 'me-auto small'; } } catch { }
             setCtfdMultiLoginBusy(false);
           }, 500);
         } catch (err) {
           try {
             if (fb) { fb.textContent = `Save failed: ${err?.message || err || 'Unknown error'}`; fb.className = 'me-auto small text-danger'; }
-          } catch {}
+          } catch { }
           setCtfdMultiLoginBusy(false);
         }
       });
     }
-  } catch {}
+  } catch { }
 }
 
 // --- Actions ---
-async function ctfdAction(kind){
+async function ctfdAction(kind) {
   // If multi-project selection is active, run grouped multi-project action
   try {
     if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
       return await ctfdActionMulti(kind);
     }
-  } catch {}
-  if(!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id)||{};
-  if(!(sess?.validated && (sess.token || (sess.username && sess.password)))){
+  } catch { }
+  if (!PROJ) return;
+  const sess = readCtfdCreds(PROJ.id) || {};
+  if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) {
     return alert('Please set a CTFd API token first.');
   }
-  const baseUrl = (PROJ.challenge_url||'').trim();
-  const port = Number(PROJ.challenge_port||443);
+  const baseUrl = (PROJ.challenge_url || '').trim();
+  const port = Number(PROJ.challenge_port || 443);
   const verifyEl = document.getElementById('ctfd-verify-ssl');
   const verifySSL = verifyEl ? !!verifyEl.checked : true;
   // If any credentials are selected, build an 'only' list of usernames for those instance indices
@@ -5311,11 +5585,11 @@ async function ctfdAction(kind){
       const indices = new Set(CTFD_SELECTED_INDICES);
       const creds = Array.isArray(PROJ.credentials) ? PROJ.credentials : [];
       const names = [];
-      indices.forEach(i => { const c = creds[i-1]; if (c && c.username) names.push(String(c.username)); });
+      indices.forEach(i => { const c = creds[i - 1]; if (c && c.username) names.push(String(c.username)); });
       if (names.length > 0) only = names;
     }
-  } catch {}
-  const payload = { baseUrl, port, token: sess.token, verifySSL, ...(only?{ only }: {}) };
+  } catch { }
+  const payload = { baseUrl, port, token: sess.token, verifySSL, ...(only ? { only } : {}) };
   // Disable relevant controls during action
   const usersBtn = document.getElementById('act-ctf-users');
   const refreshBtn = document.getElementById('btn-ctfd-refresh');
@@ -5324,29 +5598,29 @@ async function ctfdAction(kind){
     if (usersBtn) usersBtn.disabled = true;
     if (refreshBtn) refreshBtn.disabled = true;
     if (loginBtn) loginBtn.disabled = true;
-  } catch {}
+  } catch { }
   try {
     let title = '';
     if (kind === 'users_create') title = 'CTFd Users Create';
     else if (kind === 'users_delete') title = 'CTFd Users Delete';
-  else if (kind === 'upload') title = 'CTFd Upload';
-  else title = 'CTFd Action';
+    else if (kind === 'upload') title = 'CTFd Upload';
+    else title = 'CTFd Action';
     shell.beginActionContext(title);
     // Progress modal start
     showActionProgress(title, kind === 'users_create' ? 'Creating users…' : (kind === 'users_delete' ? 'Deleting users…' : 'Working…'));
     updateActionProgress(10, 'Submitting…');
-  if (kind === 'users_create'){
+    if (kind === 'users_create') {
       let res;
       await runQueued(`CTFd create users for ${PROJ?.name || PROJ?.id || ''}`, async () => {
         res = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_create`, payload);
       }, { projectId: PROJ?.id });
       try {
         const logs = Array.isArray(res?.logs) ? res.logs : [];
-        logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch {} });
-        if (typeof res?.using_token !== 'undefined') { try { shell.logInfo(`[CTFd] auth mode: using_token=${!!res.using_token}`); } catch {} }
-      } catch {}
+        logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch { } });
+        if (typeof res?.using_token !== 'undefined') { try { shell.logInfo(`[CTFd] auth mode: using_token=${!!res.using_token}`); } catch { } }
+      } catch { }
       if (res && res.ok === false && res.error) {
-        try { shell.logError(`CTFd users create: ${res.error}`); } catch {}
+        try { shell.logError(`CTFd users create: ${res.error}`); } catch { }
       }
       // Logs per-result
       try {
@@ -5358,25 +5632,25 @@ async function ctfdAction(kind){
           else if (r?.error) shell.logError(`CTFd: user ${u} error — ${r.error}`);
           else shell.logDebug(`CTFd: user ${u} ${r?.action || ''}`);
         });
-      } catch {}
+      } catch { }
       shell.logSuccess(`CTFd users create: created=${res.created} updated=${res.updated}`);
       updateActionProgress(80, 'Processing results…');
-      try { showActionSummary('CTFd Users Create', buildCtfdResultsSummary('create', res)); } catch {}
+      try { showActionSummary('CTFd Users Create', buildCtfdResultsSummary('create', res)); } catch { }
       // Refresh existence and table
-      try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch {}
+      try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch { }
       shell.endActionContext(true);
-    } else if (kind === 'users_delete'){
+    } else if (kind === 'users_delete') {
       let res;
       await runQueued(`CTFd delete users for ${PROJ?.name || PROJ?.id || ''}`, async () => {
         res = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_delete`, payload);
       }, { projectId: PROJ?.id });
       try {
         const logs = Array.isArray(res?.logs) ? res.logs : [];
-        logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch {} });
-        if (typeof res?.using_token !== 'undefined') { try { shell.logInfo(`[CTFd] auth mode: using_token=${!!res.using_token}`); } catch {} }
-      } catch {}
+        logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch { } });
+        if (typeof res?.using_token !== 'undefined') { try { shell.logInfo(`[CTFd] auth mode: using_token=${!!res.using_token}`); } catch { } }
+      } catch { }
       if (res && res.ok === false && res.error) {
-        try { shell.logError(`CTFd users delete: ${res.error}`); } catch {}
+        try { shell.logError(`CTFd users delete: ${res.error}`); } catch { }
       }
       try {
         const results = Array.isArray(res?.results) ? res.results : [];
@@ -5387,13 +5661,13 @@ async function ctfdAction(kind){
           else if (r?.error) shell.logError(`CTFd: user ${u} error — ${r.error}`);
           else shell.logDebug(`CTFd: user ${u} ${r?.action || ''}`);
         });
-      } catch {}
+      } catch { }
       shell.logSuccess(`CTFd users delete: deleted=${res.deleted}`);
       updateActionProgress(80, 'Processing results…');
-      try { showActionSummary('CTFd Users Delete', buildCtfdResultsSummary('delete', res)); } catch {}
-      try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch {}
+      try { showActionSummary('CTFd Users Delete', buildCtfdResultsSummary('delete', res)); } catch { }
+      try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch { }
       shell.endActionContext(true);
-    } else if (kind === 'upload'){
+    } else if (kind === 'upload') {
       // Prompt for a previously exported CTFd file (zip)
       const picker = document.createElement('input');
       picker.type = 'file';
@@ -5428,44 +5702,44 @@ async function ctfdAction(kind){
         showActionSummary('CTFd Upload', body);
         shell.endActionContext(true);
       } catch (e) {
-        showActionSummary('CTFd Upload', `<div class="text-danger">${escHtml(e?.message||e)}</div>`);
+        showActionSummary('CTFd Upload', `<div class="text-danger">${escHtml(e?.message || e)}</div>`);
         shell.endActionContext(false);
       }
-    } else if (kind === 'download'){
+    } else if (kind === 'download') {
       showActionProgress('CTFd', 'Working…');
       updateActionProgress(100, 'Not implemented');
-      try { showActionSummary('CTFd', '<div class="text-muted">Download not implemented yet.</div>'); } catch {}
+      try { showActionSummary('CTFd', '<div class="text-muted">Download not implemented yet.</div>'); } catch { }
       shell.endActionContext(false);
     }
-  } catch(e){
-    shell.logError(`CTFd action ${kind} failed: ${e?.message||e}`);
-    alert(`CTFd action failed: ${e?.message||e}`);
-    try { shell.endActionContext(false); } catch {}
+  } catch (e) {
+    shell.logError(`CTFd action ${kind} failed: ${e?.message || e}`);
+    alert(`CTFd action failed: ${e?.message || e}`);
+    try { shell.endActionContext(false); } catch { }
   } finally {
     // Hide progress modals and re-enable controls
-    try { updateActionProgress(100, 'Done'); hideActionProgress(); } catch {}
+    try { updateActionProgress(100, 'Done'); hideActionProgress(); } catch { }
     ctfdHideProgress();
     try {
       if (usersBtn) usersBtn.disabled = false;
       if (refreshBtn) refreshBtn.disabled = false;
       if (loginBtn) loginBtn.disabled = false;
-    } catch {}
+    } catch { }
   }
 }
 
 // Multi-project variant for Users actions (create/delete) operating per selected project
-async function ctfdActionMulti(kind){
+async function ctfdActionMulti(kind) {
   const pids = Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS.slice() : [];
   if (!pids.length) return;
   await ctfdEnsureProjects();
   const pf = await ctfdPreflightPids(pids);
   // Determine targets (valid projects)
-  const invalidSet = new Set([...(pf.invalid||[]), ...(pf.missing||[])]);
+  const invalidSet = new Set([...(pf.invalid || []), ...(pf.missing || [])]);
   const targets = pids.filter(pid => !invalidSet.has(String(pid)));
   if (!targets.length) {
-    ctfdRenderSkippedIndicator([...(pf.invalid||[]), ...(pf.missing||[])], 'missing credentials or configuration');
+    ctfdRenderSkippedIndicator([...(pf.invalid || []), ...(pf.missing || [])], 'missing credentials or configuration');
     try {
-      const needsLogin = Array.from(new Set([...(pf.invalid||[]), ...(pf.missing||[])]));
+      const needsLogin = Array.from(new Set([...(pf.invalid || []), ...(pf.missing || [])]));
       if (needsLogin.length) openCtfdLoginMultiForPids(needsLogin);
       else openCtfdLoginModal();
     } catch { openCtfdLoginModal(); }
@@ -5478,16 +5752,16 @@ async function ctfdActionMulti(kind){
   if (kind === 'users_create') title = 'CTFd Users Create (Multi)';
   else if (kind === 'users_delete') title = 'CTFd Users Delete (Multi)';
   else title = 'CTFd Action (Multi)';
-  try { shell.beginActionContext(title); } catch {}
+  try { shell.beginActionContext(title); } catch { }
   showActionProgress(title, 'Working across projects…');
   // Disable some buttons while running
   const usersBtn = document.getElementById('act-ctf-users');
   const refreshBtn = document.getElementById('btn-ctfd-refresh');
   const loginBtn = document.getElementById('btn-ctfd-login');
-  try { if (usersBtn) usersBtn.disabled = true; if (refreshBtn) refreshBtn.disabled = true; if (loginBtn) loginBtn.disabled = true; } catch {}
+  try { if (usersBtn) usersBtn.disabled = true; if (refreshBtn) refreshBtn.disabled = true; if (loginBtn) loginBtn.disabled = true; } catch { }
   const verifyEl = document.getElementById('ctfd-verify-ssl');
   const verifySSL = verifyEl ? !!verifyEl.checked : true;
-  const byId = {}; (CTFD_ALL_PROJECTS||[]).forEach(p => byId[String(p.id)] = p);
+  const byId = {}; (CTFD_ALL_PROJECTS || []).forEach(p => byId[String(p.id)] = p);
   // Build per-project 'only' maps from composite selection (if any)
   const selMap = new Map();
   if (CTFD_SELECTED_KEYS && CTFD_SELECTED_KEYS.size > 0) {
@@ -5503,25 +5777,25 @@ async function ctfdActionMulti(kind){
   }
   const summaries = [];
   let i = 0; const total = targets.length;
-  for (const pid of targets){
+  for (const pid of targets) {
     i += 1;
     const proj = byId[String(pid)];
     if (!proj) continue;
     const sess = readCtfdCreds(String(pid)) || {};
-    const baseUrl = (proj.challenge_url||'').trim();
-    const port = Number(proj.challenge_port||443);
+    const baseUrl = (proj.challenge_url || '').trim();
+    const port = Number(proj.challenge_port || 443);
     // Compute only list if selection provided
-    let payload = { baseUrl, port, token: sess.token||'', verifySSL };
+    let payload = { baseUrl, port, token: sess.token || '', verifySSL };
     try {
       const idxSet = selMap.get(String(pid));
       if (idxSet && idxSet.size > 0) {
         const creds = Array.isArray(proj.credentials) ? proj.credentials : [];
         const names = [];
-        idxSet.forEach(iIdx => { const c = creds[iIdx-1]; if (c && c.username) names.push(String(c.username)); });
+        idxSet.forEach(iIdx => { const c = creds[iIdx - 1]; if (c && c.username) names.push(String(c.username)); });
         if (names.length > 0) payload = { ...payload, only: names };
       }
-    } catch {}
-    updateActionProgress(Math.floor((i-1)/Math.max(1,total)*100), `Processing ${proj.name}…`);
+    } catch { }
+    updateActionProgress(Math.floor((i - 1) / Math.max(1, total) * 100), `Processing ${proj.name}…`);
     try {
       let res;
       if (kind === 'users_create') {
@@ -5534,34 +5808,34 @@ async function ctfdActionMulti(kind){
         }, { projectId: pid });
       } else {
         // Unsupported in multi-mode for now
-        res = { ok:false, error:'Unsupported action in multi mode' };
+        res = { ok: false, error: 'Unsupported action in multi mode' };
       }
       const good = !!(res && res.ok !== false);
-      const sum = buildCtfdResultsSummary(kind === 'users_delete' ? 'delete' : (kind === 'users_create' ? 'create' : 'other'), res||{});
-      summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name||String(pid))}</h6>${sum}</div>`);
+      const sum = buildCtfdResultsSummary(kind === 'users_delete' ? 'delete' : (kind === 'users_create' ? 'create' : 'other'), res || {});
+      summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name || String(pid))}</h6>${sum}</div>`);
       try {
         if (!good && res?.error) shell.logError(`CTFd ${kind} (${proj.name}): ${res.error}`);
-      } catch {}
+      } catch { }
     } catch (e) {
-      summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name||String(pid))}</h6><div class="text-danger">${escHtml(e?.message||e)}</div></div>`);
+      summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name || String(pid))}</h6><div class="text-danger">${escHtml(e?.message || e)}</div></div>`);
     }
-    updateActionProgress(Math.floor(i/Math.max(1,total)*90), `Processed ${i}/${total} projects…`);
+    updateActionProgress(Math.floor(i / Math.max(1, total) * 90), `Processed ${i}/${total} projects…`);
   }
   updateActionProgress(95, 'Refreshing view…');
-  try { CTFD_ALLOW_LOAD = true; await ctfdRefreshMulti(); } catch {}
+  try { CTFD_ALLOW_LOAD = true; await ctfdRefreshMulti(); } catch { }
   updateActionProgress(100, 'Done');
-  try { showActionSummary(title, summaries.join('') || '<div class="text-muted">No details.</div>'); shell.endActionContext(true); } catch {}
+  try { showActionSummary(title, summaries.join('') || '<div class="text-muted">No details.</div>'); shell.endActionContext(true); } catch { }
   // Re-enable controls
-  try { if (usersBtn) usersBtn.disabled = false; if (refreshBtn) refreshBtn.disabled = false; if (loginBtn) loginBtn.disabled = false; } catch {}
+  try { if (usersBtn) usersBtn.disabled = false; if (refreshBtn) refreshBtn.disabled = false; if (loginBtn) loginBtn.disabled = false; } catch { }
 }
 
-function buildCtfdResultsSummary(kind, res){
+function buildCtfdResultsSummary(kind, res) {
   try {
-    const safe = (s) => String(s ?? '').replace(/[&<>]/g, c=> ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    const safe = (s) => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
     const results = Array.isArray(res?.results) ? res.results : [];
     const counts = [];
-    if (kind==='create') counts.push(`Created: <strong>${res?.created ?? 0}</strong>`, `Updated: <strong>${res?.updated ?? 0}</strong>`);
-    if (kind==='delete') counts.push(`Deleted: <strong>${res?.deleted ?? 0}</strong>`);
+    if (kind === 'create') counts.push(`Created: <strong>${res?.created ?? 0}</strong>`, `Updated: <strong>${res?.updated ?? 0}</strong>`);
+    if (kind === 'delete') counts.push(`Deleted: <strong>${res?.deleted ?? 0}</strong>`);
     const head = `<div class="mb-2">${counts.join(' • ') || ''}</div>`;
     if (!results.length) return head + '<div class="text-muted">No per-user details.</div>';
     const rows = results.map(r => {
@@ -5569,21 +5843,21 @@ function buildCtfdResultsSummary(kind, res){
       const act = safe(r?.action || '');
       const err = safe(r?.error || '');
       let badge = '';
-      if (act==='created') badge = '<span class="badge bg-success">created</span>';
-      else if (act==='updated') badge = '<span class="badge bg-primary">updated</span>';
-      else if (act==='deleted') badge = '<span class="badge bg-success">deleted</span>';
-      else if (act==='missing') badge = '<span class="badge bg-secondary">missing</span>';
+      if (act === 'created') badge = '<span class="badge bg-success">created</span>';
+      else if (act === 'updated') badge = '<span class="badge bg-primary">updated</span>';
+      else if (act === 'deleted') badge = '<span class="badge bg-success">deleted</span>';
+      else if (act === 'missing') badge = '<span class="badge bg-secondary">missing</span>';
       else if (err) badge = '<span class="badge bg-danger">error</span>';
-      else badge = `<span class="badge bg-secondary">${act||'n/a'}</span>`;
+      else badge = `<span class="badge bg-secondary">${act || 'n/a'}</span>`;
       const msg = err ? `<div class="small text-danger">${err}</div>` : '';
-      return `<tr><td>${u||'n/a'}</td><td>${badge}</td><td>${msg}</td></tr>`;
+      return `<tr><td>${u || 'n/a'}</td><td>${badge}</td><td>${msg}</td></tr>`;
     }).join('');
     return head + `<div class="table-responsive"><table class="table table-sm"><thead><tr><th>User</th><th>Status</th><th>Info</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   } catch { return '<div class="text-muted">No details.</div>'; }
 }
 
 // Fetch CTFd existence map for current project's usernames
-async function ctfdCheckExistence(){
+async function ctfdCheckExistence() {
   if (!PROJ) return;
   const sess = readCtfdCreds(PROJ.id) || {};
   if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) { CTFD_USER_EXISTS = {}; return; }
@@ -5596,8 +5870,8 @@ async function ctfdCheckExistence(){
   // Print detailed CTFd request/response logs to console
   try {
     const logs = Array.isArray(resp?.logs) ? resp.logs : [];
-    logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch {} });
-  } catch {}
+    logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch { } });
+  } catch { }
   const map = {};
   try {
     const list = Array.isArray(resp?.users) ? resp.users : [];
@@ -5621,7 +5895,7 @@ async function ctfdCheckExistence(){
         team_last_solve_challenge: (u?.team_last_solve_challenge ?? null),
       };
     });
-  } catch {}
+  } catch { }
   ctfdApplyUserMeta(PROJ?.id, map);
 }
 
@@ -5634,21 +5908,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!btn) return;
     const pid = btn.getAttribute('data-pid');
     if (!pid) return;
-    try { if (window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch {}
+    try { if (window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch { }
     // Selecting a project should not auto-load; user must press Refresh or add valid credentials
     // Load only the project config to display table with n/a values; do not contact CTFd
-    try { ctfdLoadProjectConfig(pid); } catch {}
+    try { ctfdLoadProjectConfig(pid); } catch { }
   });
 });
 
 // Defensive cleanup for modal backdrops if Cancel/Close leaves a grey screen
-document.addEventListener('hidden.bs.modal', ()=>{
+document.addEventListener('hidden.bs.modal', () => {
   try {
     document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('padding-right');
     document.body.style.removeProperty('overflow');
-  } catch {}
+  } catch { }
 });
 
 function safeHideModalById(id) {
@@ -5656,13 +5930,13 @@ function safeHideModalById(id) {
     const modal = document.getElementById(id);
     if (!modal || !window.bootstrap) return;
     const inst = bootstrap.Modal.getInstance(modal) || bootstrap.Modal.getOrCreateInstance(modal);
-    try { inst.hide(); } catch {}
-  } catch {}
+    try { inst.hide(); } catch { }
+  } catch { }
 }
 function showActionSummary(title, htmlBody) {
   try {
     // Hide progress before showing summary (avoid overlaps)
-    try { safeHideModalById('actionProgressModal'); } catch {}
+    try { safeHideModalById('actionProgressModal'); } catch { }
     const modal = document.getElementById('actionSummaryModal');
     if (!modal || !window.bootstrap) return;
     const titleEl = document.getElementById('action-summary-title');
@@ -5670,6 +5944,6 @@ function showActionSummary(title, htmlBody) {
     if (titleEl) titleEl.textContent = title || 'Action Results';
     if (bodyEl) bodyEl.innerHTML = htmlBody || '<div class="text-muted">No details.</div>';
     const bs = bootstrap.Modal.getOrCreateInstance(modal);
-    setTimeout(() => { try { bs.show(); } catch {} }, 10);
-  } catch {}
+    setTimeout(() => { try { bs.show(); } catch { } }, 10);
+  } catch { }
 }

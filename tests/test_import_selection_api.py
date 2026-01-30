@@ -43,14 +43,17 @@ class ImportSelectionApiTests(unittest.TestCase):
         include_creds: bool,
         include_vms: bool,
         include_notify_audio: bool = True,
+        file_name: str = 'proj.zip',
+        allow_best_effort: bool = False,
     ) -> str:
         resp = self.client.post(
             '/api/projects/import/start',
             data={
-                'file': (zip_buf, 'proj.zip'),
+                'file': (zip_buf, file_name),
                 'includeCreds': 'true' if include_creds else 'false',
                 'includeVms': 'true' if include_vms else 'false',
                 'includeNotifyAudio': 'true' if include_notify_audio else 'false',
+                'allowBestEffort': 'true' if allow_best_effort else 'false',
             },
             content_type='multipart/form-data',
         )
@@ -227,6 +230,31 @@ class ImportSelectionApiTests(unittest.TestCase):
         self.assertEqual(len(media_keys), 1)
         self.assertIn('event:test', audio)
         self.assertEqual(audio['event:test'].get('soundKey'), media_keys[0])
+
+    def test_import_without_manifest_uses_backups(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('backups/vm-one/vzdump-qemu-101-2025_01_01-00_00_00.vma.zst', b'dummy')
+        buf.seek(0)
+
+        job = self._start_import_job(
+            buf,
+            include_creds=True,
+            include_vms=True,
+            file_name='backups-only.zip',
+            allow_best_effort=True,
+        )
+        status = self._wait_job_completed(job)
+        self.assertEqual(status.get('status'), 'completed')
+
+        resp = self.client.get('/api/projects')
+        self.assertEqual(resp.status_code, 200)
+        projects = (resp.get_json() or {}).get('projects') or []
+        created = next((p for p in projects if p.get('name') == 'backups-only'), None)
+        self.assertIsNotNone(created)
+        vms = created.get('vms') or []
+        self.assertEqual(len(vms), 1)
+        self.assertEqual(vms[0].get('name'), 'vm-one')
 
     def test_legacy_import_cleans_uploads_temp_artifacts(self):
         project = {

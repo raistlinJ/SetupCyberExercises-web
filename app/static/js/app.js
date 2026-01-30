@@ -357,7 +357,7 @@ function updateStartCommandsCache(pid, vmName, steps, idxHint) {
         list[targetIdx] = { ...list[targetIdx], start_commands: payload.slice() };
       }
     }
-  } catch {}
+  } catch { }
   return clean;
 }
 
@@ -394,7 +394,7 @@ function updateStoredCommandsCache(pid, vmName, steps, idxHint) {
         list[targetIdx] = { ...list[targetIdx], stored_commands: payload.slice() };
       }
     }
-  } catch {}
+  } catch { }
   return clean;
 }
 
@@ -409,12 +409,12 @@ async function http(method, url, body) {
   }
   try {
     (window.shell && shell.logDebug) ? shell.logDebug(`[HTTP] ${method} ${url}`) : null;
-  } catch {}
+  } catch { }
   const res = await fetch(url, opts);
   if (!res.ok) {
     let msg = res.statusText;
     let bodyText = '';
-    try { bodyText = (await res.text()) || ''; } catch {}
+    try { bodyText = (await res.text()) || ''; } catch { }
     if (bodyText) msg = bodyText;
     // Remote-mode enforcement uses HTTP 403; show a friendly message when possible.
     try {
@@ -423,11 +423,11 @@ async function http(method, url, body) {
         try {
           const parsed = JSON.parse(bodyText || '{}');
           extracted = (parsed && (parsed.error || parsed.message)) ? String(parsed.error || parsed.message) : '';
-        } catch {}
+        } catch { }
         const warn = extracted || (bodyText || 'Action is disabled when app is running in remote mode.');
-        try { if (typeof window.showToast === 'function') window.showToast(warn, 'warning'); } catch {}
+        try { if (typeof window.showToast === 'function') window.showToast(warn, 'warning'); } catch { }
       }
-    } catch {}
+    } catch { }
     throw new Error(msg || `HTTP ${res.status}`);
   }
   const ct = res.headers.get('content-type') || '';
@@ -437,7 +437,7 @@ async function http(method, url, body) {
 
 // UI state helpers (restored)
 function readUIState() { try { return JSON.parse(localStorage.getItem(UI_STATE_KEY) || '{}'); } catch { return {}; } }
-function writeUIState(s) { try { localStorage.setItem(UI_STATE_KEY, JSON.stringify(s)); } catch {} }
+function writeUIState(s) { try { localStorage.setItem(UI_STATE_KEY, JSON.stringify(s)); } catch { } }
 function getProjState(pid) { const s = readUIState(); s.projects = s.projects || {}; s.projects[pid] = s.projects[pid] || {}; return s.projects[pid]; }
 function setProjState(pid, patch) {
   const s = readUIState();
@@ -455,24 +455,24 @@ function readSettings() {
       const parsed = JSON.parse(raw || '{}') || {};
       if (parsed && typeof parsed === 'object') return parsed;
     }
-  } catch {}
+  } catch { }
   // Legacy migration: older versions stored UI settings in `toolhub.settings.v1`.
   // That key is now owned by `shell.js` for runMode, so copy everything except `runMode`.
   try {
     const legacy = JSON.parse(localStorage.getItem(UI_SETTINGS_KEY_LEGACY) || '{}') || {};
     if (legacy && typeof legacy === 'object') {
-      try { delete legacy.runMode; } catch {}
+      try { delete legacy.runMode; } catch { }
       try {
         if (Object.keys(legacy).length) {
           localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(legacy));
         }
-      } catch {}
+      } catch { }
       return legacy;
     }
-  } catch {}
+  } catch { }
   return {};
 }
-function writeSettings(s) { try { localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(s || {})); } catch {} }
+function writeSettings(s) { try { localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(s || {})); } catch { } }
 
 const PROJECT_AUDIO_CACHE = {};
 const PROJECT_AUDIO_LOADED = new Set();
@@ -494,7 +494,7 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-user-speak-template-add',
     templateListId: 'settings-audio-ctfd-user-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-user-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{project}}, {{project_clause}}, {{first_team}}, {{second_team}}, {{third_team}}',
+    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
     defaultSpeak: true,
     defaultSpeakTemplate: '{{audio}} {{leader}} is now in first place{{project_clause}}.',
@@ -514,10 +514,10 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-team-speak-template-add',
     templateListId: 'settings-audio-ctfd-team-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-team-speak-help',
-    placeholderHint: '{{audio}}, {{first_team}}, {{second_team}}, {{third_team}}, {{project}}, {{project_clause}}',
+    placeholderHint: '{{audio}}, {{team_first}}, {{second_team}}, {{third_team}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} {{first_team}} is now in first place{{project_clause}}.',
+    defaultSpeakTemplate: '{{audio}} {{team_first}} is now in first place{{project_clause}}.',
     legacyDefaultSpeakBefore: '',
     legacyDefaultSpeakAfter: 'Team {{team_first}} is now in first place{{project_clause}}.'
   },
@@ -534,7 +534,7 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-score-speak-template-add',
     templateListId: 'settings-audio-ctfd-score-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-score-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{points}}, {{points_clause}}, {{project}}, {{project_clause}}, {{first_team}}, {{second_team}}, {{third_team}}',
+    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{points}}, {{points_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
     defaultSpeak: true,
     defaultSpeakTemplate: '{{audio}} First score{{project_clause}} goes to {{leader}}{{team_clause}}{{challenge_clause}}{{points_clause}}.',
@@ -554,7 +554,7 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-countdown-speak-template-add',
     templateListId: 'settings-audio-ctfd-countdown-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-countdown-speak-help',
-    placeholderHint: '{{audio}}, {{reason}}, {{reason_clause}}, {{countdown_seconds}}, {{project}}, {{project_clause}}, {{first_team}}, {{second_team}}, {{third_team}}',
+    placeholderHint: '{{audio}}, {{reason}}, {{reason_clause}}, {{countdown_seconds}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
     defaultEnabled: false,
     defaultSpeak: false,
     defaultSpeakTemplate: '{{audio}} Countdown complete{{reason_clause}}.',
@@ -645,7 +645,7 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-cat-team-speak-template-add',
     templateListId: 'settings-audio-ctfd-cat-team-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-cat-team-speak-help',
-  placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{team_first}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
+    placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{team_first}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
     defaultSpeak: true,
     defaultSpeakTemplate: '{{audio}} {{team_first}} is first to solve a {{category}} challenge{{project_clause}}.',
@@ -663,7 +663,7 @@ const SETTINGS_AUDIO_PREVIEW_DEFAULT_CONTEXT = {
   team_clause: ' from Team Eclipse',
   project: 'Cyber Shield',
   project_clause: ' in Cyber Shield',
-  first_team: 'Team Eclipse',
+
   second_team: 'Team Orion',
   third_team: 'Team Nova',
   challenge: 'Forensics Intro',
@@ -684,13 +684,13 @@ const SETTINGS_AUDIO_PREVIEW_CONTEXT = {
   ctfdFirstCategoryTeam: { category: 'Reverse Engineering', team_first: 'Team Aurora' },
   ctfdCountdownStop: { reason: 'challenges_hidden', reason_clause: ' while challenges are hidden' }
 };
-function settingsModalPreviewContext(key){
+function settingsModalPreviewContext(key) {
   const overrides = SETTINGS_AUDIO_PREVIEW_CONTEXT[key];
   return overrides && typeof overrides === 'object'
     ? { ...SETTINGS_AUDIO_PREVIEW_DEFAULT_CONTEXT, ...overrides }
     : { ...SETTINGS_AUDIO_PREVIEW_DEFAULT_CONTEXT };
 }
-function settingsModalRenderSpeechTemplate(template, context){
+function settingsModalRenderSpeechTemplate(template, context) {
   const raw = typeof template === 'string' ? template : '';
   if (!raw.trim()) return '';
   const ctx = context && typeof context === 'object' ? context : {};
@@ -704,7 +704,7 @@ function settingsModalRenderSpeechTemplate(template, context){
   });
   return replaced.replace(/\s{2,}/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
 }
-function settingsModalBuildPreviewSpeechText(key, entry){
+function settingsModalBuildPreviewSpeechText(key, entry) {
   const templates = settingsAudioValidTemplates(entry);
   const tpl = templates.length ? templates[0] : settingsAudioDefaultSpeakTemplate(key);
   if (!tpl) return '';
@@ -723,8 +723,8 @@ function settingsModalBuildPreviewSpeechText(key, entry){
   }
   return settingsModalRenderSpeechTemplate(tpl, context);
 }
-function settingsModalSpeakPreview(text){
-  try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
+function settingsModalSpeakPreview(text) {
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch { }
   if (!text || !settingsSpeechSupported()) return Promise.resolve(false);
   try {
     settingsModalSyncTtsWorkingFromInputs();
@@ -752,12 +752,12 @@ function settingsModalSpeakPreview(text){
         _utterance: utterance,
         stop: () => {
           if (settled) return;
-          try { synth.cancel(); } catch {}
+          try { synth.cancel(); } catch { }
           finish(false);
         }
       };
 
-      try { synth.cancel(); } catch {}
+      try { synth.cancel(); } catch { }
       synth.speak(utterance);
     });
   } catch {
@@ -773,7 +773,7 @@ const SETTINGS_TTS_MIN_PITCH = 0;
 const SETTINGS_TTS_MAX_PITCH = 2.0;
 let _settingsSpeechSupported = false;
 let _settingsTtsWorking = { rate: SETTINGS_TTS_DEFAULT_RATE, pitch: SETTINGS_TTS_DEFAULT_PITCH };
-function settingsSpeechSupported(){
+function settingsSpeechSupported() {
   try {
     return typeof window !== 'undefined'
       && 'speechSynthesis' in window
@@ -782,19 +782,19 @@ function settingsSpeechSupported(){
       && typeof window.SpeechSynthesisUtterance === 'function';
   } catch { return false; }
 }
-function settingsClampNumber(value, min, max, fallback){
+function settingsClampNumber(value, min, max, fallback) {
   const num = Number(value);
   if (!Number.isFinite(num)) return fallback;
   if (num < min) return min;
   if (num > max) return max;
   return num;
 }
-function settingsRoundTts(value){
+function settingsRoundTts(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
   return Math.round(num * 100) / 100;
 }
-function settingsReadStoredTts(settings){
+function settingsReadStoredTts(settings) {
   const payload = (settings && typeof settings.tts === 'object') ? settings.tts : {};
   const rateRaw = Object.prototype.hasOwnProperty.call(payload || {}, 'rate') ? payload.rate : settings?.ttsRate;
   const pitchRaw = Object.prototype.hasOwnProperty.call(payload || {}, 'pitch') ? payload.pitch : settings?.ttsPitch;
@@ -805,7 +805,7 @@ function settingsReadStoredTts(settings){
     pitch: settingsRoundTts(pitch) ?? SETTINGS_TTS_DEFAULT_PITCH
   };
 }
-function settingsModalUpdateTtsSupportNote(){
+function settingsModalUpdateTtsSupportNote() {
   const note = document.getElementById('settings-tts-support-note');
   if (!note) return;
   if (_settingsSpeechSupported) {
@@ -816,14 +816,14 @@ function settingsModalUpdateTtsSupportNote(){
     note.classList.add('text-danger');
   }
 }
-function settingsModalHandleTtsInput(kind, input){
+function settingsModalHandleTtsInput(kind, input) {
   if (!input) return;
   const num = Number(input.value);
   if (!Number.isFinite(num)) return;
   if (kind === 'rate') _settingsTtsWorking.rate = num;
   else _settingsTtsWorking.pitch = num;
 }
-function settingsModalHandleTtsChange(kind, input){
+function settingsModalHandleTtsChange(kind, input) {
   if (!input) return;
   const fallback = kind === 'rate' ? (_settingsTtsWorking.rate ?? SETTINGS_TTS_DEFAULT_RATE) : (_settingsTtsWorking.pitch ?? SETTINGS_TTS_DEFAULT_PITCH);
   const min = kind === 'rate' ? SETTINGS_TTS_MIN_RATE : SETTINGS_TTS_MIN_PITCH;
@@ -834,13 +834,13 @@ function settingsModalHandleTtsChange(kind, input){
   else _settingsTtsWorking.pitch = rounded;
   input.value = String(rounded);
 }
-function settingsModalSyncTtsWorkingFromInputs(){
+function settingsModalSyncTtsWorkingFromInputs() {
   const rateInput = document.getElementById('settings-tts-rate');
   const pitchInput = document.getElementById('settings-tts-pitch');
   if (rateInput) settingsModalHandleTtsChange('rate', rateInput);
   if (pitchInput) settingsModalHandleTtsChange('pitch', pitchInput);
 }
-function wireSettingsTtsControls(){
+function wireSettingsTtsControls() {
   const bindings = [
     { el: document.getElementById('settings-tts-rate'), kind: 'rate' },
     { el: document.getElementById('settings-tts-pitch'), kind: 'pitch' }
@@ -853,10 +853,10 @@ function wireSettingsTtsControls(){
     el._toolhubBound = true;
   });
 }
-function cloneSettingsAudio(src){ try { return JSON.parse(JSON.stringify(src || {})); } catch { return {}; } }
-function cloneAudioEntry(entry){ try { return JSON.parse(JSON.stringify(entry || {})); } catch { return {}; } }
-function projectAudioCacheKey(pid){ return String(pid || '').trim(); }
-async function loadProjectAudio(pid, options){
+function cloneSettingsAudio(src) { try { return JSON.parse(JSON.stringify(src || {})); } catch { return {}; } }
+function cloneAudioEntry(entry) { try { return JSON.parse(JSON.stringify(entry || {})); } catch { return {}; } }
+function projectAudioCacheKey(pid) { return String(pid || '').trim(); }
+async function loadProjectAudio(pid, options) {
   const id = projectAudioCacheKey(pid);
   if (!id) return {};
   const opts = options && typeof options === 'object' ? options : {};
@@ -872,29 +872,29 @@ async function loadProjectAudio(pid, options){
     return cloneSettingsAudio(sanitized);
   } catch (err) {
     if (!opts.silent) {
-      try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to load audio for project ${id}: ${err?.message || err}`) : console.warn('Settings: failed to load audio', id, err); } catch {}
+      try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to load audio for project ${id}: ${err?.message || err}`) : console.warn('Settings: failed to load audio', id, err); } catch { }
     }
     if (!PROJECT_AUDIO_LOADED.has(id)) return {};
     return cloneSettingsAudio(PROJECT_AUDIO_CACHE[id] || {});
   }
 }
-function peekProjectAudio(pid){
+function peekProjectAudio(pid) {
   const id = projectAudioCacheKey(pid);
   if (!id) return null;
   if (!PROJECT_AUDIO_LOADED.has(id)) return null;
   return PROJECT_AUDIO_CACHE[id] || {};
 }
-function getProjectAudio(pid){
+function getProjectAudio(pid) {
   const cached = peekProjectAudio(pid);
   if (cached === null) return {};
   return cloneSettingsAudio(cached || {});
 }
-function projectAudioIsLoaded(pid){
+function projectAudioIsLoaded(pid) {
   const id = projectAudioCacheKey(pid);
   if (!id) return false;
   return PROJECT_AUDIO_LOADED.has(id);
 }
-async function saveProjectAudio(pid, audio){
+async function saveProjectAudio(pid, audio) {
   const id = projectAudioCacheKey(pid);
   if (!id) throw new Error('Project id required to save audio');
   const payload = { audio: cloneSettingsAudio(audio || {}) };
@@ -904,7 +904,7 @@ async function saveProjectAudio(pid, audio){
   PROJECT_AUDIO_CACHE[id] = sanitized;
   PROJECT_AUDIO_LOADED.add(id);
   const detailAudio = cloneSettingsAudio(sanitized);
-  try { document.dispatchEvent(new CustomEvent('project-audio-updated', { detail: { pid: id, audio: detailAudio } })); } catch {}
+  try { document.dispatchEvent(new CustomEvent('project-audio-updated', { detail: { pid: id, audio: detailAudio } })); } catch { }
   return detailAudio;
 }
 window.loadProjectAudio = loadProjectAudio;
@@ -922,7 +922,7 @@ let APP_ACTIVE_SPEECH_PLAYBACK = null;
 let APP_ACTIVE_PLAY_BUTTON = null;
 let APP_ACTIVE_PLAY_TOKEN = 0;
 
-function appSetPlayStopButtonState(btn, playing){
+function appSetPlayStopButtonState(btn, playing) {
   if (!btn) return;
   const isPlaying = !!playing;
   if (!btn.dataset.playLabel) btn.dataset.playLabel = btn.textContent || 'Preview';
@@ -933,30 +933,30 @@ function appSetPlayStopButtonState(btn, playing){
   else delete btn.dataset.playing;
 }
 
-function appClearActivePlayButton(){
+function appClearActivePlayButton() {
   if (!APP_ACTIVE_PLAY_BUTTON) return;
-  try { appSetPlayStopButtonState(APP_ACTIVE_PLAY_BUTTON, false); } catch {}
+  try { appSetPlayStopButtonState(APP_ACTIVE_PLAY_BUTTON, false); } catch { }
   APP_ACTIVE_PLAY_BUTTON = null;
 }
 
-function appStopActiveAudioPlayback(){
+function appStopActiveAudioPlayback() {
   const active = APP_ACTIVE_AUDIO_PLAYBACK;
   if (!active) return;
   APP_ACTIVE_AUDIO_PLAYBACK = null;
-  try { if (active && typeof active.stop === 'function') active.stop(); } catch {}
+  try { if (active && typeof active.stop === 'function') active.stop(); } catch { }
 }
 
-function appStopActiveSpeechPlayback(){
+function appStopActiveSpeechPlayback() {
   const active = APP_ACTIVE_SPEECH_PLAYBACK;
   APP_ACTIVE_SPEECH_PLAYBACK = null;
-  try { if (active && typeof active.stop === 'function') active.stop(); } catch {}
+  try { if (active && typeof active.stop === 'function') active.stop(); } catch { }
   try {
     const synth = window.speechSynthesis;
     if (synth && typeof synth.cancel === 'function') synth.cancel();
-  } catch {}
+  } catch { }
 }
 
-function appStopActivePlayback(){
+function appStopActivePlayback() {
   // Bump the play token so any in-flight preview chains (timers/events/promises)
   // can detect cancellation and avoid starting new playback.
   APP_ACTIVE_PLAY_TOKEN++;
@@ -965,26 +965,26 @@ function appStopActivePlayback(){
   appClearActivePlayButton();
 }
 
-try { window.appStopActivePlayback = appStopActivePlayback; } catch {}
+try { window.appStopActivePlayback = appStopActivePlayback; } catch { }
 
-function audioMakeMediaKey(){
+function audioMakeMediaKey() {
   let id = '';
   try {
     if (typeof crypto !== 'undefined' && crypto && typeof crypto.randomUUID === 'function') {
       id = crypto.randomUUID();
     }
-  } catch {}
+  } catch { }
   if (!id) {
     id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
   return `${AUDIO_MEDIA_PREFIX}${id}`;
 }
 
-function audioIsMediaKey(key){
+function audioIsMediaKey(key) {
   return typeof key === 'string' && key.startsWith(AUDIO_MEDIA_PREFIX);
 }
 
-function audioNormalizeSingleSound(entry){
+function audioNormalizeSingleSound(entry) {
   if (!entry || typeof entry !== 'object') return null;
   const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
   const sound = sounds.find(s => s && typeof s.dataUrl === 'string' && s.dataUrl.startsWith('data:')) || null;
@@ -998,7 +998,7 @@ function audioNormalizeSingleSound(entry){
   };
 }
 
-function audioNormalizeSingleSoundLoose(entry){
+function audioNormalizeSingleSoundLoose(entry) {
   if (!entry || typeof entry !== 'object') return null;
   const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
   const sound = sounds.find(s => s && typeof s === 'object') || null;
@@ -1013,7 +1013,7 @@ function audioNormalizeSingleSoundLoose(entry){
   };
 }
 
-function audioListMediaItems(audioStore){
+function audioListMediaItems(audioStore) {
   const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
   const items = [];
   Object.entries(store).forEach(([key, entry]) => {
@@ -1026,7 +1026,7 @@ function audioListMediaItems(audioStore){
   return items;
 }
 
-async function mediaManagerLoadMediaMeta(pid){
+async function mediaManagerLoadMediaMeta(pid) {
   const id = projectAudioCacheKey(pid);
   if (!id) return {};
   const pfx = encodeURIComponent(AUDIO_MEDIA_PREFIX);
@@ -1035,7 +1035,7 @@ async function mediaManagerLoadMediaMeta(pid){
   return cloneSettingsAudio(audio);
 }
 
-function mediaManagerUpsertCacheEntry(pid, key, entry){
+function mediaManagerUpsertCacheEntry(pid, key, entry) {
   const id = projectAudioCacheKey(pid);
   if (!id || !key) return;
   try {
@@ -1045,10 +1045,10 @@ function mediaManagerUpsertCacheEntry(pid, key, entry){
       PROJECT_AUDIO_CACHE[id] = existing;
       PROJECT_AUDIO_LOADED.add(id);
     }
-  } catch {}
+  } catch { }
 }
 
-function mediaManagerReadCurrentPid(){
+function mediaManagerReadCurrentPid() {
   try {
     return (window.shell && shell.getCurrentProjectId) ? String(shell.getCurrentProjectId() || '').trim() : '';
   } catch {
@@ -1056,11 +1056,11 @@ function mediaManagerReadCurrentPid(){
   }
 }
 
-function mediaManagerRemoteBlocked(){
+function mediaManagerRemoteBlocked() {
   try { return !!(window.shell && shell.isRemote && shell.isRemote()); } catch { return false; }
 }
 
-function mediaManagerReadFileAsDataUrl(file){
+function mediaManagerReadFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     try {
       const reader = new FileReader();
@@ -1074,7 +1074,7 @@ function mediaManagerReadFileAsDataUrl(file){
   });
 }
 
-function mediaManagerReadFileAsDataUrlWithProgress(file, onProgress){
+function mediaManagerReadFileAsDataUrlWithProgress(file, onProgress) {
   return new Promise((resolve, reject) => {
     try {
       const reader = new FileReader();
@@ -1083,7 +1083,7 @@ function mediaManagerReadFileAsDataUrlWithProgress(file, onProgress){
           if (!ev || !ev.lengthComputable) return;
           const pct = ev.total ? Math.round((ev.loaded / ev.total) * 100) : 0;
           if (typeof onProgress === 'function') onProgress(pct);
-        } catch {}
+        } catch { }
       };
       reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
       reader.onerror = () => reject(new Error('Failed to read file'));
@@ -1094,7 +1094,7 @@ function mediaManagerReadFileAsDataUrlWithProgress(file, onProgress){
   });
 }
 
-function mediaManagerXhrJson(method, url, body, onProgress){
+function mediaManagerXhrJson(method, url, body, onProgress) {
   return new Promise((resolve, reject) => {
     try {
       const xhr = new XMLHttpRequest();
@@ -1108,7 +1108,7 @@ function mediaManagerXhrJson(method, url, body, onProgress){
             if (!ev || !ev.lengthComputable) return;
             const pct = ev.total ? Math.round((ev.loaded / ev.total) * 100) : 0;
             if (typeof onProgress === 'function') onProgress(pct);
-          } catch {}
+          } catch { }
         });
       }
       xhr.onload = () => {
@@ -1130,12 +1130,12 @@ function mediaManagerXhrJson(method, url, body, onProgress){
   });
 }
 
-function mediaManagerLooks404(err){
+function mediaManagerLooks404(err) {
   const msg = String(err && err.message ? err.message : err || '');
   return msg.includes('404') || msg.toLowerCase().includes('not found') || msg.includes('requested URL was not found');
 }
 
-async function mediaManagerSha256HexFromDataUrl(dataUrl){
+async function mediaManagerSha256HexFromDataUrl(dataUrl) {
   try {
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return '';
     const comma = dataUrl.indexOf(',');
@@ -1157,7 +1157,7 @@ async function mediaManagerSha256HexFromDataUrl(dataUrl){
   }
 }
 
-function mediaManagerFindDuplicateKeyBySha256(mediaMeta, sha256Hex){
+function mediaManagerFindDuplicateKeyBySha256(mediaMeta, sha256Hex) {
   if (!sha256Hex) return '';
   const store = mediaMeta && typeof mediaMeta === 'object' ? mediaMeta : {};
   for (const [k, v] of Object.entries(store)) {
@@ -1171,7 +1171,7 @@ function mediaManagerFindDuplicateKeyBySha256(mediaMeta, sha256Hex){
   return '';
 }
 
-function mediaManagerFindDuplicateKeyByDataUrl(audioStore, dataUrl){
+function mediaManagerFindDuplicateKeyByDataUrl(audioStore, dataUrl) {
   if (!dataUrl) return '';
   const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
   for (const [k, v] of Object.entries(store)) {
@@ -1182,7 +1182,7 @@ function mediaManagerFindDuplicateKeyByDataUrl(audioStore, dataUrl){
   return '';
 }
 
-function mediaManagerGetSelectedKeys(){
+function mediaManagerGetSelectedKeys() {
   const listEl = document.getElementById('settings-media-list');
   if (!listEl) return [];
   const keys = Array.from(listEl.querySelectorAll('input.media-select:checked')).map(el => String(el.getAttribute('data-media-key') || '')).filter(Boolean);
@@ -1197,20 +1197,20 @@ function mediaManagerGetSelectedKeys(){
   return out;
 }
 
-function mediaManagerUpdateBatchDeleteButton(){
+function mediaManagerUpdateBatchDeleteButton() {
   const btn = document.getElementById('settings-media-delete-selected');
   if (!btn) return;
   try { btn.disabled = mediaManagerGetSelectedKeys().length === 0; } catch { btn.disabled = true; }
 }
 
-function mediaManagerSetSelectAllState({ disabled, checked } = {}){
+function mediaManagerSetSelectAllState({ disabled, checked } = {}) {
   const el = document.getElementById('settings-media-select-all');
   if (!el) return;
   if (disabled !== undefined) el.disabled = !!disabled;
   if (checked !== undefined) el.checked = !!checked;
 }
 
-async function mediaManagerDeleteItems(mediaKeys){
+async function mediaManagerDeleteItems(mediaKeys) {
   if (mediaManagerRemoteBlocked()) return { deleted: 0, failed: 0 };
   const pid = mediaManagerReadCurrentPid();
   if (!pid) return { deleted: 0, failed: 0 };
@@ -1223,13 +1223,13 @@ async function mediaManagerDeleteItems(mediaKeys){
   let fellBackToLegacy = false;
 
   try {
-    try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Media Delete', `Deleting ${unique.length} file(s)…`); } catch {}
+    try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Media Delete', `Deleting ${unique.length} file(s)…`); } catch { }
     for (let i = 0; i < unique.length; i++) {
       const key = unique[i];
       const pct = Math.max(0, Math.min(95, Math.round((i / unique.length) * 95)));
       try {
         if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: `Deleting ${i + 1}/${unique.length}…`, percent: pct, barText: `${pct}%` });
-      } catch {}
+      } catch { }
       try {
         await http('DELETE', `/api/projects/${encodeURIComponent(pid)}/audio_entry?key=${encodeURIComponent(key)}`);
         deleted += 1;
@@ -1255,7 +1255,7 @@ async function mediaManagerDeleteItems(mediaKeys){
           if (!k.startsWith(AUDIO_EVENT_PREFIX)) return;
           if (!v || typeof v !== 'object') return;
           if (v.soundKey === key) {
-            try { delete v.soundKey; } catch {}
+            try { delete v.soundKey; } catch { }
           }
         });
       });
@@ -1268,18 +1268,18 @@ async function mediaManagerDeleteItems(mediaKeys){
     try {
       const id = projectAudioCacheKey(pid);
       if (id && PROJECT_AUDIO_CACHE[id] && typeof PROJECT_AUDIO_CACHE[id] === 'object') {
-        unique.forEach(k => { try { delete PROJECT_AUDIO_CACHE[id][k]; } catch {} });
+        unique.forEach(k => { try { delete PROJECT_AUDIO_CACHE[id][k]; } catch { } });
       }
-    } catch {}
+    } catch { }
   } finally {
-    try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' }); } catch {}
-    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+    try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' }); } catch { }
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
   }
 
   return { deleted, failed };
 }
 
-async function mediaManagerUploadFilesBatch(files){
+async function mediaManagerUploadFilesBatch(files) {
   if (mediaManagerRemoteBlocked()) return { uploaded: 0, duplicated: 0, failed: 0 };
   const pid = mediaManagerReadCurrentPid();
   if (!pid) return { uploaded: 0, duplicated: 0, failed: 0 };
@@ -1301,7 +1301,7 @@ async function mediaManagerUploadFilesBatch(files){
       const h = s0 && typeof s0.sha256 === 'string' ? String(s0.sha256) : '';
       if (h) existingShaToKey[h] = k;
     });
-  } catch {}
+  } catch { }
   const seenSha = new Set();
   const legacyModeSeenDataUrls = new Set();
 
@@ -1319,11 +1319,11 @@ async function mediaManagerUploadFilesBatch(files){
   const setProgress = (pct, text) => {
     try {
       if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text, percent: pct, barText: `${pct}%` });
-    } catch {}
+    } catch { }
   };
 
   try {
-    try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Media Upload', `Uploading ${total} file(s)…`); } catch {}
+    try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Media Upload', `Uploading ${total} file(s)…`); } catch { }
 
     for (let idx = 0; idx < total; idx++) {
       const file = list[idx];
@@ -1425,14 +1425,14 @@ async function mediaManagerUploadFilesBatch(files){
       }
     }
   } finally {
-    try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' }); } catch {}
-    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+    try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' }); } catch { }
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
   }
 
   return { uploaded, duplicated, failed };
 }
 
-async function mediaManagerUploadFile(file){
+async function mediaManagerUploadFile(file) {
   if (!file) return;
   if (mediaManagerRemoteBlocked()) return;
   if (file.size > SETTINGS_AUDIO_MAX_BYTES) {
@@ -1450,7 +1450,7 @@ async function mediaManagerUploadFile(file){
       window.showActionProgress('Media Upload', `Reading ${file.name || 'file'}…`);
       if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
     }
-  } catch {}
+  } catch { }
 
   let dataUrl = '';
   try {
@@ -1460,7 +1460,7 @@ async function mediaManagerUploadFile(file){
           const scaled = Math.max(0, Math.min(40, Math.round((pct / 100) * 40)));
           window.updateActionProgress({ text: `Reading ${file.name || 'file'}…`, percent: scaled, barText: `${scaled}%` });
         }
-      } catch {}
+      } catch { }
     });
     if (!dataUrl || !dataUrl.startsWith('data:')) {
       alert('Unsupported audio format.');
@@ -1473,39 +1473,39 @@ async function mediaManagerUploadFile(file){
       if (typeof window.updateActionProgress === 'function') {
         window.updateActionProgress({ text: `Checking duplicates…`, percent: 42, barText: 'Checking…' });
       }
-    } catch {}
+    } catch { }
     sha256Hex = await mediaManagerSha256HexFromDataUrl(dataUrl);
 
     let dupKey = '';
     try {
       const meta = await mediaManagerLoadMediaMeta(pid);
       dupKey = mediaManagerFindDuplicateKeyBySha256(meta, sha256Hex);
-    } catch {}
+    } catch { }
 
     if (!dupKey) {
       // If meta doesn't include hashes (older backend), fall back to full store equality.
       try {
         const full = await loadProjectAudio(pid, { force: false, silent: true });
         dupKey = mediaManagerFindDuplicateKeyByDataUrl(full, dataUrl);
-      } catch {}
+      } catch { }
       if (!dupKey) {
         try {
           const full = await loadProjectAudio(pid, { force: true, silent: true });
           dupKey = mediaManagerFindDuplicateKeyByDataUrl(full, dataUrl);
-        } catch {}
+        } catch { }
       }
     }
 
     if (dupKey) {
-      try { if (typeof window.showToast === 'function') window.showToast(`Already uploaded: ${file.name || 'Audio'}`, 'info'); } catch {}
+      try { if (typeof window.showToast === 'function') window.showToast(`Already uploaded: ${file.name || 'Audio'}`, 'info'); } catch { }
       return;
     }
 
     try {
-    if (typeof window.updateActionProgress === 'function') {
-      window.updateActionProgress({ text: `Uploading ${file.name || 'file'}…`, percent: 45, barText: 'Uploading…' });
-    }
-    } catch {}
+      if (typeof window.updateActionProgress === 'function') {
+        window.updateActionProgress({ text: `Uploading ${file.name || 'file'}…`, percent: 45, barText: 'Uploading…' });
+      }
+    } catch { }
 
     let res = null;
     try {
@@ -1520,7 +1520,7 @@ async function mediaManagerUploadFile(file){
             const scaled = 45 + Math.max(0, Math.min(50, Math.round((pct / 100) * 50)));
             window.updateActionProgress({ text: `Uploading ${file.name || 'file'}…`, percent: scaled, barText: `${scaled}%` });
           }
-        } catch {}
+        } catch { }
       });
     } catch (err) {
       // Backward compatible fallback: if the server doesn't have the new endpoint yet,
@@ -1531,7 +1531,7 @@ async function mediaManagerUploadFile(file){
         if (typeof window.updateActionProgress === 'function') {
           window.updateActionProgress({ text: `Uploading ${file.name || 'file'}…`, percent: 60, barText: 'Saving…' });
         }
-      } catch {}
+      } catch { }
 
       const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
 
@@ -1540,36 +1540,36 @@ async function mediaManagerUploadFile(file){
       if (legacyDup) {
         res = { duplicated: true, key: legacyDup, legacy: true };
       } else {
-      const mediaKey = audioMakeMediaKey();
-      audioStore[mediaKey] = {
-        sounds: [{
-          name: file.name || 'Audio',
-          size: file.size || 0,
-          type: file.type || '',
-          dataUrl,
-          updated: Date.now()
-        }]
-      };
-      await saveProjectAudio(pid, audioStore);
-      res = { duplicated: false, key: mediaKey, legacy: true };
+        const mediaKey = audioMakeMediaKey();
+        audioStore[mediaKey] = {
+          sounds: [{
+            name: file.name || 'Audio',
+            size: file.size || 0,
+            type: file.type || '',
+            dataUrl,
+            updated: Date.now()
+          }]
+        };
+        await saveProjectAudio(pid, audioStore);
+        res = { duplicated: false, key: mediaKey, legacy: true };
       }
     }
 
     const duplicated = !!(res && res.duplicated);
     if (duplicated) {
-      try { if (typeof window.showToast === 'function') window.showToast(`Already uploaded: ${file.name || 'Audio'}`, 'info'); } catch {}
+      try { if (typeof window.showToast === 'function') window.showToast(`Already uploaded: ${file.name || 'Audio'}`, 'info'); } catch { }
     } else {
-      try { if (typeof window.showToast === 'function') window.showToast(`Uploaded: ${file.name || 'Audio'}`, 'success'); } catch {}
+      try { if (typeof window.showToast === 'function') window.showToast(`Uploaded: ${file.name || 'Audio'}`, 'success'); } catch { }
     }
   } finally {
     try {
       if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' });
-    } catch {}
-    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+    } catch { }
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
   }
 }
 
-async function mediaManagerDeleteItem(mediaKey){
+async function mediaManagerDeleteItem(mediaKey) {
   if (mediaManagerRemoteBlocked()) return;
   const pid = mediaManagerReadCurrentPid();
   if (!pid) return;
@@ -1594,7 +1594,7 @@ async function mediaManagerDeleteItem(mediaKey){
       if (!k.startsWith(AUDIO_EVENT_PREFIX)) return;
       if (!v || typeof v !== 'object') return;
       if (v.soundKey === key) {
-        try { delete v.soundKey; } catch {}
+        try { delete v.soundKey; } catch { }
       }
     });
     await saveProjectAudio(pid, audioStore);
@@ -1605,10 +1605,10 @@ async function mediaManagerDeleteItem(mediaKey){
     if (id && PROJECT_AUDIO_CACHE[id] && typeof PROJECT_AUDIO_CACHE[id] === 'object') {
       delete PROJECT_AUDIO_CACHE[id][key];
     }
-  } catch {}
+  } catch { }
 }
 
-async function mediaManagerRefreshList(options){
+async function mediaManagerRefreshList(options) {
   const opts = options && typeof options === 'object' ? options : {};
   const listEl = document.getElementById('settings-media-list');
   const statusEl = document.getElementById('settings-media-status');
@@ -1662,7 +1662,7 @@ async function mediaManagerRefreshList(options){
   mediaManagerSetSelectAllState({ disabled: false, checked: false });
 }
 
-function wireMediaManagerControls(){
+function wireMediaManagerControls() {
   const upload = document.getElementById('settings-media-upload');
   const refresh = document.getElementById('settings-media-refresh');
   const delSelected = document.getElementById('settings-media-delete-selected');
@@ -1681,12 +1681,12 @@ function wireMediaManagerControls(){
         if (dup) msgParts.push(`Skipped ${dup} duplicate${dup === 1 ? '' : 's'}`);
         if (fail) msgParts.push(`${fail} failed`);
         const msg = msgParts.length ? msgParts.join(' • ') : 'No files uploaded.';
-        try { showToast(msg, fail ? 'warning' : 'success'); } catch {}
+        try { showToast(msg, fail ? 'warning' : 'success'); } catch { }
       } catch (err) {
-        try { showToast(`Media upload failed: ${err?.message || err}`, 'warning'); } catch {}
+        try { showToast(`Media upload failed: ${err?.message || err}`, 'warning'); } catch { }
       }
-      try { ev.target.value = ''; } catch {}
-      try { await mediaManagerRefreshList({ force: true }); } catch {}
+      try { ev.target.value = ''; } catch { }
+      try { await mediaManagerRefreshList({ force: true }); } catch { }
     });
     upload._toolhubBound = true;
   }
@@ -1705,11 +1705,11 @@ function wireMediaManagerControls(){
         const res = await mediaManagerDeleteItems(keys);
         const del = res && Number.isFinite(res.deleted) ? res.deleted : 0;
         const fail = res && Number.isFinite(res.failed) ? res.failed : 0;
-        try { showToast(fail ? `Deleted ${del}. ${fail} failed.` : `Deleted ${del} audio file${del === 1 ? '' : 's'}.`, fail ? 'warning' : 'success'); } catch {}
+        try { showToast(fail ? `Deleted ${del}. ${fail} failed.` : `Deleted ${del} audio file${del === 1 ? '' : 's'}.`, fail ? 'warning' : 'success'); } catch { }
       } catch (err) {
-        try { showToast(`Delete failed: ${err?.message || err}`, 'warning'); } catch {}
+        try { showToast(`Delete failed: ${err?.message || err}`, 'warning'); } catch { }
       }
-      try { await mediaManagerRefreshList({ force: true }); } catch {}
+      try { await mediaManagerRefreshList({ force: true }); } catch { }
     });
     delSelected._toolhubBound = true;
   }
@@ -1719,7 +1719,7 @@ function wireMediaManagerControls(){
       if (!listEl) return;
       const desired = !!selectAll.checked;
       listEl.querySelectorAll('input.media-select').forEach(cb => {
-        try { cb.checked = desired; } catch {}
+        try { cb.checked = desired; } catch { }
       });
       mediaManagerUpdateBatchDeleteButton();
     });
@@ -1736,11 +1736,11 @@ function wireMediaManagerControls(){
         if (mediaManagerRemoteBlocked()) return;
         try {
           if (actionBtn && actionBtn.dataset.playing === '1') {
-            try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+            try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch { }
             appStopActivePlayback();
             return;
           }
-          try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+          try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch { }
           appStopActivePlayback();
           const pid = mediaManagerReadCurrentPid();
           if (!pid) return;
@@ -1762,9 +1762,9 @@ function wireMediaManagerControls(){
           const audio = new Audio(sound.dataUrl);
           let settled = false;
           const cleanup = () => {
-            try { audio.removeEventListener('ended', onEnded); } catch {}
-            try { audio.removeEventListener('error', onError); } catch {}
-            try { audio.removeEventListener('abort', onError); } catch {}
+            try { audio.removeEventListener('ended', onEnded); } catch { }
+            try { audio.removeEventListener('error', onError); } catch { }
+            try { audio.removeEventListener('abort', onError); } catch { }
           };
           const finish = () => {
             if (settled) return;
@@ -1772,7 +1772,7 @@ function wireMediaManagerControls(){
             cleanup();
             if (APP_ACTIVE_AUDIO_PLAYBACK && APP_ACTIVE_AUDIO_PLAYBACK._audio === audio) APP_ACTIVE_AUDIO_PLAYBACK = null;
             if (APP_ACTIVE_PLAY_BUTTON === actionBtn && (!actionBtn || actionBtn.dataset.playToken === token)) {
-              try { appSetPlayStopButtonState(actionBtn, false); } catch {}
+              try { appSetPlayStopButtonState(actionBtn, false); } catch { }
               if (APP_ACTIVE_PLAY_BUTTON === actionBtn) APP_ACTIVE_PLAY_BUTTON = null;
             }
           };
@@ -1785,17 +1785,17 @@ function wireMediaManagerControls(){
             _audio: audio,
             stop: () => {
               if (settled) return;
-              try { audio.pause(); } catch {}
-              try { audio.currentTime = 0; } catch {}
+              try { audio.pause(); } catch { }
+              try { audio.currentTime = 0; } catch { }
               finish();
             }
           };
-          audio.play().catch(()=> finish());
+          audio.play().catch(() => finish());
         } catch {
           try {
             if (actionBtn) appSetPlayStopButtonState(actionBtn, false);
             if (APP_ACTIVE_PLAY_BUTTON === actionBtn) APP_ACTIVE_PLAY_BUTTON = null;
-          } catch {}
+          } catch { }
         }
         return;
       }
@@ -1812,12 +1812,12 @@ function wireMediaManagerControls(){
           const allChecked = boxes.length ? boxes.every(b => !!b.checked) : false;
           all.checked = allChecked;
         }
-      } catch {}
+      } catch { }
     });
     list._toolhubBound = true;
   }
 }
-function settingsAudioValidSounds(entry){
+function settingsAudioValidSounds(entry) {
   const list = Array.isArray(entry && entry.sounds) ? entry.sounds : [];
   return list.filter(sound => {
     if (!sound) return false;
@@ -1825,7 +1825,7 @@ function settingsAudioValidSounds(entry){
     return dataUrl.startsWith('data:');
   });
 }
-function settingsAudioValidTemplates(entry){
+function settingsAudioValidTemplates(entry) {
   const list = Array.isArray(entry && entry.speakTemplates) ? entry.speakTemplates : [];
   return list.map(t => {
     if (typeof t === 'string') return t.trim();
@@ -1833,7 +1833,7 @@ function settingsAudioValidTemplates(entry){
     return '';
   }).filter(Boolean);
 }
-function describeAudioEntry(entry){
+function describeAudioEntry(entry) {
   const sounds = settingsAudioValidSounds(entry);
   if (!sounds.length) return 'Using built-in tone.';
   if (sounds.length === 1) {
@@ -1845,32 +1845,32 @@ function describeAudioEntry(entry){
   }
   return `Custom: ${sounds.length} clips`;
 }
-function settingsAudioDefaultEnabled(key){
+function settingsAudioDefaultEnabled(key) {
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg || cfg.defaultEnabled === undefined) return true;
   return !!cfg.defaultEnabled;
 }
-function settingsAudioDefaultSpeak(key){
+function settingsAudioDefaultSpeak(key) {
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg || cfg.defaultSpeak === undefined) return false;
   return !!cfg.defaultSpeak;
 }
-function settingsAudioDefaultSpeakTemplate(key){
+function settingsAudioDefaultSpeakTemplate(key) {
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg || cfg.defaultSpeakTemplate === undefined) return '';
   return String(cfg.defaultSpeakTemplate || '') || '';
 }
-function settingsAudioLegacyDefaultSpeakBefore(key){
+function settingsAudioLegacyDefaultSpeakBefore(key) {
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg || cfg.legacyDefaultSpeakBefore === undefined) return '';
   return String(cfg.legacyDefaultSpeakBefore || '') || '';
 }
-function settingsAudioLegacyDefaultSpeakAfter(key){
+function settingsAudioLegacyDefaultSpeakAfter(key) {
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg || cfg.legacyDefaultSpeakAfter === undefined) return '';
   return String(cfg.legacyDefaultSpeakAfter || '') || '';
 }
-function settingsAudioNormalizeLegacyTemplate(entry, key){
+function settingsAudioNormalizeLegacyTemplate(entry, key) {
   if (!entry || typeof entry !== 'object') return;
   const hasLegacyBefore = typeof entry.speakBefore === 'string';
   const hasLegacyAfter = typeof entry.speakAfter === 'string';
@@ -1886,7 +1886,7 @@ function settingsAudioNormalizeLegacyTemplate(entry, key){
   delete entry.speakBefore;
   delete entry.speakAfter;
 }
-function settingsAudioClampNumeric(raw, field){
+function settingsAudioClampNumeric(raw, field) {
   if (!field) return undefined;
   let value = Number(raw);
   if (!Number.isFinite(value)) {
@@ -1901,7 +1901,7 @@ function settingsAudioClampNumeric(raw, field){
   }
   return Number.isFinite(value) ? value : undefined;
 }
-function settingsAudioApplyNumericFields(entry, key){
+function settingsAudioApplyNumericFields(entry, key) {
   if (!entry || typeof entry !== 'object') return;
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg || !Array.isArray(cfg.numericFields)) return;
@@ -1921,7 +1921,7 @@ function settingsAudioApplyNumericFields(entry, key){
     }
   });
 }
-function settingsAudioEnsureEntry(key){
+function settingsAudioEnsureEntry(key) {
   const defEnabled = settingsAudioDefaultEnabled(key);
   const defSpeak = settingsAudioDefaultSpeak(key);
   const defTemplate = settingsAudioDefaultSpeakTemplate(key);
@@ -1968,7 +1968,7 @@ function settingsAudioEnsureEntry(key){
   settingsAudioApplyNumericFields(entry, key);
   return entry;
 }
-function settingsModalUpdateAudioUi(key){
+function settingsModalUpdateAudioUi(key) {
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg) return;
   const label = document.getElementById(cfg.labelId);
@@ -2054,7 +2054,7 @@ function settingsModalUpdateAudioUi(key){
         const sizeBytes = Number(sound.size);
         const sizeLabel = Number.isFinite(sizeBytes) && sizeBytes > 0 ? `${Math.round(sizeBytes / 1024)} KB` : 'Size unknown';
         const typeLabel = sound.type ? sound.type : 'Audio';
-  const meta = `${sizeLabel}${typeLabel ? ` | ${escHtml(String(typeLabel))}` : ''}`;
+        const meta = `${sizeLabel}${typeLabel ? ` | ${escHtml(String(typeLabel))}` : ''}`;
         return `<li class="list-group-item d-flex align-items-center justify-content-between gap-2" data-sound-index="${idx}">
   <div class="flex-grow-1">
     <div>${name}</div>
@@ -2076,8 +2076,8 @@ function settingsModalUpdateAudioUi(key){
   if (preview) preview.disabled = !(hasCustomAudio || canSpeak);
   if (clear) clear.disabled = !hasCustomAudio;
 }
-function settingsModalUpdateAllAudio(){ Object.keys(SETTINGS_AUDIO_FIELDS).forEach(settingsModalUpdateAudioUi); }
-async function settingsModalResetFromStorage(){
+function settingsModalUpdateAllAudio() { Object.keys(SETTINGS_AUDIO_FIELDS).forEach(settingsModalUpdateAudioUi); }
+async function settingsModalResetFromStorage() {
   const settings = readSettings();
   _settingsSpeechSupported = settingsSpeechSupported();
   settingsModalUpdateTtsSupportNote();
@@ -2098,12 +2098,12 @@ async function settingsModalResetFromStorage(){
     const remoteToggle = document.getElementById('settings-run-remote');
     if (remoteToggle) {
       let checked = false;
-      try { checked = !!(window.shell && shell.isRemote && shell.isRemote()); } catch {}
+      try { checked = !!(window.shell && shell.isRemote && shell.isRemote()); } catch { }
       if (!checked) checked = (settings && settings.runMode === 'remote');
       remoteToggle.checked = !!checked;
     }
-  } catch {}
-  try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(); } catch {}
+  } catch { }
+  try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(); } catch { }
   const currentPid = (window.shell && shell.getCurrentProjectId) ? String(shell.getCurrentProjectId() || '').trim() : '';
   let projectAudio = {};
   let audioLoaded = false;
@@ -2124,7 +2124,7 @@ async function settingsModalResetFromStorage(){
     }
   }
   _settingsAudioWorking = {};
-  Object.keys(SETTINGS_AUDIO_FIELDS).forEach((key)=>{
+  Object.keys(SETTINGS_AUDIO_FIELDS).forEach((key) => {
     const saved = projectAudio && typeof projectAudio[key] === 'object' ? cloneAudioEntry(projectAudio[key]) : {};
     if (saved && saved.enabled === undefined) saved.enabled = settingsAudioDefaultEnabled(key);
     if (saved && saved.speak === undefined) saved.speak = settingsAudioDefaultSpeak(key);
@@ -2134,10 +2134,10 @@ async function settingsModalResetFromStorage(){
   });
   settingsModalUpdateAllAudio();
   if (loadError && currentPid) {
-    try { showToast('Project audio could not be loaded. Using local copy.', 'warning'); } catch {}
+    try { showToast('Project audio could not be loaded. Using local copy.', 'warning'); } catch { }
   }
 }
-function settingsModalHandleFile(key, file){
+function settingsModalHandleFile(key, file) {
   if (!file) return;
   if (file.size > SETTINGS_AUDIO_MAX_BYTES) {
     alert('Audio file too large. Limit is 10 MB per sound.');
@@ -2165,23 +2165,23 @@ function settingsModalHandleFile(key, file){
   };
   reader.readAsDataURL(file);
 }
-function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
-  try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch {}
+function settingsModalPreviewAudio(key, soundIndex, sourceBtn) {
+  try { if (window.shell && shell.isRemote && shell.isRemote()) return; } catch { }
   let token = '';
   const revert = () => {
     try {
       if (!sourceBtn) return;
       appSetPlayStopButtonState(sourceBtn, false);
       if (APP_ACTIVE_PLAY_BUTTON === sourceBtn) APP_ACTIVE_PLAY_BUTTON = null;
-    } catch {}
+    } catch { }
   };
   try {
     if (sourceBtn && sourceBtn.dataset && sourceBtn.dataset.playing === '1') {
-      try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+      try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch { }
       appStopActivePlayback();
       return;
     }
-    try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch {}
+    try { if (typeof window.ctfdStopActivePlayback === 'function') window.ctfdStopActivePlayback(); } catch { }
     appStopActivePlayback();
 
     const entry = settingsAudioEnsureEntry(key);
@@ -2203,7 +2203,7 @@ function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
     let cancelled = false;
     let previewAudioEl = null;
     const isCancelled = () => cancelled || String(APP_ACTIVE_PLAY_TOKEN) !== token;
-    const triggerSpeech = ()=>{
+    const triggerSpeech = () => {
       if (isCancelled()) return;
       if (!hasSpeech || speechTriggered) return;
       speechTriggered = true;
@@ -2216,31 +2216,31 @@ function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
           previewAudioEl.pause();
           previewAudioEl.currentTime = 0;
         }
-      } catch {}
+      } catch { }
       try {
         if (APP_ACTIVE_AUDIO_PLAYBACK && APP_ACTIVE_AUDIO_PLAYBACK._audio === previewAudioEl) APP_ACTIVE_AUDIO_PLAYBACK = null;
-      } catch {}
+      } catch { }
 
       const p = settingsModalSpeakPreview(speechText);
       if (p && typeof p.finally === 'function') {
-        p.finally(()=> finishSession());
+        p.finally(() => finishSession());
       } else {
         // Best-effort fallback: clear button after a short delay.
-        setTimeout(()=> finishSession(), 1500);
+        setTimeout(() => finishSession(), 1500);
       }
     };
 
-    const finishSession = ()=>{
+    const finishSession = () => {
       try {
         cancelled = true;
         if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
-      } catch {}
+      } catch { }
       if (APP_ACTIVE_PLAY_BUTTON === sourceBtn && (!sourceBtn || sourceBtn.dataset.playToken === token)) {
-        try { appSetPlayStopButtonState(sourceBtn, false); } catch {}
+        try { appSetPlayStopButtonState(sourceBtn, false); } catch { }
         if (APP_ACTIVE_PLAY_BUTTON === sourceBtn) APP_ACTIVE_PLAY_BUTTON = null;
       }
     };
-    const scheduleFallback = (audio)=>{
+    const scheduleFallback = (audio) => {
       if (isCancelled()) return;
       if (!hasSpeech) return;
       // Keep speech aligned with audio completion even if metadata is missing.
@@ -2255,17 +2255,17 @@ function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
       previewAudioEl = audio;
       const stop = () => {
         cancelled = true;
-        try { if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; } } catch {}
+        try { if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; } } catch { }
         try {
           audio.pause();
           audio.currentTime = 0;
-        } catch {}
-        try { finishSession(); } catch {}
+        } catch { }
+        try { finishSession(); } catch { }
       };
       APP_ACTIVE_AUDIO_PLAYBACK = { _audio: audio, stop };
       if (hasSpeech) {
         scheduleFallback(audio);
-        audio.addEventListener('loadedmetadata', ()=> scheduleFallback(audio), { once: true });
+        audio.addEventListener('loadedmetadata', () => scheduleFallback(audio), { once: true });
         audio.addEventListener('ended', triggerSpeech, { once: true });
         audio.addEventListener('error', triggerSpeech, { once: true });
         audio.addEventListener('abort', triggerSpeech, { once: true });
@@ -2275,7 +2275,7 @@ function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
         audio.addEventListener('error', finishSession, { once: true });
         audio.addEventListener('abort', finishSession, { once: true });
       }
-      audio.play().catch(()=> (hasSpeech ? triggerSpeech() : finishSession()));
+      audio.play().catch(() => (hasSpeech ? triggerSpeech() : finishSession()));
     } else {
       if (hasSpeech) triggerSpeech();
       else finishSession();
@@ -2284,12 +2284,12 @@ function settingsModalPreviewAudio(key, soundIndex, sourceBtn){
     revert();
   }
 }
-function settingsModalClearAudio(key){
+function settingsModalClearAudio(key) {
   const entry = settingsAudioEnsureEntry(key);
   entry.sounds = [];
   settingsModalUpdateAudioUi(key);
 }
-function settingsModalRemoveSound(key, index){
+function settingsModalRemoveSound(key, index) {
   const entry = settingsAudioEnsureEntry(key);
   if (!Array.isArray(entry.sounds)) entry.sounds = [];
   const idx = Number(index);
@@ -2297,7 +2297,7 @@ function settingsModalRemoveSound(key, index){
   entry.sounds.splice(idx, 1);
   settingsModalUpdateAudioUi(key);
 }
-function settingsModalAddTemplate(key){
+function settingsModalAddTemplate(key) {
   const cfg = SETTINGS_AUDIO_FIELDS[key];
   if (!cfg) return;
   const entry = settingsAudioEnsureEntry(key);
@@ -2313,7 +2313,7 @@ function settingsModalAddTemplate(key){
   if (input) input.value = '';
   settingsModalUpdateAudioUi(key);
 }
-function settingsModalRemoveTemplate(key, index){
+function settingsModalRemoveTemplate(key, index) {
   const entry = settingsAudioEnsureEntry(key);
   if (!Array.isArray(entry.speakTemplates)) entry.speakTemplates = [];
   const idx = Number(index);
@@ -2321,14 +2321,14 @@ function settingsModalRemoveTemplate(key, index){
   entry.speakTemplates.splice(idx, 1);
   settingsModalUpdateAudioUi(key);
 }
-function settingsModalSetTemplate(key, index, value){
+function settingsModalSetTemplate(key, index, value) {
   const entry = settingsAudioEnsureEntry(key);
   if (!Array.isArray(entry.speakTemplates)) entry.speakTemplates = [];
   const idx = Number(index);
   if (!Number.isFinite(idx) || idx < 0 || idx >= entry.speakTemplates.length) return;
   entry.speakTemplates[idx] = value;
 }
-function wireSettingsAudioControls(){
+function wireSettingsAudioControls() {
   Object.entries(SETTINGS_AUDIO_FIELDS).forEach(([key, cfg]) => {
     const input = document.getElementById(cfg.inputId);
     const preview = document.getElementById(cfg.previewId);
@@ -2341,10 +2341,10 @@ function wireSettingsAudioControls(){
     const audioList = cfg.listId ? document.getElementById(cfg.listId) : null;
     const numericFields = Array.isArray(cfg.numericFields) ? cfg.numericFields : [];
     if (input && !input._toolhubBound) {
-      input.addEventListener('change', (ev)=>{
+      input.addEventListener('change', (ev) => {
         const file = ev.target && ev.target.files && ev.target.files[0];
         settingsModalHandleFile(key, file || null);
-        try { ev.target.value = ''; } catch {}
+        try { ev.target.value = ''; } catch { }
       });
       input._toolhubBound = true;
     }
@@ -2352,7 +2352,7 @@ function wireSettingsAudioControls(){
       if (!field || !field.inputId) return;
       const numInput = document.getElementById(field.inputId);
       if (!numInput || numInput._toolhubBound) return;
-      const commitValue = ()=>{
+      const commitValue = () => {
         const entry = settingsAudioEnsureEntry(key);
         const raw = String(numInput.value || '').trim();
         if (!raw) {
@@ -2393,15 +2393,15 @@ function wireSettingsAudioControls(){
       numInput._toolhubBound = true;
     });
     if (preview && !preview._toolhubBound) {
-      preview.addEventListener('click', (ev)=> settingsModalPreviewAudio(key, undefined, ev.currentTarget));
+      preview.addEventListener('click', (ev) => settingsModalPreviewAudio(key, undefined, ev.currentTarget));
       preview._toolhubBound = true;
     }
     if (clear && !clear._toolhubBound) {
-      clear.addEventListener('click', ()=> settingsModalClearAudio(key));
+      clear.addEventListener('click', () => settingsModalClearAudio(key));
       clear._toolhubBound = true;
     }
     if (toggle && !toggle._toolhubBound) {
-      toggle.addEventListener('change', ()=>{
+      toggle.addEventListener('change', () => {
         const entry = settingsAudioEnsureEntry(key);
         entry.enabled = !!toggle.checked;
         settingsModalUpdateAudioUi(key);
@@ -2409,7 +2409,7 @@ function wireSettingsAudioControls(){
       toggle._toolhubBound = true;
     }
     if (speakToggle && !speakToggle._toolhubBound) {
-      speakToggle.addEventListener('change', ()=>{
+      speakToggle.addEventListener('change', () => {
         const entry = settingsAudioEnsureEntry(key);
         entry.speak = !!speakToggle.checked;
         settingsModalUpdateAudioUi(key);
@@ -2417,14 +2417,14 @@ function wireSettingsAudioControls(){
       speakToggle._toolhubBound = true;
     }
     if (templateInput && !templateInput._toolhubBound) {
-      const refreshAddState = ()=>{
+      const refreshAddState = () => {
         if (templateAdd) {
           templateAdd.disabled = templateInput.disabled || !templateInput.value.trim();
         }
       };
       templateInput.addEventListener('input', refreshAddState);
       templateInput.addEventListener('blur', refreshAddState);
-      templateInput.addEventListener('keydown', (ev)=>{
+      templateInput.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') {
           ev.preventDefault();
           settingsModalAddTemplate(key);
@@ -2434,17 +2434,17 @@ function wireSettingsAudioControls(){
       templateInput._toolhubBound = true;
     }
     if (templateAdd && !templateAdd._toolhubBound) {
-      templateAdd.addEventListener('click', ()=> settingsModalAddTemplate(key));
+      templateAdd.addEventListener('click', () => settingsModalAddTemplate(key));
       templateAdd._toolhubBound = true;
     }
     if (templateList && !templateList._toolhubBound) {
-      templateList.addEventListener('input', (ev)=>{
+      templateList.addEventListener('input', (ev) => {
         const inputEl = ev.target && ev.target.closest('input[data-template-index]');
         if (!inputEl) return;
         const idx = Number(inputEl.getAttribute('data-template-index'));
         settingsModalSetTemplate(key, idx, inputEl.value);
       });
-      templateList.addEventListener('blur', (ev)=>{
+      templateList.addEventListener('blur', (ev) => {
         const inputEl = ev.target && ev.target.closest('input[data-template-index]');
         if (!inputEl) return;
         const idx = Number(inputEl.getAttribute('data-template-index'));
@@ -2452,7 +2452,7 @@ function wireSettingsAudioControls(){
         settingsModalSetTemplate(key, idx, trimmed);
         inputEl.value = trimmed;
       }, true);
-      templateList.addEventListener('click', (ev)=>{
+      templateList.addEventListener('click', (ev) => {
         const btn = ev.target && ev.target.closest('[data-action="remove-template"]');
         if (!btn) return;
         ev.preventDefault();
@@ -2465,7 +2465,7 @@ function wireSettingsAudioControls(){
       templateList._toolhubBound = true;
     }
     if (audioList && !audioList._toolhubBound) {
-      audioList.addEventListener('click', (ev)=>{
+      audioList.addEventListener('click', (ev) => {
         const previewBtn = ev.target && ev.target.closest('[data-action="preview-sound"]');
         if (previewBtn) {
           const row = previewBtn.closest('[data-sound-index]');
@@ -2486,7 +2486,7 @@ function wireSettingsAudioControls(){
     }
   });
 }
-function wireSettingsModal(){
+function wireSettingsModal() {
   const modal = document.getElementById('settingsModal');
   if (!modal || modal._toolhubBound) return;
   modal._toolhubBound = true;
@@ -2494,12 +2494,12 @@ function wireSettingsModal(){
   wireSettingsTtsControls();
   wireMediaManagerControls();
   modal.addEventListener('show.bs.modal', settingsModalResetFromStorage);
-  modal.addEventListener('show.bs.modal', () => { try { mediaManagerRefreshList({ force: true }); } catch {} });
+  modal.addEventListener('show.bs.modal', () => { try { mediaManagerRefreshList({ force: true }); } catch { } });
   modal.addEventListener('hidden.bs.modal', settingsModalResetFromStorage);
   settingsModalResetFromStorage();
 }
 window.prepareSettingsModal = wireSettingsModal;
-async function saveSettingsInternal(){
+async function saveSettingsInternal() {
   const settings = readSettings();
   const defCfg = document.getElementById('def-cfg');
   const defVm = document.getElementById('def-vm');
@@ -2524,8 +2524,8 @@ async function saveSettingsInternal(){
         runModeSavedOk = true;
       }
     } catch { runModeSavedOk = false; }
-    try { delete settings.runMode; } catch {}
-  } catch {}
+    try { delete settings.runMode; } catch { }
+  } catch { }
   settingsModalSyncTtsWorkingFromInputs();
   const nextRate = settingsClampNumber(_settingsTtsWorking.rate ?? SETTINGS_TTS_DEFAULT_RATE, SETTINGS_TTS_MIN_RATE, SETTINGS_TTS_MAX_RATE, SETTINGS_TTS_DEFAULT_RATE);
   const nextPitch = settingsClampNumber(_settingsTtsWorking.pitch ?? SETTINGS_TTS_DEFAULT_PITCH, SETTINGS_TTS_MIN_PITCH, SETTINGS_TTS_MAX_PITCH, SETTINGS_TTS_DEFAULT_PITCH);
@@ -2543,13 +2543,13 @@ async function saveSettingsInternal(){
   }
   writeSettings(settings);
   // run mode already persisted above
-  try { document.dispatchEvent(new CustomEvent('settings-changed', { detail: { settings } })); } catch {}
+  try { document.dispatchEvent(new CustomEvent('settings-changed', { detail: { settings } })); } catch { }
   let resetFailed = false;
   try {
     await settingsModalResetFromStorage();
   } catch (err) {
     resetFailed = true;
-    try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to refresh UI after save: ${err?.message || err}`) : console.warn('Settings: failed to refresh settings UI after save', err); } catch {}
+    try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to refresh UI after save: ${err?.message || err}`) : console.warn('Settings: failed to refresh settings UI after save', err); } catch { }
   }
   let toastMessage = 'Settings saved.';
   let toastLevel = 'success';
@@ -2567,15 +2567,15 @@ async function saveSettingsInternal(){
     toastMessage = 'Settings saved, but the UI may be out of date. Please reload.';
     toastLevel = 'warning';
   }
-  try { showToast(toastMessage, toastLevel); } catch {}
+  try { showToast(toastMessage, toastLevel); } catch { }
   const modal = document.getElementById('settingsModal');
   if (modal && window.bootstrap && window.bootstrap.Modal) {
     // Ensure remote-mode UI changes apply immediately after the settings modal closes.
     try {
       modal.addEventListener('hidden.bs.modal', () => {
-        try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(); } catch {}
+        try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(); } catch { }
       }, { once: true });
-    } catch {}
+    } catch { }
     const inst = bootstrap.Modal.getInstance(modal) || null;
     if (inst) inst.hide();
   }
@@ -2590,7 +2590,7 @@ async function loadProjects() {
   const container = document.getElementById('projects');
   container.innerHTML = '<div class="text-muted">Loading...</div>';
   try {
-  try { (window.shell && shell.logInfo) ? shell.logInfo('Config: loading projects…') : console.log('Config: loading projects…'); } catch {}
+    try { (window.shell && shell.logInfo) ? shell.logInfo('Config: loading projects…') : console.log('Config: loading projects…'); } catch { }
     const data = await http('GET', '/api/projects');
     container.innerHTML = '';
     // Reset cache
@@ -2611,12 +2611,12 @@ async function loadProjects() {
         container.innerHTML = '<div class="text-muted">Select a project from the left to view its configuration.</div>';
       }
     }
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Config: loaded ${(data.projects||[]).length} project(s)`) : console.log('Config: projects loaded'); } catch {}
+    try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Config: loaded ${(data.projects || []).length} project(s)`) : console.log('Config: projects loaded'); } catch { }
     // Ensure any dynamically rendered controls get remote-mode disabling.
-    try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(container); } catch {}
+    try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(container); } catch { }
   } catch (e) {
     container.innerHTML = `<div class="text-danger">Error: ${e.message}</div>`;
-    try { (window.shell && shell.logError) ? shell.logError('Config: load projects failed: ' + e.message) : console.error('Config load failed:', e); } catch {}
+    try { (window.shell && shell.logError) ? shell.logError('Config: load projects failed: ' + e.message) : console.error('Config load failed:', e); } catch { }
   }
 }
 
@@ -2624,28 +2624,28 @@ async function loadProjects() {
 async function createProject() {
   const input = document.getElementById('proj-name');
   const name = (input && input.value ? input.value.trim() : '');
-  if (!name) { try { showToast('Enter a project name.', 'warning'); } catch {} return; }
+  if (!name) { try { showToast('Enter a project name.', 'warning'); } catch { } return; }
   try {
-    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: creating project \"${name}\"…`) : console.log('Creating project', name); } catch {}
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: creating project \"${name}\"…`) : console.log('Creating project', name); } catch { }
     const res = await http('POST', '/api/projects', { name });
     // Clear input
-    try { if (input) input.value = ''; } catch {}
+    try { if (input) input.value = ''; } catch { }
     const pid = res && (res.id || res.pid) ? (res.id || res.pid) : '';
     // Select the newly created project and refresh views
-    try { if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch {}
+    try { if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch { }
     // Always navigate (or stay) on configuration page so the new project loads expanded
     try {
       if (location.pathname !== '/' && location.pathname !== '/index.html') {
         // Persist selection then redirect; index page on load will call loadProjects and show it
         return location.href = '/';
       }
-    } catch {}
+    } catch { }
     await loadProjects(); // already on configuration page
-    try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch {}
-    try { showToast('Project created.', 'success'); } catch {}
+    try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
+    try { showToast('Project created.', 'success'); } catch { }
   } catch (e) {
-    try { showToast('Failed to create project: ' + (e?.message || e), 'danger'); } catch {}
-    try { (window.shell && shell.logError) ? shell.logError('Config: create project failed: ' + (e?.message || e)) : console.error('Create project failed:', e); } catch {}
+    try { showToast('Failed to create project: ' + (e?.message || e), 'danger'); } catch { }
+    try { (window.shell && shell.logError) ? shell.logError('Config: create project failed: ' + (e?.message || e)) : console.error('Create project failed:', e); } catch { }
   }
 }
 
@@ -2664,7 +2664,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 function escHtml(s) {
   if (s === null || s === undefined) return '';
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
 }
 
 // Simple validators
@@ -2724,11 +2724,11 @@ async function processVmAutoSave(pid, idx, key) {
   }
 }
 
-function debounceProjectSave(pid, field, delay=600) {
+function debounceProjectSave(pid, field, delay = 600) {
   const key = pid + ':' + field;
   if (_pendingSaveTimers[key]) clearTimeout(_pendingSaveTimers[key]);
   _pendingSaveTimers[key] = setTimeout(() => {
-    try { autoSaveProjectField(pid); } catch(e) { console.error('Auto-save failed', e); }
+    try { autoSaveProjectField(pid); } catch (e) { console.error('Auto-save failed', e); }
     delete _pendingSaveTimers[key];
   }, delay);
 }
@@ -2740,7 +2740,7 @@ async function autoSaveProjectField(pid) {
   const tagVal = document.getElementById(`cfg-${pid}-tag`)?.value || '';
   if (!isValidTag(tagVal)) { return; }
   const payload = {
-    name: (function(){ const el = card.querySelector('input[aria-label="Project name"]'); return (el && el.value ? el.value.trim() : ''); })(),
+    name: (function () { const el = card.querySelector('input[aria-label="Project name"]'); return (el && el.value ? el.value.trim() : ''); })(),
     proxmox_url: document.getElementById(`cfg-${pid}-proxmox_url`)?.value?.trim(),
     proxmox_api_port: Number(document.getElementById(`cfg-${pid}-proxmox_api_port`)?.value),
     proxmox_ssh_port: Number(document.getElementById(`cfg-${pid}-proxmox_ssh_port`)?.value),
@@ -2757,12 +2757,12 @@ async function autoSaveProjectField(pid) {
     proxmox_use_linked_clones: !!(document.getElementById(`cfg-${pid}-proxmox_use_linked_clones`)?.checked),
   };
   // Optional future fields (skip if disabled)
-  const optIds = ['keycloak_url','keycloak_port','keycloak_nodename','challenge_url','challenge_port'];
+  const optIds = ['keycloak_url', 'keycloak_port', 'keycloak_nodename', 'challenge_url', 'challenge_port'];
   optIds.forEach(id => {
-    const el = document.getElementById(`cfg-${pid}-`+id);
+    const el = document.getElementById(`cfg-${pid}-` + id);
     if (el && !el.disabled) {
       let v = el.value;
-      if (id.endsWith('_port') || id==='keycloak_port' || id==='challenge_port') v = Number(v);
+      if (id.endsWith('_port') || id === 'keycloak_port' || id === 'challenge_port') v = Number(v);
       payload[id] = v;
     }
   });
@@ -2780,12 +2780,12 @@ async function autoSaveProjectField(pid) {
       const prevName = typeof prev.name === 'string' ? prev.name : '';
       const newName = typeof next.name === 'string' ? next.name : prevName;
       if (newName && newName !== prevName) {
-        try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
+        try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
       }
-    } catch {}
-    try { showStatusDot(pid, 'saved'); } catch {}
-  } catch(e) {
-    try { showStatusDot(pid, 'error'); } catch {}
+    } catch { }
+    try { showStatusDot(pid, 'saved'); } catch { }
+  } catch (e) {
+    try { showStatusDot(pid, 'error'); } catch { }
   }
 }
 
@@ -2815,7 +2815,7 @@ async function autoSaveVm(pid, idx) {
   const payload = {
     vmid: vmid,
     start_commands: startCommands,
-  stored_commands: storedCommands,
+    stored_commands: storedCommands,
     internal_network_adaptors: adaptors
   };
   try {
@@ -2834,7 +2834,7 @@ async function autoSaveVm(pid, idx) {
           };
         }
       }
-    } catch {}
+    } catch { }
     setVmStatus(pid, idx, 'Saved', 'text-success');
     setTimeout(() => {
       const el = document.getElementById(`vm-save-status-${pid}-${idx}`);
@@ -2845,7 +2845,7 @@ async function autoSaveVm(pid, idx) {
     }, 1600);
   } catch (e) {
     setVmStatus(pid, idx, 'Save failed', 'text-danger');
-    try { console.error('Auto-save VM failed', pid, name, e); } catch {}
+    try { console.error('Auto-save VM failed', pid, name, e); } catch { }
   }
 }
 
@@ -2988,7 +2988,7 @@ function resetStartCommandsModal() {
 }
 
 function openStartCommandsManager(pid, idx) {
-  try { wireStartCommandsModal(); } catch {}
+  try { wireStartCommandsModal(); } catch { }
   const proj = (window.PROJ_CACHE || {})[pid];
   const vmList = proj && Array.isArray(proj.vms) ? proj.vms : [];
   const vm = vmList[idx] || vmList.find(entry => entry && entry.id === idx);
@@ -3046,7 +3046,7 @@ async function saveStartCommandsFromModal() {
         el.className = 'small text-muted';
       }
     }, 1600);
-    try { showToast('Start commands updated.', 'success'); } catch {}
+    try { showToast('Start commands updated.', 'success'); } catch { }
     const modalEl = document.getElementById('startCommandsModal');
     if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
       const modal = bootstrap.Modal.getInstance(modalEl);
@@ -3349,7 +3349,7 @@ function resetStoredCommandsModal() {
 }
 
 function openStoredCommandsManager(pid, idx) {
-  try { wireStoredCommandsModal(); } catch {}
+  try { wireStoredCommandsModal(); } catch { }
   const proj = (window.PROJ_CACHE || {})[pid];
   const vmList = proj && Array.isArray(proj.vms) ? proj.vms : [];
   const vm = vmList[idx] || vmList.find(entry => entry && entry.id === idx);
@@ -3407,7 +3407,7 @@ async function saveStoredCommandsFromModal() {
         el.className = 'small text-muted';
       }
     }, 1600);
-    try { showToast('Stored commands updated.', 'success'); } catch {}
+    try { showToast('Stored commands updated.', 'success'); } catch { }
     const modalEl = document.getElementById('storedCommandsModal');
     if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
       const modal = bootstrap.Modal.getInstance(modalEl);
@@ -3581,12 +3581,12 @@ function wireStoredCommandsModal() {
 
 function showStatusDot(pid, state) {
   // state: 'saved' | 'error'
-  let el = document.getElementById('save-status-'+pid);
+  let el = document.getElementById('save-status-' + pid);
   if (!el) return;
   el.textContent = state === 'saved' ? '●' : '⚠';
   el.className = state === 'saved' ? 'text-success ms-2 small' : 'text-danger ms-2 small';
   if (state === 'saved') {
-    setTimeout(()=>{ if(el) el.textContent=''; }, 1600);
+    setTimeout(() => { if (el) el.textContent = ''; }, 1600);
   }
 }
 
@@ -3618,14 +3618,14 @@ function renderProjectCard(p) {
           <label class="form-label" title="Optional explicit VMID for the template">VM ID (optional)</label>
           <input type="number" min="0" id="vm-${p.id}-${i}-vmid" class="form-control form-control-sm" value="${(v.vmid ?? '')}" placeholder="e.g., 101" title="Explicit VMID to clone from (optional)" aria-label="VM ID" oninput="debounceVmSave('${p.id}', ${i})" />
         </div>
-        ${(function(){
-          const startSteps = normalizeStartCommandSteps(v.start_commands || []);
-          const startSummary = formatStartCommandsSummary(startSteps);
-          const startTooltip = formatStartCommandsTooltip(startSteps);
-          const startTitleAttr = escHtml(startTooltip).replace(/\n/g, '&#10;');
-          const startDataValue = escHtml(encodeStartCommandsValue(startSteps));
-          const pidLiteral = JSON.stringify(String(p.id));
-          return `
+        ${(function () {
+      const startSteps = normalizeStartCommandSteps(v.start_commands || []);
+      const startSummary = formatStartCommandsSummary(startSteps);
+      const startTooltip = formatStartCommandsTooltip(startSteps);
+      const startTitleAttr = escHtml(startTooltip).replace(/\n/g, '&#10;');
+      const startDataValue = escHtml(encodeStartCommandsValue(startSteps));
+      const pidLiteral = JSON.stringify(String(p.id));
+      return `
         <div class="col-md-4">
           <label class="form-label">Start Commands</label>
           <div class="d-flex align-items-center gap-2 mb-2">
@@ -3634,23 +3634,23 @@ function renderProjectCard(p) {
           </div>
           <input type="hidden" id="vm-${p.id}-${i}-start-data" value="${startDataValue}">
         </div>`;
-        })()}
+    })()}
         <div class="col-md-4">
           <label class="form-label">Stored Commands</label>
-          ${(function(){
-            const storedSteps = normalizeStartCommandSteps(v.stored_commands || []);
-            const storedSummary = formatStartCommandsSummary(storedSteps);
-            const storedTooltip = formatStartCommandsTooltip(storedSteps);
-            const storedTitleAttr = escHtml(storedTooltip).replace(/\n/g, '&#10;');
-            const storedDataValue = escHtml(encodeStartCommandsValue(storedSteps));
-            const pidLiteralStored = JSON.stringify(String(p.id));
-            return `
+          ${(function () {
+      const storedSteps = normalizeStartCommandSteps(v.stored_commands || []);
+      const storedSummary = formatStartCommandsSummary(storedSteps);
+      const storedTooltip = formatStartCommandsTooltip(storedSteps);
+      const storedTitleAttr = escHtml(storedTooltip).replace(/\n/g, '&#10;');
+      const storedDataValue = escHtml(encodeStartCommandsValue(storedSteps));
+      const pidLiteralStored = JSON.stringify(String(p.id));
+      return `
           <div class="d-flex align-items-center gap-2 mb-2">
             <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button" onclick='openStoredCommandsManager(${pidLiteralStored},${i})'>Manage</button>
             <div id="vm-${p.id}-${i}-stored-summary" class="small text-muted flex-grow-1" title="${storedTitleAttr}">${escHtml(storedSummary)}</div>
           </div>
           <input type="hidden" id="vm-${p.id}-${i}-stored-data" value="${storedDataValue}">`;
-          })()}
+    })()}
         </div>
     <div class="col-md-4">
           <label class="form-label">Internal Network Adaptors</label>
@@ -3659,7 +3659,7 @@ function renderProjectCard(p) {
             <button id="btn-add-net-${p.id}-${i}" class="btn btn-sm btn-outline-primary" onclick="addListItem('vm-${p.id}-${i}-nets-list','vm-${p.id}-${i}-nets-input')" disabled>Add</button>
           </div>
           <ul class="list-group list-group-sm" id="vm-${p.id}-${i}-nets-list">
-            ${(v.internal_network_adaptors||[]).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx)).join('')}
+            ${(v.internal_network_adaptors || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx)).join('')}
           </ul>
         </div>
   <div class="col-12"><div class="small text-muted" id="vm-save-status-${p.id}-${i}"></div></div>
@@ -3669,11 +3669,11 @@ function renderProjectCard(p) {
   const pendingStore = getMaterialPendingStore(p.id);
   const pendingOptions = pendingStore.length
     ? pendingStore.map(entry => {
-  const optValue = escHtml(entry.key);
-  const optTitle = escHtml(entry.relativePath || entry.file?.name || entry.display || '');
-  const optLabel = escHtml(entry.display || '');
-        return `<option value="${optValue}" title="${optTitle}">${optLabel}</option>`;
-      }).join('')
+      const optValue = escHtml(entry.key);
+      const optTitle = escHtml(entry.relativePath || entry.file?.name || entry.display || '');
+      const optLabel = escHtml(entry.display || '');
+      return `<option value="${optValue}" title="${optTitle}">${optLabel}</option>`;
+    }).join('')
     : '<option value="" disabled>No pending files</option>';
   const pendingFiles = getPendingMaterialFiles(p.id);
   const pendingCount = pendingFiles.length;
@@ -3681,8 +3681,8 @@ function renderProjectCard(p) {
   const pendingSummary = pendingCount ? `${pendingCount} item${pendingCount === 1 ? '' : 's'} selected${pendingFolderCount ? ` (${pendingFolderCount} from folders)` : ''}` : '';
   const pendingFolderSummary = pendingFolderCount ? `${pendingFolderCount} file${pendingFolderCount === 1 ? '' : 's'} in folder` : '';
   const existingOptions = (p.materials || []).map(m => {
-  const label = escHtml(m);
-  return `<option value="${label}" title="${label}">${label}</option>`;
+    const label = escHtml(m);
+    return `<option value="${label}" title="${label}">${label}</option>`;
   }).join('');
   const hasPending = pendingCount > 0;
   const hasMaterials = Array.isArray(p.materials) && p.materials.length > 0;
@@ -3898,8 +3898,8 @@ function renderProjectCard(p) {
   const cfgEl = col.querySelector(`#${cfgId}`);
   if (cfgEl) {
     const cchev = col.querySelector(`#cfg-chevron-${p.id}`);
-  cfgEl.addEventListener('shown.bs.collapse', () => { setProjState(p.id, { cfgExpanded: true }); if (cchev) { cchev.textContent = '▼'; cchev.classList.add('rotate'); } updateCredDownloadState(p.id); });
-  cfgEl.addEventListener('hidden.bs.collapse', () => { setProjState(p.id, { cfgExpanded: false }); if (cchev) { cchev.textContent = '▶'; cchev.classList.remove('rotate'); } });
+    cfgEl.addEventListener('shown.bs.collapse', () => { setProjState(p.id, { cfgExpanded: true }); if (cchev) { cchev.textContent = '▼'; cchev.classList.add('rotate'); } updateCredDownloadState(p.id); });
+    cfgEl.addEventListener('hidden.bs.collapse', () => { setProjState(p.id, { cfgExpanded: false }); if (cchev) { cchev.textContent = '▶'; cchev.classList.remove('rotate'); } });
   }
   // When Proxmox connection inputs change in Configuration, broadcast an event
   try {
@@ -3918,7 +3918,7 @@ function renderProjectCard(p) {
       tagInput.addEventListener('input', applyTagValidity);
       applyTagValidity();
     }
-  } catch {}
+  } catch { }
   // Credentials section collapse state
   const credsEl = col.querySelector(`#${credsId}`);
   if (credsEl) {
@@ -4029,7 +4029,7 @@ function renderProjectCard(p) {
       }
     });
   }
-  
+
   // Project-level collapse removed; always expanded
   (p.vms || []).forEach((v, i) => {
     const vmId = `vm-collapse-${p.id}-${i}`;
@@ -4091,7 +4091,7 @@ function renderProjectCard(p) {
         nameInput.addEventListener('input', applyVmValidity);
         applyVmValidity();
       }
-    } catch {}
+    } catch { }
   });
   // Initialize credential download button and controls state on first render
   setTimeout(() => { updateCredDownloadState(p.id); updateCredControls(p.id); }, 0);
@@ -4100,16 +4100,16 @@ function renderProjectCard(p) {
 
 
 // --- Add from Server flow (Proxmox templates) ---
-function proxCredKey(pid){ return `toolhub.session.proxmox.${pid}`; }
-function readProxCreds(pid){ try { return JSON.parse(sessionStorage.getItem(proxCredKey(pid))||'{}'); } catch { return {}; } }
-function writeProxCreds(pid,obj){ try { sessionStorage.setItem(proxCredKey(pid), JSON.stringify({ username: obj.username||'', password: obj.password||'' })); } catch {} }
-function readPersistProxCreds(pid){
+function proxCredKey(pid) { return `toolhub.session.proxmox.${pid}`; }
+function readProxCreds(pid) { try { return JSON.parse(sessionStorage.getItem(proxCredKey(pid)) || '{}'); } catch { return {}; } }
+function writeProxCreds(pid, obj) { try { sessionStorage.setItem(proxCredKey(pid), JSON.stringify({ username: obj.username || '', password: obj.password || '' })); } catch { } }
+function readPersistProxCreds(pid) {
   try {
     if (window.CREDS && typeof CREDS.readPersistProxCreds === 'function') return CREDS.readPersistProxCreds(pid) || {};
-  } catch {}
+  } catch { }
   return {};
 }
-function readBestProxCreds(pid){
+function readBestProxCreds(pid) {
   const sess = readProxCreds(pid) || {};
   const persisted = readPersistProxCreds(pid) || {};
   return {
@@ -4117,11 +4117,11 @@ function readBestProxCreds(pid){
     password: (sess.password || persisted.password || ''),
   };
 }
-function proxMetaKey(pid){ return `toolhub.session.proxmox.meta.${pid}`; }
-function writeProxMeta(pid,obj){ try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj||{})); } catch {} }
-function normalizeUrl(s){ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
+function proxMetaKey(pid) { return `toolhub.session.proxmox.meta.${pid}`; }
+function writeProxMeta(pid, obj) { try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj || {})); } catch { } }
+function normalizeUrl(s) { if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
 
-function normalizeHost(raw){
+function normalizeHost(raw) {
   if (!raw) return '';
   try {
     const str = String(raw).trim();
@@ -4136,20 +4136,20 @@ function normalizeHost(raw){
   }
 }
 
-function hostRoot(host){
+function hostRoot(host) {
   if (!host) return '';
   try { return String(host).split('.')[0].toLowerCase(); } catch { return ''; }
 }
 
-function deriveAfsCurrentNode(pid, templates, urlBase){
-  const proj = (window.PROJ_CACHE||{})[pid] || {};
+function deriveAfsCurrentNode(pid, templates, urlBase) {
+  const proj = (window.PROJ_CACHE || {})[pid] || {};
   const hostFull = normalizeHost(urlBase || proj.proxmox_url || '');
   const hostPrefix = hostRoot(hostFull);
-  const tplNodes = Array.isArray(templates) ? templates.map(t => String(t.node||'')) : [];
+  const tplNodes = Array.isArray(templates) ? templates.map(t => String(t.node || '')) : [];
   const tplLower = tplNodes.map(n => n.toLowerCase());
 
   const mapping = proj.proxmox_node_host_map || {};
-  for (const [node, target] of Object.entries(mapping)){
+  for (const [node, target] of Object.entries(mapping)) {
     const mappedHost = normalizeHost(target);
     const mappedRoot = hostRoot(mappedHost);
     if (mappedHost && hostFull && mappedHost === hostFull) return String(node);
@@ -4173,7 +4173,7 @@ function deriveAfsCurrentNode(pid, templates, urlBase){
   return hostPrefix || '';
 }
 
-function setAfsLoading(isLoading){
+function setAfsLoading(isLoading) {
   const btn = document.getElementById('afs-fetch');
   const spinner = document.getElementById('afs-fetch-spinner');
   const label = document.getElementById('afs-fetch-label');
@@ -4185,7 +4185,7 @@ function setAfsLoading(isLoading){
   if (label) label.textContent = isLoading ? 'Fetching...' : 'Fetch';
 }
 
-function setAfsFeedback(kind, message){
+function setAfsFeedback(kind, message) {
   const el = document.getElementById('afs-feedback');
   if (!el) return;
   const base = 'alert small py-2 px-3';
@@ -4207,7 +4207,7 @@ function setAfsFeedback(kind, message){
   el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
 }
 
-function describeAfsError(err){
+function describeAfsError(err) {
   if (!err) return 'Request failed. Check the credentials and try again.';
   const raw = (err && err.message) ? String(err.message) : String(err);
   const trimmed = (raw || '').trim();
@@ -4218,7 +4218,7 @@ function describeAfsError(err){
       if (parsed && parsed.error) {
         return String(parsed.error).trim() || 'Request failed. Check the credentials and try again.';
       }
-    } catch {}
+    } catch { }
   }
   if (/401|unauthorized|permission/i.test(trimmed)) {
     return 'Authentication failed. Confirm the username, password, and Proxmox realm.';
@@ -4231,10 +4231,10 @@ function describeAfsError(err){
 
 let AFS_CTX = { pid: null, templates: [], selected: new Set(), currentNode: '' };
 
-function openAddFromServer(pid){
+function openAddFromServer(pid) {
   AFS_CTX = { pid, templates: [], selected: new Set(), currentNode: '' };
   // prefill from project cache and session creds
-  const p = (window.PROJ_CACHE||{})[pid] || {};
+  const p = (window.PROJ_CACHE || {})[pid] || {};
   const modal = document.getElementById('addFromServerModal');
   if (!modal) { alert('Modal not found'); return; }
   const urlEl = document.getElementById('afs-url');
@@ -4268,10 +4268,10 @@ function openAddFromServer(pid){
           if (saveEl) saveEl.checked = !!(prox && prox.saved);
           if (uEl && !uEl.value && su) uEl.value = su;
           if (pwEl && !pwEl.value && sp) pwEl.value = sp;
-        } catch {}
-      }).catch(()=>{});
+        } catch { }
+      }).catch(() => { });
     }
-  } catch {}
+  } catch { }
   if (list) { list.innerHTML = ''; list.style.display = 'none'; }
   if (addBtn) addBtn.disabled = true;
   if (filterEl) filterEl.value = '';
@@ -4282,17 +4282,17 @@ function openAddFromServer(pid){
     document.getElementById('afs-fetch').onclick = fetchTemplatesForAFS;
     document.getElementById('afs-add').onclick = addSelectedTemplates;
     document.getElementById('afs-filter').oninput = renderAFSList;
-  } catch {}
+  } catch { }
   // show modal
   try {
     const bs = window.bootstrap && window.bootstrap.Modal ? window.bootstrap.Modal : null;
     if (bs) bs.getOrCreateInstance(modal).show(); else modal.classList.add('show');
-  } catch {}
+  } catch { }
 }
 
-async function fetchTemplatesForAFS(){
+async function fetchTemplatesForAFS() {
   const pid = AFS_CTX.pid; if (!pid) return;
-  const p = (window.PROJ_CACHE||{})[pid] || {};
+  const p = (window.PROJ_CACHE || {})[pid] || {};
   const urlEl = document.getElementById('afs-url');
   const portEl = document.getElementById('afs-port');
   const verEl = document.getElementById('afs-verify');
@@ -4301,15 +4301,15 @@ async function fetchTemplatesForAFS(){
   const saveEl = document.getElementById('afs-save-creds');
   const list = document.getElementById('afs-list');
   const filterGroup = document.getElementById('afs-filter-group');
-  const urlBase = normalizeUrl((urlEl?.value||'').trim());
-  const apiPort = Number(portEl?.value||8006)||8006;
-  if (!urlBase){
+  const urlBase = normalizeUrl((urlEl?.value || '').trim());
+  const apiPort = Number(portEl?.value || 8006) || 8006;
+  if (!urlBase) {
     setAfsFeedback('warning', 'Enter the Proxmox URL before fetching.');
     try { showToast('Enter Proxmox URL', 'warning'); } catch { alert('Enter Proxmox URL'); }
     return;
   }
-  const baseUrl = urlBase.replace(/\/$/, '') + (apiPort ? '' : '') ; // API endpoints include /api2/json internally
-  const body = { baseUrl, apiPort, verifySSL: !!(verEl?.checked), username: (uEl?.value||'').trim() || undefined, password: (pwEl?.value||'') || undefined };
+  const baseUrl = urlBase.replace(/\/$/, '') + (apiPort ? '' : ''); // API endpoints include /api2/json internally
+  const body = { baseUrl, apiPort, verifySSL: !!(verEl?.checked), username: (uEl?.value || '').trim() || undefined, password: (pwEl?.value || '') || undefined };
   setAfsLoading(true);
   setAfsFeedback('info', 'Connecting to Proxmox…');
   let fetchError = null;
@@ -4322,11 +4322,11 @@ async function fetchTemplatesForAFS(){
       try {
         const resp = await http('POST', '/api/proxmox/templates', body);
         const items = Array.isArray(resp?.templates) ? resp.templates : [];
-        AFS_CTX.templates = items.map(t => ({ node: String(t.node||''), vmid: Number(t.vmid||0), name: String(t.name||''), bridges: Array.isArray(t.bridges)? t.bridges.map(b=>String(b||'')) : [] }));
+        AFS_CTX.templates = items.map(t => ({ node: String(t.node || ''), vmid: Number(t.vmid || 0), name: String(t.name || ''), bridges: Array.isArray(t.bridges) ? t.bridges.map(b => String(b || '')) : [] }));
         AFS_CTX.currentNode = deriveAfsCurrentNode(pid, AFS_CTX.templates, urlBase);
         // persist creds and meta for VM Manager prefill
-        writeProxCreds(pid, { username: body.username||'', password: body.password||'' });
-        writeProxMeta(pid, { url: urlBase, apiPort: apiPort, sshPort: Number(p.proxmox_ssh_port||22)||22 });
+        writeProxCreds(pid, { username: body.username || '', password: body.password || '' });
+        writeProxMeta(pid, { url: urlBase, apiPort: apiPort, sshPort: Number(p.proxmox_ssh_port || 22) || 22 });
         // Optional: persist creds per project across sessions (server-side project secrets)
         try {
           const wantsPersist = !!(saveEl && saveEl.checked);
@@ -4334,7 +4334,7 @@ async function fetchTemplatesForAFS(){
             if (wantsPersist) CREDS.setPersistProxCreds(pid, body.username || '', body.password || '', true);
             else CREDS.setPersistProxCreds(pid, '', '', false);
           }
-        } catch {}
+        } catch { }
         if (filterGroup) filterGroup.style.display = '';
         if (list) list.style.display = '';
         renderAFSList();
@@ -4349,7 +4349,7 @@ async function fetchTemplatesForAFS(){
         throw err;
       }
     }, { projectId: pid });
-  } catch (e){
+  } catch (e) {
     fetchError = fetchError || e;
   } finally {
     setAfsLoading(false);
@@ -4367,35 +4367,35 @@ async function fetchTemplatesForAFS(){
   }
 }
 
-function renderAFSList(){
+function renderAFSList() {
   const list = document.getElementById('afs-list');
   const addBtn = document.getElementById('afs-add');
-  const filter = (document.getElementById('afs-filter')?.value||'').trim().toLowerCase();
-  const items = (AFS_CTX.templates||[]).filter(t => {
+  const filter = (document.getElementById('afs-filter')?.value || '').trim().toLowerCase();
+  const items = (AFS_CTX.templates || []).filter(t => {
     if (!filter) return true;
     const s = `${t.name} ${t.vmid} ${t.node}`.toLowerCase();
     return s.includes(filter);
   });
-  if (!items.length){ if (list) list.innerHTML = '<div class="text-muted small p-2">No templates found.</div>'; if (addBtn) addBtn.disabled = true; return; }
-  const currentNode = String(AFS_CTX.currentNode||'').toLowerCase();
-  const hasCurrent = currentNode && (AFS_CTX.templates||[]).some(t => String(t.node||'').toLowerCase() === currentNode);
+  if (!items.length) { if (list) list.innerHTML = '<div class="text-muted small p-2">No templates found.</div>'; if (addBtn) addBtn.disabled = true; return; }
+  const currentNode = String(AFS_CTX.currentNode || '').toLowerCase();
+  const hasCurrent = currentNode && (AFS_CTX.templates || []).some(t => String(t.node || '').toLowerCase() === currentNode);
   const restrict = !!hasCurrent;
   const ordered = items.slice().sort((a, b) => {
-    if (restrict){
-      const aPreferred = String(a.node||'').toLowerCase() === currentNode;
-      const bPreferred = String(b.node||'').toLowerCase() === currentNode;
+    if (restrict) {
+      const aPreferred = String(a.node || '').toLowerCase() === currentNode;
+      const bPreferred = String(b.node || '').toLowerCase() === currentNode;
       if (aPreferred !== bPreferred) return aPreferred ? -1 : 1;
     }
-    const nameCmp = String(a.name||'').localeCompare(String(b.name||''));
+    const nameCmp = String(a.name || '').localeCompare(String(b.name || ''));
     if (nameCmp !== 0) return nameCmp;
-    return Number(a.vmid||0) - Number(b.vmid||0);
+    return Number(a.vmid || 0) - Number(b.vmid || 0);
   });
   let hasPreferredInFilter = false;
   const rows = ordered.map(t => {
     const key = `${t.node}|${t.vmid}|${t.name}`;
     const checked = AFS_CTX.selected.has(key) ? 'checked' : '';
-    const bridges = (t.bridges||[]).join(', ');
-    const nodeName = String(t.node||'');
+    const bridges = (t.bridges || []).join(', ');
+    const nodeName = String(t.node || '');
     const isPreferred = restrict && nodeName.toLowerCase() === currentNode;
     if (isPreferred) hasPreferredInFilter = true;
     const disableRow = restrict && !isPreferred;
@@ -4419,7 +4419,7 @@ function renderAFSList(){
   }).join('');
   if (list) {
     let notice = '';
-    if (restrict){
+    if (restrict) {
       const info = hasPreferredInFilter ? 'Templates on other nodes are disabled.' : 'No templates on the current node match this filter.';
       notice = `<div class="small text-muted px-3 py-2 border-bottom">Current node: <strong>${escHtml(AFS_CTX.currentNode)}</strong>. ${escHtml(info)}</div>`;
     }
@@ -4428,42 +4428,42 @@ function renderAFSList(){
   // wire checkbox changes
   try {
     if (!list) return;
-    (list.querySelectorAll('input[type=checkbox]')||[]).forEach(cb => {
+    (list.querySelectorAll('input[type=checkbox]') || []).forEach(cb => {
       cb.onchange = (e) => {
         const k = e.target.getAttribute('data-key');
         if (e.target.checked) AFS_CTX.selected.add(k); else AFS_CTX.selected.delete(k);
         if (addBtn) addBtn.disabled = AFS_CTX.selected.size === 0;
       };
     });
-  } catch {}
+  } catch { }
   if (addBtn) addBtn.disabled = AFS_CTX.selected.size === 0;
 }
 
-async function addSelectedTemplates(){
+async function addSelectedTemplates() {
   const pid = AFS_CTX.pid; if (!pid) return;
-  const selected = Array.from(AFS_CTX.selected||[]);
+  const selected = Array.from(AFS_CTX.selected || []);
   if (!selected.length) return;
   // For each selection, add a VM using the template name and set vmid
   // We will batch sequentially to keep API simple
   const sanitizeAdaptor = (s) => {
     // Letters only, up to 8 chars per UI rules
-    try { return (String(s||'').replace(/[^A-Za-z]/g, '').slice(0,8)); } catch { return ''; }
+    try { return (String(s || '').replace(/[^A-Za-z]/g, '').slice(0, 8)); } catch { return ''; }
   };
   // collect a mapping from name->sanitized adaptors derived from bridges
   const adaptorByName = {};
-  for (const k of selected){
+  for (const k of selected) {
     const parts = String(k).split('|');
     const node = parts[0];
-    const vmid = Number(parts[1]||0) || 0;
+    const vmid = Number(parts[1] || 0) || 0;
     const name = parts.slice(2).join('|');
     if (!name || !vmid) continue;
     try {
-      const t = (AFS_CTX.templates||[]).find(x => x.node===node && x.vmid===vmid && x.name===name);
+      const t = (AFS_CTX.templates || []).find(x => x.node === node && x.vmid === vmid && x.name === name);
       if (t && Array.isArray(t.bridges)) {
         const sans = t.bridges.map(b => sanitizeAdaptor(b)).filter(x => !!x);
         if (sans.length) adaptorByName[name] = Array.from(new Set(sans));
       }
-    } catch {}
+    } catch { }
     try {
       await http('POST', `/api/projects/${pid}/vms`, { name });
     } catch (e) {
@@ -4476,53 +4476,53 @@ async function addSelectedTemplates(){
       }
       await http('PATCH', `/api/projects/${pid}/vms/${encodeURIComponent(name)}`, patch);
     } catch (e) {
-      try { showToast(`Failed to set VMID for ${name}: ${e.message}`, 'danger'); } catch {}
+      try { showToast(`Failed to set VMID for ${name}: ${e.message}`, 'danger'); } catch { }
     }
   }
   try {
     const modal = document.getElementById('addFromServerModal');
     const bs = window.bootstrap && window.bootstrap.Modal ? window.bootstrap.Modal : null;
     if (bs) { const inst = bs.getOrCreateInstance(modal); inst.hide(); }
-  } catch {}
+  } catch { }
   // reload
   try { await loadProjects(); } catch { loadProjects(); }
   try {
     if (window.shell && typeof window.shell.refreshSidebar === 'function') {
       window.shell.refreshSidebar('config');
     }
-  } catch {}
-  try { showToast('Templates added.', 'success'); } catch {}
+  } catch { }
+  try { showToast('Templates added.', 'success'); } catch { }
 }
 
 // Rename project from the header input (on blur)
 async function renameProject(id, newName) {
   const name = String(newName || '').trim();
-  if (!name) { try { showToast('Project name cannot be empty.', 'danger'); } catch {} return; }
+  if (!name) { try { showToast('Project name cannot be empty.', 'danger'); } catch { } return; }
   try {
-    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: renaming project ${id} → ${name}`) : console.log('Renaming project', id, '->', name); } catch {}
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: renaming project ${id} → ${name}`) : console.log('Renaming project', id, '->', name); } catch { }
     await http('PATCH', `/api/projects/${id}`, { name });
     loadProjects();
-    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: project name saved') : console.log('Project name saved'); } catch {}
+    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
+    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: project name saved') : console.log('Project name saved'); } catch { }
   } catch (e) {
-    try { showToast('Error renaming project: ' + (e?.message || e), 'danger'); } catch {}
+    try { showToast('Error renaming project: ' + (e?.message || e), 'danger'); } catch { }
   }
 }
 
 async function duplicateProject(id) {
   try {
-    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: duplicating project ${id}…`) : console.log('Duplicating project', id); } catch {}
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: duplicating project ${id}…`) : console.log('Duplicating project', id); } catch { }
     const res = await http('POST', `/api/projects/${encodeURIComponent(id)}/duplicate`);
     const newId = res && (res.id || res.pid) ? (res.id || res.pid) : '';
     const newName = res && typeof res.name === 'string' ? res.name : '';
-    try { if (newId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(newId); } catch {}
+    try { if (newId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(newId); } catch { }
     await loadProjects();
-    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
+    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
     const tail = newName ? ` as ${newName}` : '';
-    try { showToast(`Project duplicated${tail}.`, 'success'); } catch {}
+    try { showToast(`Project duplicated${tail}.`, 'success'); } catch { }
   } catch (e) {
-    try { showToast('Failed to duplicate project: ' + (e?.message || e), 'danger'); } catch {}
-    try { (window.shell && shell.logError) ? shell.logError('Config: duplicate project failed: ' + (e?.message || e)) : console.error('Duplicate project failed:', e); } catch {}
+    try { showToast('Failed to duplicate project: ' + (e?.message || e), 'danger'); } catch { }
+    try { (window.shell && shell.logError) ? shell.logError('Config: duplicate project failed: ' + (e?.message || e)) : console.error('Duplicate project failed:', e); } catch { }
   }
 }
 
@@ -4531,18 +4531,20 @@ async function deleteProject(id) {
   try {
     const ok = window.confirm('Delete this project? This cannot be undone.');
     if (!ok) return;
-    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: deleting project ${id}…`) : console.log('Deleting project', id); } catch {}
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: deleting project ${id}…`) : console.log('Deleting project', id); } catch { }
     await http('DELETE', `/api/projects/${encodeURIComponent(id)}`);
-    try { showToast('Project deleted.', 'success'); } catch {}
+    try { showToast('Project deleted.', 'success'); } catch { }
     // Clear current selection if it was this project
-    try { if (window.shell && shell.getCurrentProjectId && shell.setCurrentProjectId) {
-      if (String(shell.getCurrentProjectId()||'') === String(id)) shell.setCurrentProjectId('');
-    }} catch {}
+    try {
+      if (window.shell && shell.getCurrentProjectId && shell.setCurrentProjectId) {
+        if (String(shell.getCurrentProjectId() || '') === String(id)) shell.setCurrentProjectId('');
+      }
+    } catch { }
     // Refresh views
     try { await loadProjects(); } catch { loadProjects(); }
-    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
+    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
   } catch (e) {
-    try { showToast('Failed to delete project: ' + (e?.message || e), 'danger'); } catch {}
+    try { showToast('Failed to delete project: ' + (e?.message || e), 'danger'); } catch { }
   }
 }
 
@@ -4553,18 +4555,18 @@ function renderInstancesPreview(p) {
   if (!inst || !vms.length) {
     return '<div class="text-muted">Add VMs and set Instances to preview instance names.</div>';
   }
-  const managers = ['vm','guacamole','pools','keycloak','rocketchat','ctfd'];
+  const managers = ['vm', 'guacamole', 'pools', 'keycloak', 'rocketchat', 'ctfd'];
   const statuses = (p.instance_statuses || []);
-  const statusMap = new Map(statuses.map(s => [Number(s.index||0), s]));
+  const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
   let html = '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>#</th><th>Preview VM Names</th><th>Preview Adaptors</th><th>Managers</th></tr></thead><tbody>';
   for (let i = 1; i <= inst; i++) {
     const suffix = `${tag}${i}`;
     const names = vms.map(v => `${v.name}${suffix}`);
-    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors||[]).map(a => `${a}${suffix}`)));
+    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors || []).map(a => `${a}${suffix}`)));
     const st = statusMap.get(i) || {};
     const mgr = st.managers || {};
     const mgrBadges = managers.map(m => badgeForStatus(m, mgr[m])).join(' ');
-    html += `<tr><td>${i}</td><td>${names.map(escHtml).join('<br>')}</td><td>${adaptors.map(escHtml).join('<br>')||'<span class="text-muted">—</span>'}</td><td>${mgrBadges}</td></tr>`;
+    html += `<tr><td>${i}</td><td>${names.map(escHtml).join('<br>')}</td><td>${adaptors.map(escHtml).join('<br>') || '<span class="text-muted">—</span>'}</td><td>${mgrBadges}</td></tr>`;
   }
   html += '</tbody></table></div>';
   html += '<div class="text-muted small">Names are concatenated with the Tag and an incremental number to ensure uniqueness per instance.</div>';
@@ -4599,12 +4601,12 @@ function onListItemEdit(listId, inputEl) {
       inputEl.classList.toggle('is-invalid', !valid);
       if (!valid) showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger');
     }
-  } catch {}
+  } catch { }
   // Auto-save after edits (debounced)
   try {
-  const m = String(listId).match(/^vm-(.+)-(\d+)-/);
+    const m = String(listId).match(/^vm-(.+)-(\d+)-/);
     if (m) debounceVmSave(m[1], Number(m[2]), 600);
-  } catch {}
+  } catch { }
 }
 
 // Handle Remove button clicks for dynamic lists
@@ -4612,11 +4614,11 @@ function removeListItem(listId, btnEl) {
   try {
     const li = btnEl && (btnEl.closest ? btnEl.closest('li') : null);
     if (li) li.remove();
-  } catch {}
+  } catch { }
   try {
-  const m = String(listId).match(/^vm-(.+)-(\d+)-/);
+    const m = String(listId).match(/^vm-(.+)-(\d+)-/);
     if (m) debounceVmSave(m[1], Number(m[2]), 200);
-  } catch {}
+  } catch { }
 }
 
 function onVmNameInput(pid) {
@@ -4625,9 +4627,9 @@ function onVmNameInput(pid) {
     const btn = document.getElementById(`btn-add-vm-${pid}`);
     const val = (input?.value || '').trim();
     const ok = !!val && isValidVmName(val);
-    if (input) input.classList.toggle('is-invalid', !ok && val.length>0);
+    if (input) input.classList.toggle('is-invalid', !ok && val.length > 0);
     if (btn) btn.disabled = !ok;
-  } catch {}
+  } catch { }
 }
 
 function onAdaptorInput(pid, idx, el) {
@@ -4636,9 +4638,9 @@ function onAdaptorInput(pid, idx, el) {
     const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
     const v = (input?.value || '').trim();
     const ok = /^[A-Za-z]{1,8}$/.test(v);
-    if (input) input.classList.toggle('is-invalid', !ok && v.length>0);
+    if (input) input.classList.toggle('is-invalid', !ok && v.length > 0);
     if (btn) btn.disabled = !ok;
-  } catch {}
+  } catch { }
 }
 
 // Allow pressing Enter in adaptor input to add when valid
@@ -4651,7 +4653,7 @@ function onAdaptorKeydown(pid, idx, ev) {
         addListItem(`vm-${pid}-${idx}-nets-list`, `vm-${pid}-${idx}-nets-input`);
       }
     }
-  } catch {}
+  } catch { }
 }
 
 // Strengthen Add list item to enforce adaptor validation
@@ -4669,11 +4671,11 @@ function addListItem(listId, inputId) {
       return;
     }
     // Prevent duplicates (case-insensitive) within the same VM list
-    const existing = Array.from(list.querySelectorAll('input')).map(i => (i.value||'').trim().toLowerCase());
+    const existing = Array.from(list.querySelectorAll('input')).map(i => (i.value || '').trim().toLowerCase());
     if (existing.includes(val.toLowerCase())) {
-      try { showToast('Adaptor already added for this VM.', 'warning'); } catch {}
+      try { showToast('Adaptor already added for this VM.', 'warning'); } catch { }
       input.value = '';
-  const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
+      const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
       if (pid && idx) {
         const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
         if (btn) btn.disabled = true;
@@ -4689,19 +4691,19 @@ function addListItem(listId, inputId) {
   input.classList.remove('is-invalid');
   // Debounce save for VM lists
   try {
-  const m = String(listId).match(/^vm-(.+)-(\d+)-/);
+    const m = String(listId).match(/^vm-(.+)-(\d+)-/);
     if (m) debounceVmSave(m[1], Number(m[2]), 300);
-  } catch {}
+  } catch { }
   // Disable Add button until next valid input
   try {
     if (String(listId).includes('-nets-list')) {
-  const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
+      const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
       if (pid && idx) {
         const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
         if (btn) btn.disabled = true;
       }
     }
-  } catch {}
+  } catch { }
 }
 
 async function addVM(id) {
@@ -4716,52 +4718,52 @@ async function addVM(id) {
     return;
   }
   try {
-  try { shell.beginActionContext('Add VM'); } catch {}
-    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: adding VM ${name}`) : console.log('Adding VM', name); } catch {}
-  try { shell.step('Sending POST request'); } catch {}
+    try { shell.beginActionContext('Add VM'); } catch { }
+    try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: adding VM ${name}`) : console.log('Adding VM', name); } catch { }
+    try { shell.step('Sending POST request'); } catch { }
     await http('POST', `/api/projects/${id}/vms`, { name });
-  try { shell.step('Server acknowledged VM add'); } catch {}
-    el.value='';
+    try { shell.step('Server acknowledged VM add'); } catch { }
+    el.value = '';
     el.classList.remove('is-invalid');
     const btn = document.getElementById(`btn-add-vm-${id}`);
     if (btn) btn.disabled = true;
-  try { shell.step('Cleared form input'); } catch {}
+    try { shell.step('Cleared form input'); } catch { }
     loadProjects();
-  try { shell.step('Reloaded projects'); } catch {}
-    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
-  try { shell.step('Sidebar refresh requested'); } catch {}
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: VM added') : console.log('VM added'); } catch {}
-  try { shell.endActionContext(true); } catch {}
+    try { shell.step('Reloaded projects'); } catch { }
+    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
+    try { shell.step('Sidebar refresh requested'); } catch { }
+    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: VM added') : console.log('VM added'); } catch { }
+    try { shell.endActionContext(true); } catch { }
   }
-  catch (e) { try { showToast('Error adding VM: ' + e.message, 'danger'); } catch { alert('Error adding VM: ' + e.message); } try { (window.shell && shell.logError) ? shell.logError('Config: add VM failed: ' + e.message) : console.error('Add VM failed:', e); } catch {} }
-  try { shell.endActionContext(false); } catch {}
+  catch (e) { try { showToast('Error adding VM: ' + e.message, 'danger'); } catch { alert('Error adding VM: ' + e.message); } try { (window.shell && shell.logError) ? shell.logError('Config: add VM failed: ' + e.message) : console.error('Add VM failed:', e); } catch { } }
+  try { shell.endActionContext(false); } catch { }
 }
 
 async function removeVM(id, name) {
   try {
-    try { (window.shell && shell.logWarn) ? shell.logWarn(`Config: removing VM ${name}`) : console.warn('Removing VM', name); } catch {}
+    try { (window.shell && shell.logWarn) ? shell.logWarn(`Config: removing VM ${name}`) : console.warn('Removing VM', name); } catch { }
     await http('DELETE', `/api/projects/${id}/vms/${encodeURIComponent(name)}`);
     loadProjects();
-    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: VM removed') : console.log('VM removed'); } catch {}
+    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
+    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: VM removed') : console.log('VM removed'); } catch { }
   }
-  catch (e) { alert('Error removing VM: ' + e.message); try { (window.shell && shell.logError) ? shell.logError('Config: remove VM failed: ' + e.message) : console.error('Remove VM failed:', e); } catch {} }
+  catch (e) { alert('Error removing VM: ' + e.message); try { (window.shell && shell.logError) ? shell.logError('Config: remove VM failed: ' + e.message) : console.error('Remove VM failed:', e); } catch { } }
 }
 
-async function saveVM(id, name, fields, opts={}) {
+async function saveVM(id, name, fields, opts = {}) {
   const silent = !!opts.silent;
   try {
-    if(!silent) { try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: saving VM ${name}`) : console.log('Saving VM', name); } catch {} }
+    if (!silent) { try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: saving VM ${name}`) : console.log('Saving VM', name); } catch { } }
     await http('PATCH', `/api/projects/${id}/vms/${encodeURIComponent(name)}`, fields);
-    if(!silent){
+    if (!silent) {
       loadProjects();
-      try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
-      try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: VM saved') : console.log('VM saved'); } catch {}
+      try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: VM saved') : console.log('VM saved'); } catch { }
     }
   }
   catch (e) {
-    if(!silent) alert('Error saving VM: ' + e.message);
-    try { (window.shell && shell.logError) ? shell.logError('Config: save VM failed: ' + e.message) : console.error('Save VM failed:', e); } catch {}
+    if (!silent) alert('Error saving VM: ' + e.message);
+    try { (window.shell && shell.logError) ? shell.logError('Config: save VM failed: ' + e.message) : console.error('Save VM failed:', e); } catch { }
   }
 }
 
@@ -4804,10 +4806,10 @@ async function vmNameKey(pid, idx, ev) {
     try {
       await http('POST', `/api/projects/${pid}/vms/${encodeURIComponent(oldName)}/rename`, { new_name: newName });
       loadProjects();
-  try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Config: VM renamed ${oldName} → ${newName}`) : console.log('VM renamed', oldName, '->', newName); } catch {}
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Config: VM renamed ${oldName} → ${newName}`) : console.log('VM renamed', oldName, '->', newName); } catch { }
     } catch (e) {
       alert('Error renaming VM: ' + e.message);
-  try { (window.shell && shell.logError) ? shell.logError('Config: VM rename failed: ' + e.message) : console.error('VM rename failed:', e); } catch {}
+      try { (window.shell && shell.logError) ? shell.logError('Config: VM rename failed: ' + e.message) : console.error('VM rename failed:', e); } catch { }
       input.classList.add('d-none');
       disp.classList.remove('d-none');
       input.value = oldName;
@@ -4815,32 +4817,32 @@ async function vmNameKey(pid, idx, ev) {
   }
 }
 
-function getMaterialInputs(pid){
+function getMaterialInputs(pid) {
   return {
     files: document.getElementById(`file-${pid}`),
     folder: document.getElementById(`folder-${pid}`),
   };
 }
 
-function openMaterialPicker(pid, kind){
+function openMaterialPicker(pid, kind) {
   try {
     const input = document.getElementById(`${kind}-${pid}`);
     if (input) input.click();
-  } catch {}
+  } catch { }
 }
 
-function getMaterialPendingStore(pid){
+function getMaterialPendingStore(pid) {
   const key = String(pid ?? '');
   if (!window.MATERIAL_PENDING[key]) window.MATERIAL_PENDING[key] = [];
   return window.MATERIAL_PENDING[key];
 }
 
-function materialKeyFor(file, relPath){
+function materialKeyFor(file, relPath) {
   const pathPart = relPath ? String(relPath) : '';
   return `${pathPart}::${file.name}::${file.size}::${file.lastModified}`;
 }
 
-function materialFormatSize(bytes){
+function materialFormatSize(bytes) {
   const num = Number(bytes);
   if (!Number.isFinite(num) || num <= 0) return '';
   const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
@@ -4854,7 +4856,7 @@ function materialFormatSize(bytes){
   return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
-function getPendingMaterialFiles(pid){
+function getPendingMaterialFiles(pid) {
   const store = getMaterialPendingStore(pid);
   const files = store.map(entry => entry.file);
   const folderCount = store.reduce((count, entry) => count + (entry.relativePath ? 1 : 0), 0);
@@ -4862,7 +4864,7 @@ function getPendingMaterialFiles(pid){
   return files;
 }
 
-function renderMaterialPending(pid){
+function renderMaterialPending(pid) {
   const select = document.getElementById(`mat-pending-${pid}`);
   if (!select) return;
   const store = getMaterialPendingStore(pid);
@@ -4880,7 +4882,7 @@ function renderMaterialPending(pid){
   onPendingMaterialsSelectionChange(pid);
 }
 
-function stageMaterialSelection(pid){
+function stageMaterialSelection(pid) {
   const inputs = getMaterialInputs(pid);
   const store = getMaterialPendingStore(pid);
   const existingKeys = new Set(store.map(entry => entry.key));
@@ -4900,7 +4902,7 @@ function stageMaterialSelection(pid){
     if (inputs.files?.files?.length) {
       Array.from(inputs.files.files).forEach(file => pushFile(file, ''));
     }
-  } catch {}
+  } catch { }
   try {
     if (inputs.folder?.files?.length) {
       Array.from(inputs.folder.files).forEach(file => {
@@ -4908,12 +4910,12 @@ function stageMaterialSelection(pid){
         pushFile(file, rel);
       });
     }
-  } catch {}
+  } catch { }
   if (inputs.files) {
-    try { inputs.files.value = ''; } catch {}
+    try { inputs.files.value = ''; } catch { }
   }
   if (inputs.folder) {
-    try { inputs.folder.value = ''; } catch {}
+    try { inputs.folder.value = ''; } catch { }
   }
   if (added.length) {
     store.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
@@ -4921,7 +4923,7 @@ function stageMaterialSelection(pid){
   return added.length;
 }
 
-function onPendingMaterialsSelectionChange(pid){
+function onPendingMaterialsSelectionChange(pid) {
   const select = document.getElementById(`mat-pending-${pid}`);
   const btn = document.getElementById(`btn-remove-pending-${pid}`);
   if (!btn) return;
@@ -4933,7 +4935,7 @@ function onPendingMaterialsSelectionChange(pid){
   btn.disabled = select.selectedOptions.length === 0;
 }
 
-function removeSelectedPendingMaterials(pid){
+function removeSelectedPendingMaterials(pid) {
   const select = document.getElementById(`mat-pending-${pid}`);
   if (!select) return;
   const values = Array.from(select.selectedOptions || []).map(opt => opt.value).filter(Boolean);
@@ -4953,7 +4955,7 @@ function removeSelectedPendingMaterials(pid){
   }
 }
 
-function onExistingMaterialsSelectionChange(pid){
+function onExistingMaterialsSelectionChange(pid) {
   const select = document.getElementById(`mat-existing-${pid}`);
   const btn = document.getElementById(`btn-remove-existing-${pid}`);
   if (!btn) return;
@@ -4964,7 +4966,7 @@ function onExistingMaterialsSelectionChange(pid){
   btn.disabled = select.selectedOptions.length === 0;
 }
 
-async function removeSelectedExistingMaterials(pid){
+async function removeSelectedExistingMaterials(pid) {
   const select = document.getElementById(`mat-existing-${pid}`);
   if (!select) return;
   const names = Array.from(select.selectedOptions || []).map(opt => opt.value).filter(Boolean);
@@ -4972,7 +4974,7 @@ async function removeSelectedExistingMaterials(pid){
     try { showToast('Select materials to remove first.', 'warning'); } catch { alert('Select materials to remove first.'); }
     return;
   }
-  const proj = (window.PROJ_CACHE||{})[pid] || {};
+  const proj = (window.PROJ_CACHE || {})[pid] || {};
   const projectName = proj.name || pid;
   const count = names.length;
   const confirmMsg = `Remove ${count} selected material${count === 1 ? '' : 's'} from this project? This will delete the files from the server.`;
@@ -4982,12 +4984,12 @@ async function removeSelectedExistingMaterials(pid){
     if (window.shell && typeof window.shell.beginActionContext === 'function') {
       window.shell.beginActionContext('Remove materials');
     }
-  } catch {}
+  } catch { }
   try {
     if (window.shell && typeof window.shell.logWarn === 'function') {
       window.shell.logWarn(`Config: removing ${count} selected material${count === 1 ? '' : 's'} for ${projectName}`);
     }
-  } catch {}
+  } catch { }
   const queueResult = await runQueued(`Remove selected materials for ${projectName}`, async () => {
     for (const fname of names) {
       try {
@@ -4995,7 +4997,7 @@ async function removeSelectedExistingMaterials(pid){
           if (window.shell && typeof window.shell.step === 'function') {
             window.shell.step(`Removing ${fname}`);
           }
-        } catch {}
+        } catch { }
         await http('DELETE', `/api/projects/${pid}/materials/${encodeURIComponent(fname)}`);
       } catch (err) {
         errors.push({ name: fname, error: err });
@@ -5004,7 +5006,7 @@ async function removeSelectedExistingMaterials(pid){
   }, { projectId: pid });
   if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
     try { showToast('Material removal canceled.', 'warning'); } catch { alert('Material removal canceled.'); }
-    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch { }
     return;
   }
   try { await loadProjects(); } catch { loadProjects(); }
@@ -5012,7 +5014,7 @@ async function removeSelectedExistingMaterials(pid){
     if (window.shell && typeof window.shell.refreshSidebar === 'function') {
       window.shell.refreshSidebar('config');
     }
-  } catch {}
+  } catch { }
   if (errors.length) {
     const failedNames = errors.map(e => e.name || 'unknown').join(', ');
     try { showToast(`Some materials failed to delete: ${failedNames}`, 'danger'); } catch { alert(`Some materials failed to delete: ${failedNames}`); }
@@ -5020,8 +5022,8 @@ async function removeSelectedExistingMaterials(pid){
       if (window.shell && typeof window.shell.logError === 'function') {
         window.shell.logError(`Config: remove materials failed for ${failedNames}`);
       }
-    } catch {}
-    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    } catch { }
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch { }
     onExistingMaterialsSelectionChange(pid);
     return;
   }
@@ -5030,18 +5032,18 @@ async function removeSelectedExistingMaterials(pid){
     if (window.shell && typeof window.shell.logSuccess === 'function') {
       window.shell.logSuccess(`Config: removed selected materials for ${projectName}`);
     }
-  } catch {}
+  } catch { }
   onExistingMaterialsSelectionChange(pid);
   const removeAllBtn = document.getElementById(`btn-remove-mat-${pid}`);
-  if (removeAllBtn) removeAllBtn.disabled = !((window.PROJ_CACHE||{})[pid]?.materials || []).length;
-  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch {}
+  if (removeAllBtn) removeAllBtn.disabled = !((window.PROJ_CACHE || {})[pid]?.materials || []).length;
+  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch { }
 }
 
-function collectMaterialFiles(pid){
+function collectMaterialFiles(pid) {
   return getPendingMaterialFiles(pid);
 }
 
-function updateMaterialSelectionSummary(pid, files){
+function updateMaterialSelectionSummary(pid, files) {
   const lbl = document.getElementById(`mat-selection-summary-${pid}`);
   const btn = document.getElementById(`btn-upload-mat-${pid}`);
   const folderLbl = document.getElementById(`mat-folder-summary-${pid}`);
@@ -5061,24 +5063,24 @@ function updateMaterialSelectionSummary(pid, files){
   }
 }
 
-function onMaterialSelectionChange(pid){
+function onMaterialSelectionChange(pid) {
   stageMaterialSelection(pid);
   renderMaterialPending(pid);
   const files = collectMaterialFiles(pid);
   updateMaterialSelectionSummary(pid, files);
 }
 
-function clearMaterialSelections(pid){
+function clearMaterialSelections(pid) {
   const inputs = getMaterialInputs(pid);
-  try { if (inputs.files) inputs.files.value = ''; } catch {}
-  try { if (inputs.folder) inputs.folder.value = ''; } catch {}
+  try { if (inputs.files) inputs.files.value = ''; } catch { }
+  try { if (inputs.folder) inputs.folder.value = ''; } catch { }
   window.MATERIAL_PENDING[pid] = [];
   renderMaterialPending(pid);
   updateMaterialSelectionSummary(pid, []);
   onPendingMaterialsSelectionChange(pid);
 }
 
-function clearMaterialSelection(pid){
+function clearMaterialSelection(pid) {
   clearMaterialSelections(pid);
   try { showToast('Material selection cleared.', 'info'); } catch { alert('Material selection cleared.'); }
 }
@@ -5107,7 +5109,7 @@ async function uploadMaterial(id) {
       return;
     }
   }
-  const proj = (window.PROJ_CACHE||{})[id] || {};
+  const proj = (window.PROJ_CACHE || {})[id] || {};
   const label = files.length === 1 ? `Uploading 1 material` : `Uploading ${files.length} materials`;
   const projectName = proj.name || id;
   const errors = [];
@@ -5117,14 +5119,14 @@ async function uploadMaterial(id) {
     if (window.shell && typeof window.shell.beginActionContext === 'function') {
       window.shell.beginActionContext('Upload materials');
     }
-  } catch {}
+  } catch { }
   try {
     if (window.shell && typeof window.shell.logInfo === 'function') {
       window.shell.logInfo(`Config: ${label} for ${projectName}`);
     } else {
       console.log('Uploading materials', projectName, files.length);
     }
-  } catch {}
+  } catch { }
   const queueResult = await runQueued(`Upload materials for ${projectName}`, async () => {
     for (let i = 0; i < files.length; i += 1) {
       const file = files[i];
@@ -5139,7 +5141,7 @@ async function uploadMaterial(id) {
           } else {
             console.log('Uploading material', rel || file.name);
           }
-        } catch {}
+        } catch { }
         await http('POST', `/api/projects/${id}/materials`, fd);
       } catch (e) {
         errors.push({ file, error: e });
@@ -5154,13 +5156,13 @@ async function uploadMaterial(id) {
       } else {
         console.warn('Material upload canceled');
       }
-    } catch {}
-    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    } catch { }
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch { }
     try { showToast('Material upload canceled.', 'warning'); } catch { alert('Material upload canceled.'); }
     return;
   }
   try { await loadProjects(); } catch { loadProjects(); }
-  try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
+  try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
   if (errors.length) {
     const failedNames = errors.map(e => e.file?.name || 'unknown').join(', ');
     try { showToast(`Some materials failed to upload: ${failedNames}`, 'danger'); } catch { alert(`Some materials failed to upload: ${failedNames}`); }
@@ -5170,8 +5172,8 @@ async function uploadMaterial(id) {
       } else {
         console.error('Material upload failed for', failedNames);
       }
-    } catch {}
-    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    } catch { }
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch { }
     return;
   }
   try { showToast('Materials uploaded.', 'success'); } catch { alert('Materials uploaded.'); }
@@ -5181,12 +5183,12 @@ async function uploadMaterial(id) {
     } else {
       console.log('Materials uploaded');
     }
-  } catch {}
-  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch {}
+  } catch { }
+  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch { }
 }
 
 async function removeAllMaterials(pid) {
-  const proj = (window.PROJ_CACHE||{})[pid] || {};
+  const proj = (window.PROJ_CACHE || {})[pid] || {};
   const mats = Array.isArray(proj.materials) ? [...proj.materials] : [];
   if (!mats.length) {
     try { showToast('No materials to remove.', 'info'); } catch { alert('No materials to remove.'); }
@@ -5202,12 +5204,12 @@ async function removeAllMaterials(pid) {
     if (window.shell && typeof window.shell.beginActionContext === 'function') {
       window.shell.beginActionContext('Remove materials');
     }
-  } catch {}
+  } catch { }
   try {
     if (window.shell && typeof window.shell.logWarn === 'function') {
       window.shell.logWarn(`Config: removing ${count} material${count === 1 ? '' : 's'} for ${projectName}`);
     }
-  } catch {}
+  } catch { }
   const queueResult = await runQueued(`Remove materials for ${projectName}`, async () => {
     for (const fname of mats) {
       try {
@@ -5215,7 +5217,7 @@ async function removeAllMaterials(pid) {
           if (window.shell && typeof window.shell.step === 'function') {
             window.shell.step(`Removing ${fname}`);
           }
-        } catch {}
+        } catch { }
         await http('DELETE', `/api/projects/${pid}/materials/${encodeURIComponent(fname)}`);
       } catch (e) {
         errors.push({ name: fname, error: e });
@@ -5224,7 +5226,7 @@ async function removeAllMaterials(pid) {
   }, { projectId: pid });
   if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
     try { showToast('Material removal canceled.', 'warning'); } catch { alert('Material removal canceled.'); }
-    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch { }
     return;
   }
   try { await loadProjects(); } catch { loadProjects(); }
@@ -5232,7 +5234,7 @@ async function removeAllMaterials(pid) {
     if (window.shell && typeof window.shell.refreshSidebar === 'function') {
       window.shell.refreshSidebar('config');
     }
-  } catch {}
+  } catch { }
   clearMaterialSelections(pid);
   onExistingMaterialsSelectionChange(pid);
   if (errors.length) {
@@ -5242,12 +5244,12 @@ async function removeAllMaterials(pid) {
       if (window.shell && typeof window.shell.logError === 'function') {
         window.shell.logError(`Config: remove materials failed for ${failedNames}`);
       }
-    } catch {}
-    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch {}
+    } catch { }
+    try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(false); } catch { }
     const removeBtn = document.getElementById(`btn-remove-mat-${pid}`);
     if (removeBtn) removeBtn.disabled = false;
     const removeSelectedBtn = document.getElementById(`btn-remove-existing-${pid}`);
-    if (removeSelectedBtn) removeSelectedBtn.disabled = !((window.PROJ_CACHE||{})[pid]?.materials || []).length;
+    if (removeSelectedBtn) removeSelectedBtn.disabled = !((window.PROJ_CACHE || {})[pid]?.materials || []).length;
     return;
   }
   try { showToast('All materials removed.', 'success'); } catch { alert('All materials removed.'); }
@@ -5255,29 +5257,29 @@ async function removeAllMaterials(pid) {
     if (window.shell && typeof window.shell.logSuccess === 'function') {
       window.shell.logSuccess(`Config: removed materials for ${projectName}`);
     }
-  } catch {}
+  } catch { }
   const removeBtn = document.getElementById(`btn-remove-mat-${pid}`);
   if (removeBtn) removeBtn.disabled = true;
   const removeSelectedBtn = document.getElementById(`btn-remove-existing-${pid}`);
   if (removeSelectedBtn) removeSelectedBtn.disabled = true;
-  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch {}
+  try { if (window.shell && typeof window.shell.endActionContext === 'function') window.shell.endActionContext(true); } catch { }
 }
 
 async function deleteMaterial(id, fname) {
   try {
-    try { (window.shell && shell.logWarn) ? shell.logWarn(`Config: deleting material ${fname}`) : console.warn('Deleting material', fname); } catch {}
+    try { (window.shell && shell.logWarn) ? shell.logWarn(`Config: deleting material ${fname}`) : console.warn('Deleting material', fname); } catch { }
     await http('DELETE', `/api/projects/${id}/materials/${encodeURIComponent(fname)}`);
     loadProjects();
-    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch {}
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: material deleted') : console.log('Material deleted'); } catch {}
+    try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
+    try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: material deleted') : console.log('Material deleted'); } catch { }
   }
-  catch (e) { alert('Error deleting material: ' + e.message); try { (window.shell && shell.logError) ? shell.logError('Config: delete material failed: ' + e.message) : console.error('Delete material failed:', e); } catch {} }
+  catch (e) { alert('Error deleting material: ' + e.message); try { (window.shell && shell.logError) ? shell.logError('Config: delete material failed: ' + e.message) : console.error('Delete material failed:', e); } catch { } }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  try { wireSettingsModal(); } catch {}
+  try { wireSettingsModal(); } catch { }
   if (document.getElementById('projects')) {
-    try { loadProjects(); } catch {}
+    try { loadProjects(); } catch { }
   }
 });
 
@@ -5290,9 +5292,9 @@ function openExportOptions(pid) {
       try { showToast('Export is disabled in remote mode.', 'warning'); } catch { alert('Export is disabled in remote mode.'); }
       return;
     }
-  } catch {}
+  } catch { }
   EXPORT_CONTEXT.pid = pid;
-  try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: open export options for ${pid}`) : console.log('Open export options', pid); } catch {}
+  try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: open export options for ${pid}`) : console.log('Open export options', pid); } catch { }
   const modalEl = document.getElementById('exportOptionsModal');
   if (!modalEl || !window.bootstrap) { window.location.href = `/api/projects/${encodeURIComponent(pid)}/export`; return; }
   // Default to include both
@@ -5300,13 +5302,13 @@ function openExportOptions(pid) {
     const c = document.getElementById('exp-creds');
     const v = document.getElementById('exp-vms');
     const a = document.getElementById('exp-notify-audio');
-  const warn = document.getElementById('exp-vms-warning');
+    const warn = document.getElementById('exp-vms-warning');
     if (c) c.checked = true;
     if (v) v.checked = true;
     if (a) a.checked = true;
-  if (warn && v) warn.style.display = v.checked ? 'block' : 'none';
-  if (v && warn) v.onchange = () => { warn.style.display = v.checked ? 'block' : 'none'; };
-  } catch {}
+    if (warn && v) warn.style.display = v.checked ? 'block' : 'none';
+    if (v && warn) v.onchange = () => { warn.style.display = v.checked ? 'block' : 'none'; };
+  } catch { }
   const m = new bootstrap.Modal(modalEl);
   m.show();
   const dl = document.getElementById('exp-download');
@@ -5330,7 +5332,7 @@ function openExportOptions(pid) {
           if (!proceed) { return; }
         }
         if (includeVms) {
-          try { m.hide(); } catch {}
+          try { m.hide(); } catch { }
           await gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms, includeNotifyAudio });
         } else {
           try {
@@ -5338,16 +5340,16 @@ function openExportOptions(pid) {
               window.showActionProgress('Export', 'Preparing download…');
               if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
             }
-          } catch {}
+          } catch { }
           const a = document.createElement('a');
           a.href = `/api/projects/${encodeURIComponent(EXPORT_CONTEXT.pid)}/export?includeCreds=${includeCreds}&includeVms=${includeVms}&includeNotifyAudio=${includeNotifyAudio}`;
           // Give the modal a moment to render before starting the download
-          setTimeout(() => { try { a.click(); } catch {} }, 50);
-          try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: export started') : console.log('Export started'); } catch {}
-          try { m.hide(); } catch {}
+          setTimeout(() => { try { a.click(); } catch { } }, 50);
+          try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: export started') : console.log('Export started'); } catch { }
+          try { m.hide(); } catch { }
           // Best-effort: hide progress shortly after initiating download
           setTimeout(() => {
-            try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+            try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
           }, 1200);
         }
       } finally {
@@ -5362,27 +5364,54 @@ function openExportOptions(pid) {
   }
 }
 
+function _isMissingManifestError(err) {
+  try {
+    const code = err?.body?.code || err?.body?.errorCode || err?.code;
+    if (String(code || '').toLowerCase() === 'missing_manifest') return true;
+    const msg = String(err?.message || err?.body?.error || '').toLowerCase();
+    return msg.includes('missing project.json') || msg.includes('missing manifest');
+  } catch {
+    return false;
+  }
+}
+
+function _confirmBestEffortImport(file) {
+  const name = (file && file.name) ? file.name : 'archive';
+  const msg = `The archive "${name}" does not include project.json.\n\nWe can try a best-effort import (VMs from backups/ only). Continue?`;
+  try { return confirm(msg); } catch { return false; }
+}
+
+function _makeImportCancelledError() {
+  const err = new Error('Import cancelled by user');
+  err.code = 'import_cancelled';
+  return err;
+}
+
 async function performProjectImport(options = {}) {
   try {
     if (window.shell && shell.isRemote && shell.isRemote()) {
       try { showToast('Import is disabled in remote mode.', 'warning'); } catch { alert('Import is disabled in remote mode.'); }
       return false;
     }
-  } catch {}
+  } catch { }
   const input = document.getElementById('import-file');
   if (!input || !input.files || !input.files[0]) return false;
   const file = input.files[0];
-  const fd = new FormData();
-  fd.append('file', file);
-  if (options.includeCreds !== undefined) fd.append('includeCreds', options.includeCreds ? 'true' : 'false');
-  if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
-  if (options.includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', options.includeNotifyAudio ? 'true' : 'false');
-  if (options.importAsTemplates !== undefined) fd.append('importAsTemplates', options.importAsTemplates ? 'true' : 'false');
+  const buildFormData = (allowBestEffort = false) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (options.includeCreds !== undefined) fd.append('includeCreds', options.includeCreds ? 'true' : 'false');
+    if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
+    if (options.includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', options.includeNotifyAudio ? 'true' : 'false');
+    if (options.importAsTemplates !== undefined) fd.append('importAsTemplates', options.importAsTemplates ? 'true' : 'false');
+    if (allowBestEffort) fd.append('allowBestEffort', 'true');
+    return fd;
+  };
   const label = `Import project: ${file.name}`;
 
   // Publish progress into the global queue/progress system so the user can hide/show
   // via the Queue dock, just like other tasks.
-  try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Import', 'Uploading…'); } catch {}
+  try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Import', 'Uploading…'); } catch { }
 
   // Prefer the dedicated Import Progress modal (scrolling log) when available.
   const modalEl = document.getElementById('importProgressModal');
@@ -5394,11 +5423,11 @@ async function performProjectImport(options = {}) {
   if (hasImportModal) {
     try {
       modalInst = new window.bootstrap.Modal(modalEl);
-      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow','0'); }
+      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow', '0'); }
       if (stat) stat.textContent = 'Uploading…';
       if (log) log.textContent = 'Preparing upload…';
       modalInst.show();
-    } catch {}
+    } catch { }
   } else {
     // Fallback to action progress (only if import modal isn't available).
     try {
@@ -5406,103 +5435,127 @@ async function performProjectImport(options = {}) {
         window.showActionProgress('Import', 'Uploading…');
         if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
       }
-    } catch {}
+    } catch { }
   }
   try {
     if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(true);
-  } catch {}
+  } catch { }
   let resp = null;
   try {
     await runQueued(label, async () => {
       // Use XHR for legacy import so we can show byte upload progress.
-      resp = await _xhrPostFormData('/api/projects/import', fd, {
-        onProgress: (pct, loaded, total) => {
-          const mapped = Math.max(0, Math.min(35, Math.round((pct * 35) / 100)));
-          const bytes = _fmtByteProgress(loaded, total);
-          const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
-          try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch {}
-          if (hasImportModal) {
-            try {
-              if (bar) { bar.style.width = `${mapped}%`; bar.textContent = `${mapped}%`; bar.setAttribute('aria-valuenow', String(mapped)); }
-              if (stat) stat.textContent = line;
-              if (log) log.textContent = line;
-            } catch {}
-          } else {
-            try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch {}
+      const attemptUpload = async (allowBestEffort) => {
+        return await _xhrPostFormData('/api/projects/import', buildFormData(allowBestEffort), {
+          onProgress: (pct, loaded, total) => {
+            const mapped = Math.max(0, Math.min(35, Math.round((pct * 35) / 100)));
+            const bytes = _fmtByteProgress(loaded, total);
+            const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+            try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch { }
+            if (hasImportModal) {
+              try {
+                if (bar) { bar.style.width = `${mapped}%`; bar.textContent = `${mapped}%`; bar.setAttribute('aria-valuenow', String(mapped)); }
+                if (stat) stat.textContent = line;
+                if (log) log.textContent = line;
+              } catch { }
+            } else {
+              try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch { }
+            }
           }
+        });
+      };
+      try {
+        resp = await attemptUpload(false);
+      } catch (err) {
+        if (_isMissingManifestError(err)) {
+          const ok = _confirmBestEffortImport(file);
+          if (!ok) throw _makeImportCancelledError();
+          resp = await attemptUpload(true);
+        } else {
+          throw err;
         }
-      });
+      }
       if (hasImportModal) {
         try {
-          if (bar) { bar.style.width = '90%'; bar.textContent = '90%'; bar.setAttribute('aria-valuenow','90'); }
+          if (bar) { bar.style.width = '90%'; bar.textContent = '90%'; bar.setAttribute('aria-valuenow', '90'); }
           if (stat) stat.textContent = 'Finalizing…';
           if (log) log.textContent = 'Applying imported configuration…';
-        } catch {}
+        } catch { }
       } else {
-        try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch {}
+        try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch { }
       }
-      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch {}
+      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch { }
     }, { projectId: options.queueKey || 'import' });
   } catch (err) {
+    if (err && err.code === 'import_cancelled') {
+      if (hasImportModal) {
+        try {
+          if (bar) { bar.style.width = '100%'; bar.textContent = 'Cancelled'; bar.setAttribute('aria-valuenow', '100'); bar.classList.remove('progress-bar-animated'); }
+          if (stat) stat.textContent = 'cancelled';
+          if (log) log.textContent = 'Import cancelled.';
+        } catch { }
+      }
+      try { showToast('Import cancelled.', 'warning'); } catch { }
+      return false;
+    }
     if (hasImportModal) {
       try {
-        if (bar) { bar.style.width = '100%'; bar.textContent = 'Error'; bar.setAttribute('aria-valuenow','100'); bar.classList.remove('progress-bar-animated'); }
+        if (bar) { bar.style.width = '100%'; bar.textContent = 'Error'; bar.setAttribute('aria-valuenow', '100'); bar.classList.remove('progress-bar-animated'); }
         if (stat) stat.textContent = 'error';
         if (log) log.textContent = 'Failed to import project: ' + (err?.message || err);
-      } catch {}
+      } catch { }
     }
-    try { showToast('Failed to import project: ' + (err?.message || err), 'danger'); } catch {}
+    try { showToast('Failed to import project: ' + (err?.message || err), 'danger'); } catch { }
     try {
       (window.shell && shell.logError)
         ? shell.logError('Config: import project failed: ' + (err?.message || err))
         : console.error('Import project failed:', err);
-    } catch {}
+    } catch { }
     return false;
   } finally {
     try {
       if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(false);
-    } catch {}
+    } catch { }
     if (!hasImportModal) {
-      try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+      try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
     }
   }
   if (!resp) return false;
-  try { input.value = ''; } catch {}
+  try { input.value = ''; } catch { }
   const importedId = resp?.id || (Array.isArray(resp?.imported) && resp.imported[0]?.id) || '';
   if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') {
-    try { shell.setCurrentProjectId(importedId); } catch {}
+    try { shell.setCurrentProjectId(importedId); } catch { }
   }
-  try { await loadProjects(); } catch {}
+  try { await loadProjects(); } catch { }
   try {
     if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config');
-  } catch {}
-  try { showToast('Project imported.', 'success'); } catch {}
+  } catch { }
+  try { showToast('Project imported.', 'success'); } catch { }
   if (hasImportModal) {
     try {
-      if (bar) { bar.style.width = '100%'; bar.textContent = '100%'; bar.setAttribute('aria-valuenow','100'); bar.classList.remove('progress-bar-animated'); }
+      if (bar) { bar.style.width = '100%'; bar.textContent = '100%'; bar.setAttribute('aria-valuenow', '100'); bar.classList.remove('progress-bar-animated'); }
       if (stat) stat.textContent = 'completed';
       if (log) log.textContent = 'Import completed.';
-    } catch {}
+    } catch { }
   }
-  try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
+  try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
   try {
     (window.shell && shell.logSuccess)
       ? shell.logSuccess('Config: project imported')
       : console.log('Project imported');
-  } catch {}
+  } catch { }
   return true;
 }
 
 // --- Proxmox gating + async import (for VM restores) ---
 
-function _readImportProxCreds(){
+function _readImportProxCreds() {
   try { return JSON.parse(sessionStorage.getItem('toolhub.session.proxmox.import') || '{}'); } catch { return {}; }
 }
-function _writeImportProxCreds(creds){
-  try { sessionStorage.setItem('toolhub.session.proxmox.import', JSON.stringify(creds || {})); } catch {}
+function _writeImportProxCreds(creds) {
+  try { sessionStorage.setItem('toolhub.session.proxmox.import', JSON.stringify(creds || {})); } catch { }
 }
 
-function _ensureHttpsUrl(raw){
+function _ensureHttpsUrl(raw) {
   try {
     const s = (raw || '').trim();
     if (!s) return '';
@@ -5510,7 +5563,7 @@ function _ensureHttpsUrl(raw){
   } catch { return ''; }
 }
 
-function _xhrPostFormData(url, formData, { onProgress } = {}){
+function _xhrPostFormData(url, formData, { onProgress } = {}) {
   return new Promise((resolve, reject) => {
     try {
       const xhr = new XMLHttpRequest();
@@ -5521,7 +5574,7 @@ function _xhrPostFormData(url, formData, { onProgress } = {}){
           if (!onProgress || !ev || !ev.lengthComputable) return;
           const pct = Math.max(0, Math.min(100, Math.round((ev.loaded * 100) / Math.max(ev.total, 1))));
           onProgress(pct, ev.loaded, ev.total);
-        } catch {}
+        } catch { }
       };
       xhr.onload = () => {
         try {
@@ -5545,11 +5598,11 @@ function _xhrPostFormData(url, formData, { onProgress } = {}){
   });
 }
 
-function _fmtBytes(n){
+function _fmtBytes(n) {
   try {
     const v = Number(n);
     if (!Number.isFinite(v) || v < 0) return '0 B';
-    const units = ['B','KB','MB','GB','TB'];
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let x = v;
     let i = 0;
     while (x >= 1024 && i < units.length - 1) { x /= 1024; i += 1; }
@@ -5558,7 +5611,7 @@ function _fmtBytes(n){
   } catch { return '0 B'; }
 }
 
-function _fmtByteProgress(loaded, total){
+function _fmtByteProgress(loaded, total) {
   try {
     const l = Number(loaded);
     const t = Number(total);
@@ -5568,7 +5621,7 @@ function _fmtByteProgress(loaded, total){
   } catch { return ''; }
 }
 
-function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onCancel, onTaskCreated } = {}){
+function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onCancel, onTaskCreated } = {}) {
   return new Promise((resolve, reject) => {
     try {
       if (typeof window.queueRemoteAction !== 'function') {
@@ -5579,10 +5632,10 @@ function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onC
       const entryFn = async () => {
         try {
           const res = await Promise.resolve(fn());
-          try { resolve(res); } catch {}
+          try { resolve(res); } catch { }
           return res;
         } catch (e) {
-          try { reject(e); } catch {}
+          try { reject(e); } catch { }
           throw e;
         }
       };
@@ -5591,17 +5644,17 @@ function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onC
         dedupeKey,
         allowDuplicate,
         onCancel: () => {
-          try { onCancel && onCancel(); } catch {}
+          try { onCancel && onCancel(); } catch { }
           // If cancelled before the task starts, the function never runs;
           // resolve to avoid leaving the UI waiting forever.
           try {
             if (!entry || !entry.startedAt) resolve({ status: 'cancelled' });
-          } catch {}
+          } catch { }
         }
       });
-      try { if (entry && onTaskCreated) onTaskCreated(entry); } catch {}
+      try { if (entry && onTaskCreated) onTaskCreated(entry); } catch { }
       if (!entry) {
-        try { resolve(null); } catch {}
+        try { resolve(null); } catch { }
       }
     } catch (e) {
       reject(e);
@@ -5609,26 +5662,30 @@ function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onC
   });
 }
 
-async function _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox }){
-  const fd = new FormData();
-  fd.append('file', file);
-  fd.append('includeCreds', includeCreds ? 'true' : 'false');
-  fd.append('includeVms', includeVms ? 'true' : 'false');
-  if (includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', includeNotifyAudio ? 'true' : 'false');
-  if (importAsTemplates !== undefined) fd.append('importAsTemplates', importAsTemplates ? 'true' : 'false');
-  if (prox) {
-    if (prox.baseUrl) fd.append('baseUrl', String(prox.baseUrl));
-    if (prox.apiPort !== undefined && prox.apiPort !== null && String(prox.apiPort) !== '') fd.append('apiPort', String(prox.apiPort));
-    if (prox.sshPort !== undefined && prox.sshPort !== null && String(prox.sshPort) !== '') fd.append('sshPort', String(prox.sshPort));
-    if (prox.username) fd.append('username', String(prox.username));
-    if (prox.password) fd.append('password', String(prox.password));
-    if (prox.verifySSL !== undefined) fd.append('verifySSL', prox.verifySSL ? 'true' : 'false');
-  }
+async function _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox }) {
+  const buildFormData = (allowBestEffort = false) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('includeCreds', includeCreds ? 'true' : 'false');
+    fd.append('includeVms', includeVms ? 'true' : 'false');
+    if (includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', includeNotifyAudio ? 'true' : 'false');
+    if (importAsTemplates !== undefined) fd.append('importAsTemplates', importAsTemplates ? 'true' : 'false');
+    if (allowBestEffort) fd.append('allowBestEffort', 'true');
+    if (prox) {
+      if (prox.baseUrl) fd.append('baseUrl', String(prox.baseUrl));
+      if (prox.apiPort !== undefined && prox.apiPort !== null && String(prox.apiPort) !== '') fd.append('apiPort', String(prox.apiPort));
+      if (prox.sshPort !== undefined && prox.sshPort !== null && String(prox.sshPort) !== '') fd.append('sshPort', String(prox.sshPort));
+      if (prox.username) fd.append('username', String(prox.username));
+      if (prox.password) fd.append('password', String(prox.password));
+      if (prox.verifySSL !== undefined) fd.append('verifySSL', prox.verifySSL ? 'true' : 'false');
+    }
+    return fd;
+  };
 
   const label = `Import project: ${file?.name || 'archive'}`;
 
   // Publish progress state for the Queue dock (do not auto-open the generic modal).
-  try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Import', 'Uploading…'); } catch {}
+  try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Import', 'Uploading…'); } catch { }
 
   // Optional rich import progress modal (shows full backend logs).
   const modalEl = document.getElementById('importProgressModal');
@@ -5640,11 +5697,11 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
   if (hasImportModal) {
     try {
       modalInst = new window.bootstrap.Modal(modalEl);
-      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow','0'); }
+      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow', '0'); }
       if (stat) stat.textContent = 'Uploading…';
       if (log) log.textContent = 'Waiting…';
       modalInst.show();
-    } catch {}
+    } catch { }
   }
 
   // Only use action progress as a fallback when the Import Progress modal isn't present.
@@ -5654,11 +5711,11 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
         window.showActionProgress('Import', 'Uploading…');
         if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
       }
-    } catch {}
+    } catch { }
   }
 
   const state = { jobId: '', taskId: null, cancelRequested: false };
-  try { window.__ACTIVE_IMPORT_STATE__ = state; } catch {}
+  try { window.__ACTIVE_IMPORT_STATE__ = state; } catch { }
 
   const cancelBtn = document.getElementById('imp-cancel-btn');
   const setCancelEnabled = (enabled) => {
@@ -5666,7 +5723,7 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
       if (!cancelBtn) return;
       cancelBtn.disabled = !enabled;
       cancelBtn.classList.toggle('disabled', !enabled);
-    } catch {}
+    } catch { }
   };
   const markCancelling = () => {
     try {
@@ -5674,19 +5731,19 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
       cancelBtn.disabled = true;
       cancelBtn.textContent = 'Cancelling…';
       cancelBtn.classList.add('disabled');
-    } catch {}
+    } catch { }
     try {
       if (stat) stat.textContent = 'cancelling';
-    } catch {}
+    } catch { }
   };
 
-  async function requestCancel(){
+  async function requestCancel() {
     state.cancelRequested = true;
     markCancelling();
     if (!state.jobId) return;
     try {
       await http('POST', `/api/projects/import/cancel?id=${encodeURIComponent(state.jobId)}`);
-    } catch {}
+    } catch { }
   }
 
   // Wire Cancel button: cancel the active queue task (preferred), otherwise best-effort cancel by job id.
@@ -5695,13 +5752,13 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
       cancelBtn.onclick = async () => {
         if (state.cancelRequested) return;
         if (state.taskId && typeof window.cancelRemoteAction === 'function') {
-          try { window.cancelRemoteAction(state.taskId); } catch {}
+          try { window.cancelRemoteAction(state.taskId); } catch { }
         } else {
           await requestCancel();
         }
       };
     }
-  } catch {}
+  } catch { }
 
   let lastLogCount = 0;
   // Enable Cancel immediately (even while uploading). If clicked before a job id exists,
@@ -5710,13 +5767,13 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
   const finalStatus = await _queueLongAction(label, async () => {
     // Start import job (upload archive)
     let resp;
-    try {
-      resp = await _xhrPostFormData('/api/projects/import/start', fd, {
+    const attemptUpload = async (allowBestEffort) => {
+      return await _xhrPostFormData('/api/projects/import/start', buildFormData(allowBestEffort), {
         onProgress: (pct, loaded, total) => {
           const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
           const bytes = _fmtByteProgress(loaded, total);
           const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
-          try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`); } catch {}
+          try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`); } catch { }
           try {
             if (bar) {
               bar.style.width = `${mapped}%`;
@@ -5725,18 +5782,27 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
             }
             if (stat) stat.textContent = line;
             if (log) log.textContent = line;
-          } catch {}
+          } catch { }
         }
       });
+    };
+    try {
+      resp = await attemptUpload(false);
     } catch (e) {
-      // Friendly remote-mode message if backend blocks
-      if (e && (e.status === 403 || e.status === 401)) {
-        try {
-          const msg = (e.body && e.body.error) ? e.body.error : 'Import is not allowed.';
-          showToast(msg, e.status === 403 ? 'warning' : 'danger');
-        } catch {}
+      if (_isMissingManifestError(e)) {
+        const ok = _confirmBestEffortImport(file);
+        if (!ok) return { status: 'cancelled' };
+        resp = await attemptUpload(true);
+      } else {
+        // Friendly remote-mode message if backend blocks
+        if (e && (e.status === 403 || e.status === 401)) {
+          try {
+            const msg = (e.body && e.body.error) ? e.body.error : 'Import is not allowed.';
+            showToast(msg, e.status === 403 ? 'warning' : 'danger');
+          } catch { }
+        }
+        throw e;
       }
-      throw e;
     }
 
     state.jobId = resp && typeof resp === 'object' ? String(resp.job || '') : '';
@@ -5764,10 +5830,10 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
               else console.debug('[IMPORT]', s.log[i]);
             }
             lastLogCount = s.log.length;
-          } catch {}
+          } catch { }
         }
-      } catch {}
-      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, statusText, detail || 'Importing…'); } catch {}
+      } catch { }
+      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, statusText, detail || 'Importing…'); } catch { }
 
       try {
         if (bar) {
@@ -5785,12 +5851,12 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
             try {
               const box = log.parentElement;
               if (box) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
-            } catch {}
+            } catch { }
           } else {
             log.textContent = detail || '';
           }
         }
-      } catch {}
+      } catch { }
 
       if (statusText === 'completed') return s;
       if (statusText === 'cancelled') return s;
@@ -5807,15 +5873,15 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
     onCancel: () => { requestCancel(); },
   });
 
-  try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch {}
-  try { setCancelEnabled(false); } catch {}
-  try { if (cancelBtn) cancelBtn.textContent = 'Cancel Import'; } catch {}
+  try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
+  try { setCancelEnabled(false); } catch { }
+  try { if (cancelBtn) cancelBtn.textContent = 'Cancel Import'; } catch { }
   try {
     if (finalStatus && typeof finalStatus === 'object' && String(finalStatus.status || '') === 'cancelled') {
       if (stat) stat.textContent = 'cancelled';
       if (log && (!Array.isArray(finalStatus.log) || !finalStatus.log.length)) log.textContent = 'Import cancelled.';
     }
-  } catch {}
+  } catch { }
   return finalStatus;
 }
 
@@ -5835,9 +5901,9 @@ try {
       return false;
     }
   };
-} catch {}
+} catch { }
 
-async function gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates }){
+async function gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates }) {
   // If no modal, fall back to prompts.
   if (!document.getElementById('proxLoginModal') || !window.bootstrap) {
     const baseUrl = _ensureHttpsUrl(window.prompt('Proxmox URL (https://host or host):', '') || '');
@@ -5853,17 +5919,17 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms, incl
     _writeImportProxCreds({ baseUrl, apiPort, sshPort, username, password, verifySSL });
     const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox });
     if (st && typeof st === 'object' && String(st.status || '') === 'cancelled') {
-      try { showToast('Import cancelled.', 'warning'); } catch {}
+      try { showToast('Import cancelled.', 'warning'); } catch { }
       return false;
     }
     // Handle success UX
     const importedId = (Array.isArray(st?.imported) && st.imported[0]?.id) || (st?.imported?.id) || '';
     try {
       if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') shell.setCurrentProjectId(importedId);
-    } catch {}
-    try { await loadProjects(); } catch {}
-    try { if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config'); } catch {}
-    try { showToast('Project imported.', 'success'); } catch {}
+    } catch { }
+    try { await loadProjects(); } catch { }
+    try { if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config'); } catch { }
+    try { showToast('Project imported.', 'success'); } catch { }
     return true;
   }
 
@@ -5897,7 +5963,7 @@ function importProject() {
       try { showToast('Import is disabled in remote mode.', 'warning'); } catch { alert('Import is disabled in remote mode.'); }
       return;
     }
-  } catch {}
+  } catch { }
   const input = document.getElementById('import-file');
   if (!input || !input.files || !input.files[0]) return;
   const modalEl = document.getElementById('importOptionsModal');
@@ -5948,16 +6014,16 @@ function importProject() {
       try {
         // If importing VMs, prompt for Proxmox target and run async import job.
         if (includeVms) {
-          try { modal.hide(); } catch {}
+          try { modal.hide(); } catch { }
           const input = document.getElementById('import-file');
           const file = input && input.files && input.files[0] ? input.files[0] : null;
           if (!file) return;
           const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates });
-          if (ok) { try { input.value = ''; } catch {} }
+          if (ok) { try { input.value = ''; } catch { } }
         } else {
           const ok = await performProjectImport({ includeCreds, includeVms, includeNotifyAudio, importAsTemplates, queueKey: 'import' });
           if (ok) {
-            try { modal.hide(); } catch {}
+            try { modal.hide(); } catch { }
           }
         }
       } finally {
@@ -5974,14 +6040,14 @@ async function startExportJob(pid, opts) {
       try { showToast('Export is disabled in remote mode.', 'warning'); } catch { alert('Export is disabled in remote mode.'); }
       return;
     }
-  } catch {}
+  } catch { }
   // Read Proxmox session creds from sessionStorage
   const creds = readBestProxCreds(pid) || {};
   const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, includeNotifyAudio: opts.includeNotifyAudio !== false, username: creds.username || '', password: creds.password || '' };
   if (!body.username || !body.password) { alert('Please log into Proxmox (Update Proxmox Creds) before exporting VMs.'); return; }
   // Ensure console dock shows debug-level messages
-  try { if (window.shell && shell.enableConsoleDebug) shell.enableConsoleDebug(true); } catch {}
-  try { (window.shell && shell.logInfo) ? shell.logInfo('Config: starting export job…') : console.log('Starting export job…'); } catch {}
+  try { if (window.shell && shell.enableConsoleDebug) shell.enableConsoleDebug(true); } catch { }
+  try { (window.shell && shell.logInfo) ? shell.logInfo('Config: starting export job…') : console.log('Starting export job…'); } catch { }
   try {
     let resp;
     await runQueued(`Start export for ${pid}`, async () => {
@@ -5993,16 +6059,16 @@ async function startExportJob(pid, opts) {
     const bar = document.getElementById('exp-prog-bar');
     const stat = document.getElementById('exp-status');
     const log = document.getElementById('exp-log');
-  const dl = document.getElementById('exp-download-final');
-  const openBtn = document.getElementById('exp-open-folder');
-  const pathNote = document.getElementById('exp-path-note');
-    if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow','0'); }
+    const dl = document.getElementById('exp-download-final');
+    const openBtn = document.getElementById('exp-open-folder');
+    const pathNote = document.getElementById('exp-path-note');
+    if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow', '0'); }
     if (stat) stat.textContent = 'Queued…';
     if (log) log.textContent = 'Waiting…';
-  if (dl) { dl.classList.add('disabled'); dl.href = '#'; dl.setAttribute('aria-disabled','true'); }
-  if (openBtn) { openBtn.disabled = true; }
-  if (pathNote) { pathNote.textContent = ''; }
-  const m = new bootstrap.Modal(modalEl);
+    if (dl) { dl.classList.add('disabled'); dl.href = '#'; dl.setAttribute('aria-disabled', 'true'); }
+    if (openBtn) { openBtn.disabled = true; }
+    if (pathNote) { pathNote.textContent = ''; }
+    const m = new bootstrap.Modal(modalEl);
     m.show();
     // Poll
     let lastLogCount = 0;
@@ -6018,16 +6084,16 @@ async function startExportJob(pid, opts) {
             const sure = confirm(msg);
             if (!sure) return;
           }
-          try { m.hide(); } catch {}
+          try { m.hide(); } catch { }
         };
       }
-    } catch {}
-  const poll = async () => {
-           try {
+    } catch { }
+    const poll = async () => {
+      try {
         const s = await http('GET', `/api/projects/${encodeURIComponent(pid)}/export/status`);
-        const p = Math.max(0, Math.min(100, Number(s.progress||0)));
+        const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
         if (bar) { bar.style.width = p + '%'; bar.textContent = p + '%'; bar.setAttribute('aria-valuenow', String(p)); }
-        if (stat) stat.textContent = String(s.status||'');
+        if (stat) stat.textContent = String(s.status || '');
         if (Array.isArray(s.log)) {
           // Update modal log area
           if (log) {
@@ -6039,7 +6105,7 @@ async function startExportJob(pid, opts) {
                 // Use rAF to ensure layout is updated before scrolling
                 requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
               }
-            } catch {}
+            } catch { }
           }
           // Stream only new lines to bottom console as DEBUG
           try {
@@ -6049,7 +6115,7 @@ async function startExportJob(pid, opts) {
               else console.debug('[EXPORT]', s.log[i]);
             }
             lastLogCount = s.log.length;
-          } catch {}
+          } catch { }
           // Try to extract the ZIP destination path from logs
           try {
             // Look for a line like: [CMD] package -> /path/to/export_xxx.zip
@@ -6058,21 +6124,21 @@ async function startExportJob(pid, opts) {
               const m = line.match(/\[CMD\]\s+package\s+->\s+(.+\.zip)\s*$/);
               if (m) { finalZipPath = m[1]; break; }
             }
-          } catch {}
+          } catch { }
         } else if (log) { log.textContent = ''; }
         if (s.status === 'completed') {
           completed = true;
           const hasDl = !!s.downloadReady;
           const href = hasDl ? `/api/projects/${encodeURIComponent(pid)}/export/download` : '#';
           if (stat) stat.textContent = 'completed';
-          if (dl){
+          if (dl) {
             dl.href = href;
             dl.classList.toggle('disabled', !hasDl);
             dl.setAttribute('aria-disabled', String(!hasDl));
             dl.textContent = 'Download ZIP';
           }
-          if (pathNote){ pathNote.textContent = s.downloadPath ? `Saved: ${s.downloadPath}` : ''; }
-          if (openBtn){
+          if (pathNote) { pathNote.textContent = s.downloadPath ? `Saved: ${s.downloadPath}` : ''; }
+          if (openBtn) {
             openBtn.disabled = !s.downloadPath;
             openBtn.onclick = async () => {
               try {
@@ -6080,10 +6146,10 @@ async function startExportJob(pid, opts) {
                 // For immediate UX, ask backend to reveal by id isn't available here; fallback to just opening downloads dir.
                 // We can navigate to Exports page where Open Folder is available per export.
                 window.location.href = `/static/exports.html?id=${encodeURIComponent(pid)}`;
-              } catch {}
+              } catch { }
             };
           }
-          try { (window.shell && shell.logSuccess) ? shell.logSuccess('Export completed and ready to download') : console.log('Export completed and ready'); } catch {}
+          try { (window.shell && shell.logSuccess) ? shell.logSuccess('Export completed and ready to download') : console.log('Export completed and ready'); } catch { }
           return; // stop polling
         }
         if (s.status === 'error' || s.status === 'cancelled') { return; }
@@ -6095,13 +6161,13 @@ async function startExportJob(pid, opts) {
     setTimeout(poll, 1200);
   } catch (e) {
     alert('Failed to start export: ' + (e && e.message ? e.message : 'Unknown error'));
-    try { (window.shell && shell.logError) ? shell.logError('Config: export start failed: ' + (e && e.message ? e.message : e)) : console.error('Export start failed:', e); } catch {}
+    try { (window.shell && shell.logError) ? shell.logError('Config: export start failed: ' + (e && e.message ? e.message : e)) : console.error('Export start failed:', e); } catch { }
   }
 }
 
 // Open Proxmox login modal and continue export after successful verify
-async function gateExportThroughProxLogin(pid, opts){
-  try { (window.shell && shell.logInfo) ? shell.logInfo('Config: gating export through Proxmox login') : console.log('Gate export: Proxmox login'); } catch {}
+async function gateExportThroughProxLogin(pid, opts) {
+  try { (window.shell && shell.logInfo) ? shell.logInfo('Config: gating export through Proxmox login') : console.log('Gate export: Proxmox login'); } catch { }
   const data = await http('GET', '/api/projects');
   const proj = (data.projects || []).find(p => p.id === pid);
   if (!proj) { alert('Project not found.'); return; }
@@ -6128,7 +6194,7 @@ async function gateExportThroughProxLogin(pid, opts){
   m.show();
 }
 
-async function exportProxLoginSave(){
+async function exportProxLoginSave() {
   const exportNext = window.__EXPORT_NEXT__;
   const importNext = window.__IMPORT_NEXT__;
   if (!exportNext && !importNext) return;
@@ -6145,16 +6211,16 @@ async function exportProxLoginSave(){
   const feedback = document.getElementById('prox-login-feedback');
   setBusy(true);
   try {
-    const ensure = (s)=>{ if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; };
+    const ensure = (s) => { if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; };
     const urlRaw = (urlEl?.value || '').trim();
     const url = ensure(urlRaw);
     const apiPort = Number((apiEl?.value || 8006));
     const sshPort = Number((sshEl?.value || 22));
-    const username = (userEl?.value||'').trim();
+    const username = (userEl?.value || '').trim();
     const password = passEl?.value || '';
     const verifySSL = !!(vsslEl?.checked);
-    if (!url){ if (feedback){ feedback.textContent='Enter Proxmox URL'; feedback.className='me-auto small text-danger'; } return; }
-    if (!username || !password){ if (feedback){ feedback.textContent='Enter username and password'; feedback.className='me-auto small text-danger'; } return; }
+    if (!url) { if (feedback) { feedback.textContent = 'Enter Proxmox URL'; feedback.className = 'me-auto small text-danger'; } return; }
+    if (!username || !password) { if (feedback) { feedback.textContent = 'Enter username and password'; feedback.className = 'me-auto small text-danger'; } return; }
 
     // If exporting, we can verify and persist onto the project.
     if (exportNext) {
@@ -6165,8 +6231,8 @@ async function exportProxLoginSave(){
         await http('PATCH', `/api/projects/${encodeURIComponent(pid)}`, {
           proxmox_url: url, proxmox_api_port: apiPort, proxmox_ssh_port: sshPort, proxmox_verify_ssl: verifySSL
         });
-      } catch {}
-      try { sessionStorage.setItem(`toolhub.session.proxmox.${pid}`, JSON.stringify({ username, password })); } catch {}
+      } catch { }
+      try { sessionStorage.setItem(`toolhub.session.proxmox.${pid}`, JSON.stringify({ username, password })); } catch { }
       let verify;
       try {
         await runQueued(`Verify Proxmox login for ${proj?.name || pid}`, async () => {
@@ -6174,18 +6240,18 @@ async function exportProxLoginSave(){
             baseUrl: url, apiPort, sshPort, username, password, verifySSL
           });
         }, { projectId: pid });
-      } catch(e) {
-        verify = { ok:false, proxmox_ok:false, ssh_ok:false, proxmox_error: e?.message || 'verify failed' };
+      } catch (e) {
+        verify = { ok: false, proxmox_ok: false, ssh_ok: false, proxmox_error: e?.message || 'verify failed' };
       }
-      if (!verify || !verify.ok){
+      if (!verify || !verify.ok) {
         const apiOk = !!(verify && verify.proxmox_ok);
         const sshOk = !!(verify && verify.ssh_ok);
         const apiErr = (verify && verify.proxmox_error) ? String(verify.proxmox_error) : '';
         const sshErr = (verify && verify.ssh_error) ? String(verify.ssh_error) : '';
         const details = [apiErr, sshErr].filter(Boolean).join(' | ');
         const msg = (!apiOk && !sshOk) ? 'Neither Proxmox API nor SSH could be reached.' : (!apiOk ? 'Proxmox API could not be reached.' : 'SSH could not be reached.');
-        if (feedback){ feedback.textContent = `${msg} ${details}`.trim(); feedback.className='me-auto small text-danger'; }
-        try { sessionStorage.removeItem(`toolhub.session.proxmox.${pid}`); } catch {}
+        if (feedback) { feedback.textContent = `${msg} ${details}`.trim(); feedback.className = 'me-auto small text-danger'; }
+        try { sessionStorage.removeItem(`toolhub.session.proxmox.${pid}`); } catch { }
         return;
       }
       try {
@@ -6193,8 +6259,8 @@ async function exportProxLoginSave(){
         const bs = window.bootstrap;
         const m = (bs && modalEl) ? bs.Modal.getInstance(modalEl) : null;
         if (m) m.hide();
-      } catch {}
-      try { (window.shell && shell.logSuccess) ? shell.logSuccess('Proxmox login verified (API + SSH)') : console.log('Proxmox login verified'); } catch {}
+      } catch { }
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess('Proxmox login verified (API + SSH)') : console.log('Proxmox login verified'); } catch { }
       await startExportJob(pid, opts);
       return;
     }
@@ -6202,20 +6268,20 @@ async function exportProxLoginSave(){
     // Import path: store session creds and start async import job.
     if (importNext) {
       const file = importNext.file;
-      if (!file) { if (feedback){ feedback.textContent='No import file selected.'; feedback.className='me-auto small text-danger'; } return; }
+      if (!file) { if (feedback) { feedback.textContent = 'No import file selected.'; feedback.className = 'me-auto small text-danger'; } return; }
       _writeImportProxCreds({ baseUrl: url, apiPort, sshPort, username, password, verifySSL });
       try {
         const modalEl = document.getElementById('proxLoginModal');
         const bs = window.bootstrap;
         const m = (bs && modalEl) ? bs.Modal.getInstance(modalEl) : null;
         if (m) m.hide();
-      } catch {}
+      } catch { }
       window.__IMPORT_NEXT__ = null;
       const prox = { baseUrl: url, apiPort, sshPort, username, password, verifySSL };
 
       // Do not keep the modal's Save button disabled for the entire import.
       // Imports can take a long time; users may close/re-open the dialog.
-      try { setBusy(false); } catch {}
+      try { setBusy(false); } catch { }
 
       const st = await _runAsyncImportWithProx({
         file,
@@ -6225,7 +6291,7 @@ async function exportProxLoginSave(){
         prox,
       });
       if (st && typeof st === 'object' && String(st.status || '') === 'cancelled') {
-        try { showToast('Import cancelled.', 'warning'); } catch {}
+        try { showToast('Import cancelled.', 'warning'); } catch { }
         return;
       }
       // Post-success refresh
@@ -6233,19 +6299,19 @@ async function exportProxLoginSave(){
       try {
         const input = document.getElementById('import-file');
         if (input) input.value = '';
-      } catch {}
-      try { if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') shell.setCurrentProjectId(importedId); } catch {}
-      try { await loadProjects(); } catch {}
-      try { if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config'); } catch {}
-      try { showToast('Project imported.', 'success'); } catch {}
+      } catch { }
+      try { if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') shell.setCurrentProjectId(importedId); } catch { }
+      try { await loadProjects(); } catch { }
+      try { if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config'); } catch { }
+      try { showToast('Project imported.', 'success'); } catch { }
       return;
     }
   } catch (err) {
-    if (feedback){
+    if (feedback) {
       feedback.textContent = 'Login failed: ' + (err && err.message ? err.message : 'Unknown error');
       feedback.className = 'me-auto small text-danger';
     }
-    try { (window.shell && shell.logError) ? shell.logError('Proxmox login failed: ' + (err && err.message ? err.message : err)) : console.error('Proxmox login failed:', err); } catch {}
+    try { (window.shell && shell.logError) ? shell.logError('Proxmox login failed: ' + (err && err.message ? err.message : err)) : console.error('Proxmox login failed:', err); } catch { }
   } finally {
     setBusy(false);
   }
@@ -6260,16 +6326,16 @@ try {
       if (btn) btn.disabled = false;
       const feedback = document.getElementById('prox-login-feedback');
       if (feedback) { feedback.textContent = ''; feedback.className = 'me-auto small'; }
-    } catch {}
+    } catch { }
   });
   document.addEventListener('hidden.bs.modal', (ev) => {
     try {
       if (!ev || !ev.target || ev.target.id !== 'proxLoginModal') return;
       window.__EXPORT_NEXT__ = null;
       window.__IMPORT_NEXT__ = null;
-    } catch {}
+    } catch { }
   });
-} catch {}
+} catch { }
 
 // Toast helper for this page
 function showToast(message, type) {
@@ -6280,7 +6346,7 @@ function showToast(message, type) {
       // Remove a single trailing period, but keep ellipses.
       if (s.endsWith('.') && !s.endsWith('...')) s = s.slice(0, -1);
       message = s;
-    } catch {}
+    } catch { }
 
     let container = document.getElementById('toastContainer');
     if (!container) {
@@ -6291,17 +6357,17 @@ function showToast(message, type) {
       document.body.appendChild(container);
     }
     if (!window.bootstrap) {
-      try { console.log(String(message || '')); } catch {}
+      try { console.log(String(message || '')); } catch { }
       return;
     }
     const el = document.createElement('div');
-    el.className = `toast align-items-center text-bg-${type||'info'} border-0`;
+    el.className = `toast align-items-center text-bg-${type || 'info'} border-0`;
     el.role = 'alert';
     el.ariaLive = 'assertive';
     el.ariaAtomic = 'true';
     el.innerHTML = `
       <div class="d-flex">
-        <div class="toast-body">${escHtml(String(message||''))}</div>
+        <div class="toast-body">${escHtml(String(message || ''))}</div>
         <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
       </div>`;
     container.appendChild(el);
@@ -6309,7 +6375,7 @@ function showToast(message, type) {
     t.show();
     el.addEventListener('hidden.bs.toast', () => el.remove());
   } catch {
-    try { console.log(String(message || '')); } catch {}
+    try { console.log(String(message || '')); } catch { }
   }
 }
 // Credentials UI Helpers
@@ -6343,12 +6409,12 @@ function addCredentialRow(pid) {
     wrapper.querySelector('button')?.addEventListener('click', () => { wrapper.remove(); onCredentialChanged(pid); });
     host.appendChild(wrapper);
     updateCredControls(pid);
-    try { wrapper.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => onCredentialChanged(pid))); } catch {}
+    try { wrapper.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => onCredentialChanged(pid))); } catch { }
     onCredentialChanged(pid);
-  } catch {}
+  } catch { }
 }
 function removeCredentialRow(pid, btn) {
-  try { const row = btn.closest('.row'); if (row) row.remove(); updateCredControls(pid); onCredentialChanged(pid); } catch {}
+  try { const row = btn.closest('.row'); if (row) row.remove(); updateCredControls(pid); onCredentialChanged(pid); } catch { }
 }
 function collectCredentials(pid) {
   const host = document.getElementById(`cred-${pid}-list`);
@@ -6372,7 +6438,7 @@ function updateCredControls(pid) {
     const addBtn = document.getElementById(`cred-add-${pid}`);
     if (addBtn) addBtn.disabled = list.length >= inst && inst > 0;
     updateCredDownloadState(pid);
-  } catch {}
+  } catch { }
 }
 function updateCredDownloadState(pid) {
   try {
@@ -6381,11 +6447,11 @@ function updateCredDownloadState(pid) {
     const list = collectCredentials(pid);
     const ok = list.some(c => c.username && c.password && c.password.length >= 8);
     btn.disabled = !ok;
-  } catch {}
+  } catch { }
 }
 
 // Harmonize credential rows when Instances or Tag change
-function onInstancesChange(pid){
+function onInstancesChange(pid) {
   try {
     const inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
     const warn = document.getElementById(`cred-warn-${pid}`);
@@ -6401,20 +6467,20 @@ function onInstancesChange(pid){
     } else {
       updateCredControls(pid);
     }
-  } catch {}
+  } catch { }
 }
 
-function onTagChange(pid){
+function onTagChange(pid) {
   try {
     const el = document.getElementById(`cfg-${pid}-tag`);
     if (!el) return;
-    const ok = /^[A-Za-z-]+$/.test((el.value||'').trim());
+    const ok = /^[A-Za-z-]+$/.test((el.value || '').trim());
     el.classList.toggle('is-invalid', !ok);
-  } catch {}
+  } catch { }
 }
 
 // CSV upload: replace credentials up to Instances
-async function uploadCredentialsFile(pid){
+async function uploadCredentialsFile(pid) {
   try {
     const input = document.getElementById(`cfg-${pid}-cred-file`);
     const warn = document.getElementById(`cred-warn-${pid}`);
@@ -6422,11 +6488,11 @@ async function uploadCredentialsFile(pid){
     const file = input.files[0];
     const existing = collectCredentials(pid);
     const text = await file.text();
-    const lines = String(text||'').split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
     const creds = [];
     const stripBom = s => s && s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
-    const isHeader = (a,b) => (String(a||'').toLowerCase()==='username' && String(b||'').toLowerCase()==='password');
-    for (let i=0;i<lines.length;i++){
+    const isHeader = (a, b) => (String(a || '').toLowerCase() === 'username' && String(b || '').toLowerCase() === 'password');
+    for (let i = 0; i < lines.length; i++) {
       let line = stripBom(lines[i]);
       // Basic CSV splitting with quotes support for two fields
       let a = '', b = '';
@@ -6434,10 +6500,10 @@ async function uploadCredentialsFile(pid){
         const out = [];
         let cur = '';
         let inQ = false;
-        for (let j=0;j<s.length;j++){
+        for (let j = 0; j < s.length; j++) {
           const ch = s[j];
           if (ch === '"') { inQ = !inQ; continue; }
-          if (!inQ && ch === ',') { out.push(cur); cur=''; continue; }
+          if (!inQ && ch === ',') { out.push(cur); cur = ''; continue; }
           cur += ch;
         }
         out.push(cur);
@@ -6448,9 +6514,9 @@ async function uploadCredentialsFile(pid){
       if (parts.length < 2) parts = line.split(';');
       if (parts.length < 2) parts = line.split('\t');
       if (parts.length < 2) parts = line.split(/\s+/);
-      a = (parts[0]||'').trim();
-      b = (parts[1]||'').trim();
-      if (i===0 && isHeader(a,b)) continue; // skip header
+      a = (parts[0] || '').trim();
+      b = (parts[1] || '').trim();
+      if (i === 0 && isHeader(a, b)) continue; // skip header
       if (!a && !b) continue;
       creds.push({ username: a, password: b });
     }
@@ -6475,54 +6541,54 @@ async function uploadCredentialsFile(pid){
       const renderList = targetLength > 0 ? merged : applied;
       host.innerHTML = renderCredentials(pid, renderList);
     }
-    if (warn){
+    if (warn) {
       if (creds.length === 0) warn.textContent = 'No valid rows found. Expected two columns: username,password';
       else if (inst > 0 && creds.length > inst) warn.textContent = `Imported ${applied.length} of ${creds.length} rows (trimmed to Instances=${inst}).`;
       else warn.textContent = `Imported ${applied.length} rows.`;
     }
     // Clear the file input so the same file can be re-selected later
-    try { input.value = ''; } catch {}
+    try { input.value = ''; } catch { }
     updateCredControls(pid);
     onCredentialChanged(pid);
-    try { showToast('Credentials imported from CSV','success'); } catch {}
+    try { showToast('Credentials imported from CSV', 'success'); } catch { }
   } catch (e) {
-    try { showToast('Failed to import CSV: ' + (e?.message||e),'danger'); } catch {}
+    try { showToast('Failed to import CSV: ' + (e?.message || e), 'danger'); } catch { }
   }
 }
 
 // Auto-generate credentials: one per Instance with 8-char uppercase passwords
-function generateCredentials(pid){
+function generateCredentials(pid) {
   try {
     const inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
     const digits = String(inst).length;
-    const pad = (n)=> String(n).padStart(digits, '0');
-    const randPwd = ()=>{
+    const pad = (n) => String(n).padStart(digits, '0');
+    const randPwd = () => {
       const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-      let s='';
-      for (let i=0;i<8;i++) s += chars[Math.floor(Math.random()*chars.length)];
+      let s = '';
+      for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)];
       return s;
     };
     const list = [];
-    for (let i=1;i<=inst;i++) list.push({ username: `user${pad(i)}`, password: randPwd() });
+    for (let i = 1; i <= inst; i++) list.push({ username: `user${pad(i)}`, password: randPwd() });
     const host = document.getElementById(`cred-${pid}-list`);
     if (host) host.innerHTML = renderCredentials(pid, list);
     const warn = document.getElementById(`cred-warn-${pid}`);
     if (warn) warn.textContent = '';
     updateCredControls(pid);
     onCredentialChanged(pid);
-    try { showToast(`Generated ${inst} credentials`,`info`); } catch {}
-  } catch {}
+    try { showToast(`Generated ${inst} credentials`, `info`); } catch { }
+  } catch { }
 }
 
 // Download credentials as CSV
-function downloadCredentials(pid){
+function downloadCredentials(pid) {
   try {
     const rows = collectCredentials(pid).filter(c => c && c.username);
-    if (rows.length === 0) { showToast('No credentials to download','warning'); return; }
+    if (rows.length === 0) { showToast('No credentials to download', 'warning'); return; }
     const header = 'username,password';
     const csv = [header].concat(rows.map(c => {
-      const u = String(c.username||'').replaceAll('"','""');
-      const p = String(c.password||'').replaceAll('"','""');
+      const u = String(c.username || '').replaceAll('"', '""');
+      const p = String(c.password || '').replaceAll('"', '""');
       return /[,\n\r]/.test(u) || /[,\n\r]/.test(p) ? `"${u}","${p}"` : `${u},${p}`;
     })).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -6533,38 +6599,38 @@ function downloadCredentials(pid){
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
-  } catch {}
+  } catch { }
 }
 // Credential auto-save (usernames/passwords)
 const _credSaveTimers = {};
-function onCredentialChanged(pid){
+function onCredentialChanged(pid) {
   updateCredDownloadState(pid);
-  if(_credSaveTimers[pid]) clearTimeout(_credSaveTimers[pid]);
+  if (_credSaveTimers[pid]) clearTimeout(_credSaveTimers[pid]);
   let status = document.getElementById(`cred-status-${pid}`);
-  if(!status){
+  if (!status) {
     try {
       const container = document.getElementById(`cred-${pid}-list`);
-      if(container){
+      if (container) {
         status = document.createElement('div');
         status.id = `cred-status-${pid}`;
         status.className = 'small text-muted mb-1';
         container.parentElement.insertBefore(status, container);
       }
-    } catch {}
+    } catch { }
   }
-  if(status){ status.textContent='Saving…'; status.className='small text-muted'; }
-  _credSaveTimers[pid] = setTimeout(()=>_saveCredentialsNow(pid), 600);
+  if (status) { status.textContent = 'Saving…'; status.className = 'small text-muted'; }
+  _credSaveTimers[pid] = setTimeout(() => _saveCredentialsNow(pid), 600);
 }
-async function _saveCredentialsNow(pid){
+async function _saveCredentialsNow(pid) {
   delete _credSaveTimers[pid];
   try {
     const creds = harmonizeCredentialsToInstances(pid, collectCredentials(pid));
     await http('PATCH', `/api/projects/${pid}`, { credentials: creds });
     const status = document.getElementById(`cred-status-${pid}`);
-    if(status){ status.textContent='Saved'; status.className='small text-success'; setTimeout(()=>{ if(status && status.textContent==='Saved') status.textContent=''; }, 1500); }
-  } catch(e){
+    if (status) { status.textContent = 'Saved'; status.className = 'small text-success'; setTimeout(() => { if (status && status.textContent === 'Saved') status.textContent = ''; }, 1500); }
+  } catch (e) {
     const status = document.getElementById(`cred-status-${pid}`);
-    if(status){ status.textContent='Error'; status.className='small text-danger'; }
-    try { showToast('Failed to auto-save credentials','danger'); } catch {}
+    if (status) { status.textContent = 'Error'; status.className = 'small text-danger'; }
+    try { showToast('Failed to auto-save credentials', 'danger'); } catch { }
   }
 }

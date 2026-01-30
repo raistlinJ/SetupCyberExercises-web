@@ -7063,6 +7063,68 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
     return out
 
 
+def _default_import_name(source_name: str) -> str:
+    try:
+        base = os.path.basename(source_name or "").strip()
+        stem, _ = os.path.splitext(base)
+        stem = stem.strip()
+        return stem or "Imported"
+    except Exception:
+        return "Imported"
+
+
+def _infer_vms_from_backups(zf) -> list:
+    inferred = []
+    seen = set()
+    try:
+        names = zf.namelist()
+    except Exception:
+        return inferred
+    for entry in names:
+        if not (entry.startswith('backups/') and not entry.endswith('/')):
+            continue
+        if not entry.lower().endswith(('.vma.zst', '.vma.lzo', '.vma.gz')):
+            continue
+        parts = entry.split('/')
+        vm_name = ''
+        if len(parts) >= 3:
+            vm_name = parts[1]
+        if not vm_name:
+            vm_name = os.path.splitext(os.path.basename(entry))[0]
+        vm_clean = _sanitize_vm_name(vm_name)
+        if vm_clean in seen:
+            continue
+        seen.add(vm_clean)
+        inferred.append({'name': vm_clean})
+    return inferred
+
+
+def _load_import_manifest(zf, *, default_project_name: str = "Imported") -> tuple:
+    try:
+        with zf.open('project.json') as mf:
+            return json.load(mf), False
+    except KeyError:
+        fallback = {
+            'schemaVersion': 1,
+            'project': {
+                'name': default_project_name or "Imported",
+                'vms': _infer_vms_from_backups(zf),
+            },
+        }
+        return fallback, True
+
+
+def _zip_has_manifest(path: str) -> bool:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            zf.getinfo('project.json')
+        return True
+    except KeyError:
+        return False
+    except Exception:
+        return False
+
+
 def _validate_project_fields(data: dict) -> list:
     errors = []
     def port_ok(v):
@@ -7818,6 +7880,14 @@ def import_project():
     except Exception:
         include_creds, include_vms, include_notify_audio = True, True, True
     try:
+        allow_best_effort = (request.form.get('allowBestEffort', 'false').lower() == 'true')
+    except Exception:
+        allow_best_effort = False
+    try:
+        allow_best_effort = (request.form.get('allowBestEffort', 'false').lower() == 'true')
+    except Exception:
+        allow_best_effort = False
+    try:
         import_as_templates = (request.form.get('importAsTemplates', 'false').lower() == 'true')
     except Exception:
         import_as_templates = False
@@ -7846,6 +7916,10 @@ def import_project():
             try: os.close(tmp_fd)
             except Exception: pass
         file.save(tmp_path)
+        if not allow_best_effort:
+            has_manifest = _zip_has_manifest(tmp_path)
+            if not has_manifest:
+                return jsonify({"error": "Missing project.json in archive. Enable best-effort import to continue.", "code": "missing_manifest"}), 400
 
         # Stage extracted artifacts into a per-import work directory so we can
         # commit atomically (important when the client cancels/closes mid-import).
@@ -7858,9 +7932,15 @@ def import_project():
             work_dir = None
 
         with zipfile.ZipFile(tmp_path) as zf:
-            # Load manifest
-            with zf.open('project.json') as mf:
-                manifest = json.load(mf)
+            manifest, synthesized = _load_import_manifest(
+                zf,
+                default_project_name=_default_import_name(file.filename),
+            )
+            if synthesized:
+                try:
+                    current_app.logger.info("import: missing project.json; using synthesized manifest")
+                except Exception:
+                    pass
 
             # Atomic commit bookkeeping
             projects_to_commit: List[Project] = []
@@ -8184,6 +8264,15 @@ def import_project_start():
         tmp_fd, tmp_path = tempfile.mkstemp(prefix="import_", suffix=".zip", dir=uploads_dir)
         os.close(tmp_fd)
         file.save(tmp_path)
+        if not allow_best_effort:
+            has_manifest = _zip_has_manifest(tmp_path)
+            if not has_manifest:
+                try:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+                return jsonify({"error": "Missing project.json in archive. Enable best-effort import to continue.", "code": "missing_manifest"}), 400
     except Exception as e:
         try:
             if tmp_fd:
@@ -8191,6 +8280,8 @@ def import_project_start():
         except Exception:
             pass
         return jsonify({"error": f"Failed to save upload: {e}"}), 400
+
+    upload_name = file.filename
 
     # Create job record and spawn worker
     job_id = uuid.uuid4().hex
@@ -8202,7 +8293,7 @@ def import_project_start():
         pass
     app_obj = current_app._get_current_object()
 
-    def worker(job: str, path: str, include_creds: bool, include_vms: bool, include_notify_audio: bool, import_as_templates: bool):
+    def worker(job: str, path: str, include_creds: bool, include_vms: bool, include_notify_audio: bool, import_as_templates: bool, upload_name: str):
         # Ensure app context in thread
         with app_obj.app_context():
             key = _import_job_key(job)
@@ -8234,12 +8325,14 @@ def import_project_start():
 
                 # Open ZIP and inspect manifest
                 with zipfile.ZipFile(path) as zf:
-                    try:
-                        with zf.open('project.json') as mf:
-                            manifest = json.load(mf)
+                    manifest, synthesized = _load_import_manifest(
+                        zf,
+                        default_project_name=_default_import_name(upload_name or path),
+                    )
+                    if synthesized:
+                        _emit_import(job, "[PARSE] project.json missing; synthesized manifest (backups-only)")
+                    else:
                         _emit_import(job, "[PARSE] project.json loaded")
-                    except KeyError:
-                        raise RuntimeError("Invalid archive: missing project.json")
 
                     s = _store()
                     mats_dir = os.path.join(app_obj.config["DATA_DIR"], "materials")
@@ -8829,7 +8922,7 @@ def import_project_start():
                 except Exception:
                     pass
 
-    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms, include_notify_audio, import_as_templates), daemon=True)
+    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms, include_notify_audio, import_as_templates, upload_name), daemon=True)
     t.start()
     return jsonify({"job": job_id})
 
