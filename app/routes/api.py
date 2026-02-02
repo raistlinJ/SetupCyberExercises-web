@@ -7350,7 +7350,7 @@ def create_project():
         return jsonify({"errors": errs}), 400
     project = Project(id=pid, name=name)
     for key in [
-    "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_api_token", "proxmox_verify_ssl",
+    "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
         "guacamole_url", "guacamole_port",
         "keycloak_url", "keycloak_port", "keycloak_nodename",
         "challenge_url", "challenge_port",
@@ -7405,7 +7405,7 @@ def update_project(pid: str):
     # Updatable fields
     for key in [
         "name",
-    "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_api_token", "proxmox_verify_ssl",
+    "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
         "guacamole_url", "guacamole_port",
         "keycloak_url", "keycloak_port", "keycloak_nodename",
         "challenge_url", "challenge_port",
@@ -9250,7 +9250,9 @@ def export_project_start(pid: str):
                 base_url = urlunparse((scheme, netloc, '', '', '', ''))
     except Exception:
         pass
-    prox_host = _parse_host_from_url(base_url) or ''
+    # Use explicit node name if configured, otherwise extract from URL
+    explicit_node = (getattr(proj, 'proxmox_node', '') or '').strip()
+    prox_host = explicit_node if explicit_node else (_parse_host_from_url(base_url) or '')
     verify_ssl = getattr(proj, 'proxmox_verify_ssl', True)
 
     if include_vms and base_url:

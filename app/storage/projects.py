@@ -280,6 +280,7 @@ class Project:
     proxmox_url: str = "https://proxmox.localhost"
     proxmox_api_port: int = 8006
     proxmox_ssh_port: int = 22
+    proxmox_node: str = ""  # explicit Proxmox node name (if empty, derived from URL hostname)
     proxmox_api_token: str = ""
     proxmox_verify_ssl: bool = True
     # Persisted project-scoped secrets (encrypted at rest by API helpers)

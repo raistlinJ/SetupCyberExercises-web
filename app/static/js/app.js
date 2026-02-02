@@ -2744,6 +2744,7 @@ async function autoSaveProjectField(pid) {
     proxmox_url: document.getElementById(`cfg-${pid}-proxmox_url`)?.value?.trim(),
     proxmox_api_port: Number(document.getElementById(`cfg-${pid}-proxmox_api_port`)?.value),
     proxmox_ssh_port: Number(document.getElementById(`cfg-${pid}-proxmox_ssh_port`)?.value),
+    proxmox_node: document.getElementById(`cfg-${pid}-proxmox_node`)?.value?.trim() || '',
     instances: Number(document.getElementById(`cfg-${pid}-instances`)?.value),
     tag: tagVal,
     // Advanced Proxmox
@@ -3734,6 +3735,10 @@ function renderProjectCard(p) {
             <div class="col-md-3">
               <label class="form-label" title="SSH port used for VM commands">SSH Port</label>
               <input id="cfg-${p.id}-proxmox_ssh_port" type="number" class="form-control form-control-sm" value="${p.proxmox_ssh_port ?? 22}" placeholder="22" title="SSH port" oninput="debounceProjectSave('${p.id}','proxmox_ssh_port')" />
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" title="Proxmox node name (leave empty to auto-detect from URL)">Node Name</label>
+              <input id="cfg-${p.id}-proxmox_node" class="form-control form-control-sm" value="${p.proxmox_node || ''}" placeholder="(auto)" title="Explicit Proxmox node name for export validation" oninput="debounceProjectSave('${p.id}','proxmox_node')" />
             </div>
             <div class="col-12"><hr class="my-3"/></div>
             <div class="col-md-6">
@@ -6049,10 +6054,8 @@ async function startExportJob(pid, opts) {
   try { if (window.shell && shell.enableConsoleDebug) shell.enableConsoleDebug(true); } catch { }
   try { (window.shell && shell.logInfo) ? shell.logInfo('Config: starting export job…') : console.log('Starting export job…'); } catch { }
   try {
-    let resp;
-    await runQueued(`Start export for ${pid}`, async () => {
-      resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/export/start`, body);
-    }, { projectId: pid });
+    // Make the HTTP request directly and await it - runQueued doesn't propagate return values
+    const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/export/start`, body);
     if (!resp || !resp.job) throw new Error('No job id returned');
     const modalEl = document.getElementById('exportProgressModal');
     if (!modalEl || !window.bootstrap) { alert('Export started. Keep this page open.'); return; }
@@ -6160,7 +6163,28 @@ async function startExportJob(pid, opts) {
     };
     setTimeout(poll, 1200);
   } catch (e) {
-    alert('Failed to start export: ' + (e && e.message ? e.message : 'Unknown error'));
+    // Format error message to be more human-readable
+    let displayMsg = 'Unknown error';
+    try {
+      const raw = e && e.message ? e.message : '';
+      // Check if the message is JSON (starts with {)
+      if (raw.startsWith('{')) {
+        const parsed = JSON.parse(raw);
+        const lines = [];
+        if (parsed.error) lines.push(parsed.error);
+        if (parsed.message) lines.push('\n' + parsed.message);
+        if (Array.isArray(parsed.details) && parsed.details.length) {
+          lines.push('\nAffected VMs:');
+          parsed.details.forEach(d => {
+            lines.push(`  • ${d.name || 'unknown'} (VMID ${d.vmid || '?'}, node: ${d.node || '?'})`);
+          });
+        }
+        displayMsg = lines.join('\n');
+      } else {
+        displayMsg = raw || displayMsg;
+      }
+    } catch { displayMsg = e && e.message ? e.message : 'Unknown error'; }
+    alert('Failed to start export:\n\n' + displayMsg);
     try { (window.shell && shell.logError) ? shell.logError('Config: export start failed: ' + (e && e.message ? e.message : e)) : console.error('Export start failed:', e); } catch { }
   }
 }
