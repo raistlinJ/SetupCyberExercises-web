@@ -8243,6 +8243,10 @@ def import_project_start():
         import_as_templates = (request.form.get('importAsTemplates', 'false').lower() == 'true')
     except Exception:
         import_as_templates = False
+    try:
+        allow_best_effort = (request.form.get('allowBestEffort', 'false').lower() == 'true')
+    except Exception:
+        allow_best_effort = False
     # Optional Proxmox connection parameters for VM restore
     prox = {
         'baseUrl': (request.form.get('baseUrl') or '').strip(),

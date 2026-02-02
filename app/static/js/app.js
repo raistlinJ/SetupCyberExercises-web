@@ -5769,114 +5769,136 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
   // Enable Cancel immediately (even while uploading). If clicked before a job id exists,
   // we mark cancel requested and cancel as soon as the backend returns a job id.
   setCancelEnabled(true);
-  const finalStatus = await _queueLongAction(label, async () => {
-    // Start import job (upload archive)
-    let resp;
-    const attemptUpload = async (allowBestEffort) => {
-      return await _xhrPostFormData('/api/projects/import/start', buildFormData(allowBestEffort), {
-        onProgress: (pct, loaded, total) => {
-          const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
-          const bytes = _fmtByteProgress(loaded, total);
-          const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
-          try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`); } catch { }
-          try {
-            if (bar) {
-              bar.style.width = `${mapped}%`;
-              bar.textContent = `${mapped}%`;
-              bar.setAttribute('aria-valuenow', String(mapped));
-            }
-            if (stat) stat.textContent = line;
-            if (log) log.textContent = line;
-          } catch { }
-        }
-      });
-    };
-    try {
-      resp = await attemptUpload(false);
-    } catch (e) {
-      if (_isMissingManifestError(e)) {
-        const ok = _confirmBestEffortImport(file);
-        if (!ok) return { status: 'cancelled' };
-        resp = await attemptUpload(true);
-      } else {
-        // Friendly remote-mode message if backend blocks
-        if (e && (e.status === 403 || e.status === 401)) {
-          try {
-            const msg = (e.body && e.body.error) ? e.body.error : 'Import is not allowed.';
-            showToast(msg, e.status === 403 ? 'warning' : 'danger');
-          } catch { }
-        }
-        throw e;
-      }
-    }
-
-    state.jobId = resp && typeof resp === 'object' ? String(resp.job || '') : '';
-    if (!state.jobId) throw new Error('Import did not return a job id');
-    if (state.cancelRequested) {
-      await requestCancel();
-    }
-
-    // Poll until done
-    while (true) {
-      const s = await http('GET', `/api/projects/import/status?id=${encodeURIComponent(state.jobId)}`);
-      const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
-      const statusText = String(s.status || 'processing');
-      const mapped = (statusText === 'completed')
-        ? 100
-        : Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
-      let detail = '';
-      try {
-        if (Array.isArray(s.log) && s.log.length) {
-          detail = String(s.log[s.log.length - 1] || '');
-          try {
-            const start = Math.max(0, lastLogCount);
-            for (let i = start; i < s.log.length; i++) {
-              if (window.shell && shell.logDebug) shell.logDebug(`[IMPORT] ${s.log[i]}`);
-              else console.debug('[IMPORT]', s.log[i]);
-            }
-            lastLogCount = s.log.length;
-          } catch { }
-        }
-      } catch { }
-      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, statusText, detail || 'Importing…'); } catch { }
-
-      try {
-        if (bar) {
-          bar.style.width = `${Math.max(0, Math.min(100, mapped))}%`;
-          bar.textContent = `${Math.max(0, Math.min(100, mapped))}%`;
-          bar.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, mapped))));
-          if (statusText === 'completed' || statusText === 'cancelled' || statusText === 'error') {
-            bar.classList.remove('progress-bar-animated');
-          }
-        }
-        if (stat) stat.textContent = statusText;
-        if (log) {
-          if (Array.isArray(s.log) && s.log.length) {
-            log.textContent = s.log.join('\n');
+  let finalStatus;
+  try {
+    finalStatus = await _queueLongAction(label, async () => {
+      // Start import job (upload archive)
+      let resp;
+      const attemptUpload = async (allowBestEffort) => {
+        return await _xhrPostFormData('/api/projects/import/start', buildFormData(allowBestEffort), {
+          onProgress: (pct, loaded, total) => {
+            const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
+            const bytes = _fmtByteProgress(loaded, total);
+            const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
+            try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`); } catch { }
             try {
-              const box = log.parentElement;
-              if (box) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+              if (bar) {
+                bar.style.width = `${mapped}%`;
+                bar.textContent = `${mapped}%`;
+                bar.setAttribute('aria-valuenow', String(mapped));
+              }
+              if (stat) stat.textContent = line;
+              if (log) log.textContent = line;
             } catch { }
-          } else {
-            log.textContent = detail || '';
           }
+        });
+      };
+      try {
+        resp = await attemptUpload(false);
+      } catch (e) {
+        if (_isMissingManifestError(e)) {
+          const ok = _confirmBestEffortImport(file);
+          if (!ok) return { status: 'cancelled' };
+          resp = await attemptUpload(true);
+        } else {
+          // Friendly remote-mode message if backend blocks
+          if (e && (e.status === 403 || e.status === 401)) {
+            try {
+              const msg = (e.body && e.body.error) ? e.body.error : 'Import is not allowed.';
+              showToast(msg, e.status === 403 ? 'warning' : 'danger');
+            } catch { }
+          }
+          throw e;
         }
-      } catch { }
-
-      if (statusText === 'completed') return s;
-      if (statusText === 'cancelled') return s;
-      if (statusText === 'error') {
-        const msg = (s?.errors && s.errors[0]) ? String(s.errors[0]) : 'Import failed';
-        throw new Error(msg);
       }
-      await new Promise(r => setTimeout(r, 1500));
-    }
-  }, {
-    projectId: 'import',
-    allowDuplicate: true,
-    onTaskCreated: (task) => { state.taskId = task?.id; },
-    onCancel: () => { requestCancel(); },
-  });
+
+      state.jobId = resp && typeof resp === 'object' ? String(resp.job || '') : '';
+      if (!state.jobId) throw new Error('Import did not return a job id');
+      if (state.cancelRequested) {
+        await requestCancel();
+      }
+
+      // Poll until done
+      while (true) {
+        const s = await http('GET', `/api/projects/import/status?id=${encodeURIComponent(state.jobId)}`);
+        const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
+        const statusText = String(s.status || 'processing');
+        const mapped = (statusText === 'completed')
+          ? 100
+          : Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
+        let detail = '';
+        try {
+          if (Array.isArray(s.log) && s.log.length) {
+            detail = String(s.log[s.log.length - 1] || '');
+            try {
+              const start = Math.max(0, lastLogCount);
+              for (let i = start; i < s.log.length; i++) {
+                if (window.shell && shell.logDebug) shell.logDebug(`[IMPORT] ${s.log[i]}`);
+                else console.debug('[IMPORT]', s.log[i]);
+              }
+              lastLogCount = s.log.length;
+            } catch { }
+          }
+        } catch { }
+        try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, statusText, detail || 'Importing…'); } catch { }
+
+        try {
+          if (bar) {
+            bar.style.width = `${Math.max(0, Math.min(100, mapped))}%`;
+            bar.textContent = `${Math.max(0, Math.min(100, mapped))}%`;
+            bar.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, mapped))));
+            if (statusText === 'completed' || statusText === 'cancelled' || statusText === 'error') {
+              bar.classList.remove('progress-bar-animated');
+            }
+          }
+          if (stat) stat.textContent = statusText;
+          if (log) {
+            if (Array.isArray(s.log) && s.log.length) {
+              log.textContent = s.log.join('\n');
+              try {
+                const box = log.parentElement;
+                if (box) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+              } catch { }
+            } else {
+              log.textContent = detail || '';
+            }
+          }
+        } catch { }
+
+        if (statusText === 'completed') return s;
+        if (statusText === 'cancelled') return s;
+        if (statusText === 'error') {
+          const msg = (s?.errors && s.errors[0]) ? String(s.errors[0]) : 'Import failed';
+          throw new Error(msg);
+        }
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }, {
+      projectId: 'import',
+      allowDuplicate: true,
+      onTaskCreated: (task) => { state.taskId = task?.id; },
+      onCancel: () => { requestCancel(); },
+    });
+  } catch (e) {
+    // Update modal to show error
+    try {
+      if (bar) {
+        bar.style.width = '100%';
+        bar.textContent = 'Error';
+        bar.classList.remove('progress-bar-animated');
+        bar.classList.add('bg-danger');
+      }
+      if (stat) stat.textContent = 'error';
+      if (log) {
+        const errMsg = e?.message || String(e) || 'Import failed';
+        log.textContent = 'Error: ' + errMsg;
+      }
+    } catch { }
+    try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
+    try { setCancelEnabled(false); } catch { }
+    try { if (cancelBtn) cancelBtn.textContent = 'Cancel Import'; } catch { }
+    throw e;
+  }
 
   try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
   try { setCancelEnabled(false); } catch { }
