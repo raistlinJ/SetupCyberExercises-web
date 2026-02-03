@@ -883,6 +883,9 @@ def instances_refresh_vm(pid: str):
     except Exception:
         pool_ids = None
 
+    # Cache for pool members: poolid -> set of vmids (integers)
+    pool_members_cache = {}
+
     def _norm_userid(uname: str) -> str:
         u = str(uname or '').strip()
         if not u:
@@ -1129,10 +1132,25 @@ def instances_refresh_vm(pid: str):
                     mgrs['pools'] = 'ready' if pool_exists else 'missing'
                     # Compute membership details when pool exists
                     if pool_exists:
-                        # All configured VMs for this instance count toward expected pool membership (reverted logic)
+                        # Fetch pool members (cached per-poolid to avoid repeated calls)
+                        if poolid not in pool_members_cache:
+                            try:
+                                members = client.list_pool_members(poolid) or []
+                                # Extract vmids of QEMU VMs in the pool
+                                member_vmids = set()
+                                for m in members:
+                                    try:
+                                        if str(m.get('type', '')).lower() == 'qemu':
+                                            member_vmids.add(int(m.get('vmid')))
+                                    except Exception:
+                                        continue
+                                pool_members_cache[poolid] = member_vmids
+                            except Exception:
+                                pool_members_cache[poolid] = set()
+                        pool_vmids = pool_members_cache.get(poolid, set())
+                        
+                        # All configured VMs for this instance count toward expected pool membership
                         names_viewable = list(names)
-                        # Membership: rely on per-VM config pool field (already fetched for nets).
-                        # Total expected VMs for this instance (all VMs here)
                         total_expected = len(names_viewable)
                         # Count of expected VMs that both exist and are in the pool
                         in_count = 0
@@ -1141,8 +1159,10 @@ def instances_refresh_vm(pid: str):
                                 spec_name = spec.get('name') or ''
                                 # Match found_details to spec_name to get vmid (if created)
                                 fd = next((d for d in found_details if str(d.get('name') or '') == spec_name), None)
-                                if fd and str(fd.get('pool') or '') == str(poolid):
-                                    in_count += 1
+                                if fd and fd.get('vmid') is not None:
+                                    vm_vmid = int(fd.get('vmid'))
+                                    if vm_vmid in pool_vmids:
+                                        in_count += 1
                             except Exception:
                                 continue
                         mgrs['pools_member_total'] = total_expected

@@ -2780,7 +2780,9 @@ async function autoSaveProjectField(pid) {
       window.PROJ_CACHE = cache;
       const prevName = typeof prev.name === 'string' ? prev.name : '';
       const newName = typeof next.name === 'string' ? next.name : prevName;
-      if (newName && newName !== prevName) {
+      const prevTag = typeof prev.tag === 'string' ? prev.tag : '';
+      const newTag = typeof next.tag === 'string' ? next.tag : prevTag;
+      if ((newName && newName !== prevName) || (newTag && newTag !== prevTag)) {
         try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
       }
     } catch { }
