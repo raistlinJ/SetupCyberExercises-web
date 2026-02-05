@@ -505,6 +505,40 @@ class ProxmoxClient:
             raise RuntimeError(f"Proxmox delete user error {r.status_code}: {r.text}")
         return True
 
+    def get_role(self, roleid: str) -> Optional[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/roles/{requests.utils.quote(roleid, safe='')}"
+        r = s.get(url, timeout=15)
+        if r.status_code == 404:
+            return None
+        if r.status_code >= 400:
+             # Fallback to listing if direct get not supported/authorized
+             url_list = f"{self.base_url.rstrip('/')}/api2/json/access/roles"
+             rl = s.get(url_list, timeout=20)
+             if rl.status_code < 400:
+                 try:
+                     wanted = str(roleid)
+                     for role in (rl.json().get('data') or []):
+                         if (role or {}).get('roleid') == wanted:
+                             return role
+                 except Exception:
+                     pass
+             return None
+        return r.json().get('data')
+
+    def create_role(self, roleid: str, privileges: List[str]):
+        """Create a new role with the given privileges."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/roles"
+        data: Dict[str, Any] = {'roleid': roleid}
+        if privileges:
+            data['privs'] = ",".join(privileges)
+        r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            if r.status_code != 409: # 409 Conflict means already exists
+                raise RuntimeError(f"Proxmox create role error {r.status_code}: {r.text}")
+        return True
+
     def get_pool(self, poolid: str) -> Optional[Dict[str, Any]]:
         s = self._ensure_session()
         url = f"{self.base_url.rstrip('/')}/api2/json/pools/{requests.utils.quote(poolid, safe='')}"

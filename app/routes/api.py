@@ -4424,26 +4424,40 @@ def instances_users_create(pid: str):
                                 except Exception:
                                     pass
                                 try:
-                                    client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEUser', propagate=True)
-                                except Exception as e:
-                                    msg_low = str(e).lower()
-                                    if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
-                                        client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser', propagate=True)
-                                    else:
-                                        raise
-                                applied += 1
-                            except Exception as e2:
-                                if '501' in str(e2) and 'not implemented' not in str(e2).lower():
-                                    errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL permission issue (501) applying user {userid}: {e2}' })
-                                elif 'not implemented' in str(e2).lower():
-                                    unsupported = True
-                                else:
+                                    # Ensure AcostaRollback role exists
                                     try:
-                                        # Always log actual failure
-                                        current_app.logger.error(f"[users_create][ACL] failed user={userid} vmid={m.get('vmid')} name={m.get('name')}: {e2}")
+                                        if not client.get_role('AcostaRollback'):
+                                             client.create_role('AcostaRollback', ['VM.Snapshot.Rollback'])
                                     except Exception:
-                                        pass
-                                    errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'per-VM ACL failed: {e2}' })
+                                         pass  # Best effort
+                                    
+                                    # Assign roles: PVEUser (or PVEVMUser fallback) AND AcostaRollback
+                                    # We use set_acl_user_vm which supports comma-separated roles
+                                    roles_to_set = 'PVEUser,AcostaRollback'
+                                    try:
+                                         client.set_acl_user_vm(userid, int(m['vmid']), roles=roles_to_set, propagate=True)
+                                    except Exception as e:
+                                        msg_low = str(e).lower()
+                                        if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
+                                             # Fallback to PVEVMUser if PVEUser missing, but still try to include AcostaRollback
+                                             client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser,AcostaRollback', propagate=True)
+                                        else:
+                                            raise
+                                    applied += 1
+                                except Exception as e2:
+                                    if '501' in str(e2) and 'not implemented' not in str(e2).lower():
+                                        errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL permission issue (501) applying user {userid}: {e2}' })
+                                    elif 'not implemented' in str(e2).lower():
+                                        unsupported = True
+                                    else:
+                                        try:
+                                            # Always log actual failure
+                                            current_app.logger.error(f"[users_create][ACL] failed user={userid} vmid={m.get('vmid')} name={m.get('name')}: {e2}")
+                                        except Exception:
+                                            pass
+                                        errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'per-VM ACL failed: {e2}' })
+                            except Exception as e_outer:
+                                errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL processing failed: {e_outer}' })
                         if applied:
                             try:
                                 if current_app.config.get('ACL_DEBUG'):
