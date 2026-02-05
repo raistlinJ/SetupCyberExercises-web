@@ -327,6 +327,11 @@ function ctfdSplitProjectAudioStore(audioStore) {
   const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
   const media = {};
   const events = {};
+
+  // Robustness: Handle potential missing prefixes or legacy keys by checking known IDs.
+  let knownKeys = null;
+  try { knownKeys = new Set(ctfdNotifyEventKeys()); } catch { }
+
   Object.entries(store).forEach(([rawKey, rawEntry]) => {
     const key = String(rawKey || '');
     if (!key) return;
@@ -337,6 +342,13 @@ function ctfdSplitProjectAudioStore(audioStore) {
     if (key.startsWith(CTFD_AUDIO_EVENT_PREFIX)) {
       const eventKey = key.slice(CTFD_AUDIO_EVENT_PREFIX.length);
       if (eventKey) events[eventKey] = rawEntry;
+      return;
+    }
+
+    // Fallback: if key matches a known event ID (without prefix), accept it.
+    // This handles possible API mismatches or legacy data.
+    if (knownKeys && knownKeys.has(key)) {
+      events[key] = rawEntry;
     }
   });
   return { media, events };
@@ -1293,7 +1305,10 @@ function ctfdWireNotifyConfig() {
   const saveBtn = document.getElementById('ctfd-notify-save');
   const rows = document.getElementById('ctfd-notify-rows');
   if (reloadBtn && !reloadBtn._toolhubBound) {
-    reloadBtn.addEventListener('click', () => ctfdRenderNotifyConfig({ force: true }));
+    reloadBtn.addEventListener('click', () => {
+      if (!confirm('Reload will discard any unsaved changes. Continue?')) return;
+      ctfdRenderNotifyConfig({ force: true });
+    });
     reloadBtn._toolhubBound = true;
   }
   if (saveBtn && !saveBtn._toolhubBound) {

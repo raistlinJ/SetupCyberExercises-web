@@ -1518,16 +1518,13 @@ def instances_create(pid: str):
                 bname = f"br{idx}"
             expected_bridges_for_vm.append(bname)
         post_errors = []  # will accumulate only pool/acl errors now
-        # Optional post-clone snapshot
+        # Optional post-clone snapshot (deferred to post-networking phase)
         try:
             skip_snap = getattr(cfg, 'skip_post_clone_snapshot', None)
             if skip_snap is None:
                 skip_snap = bool(getattr(proj, 'proxmox_skip_post_clone_snapshot', False))
-            if not skip_snap:
-                supid = client.snapshot_qemu(node=node, vmid=newid, snapname='post-clone', description='Auto snapshot after clone')
-                client._wait_task(node, supid, timeout=900)
-        except Exception as e:
-            return ('post', { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts }, { 'index': idx, 'name': newname, 'reason': f'snapshot failed: {e}', 'vmid_attempts': vmid_attempts })
+        except Exception:
+            skip_snap = False
         # Pool membership: add ALL VMs to pool; ACL only per-VM for user-accessible VMs (no pool ACL grants)
         assignment_info = {}
         try:
@@ -1711,10 +1708,10 @@ def instances_create(pid: str):
             post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool/acl assignment failed: {e}' })
         # Finalize
         if post_errors:
-            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used }
+            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap) }
             payload.update(assignment_info)
             return ('post', payload, post_errors)
-        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used }
+        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap) }
         payload.update(assignment_info)
         return ('ok', payload, None)
 
@@ -2069,6 +2066,40 @@ def instances_create(pid: str):
                 client.set_qemu_nets(node=node, vmid=vmid, nets=netspecs, delete_keys=None)
             except Exception as e:
                 errors.append({'reason': f'set nets failed post-clone: {e}'})
+
+        # 4b) Post-clone snapshot (deferred) - execute in parallel
+        snapshot_tasks = []
+        for r in results:
+            if r.get('skip_post_clone_snapshot'):
+                continue
+            vmid = r.get('vmid')
+            node = r.get('node')
+            if vmid and node:
+                snapshot_tasks.append(r)
+
+        if snapshot_tasks:
+            _update_job_detail(pid, phase='snapshotting', message=f'Creating post-network snapshots ({len(snapshot_tasks)} VMs)…')
+            def _do_post_snap(item):
+                try:
+                    # Timeout matching the original logic (900s)
+                    supid = client.snapshot_qemu(node=item['node'], vmid=item['vmid'], snapname='post-clone', description='Auto snapshot after clone')
+                    client._wait_task(item['node'], supid, timeout=900)
+                    return None
+                except Exception as e:
+                    return f"snapshot failed for {item.get('name')}: {e}"
+
+            with ThreadPoolExecutor(max_workers=len(snapshot_tasks) or 1) as pool:
+                snap_futs = {pool.submit(_do_post_snap, t): t for t in snapshot_tasks}
+                for fut in as_completed(snap_futs):
+                    res = fut.result()
+                    if res:
+                        # Log error but don't fail the whole job
+                        try:
+                            t_item = snap_futs[fut]
+                            errors.append({'reason': res, 'name': t_item.get('name')})
+                        except Exception:
+                            pass
+
         # 5) Reload networks on nodes where we created bridges (delayed + conditional re-run)
         #    Pre-reload verification: re-check ageing lines and log stanza excerpts
         if ssh_user and ssh_pass and bridges_needed:
