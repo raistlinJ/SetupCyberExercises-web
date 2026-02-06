@@ -1458,30 +1458,39 @@ function ctfdWireNotifyConfig() {
         const sound = ctfdNormalizeMediaSound(mediaEntry);
         const skipAudioSegments = !soundKey || !sound || !sound.dataUrl;
 
+        // Build context from ALL available live data, falling back to sample values when missing.
+        const liveContext = ctfdSpeechContextSamplePreview(pid);
+        const sampleFallbacks = {
+          leader: 'CHIRPies',
+          user_first: 'Alex Jordan',
+          team_first: 'CHIRPies',
+          team_clause: ' from CHIRPies',
+          project: 'Cyber Shield',
+          project_clause: ' in Cyber Shield',
+          second_team: 'Sigma Squad',
+          third_team: 'Byte Force',
+          challenge: 'Forensics Intro',
+          challenge_clause: ' on Forensics Intro',
+          category: 'Forensics',
+          category_clause: ' in Forensics',
+          points: '100',
+          points_clause: ' worth 100 points',
+          reason: 'scoreboard reveal',
+          reason_clause: ' for scoreboard reveal',
+          countdown_seconds: '10',
+          interval_minutes: '30',
+          interval_seconds: '1800',
+          interval_minutes_clause: ' 30 minutes',
+          interval_seconds_clause: ' 1800 seconds'
+        };
+        // Use live values when present, fall back to sample values otherwise.
+        const context = {};
+        for (const key of Object.keys(sampleFallbacks)) {
+          const live = liveContext[key];
+          context[key] = (live !== undefined && live !== null && live !== '') ? live : sampleFallbacks[key];
+        }
         const payload = {
-          context: {
-            leader: 'CHIRPies',
-            user_first: 'Alex Jordan',
-            team_first: 'CHIRPies',
-            team_clause: ' from CHIRPies',
-            project: 'Cyber Shield',
-            project_clause: ' in Cyber Shield',
-            second_team: 'Sigma Squad',
-            third_team: 'Byte Force',
-            challenge: 'Forensics Intro',
-            challenge_clause: ' on Forensics Intro',
-            category: 'Forensics',
-            category_clause: ' in Forensics',
-            points: '100',
-            points_clause: ' worth 100 points',
-            reason: 'scoreboard reveal',
-            reason_clause: ' for scoreboard reveal',
-            countdown_seconds: '10',
-            interval_minutes: '30',
-            interval_seconds: '1800',
-            interval_minutes_clause: ' 30 minutes',
-            interval_seconds_clause: ' 1800 seconds'
-          },
+          context,
           fallbackText: label
         };
 
@@ -2535,6 +2544,58 @@ function ctfdSpeechContextProject(projectId) {
     third_team: trimmed[2] || ''
   };
 }
+// Build a comprehensive context for sample previews using ALL available live data.
+// Falls back to sample values when live data is not available.
+function ctfdSpeechContextSamplePreview(projectId) {
+  const ctx = {};
+  // Start with project and leaderboard data.
+  const base = ctfdSpeechContextProject(projectId);
+  Object.assign(ctx, base);
+
+  // Add periodic interval data if configured.
+  try {
+    const entry = ctfdGetAudioEntry('ctfdPeriodic');
+    const sec = ctfdPeriodicIntervalSeconds(entry);
+    if (Number.isFinite(sec) && sec > 0) {
+      const roundedSec = Math.max(1, Math.round(sec));
+      ctx.interval_seconds = String(roundedSec);
+      ctx.interval_seconds_clause = ` ${roundedSec} second${roundedSec === 1 ? '' : 's'}`;
+      const roundedMin = Math.max(1, Math.round(roundedSec / 60));
+      ctx.interval_minutes = String(roundedMin);
+      ctx.interval_minutes_clause = ` ${roundedMin} minute${roundedMin === 1 ? '' : 's'}`;
+    }
+  } catch { }
+
+  // Derive first-place user/team and points from CTFD_USER_META.
+  try {
+    const meta = CTFD_USER_META && typeof CTFD_USER_META === 'object' ? CTFD_USER_META : {};
+    const summary = ctfdSummarizeScore(meta);
+    if (summary && summary.hasScore) {
+      if (summary.firstUser) {
+        ctx.user_first = summary.firstUser;
+        ctx.leader = summary.firstUser;
+        const teamRaw = summary.firstTeam ? String(summary.firstTeam).trim() : '';
+        if (teamRaw && teamRaw !== summary.firstUser) {
+          ctx.team_clause = ` from team ${ctfdSpeechTrimTeamName(teamRaw)}`;
+        }
+      } else if (summary.firstTeam) {
+        ctx.leader = ctfdSpeechTrimTeamName(summary.firstTeam);
+      }
+      const pts = Number(summary.firstPoints);
+      if (Number.isFinite(pts) && pts > 0) {
+        ctx.points = String(pts);
+        ctx.points_clause = ` worth ${pts} ${pts === 1 ? 'point' : 'points'}`;
+      }
+      if (summary.firstChallenge) {
+        ctx.challenge = summary.firstChallenge;
+        ctx.challenge_clause = ` on ${summary.firstChallenge}`;
+      }
+    }
+  } catch { }
+
+  return ctx;
+}
+
 function ctfdSpeechContextPeriodic(projectId) {
   const base = ctfdSpeechContextProject(projectId);
   let intervalSeconds = 0;
