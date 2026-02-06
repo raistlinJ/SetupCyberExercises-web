@@ -1091,6 +1091,9 @@ async function ctfdRenderNotifyConfig(options) {
   } catch { }
   let audioStore = ctfdGetProjectAudioStore(pid);
   const { events } = ctfdSplitProjectAudioStore(audioStore);
+  console.log('[ctfdRenderNotifyConfig] Audio store keys:', Object.keys(audioStore || {}));
+  console.log('[ctfdRenderNotifyConfig] Events:', Object.keys(events || {}),
+    Object.entries(events || {}).map(([k, v]) => [k, v.speakTemplates]));
   const mediaItems = ctfdListProjectMediaOptions(audioStore);
   const eventKeys = ctfdNotifyEventKeys();
 
@@ -1208,7 +1211,7 @@ async function ctfdSaveNotifyConfig() {
   const status = document.getElementById('ctfd-notify-status');
   const pid = ctfdCurrentPid();
   if (!pid) return;
-  if (ctfdNotifyIsMultiMode()) return;
+  if (ctfdNotifyIsMultiMode()) return; // Cannot save in multi-project mode
   const rows = document.getElementById('ctfd-notify-rows');
   if (!rows) return;
   if (status) status.textContent = 'Saving…';
@@ -1227,6 +1230,7 @@ async function ctfdSaveNotifyConfig() {
   } catch {
     audioStore = ctfdGetProjectAudioStore(pid);
   }
+  console.log('[ctfdSaveNotifyConfig] Loaded audioStore keys:', Object.keys(audioStore || {}));
 
   rows.querySelectorAll('tr[data-event-key]').forEach(tr => {
     const eventKey = tr.getAttribute('data-event-key') || '';
@@ -1283,13 +1287,15 @@ async function ctfdSaveNotifyConfig() {
     // Store templates as strings (TTS only) OR dicts ({ text, soundKey }) when a per-item clip is selected.
     next.speakTemplates = templates;
     try { delete next.speakTemplate; } catch { }
+    console.log(`[ctfdSaveNotifyConfig] ${storeKey}:`, JSON.stringify({ speakTemplates: templates, enabled, speak, playOrder }));
 
     audioStore[storeKey] = next;
   });
 
   try {
     if (typeof saveProjectAudio === 'function') {
-      await saveProjectAudio(pid, audioStore);
+      const saveResult = await saveProjectAudio(pid, audioStore);
+      console.log('[ctfdSaveNotifyConfig] Server response:', saveResult);
       if (status) status.textContent = 'Saved.';
       setTimeout(() => { try { if (status && status.textContent === 'Saved.') status.textContent = ''; } catch { } }, 1500);
     } else {
@@ -1300,14 +1306,40 @@ async function ctfdSaveNotifyConfig() {
   }
 }
 
+// Generic Confirmation Modal Utility
+function openCtfdConfirm(message, onConfirm) {
+  const modalEl = document.getElementById('ctfdConfirmModal');
+  if (!modalEl || !window.bootstrap || !window.bootstrap.Modal) {
+    // Fallback if modal missing
+    if (confirm(message) && onConfirm) onConfirm();
+    return;
+  }
+  const body = document.getElementById('ctfdConfirmBody');
+  if (body) body.textContent = message;
+
+  const confirmBtn = document.getElementById('ctfdConfirmBtn');
+  if (confirmBtn) {
+    const newBtn = confirmBtn.cloneNode(true);
+    confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
+    newBtn.addEventListener('click', () => {
+      const inst = bootstrap.Modal.getInstance(modalEl);
+      if (inst) inst.hide();
+      if (onConfirm) onConfirm();
+    });
+  }
+  const bsModal = new bootstrap.Modal(modalEl);
+  bsModal.show();
+}
+
 function ctfdWireNotifyConfig() {
   const reloadBtn = document.getElementById('ctfd-notify-reload');
   const saveBtn = document.getElementById('ctfd-notify-save');
   const rows = document.getElementById('ctfd-notify-rows');
   if (reloadBtn && !reloadBtn._toolhubBound) {
     reloadBtn.addEventListener('click', () => {
-      if (!confirm('Reload will discard any unsaved changes. Continue?')) return;
-      ctfdRenderNotifyConfig({ force: true });
+      openCtfdConfirm('Reload will discard any unsaved changes. Continue?', () => {
+        ctfdRenderNotifyConfig({ force: true });
+      });
     });
     reloadBtn._toolhubBound = true;
   }

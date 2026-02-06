@@ -7820,8 +7820,8 @@ def update_project_audio(pid: str):
     validation_errors = _validate_audio_payload(payload)
     if validation_errors:
         return jsonify({"errors": validation_errors}), 400
-    sanitized = ProjectStore._sanitize_audio_map(payload)
-    proj = s.update_audio(pid, sanitized)
+    # Note: update_audio calls _sanitize_audio_map internally, no need to sanitize here
+    proj = s.update_audio(pid, payload)
     audio = getattr(proj, 'audio', {}) or {}
     return jsonify({"audio": audio})
 
