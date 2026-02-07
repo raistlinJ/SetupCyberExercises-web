@@ -5648,6 +5648,9 @@ function openCtfdLoginMultiForPids(pids) {
             if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
               CTFD_ALLOW_LOAD = true;
               await ctfdRefreshMulti();
+            } else if (okCount > 0 && failCount === 0) {
+              // Optimistically clear indicator if we fixed everything in the modal but aren't triggering a full multi-refresh
+              try { ctfdRenderSkippedIndicator([], ''); } catch { }
             }
           } catch { }
           // Close after short delay
