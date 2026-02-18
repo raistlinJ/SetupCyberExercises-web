@@ -1074,12 +1074,7 @@ async function ctfdRenderNotifyConfig(options) {
     if (status) status.textContent = '';
     return;
   }
-  if (ctfdNotifyIsMultiMode()) {
-    rows.innerHTML = '<tr><td colspan="3" class="small text-muted">Notification audio is configured per-project (disable multi-project selection to edit).</td></tr>';
-    if (status) status.textContent = '';
-    if (saveBtn) saveBtn.disabled = true;
-    return;
-  }
+
 
   if (status) status.textContent = 'Loading…';
   try {
@@ -1211,10 +1206,13 @@ async function ctfdSaveNotifyConfig() {
   const status = document.getElementById('ctfd-notify-status');
   const pid = ctfdCurrentPid();
   if (!pid) return;
-  if (ctfdNotifyIsMultiMode()) return; // Cannot save in multi-project mode
   const rows = document.getElementById('ctfd-notify-rows');
   if (!rows) return;
-  if (status) status.textContent = 'Saving…';
+  // Determine the set of project IDs to save to
+  const targetPids = (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1)
+    ? [...CTFD_SELECTED_PIDS]
+    : [pid];
+  if (status) status.textContent = targetPids.length > 1 ? `Saving to ${targetPids.length} projects…` : 'Saving…';
 
   let audioStore = {};
   try {
@@ -1294,10 +1292,18 @@ async function ctfdSaveNotifyConfig() {
 
   try {
     if (typeof saveProjectAudio === 'function') {
-      const saveResult = await saveProjectAudio(pid, audioStore);
-      console.log('[ctfdSaveNotifyConfig] Server response:', saveResult);
-      if (status) status.textContent = 'Saved.';
-      setTimeout(() => { try { if (status && status.textContent === 'Saved.') status.textContent = ''; } catch { } }, 1500);
+      let savedCount = 0;
+      for (const savePid of targetPids) {
+        try {
+          await saveProjectAudio(savePid, audioStore);
+          savedCount++;
+        } catch (innerErr) {
+          try { shell.logWarn(`[CTFd] Failed to save audio for project ${savePid}: ${innerErr?.message || innerErr}`); } catch { }
+        }
+      }
+      const label = targetPids.length > 1 ? `Saved to ${savedCount}/${targetPids.length} projects.` : 'Saved.';
+      if (status) status.textContent = label;
+      setTimeout(() => { try { if (status && status.textContent === label) status.textContent = ''; } catch { } }, 2000);
     } else {
       if (status) status.textContent = 'Save is unavailable.';
     }
@@ -1337,6 +1343,7 @@ function ctfdWireNotifyConfig() {
   const rows = document.getElementById('ctfd-notify-rows');
   if (reloadBtn && !reloadBtn._toolhubBound) {
     reloadBtn.addEventListener('click', () => {
+
       openCtfdConfirm('Reload will discard any unsaved changes. Continue?', () => {
         ctfdRenderNotifyConfig({ force: true });
       });
@@ -1344,7 +1351,10 @@ function ctfdWireNotifyConfig() {
     reloadBtn._toolhubBound = true;
   }
   if (saveBtn && !saveBtn._toolhubBound) {
-    saveBtn.addEventListener('click', () => ctfdSaveNotifyConfig());
+    saveBtn.addEventListener('click', () => {
+
+      ctfdSaveNotifyConfig();
+    });
     saveBtn._toolhubBound = true;
   }
   if (rows && !rows._toolhubBound) {
@@ -1490,37 +1500,8 @@ function ctfdWireNotifyConfig() {
         const sound = ctfdNormalizeMediaSound(mediaEntry);
         const skipAudioSegments = !soundKey || !sound || !sound.dataUrl;
 
-        // Build context from ALL available live data, falling back to sample values when missing.
-        const liveContext = ctfdSpeechContextSamplePreview(pid);
-        const sampleFallbacks = {
-          leader: 'CHIRPies',
-          user_first: 'Alex Jordan',
-          team_first: 'CHIRPies',
-          team_clause: ' from CHIRPies',
-          project: 'Cyber Shield',
-          project_clause: ' in Cyber Shield',
-          second_team: 'Sigma Squad',
-          third_team: 'Byte Force',
-          challenge: 'Forensics Intro',
-          challenge_clause: ' on Forensics Intro',
-          category: 'Forensics',
-          category_clause: ' in Forensics',
-          points: '100',
-          points_clause: ' worth 100 points',
-          reason: 'scoreboard reveal',
-          reason_clause: ' for scoreboard reveal',
-          countdown_seconds: '10',
-          interval_minutes: '30',
-          interval_seconds: '1800',
-          interval_minutes_clause: ' 30 minutes',
-          interval_seconds_clause: ' 1800 seconds'
-        };
-        // Use live values when present, fall back to sample values otherwise.
-        const context = {};
-        for (const key of Object.keys(sampleFallbacks)) {
-          const live = liveContext[key];
-          context[key] = (live !== undefined && live !== null && live !== '') ? live : sampleFallbacks[key];
-        }
+        // Use live data from CTFd Management tab; empty/missing values are skipped.
+        const context = { ...ctfdSpeechContextSamplePreview(pid) };
         const payload = {
           context,
           fallbackText: label
@@ -2025,9 +2006,8 @@ function ctfdCompileSpeechTemplate(template, context) {
             markFallbackTarget();
           }
         } else {
-          // If the template variable doesn't map to anything, speak the variable name
-          // so it's obvious during preview/testing.
-          pushText(String(key).replace(/_/g, ' '));
+          // Variable not in context — skip silently.
+          markFallbackTarget();
         }
       }
     }
@@ -3312,12 +3292,14 @@ async function ctfdPlayFirstPlaceSound(kind, delaySeconds) {
   return await ctfdPlayNamedSound(key, fallback, delaySeconds);
 }
 function ctfdCompareScoreCandidates(a, b) {
-  const timeA = Number.isFinite(a?.solvedAt) ? a.solvedAt : Number.POSITIVE_INFINITY;
-  const timeB = Number.isFinite(b?.solvedAt) ? b.solvedAt : Number.POSITIVE_INFINITY;
-  if (timeA !== timeB) return timeA < timeB ? -1 : 1;
+  // Primary: highest points first
   const ptsA = Number.isFinite(a?.points) ? a.points : 0;
   const ptsB = Number.isFinite(b?.points) ? b.points : 0;
   if (ptsA !== ptsB) return ptsA > ptsB ? -1 : 1;
+  // Tiebreaker: earliest solve time
+  const timeA = Number.isFinite(a?.solvedAt) ? a.solvedAt : Number.POSITIVE_INFINITY;
+  const timeB = Number.isFinite(b?.solvedAt) ? b.solvedAt : Number.POSITIVE_INFINITY;
+  if (timeA !== timeB) return timeA < timeB ? -1 : 1;
   const labelA = (a?.username || a?.team || '').toLowerCase();
   const labelB = (b?.username || b?.team || '').toLowerCase();
   if (labelA < labelB) return -1;
@@ -5042,47 +5024,7 @@ async function ctfdUpdateSettings(updates) {
   // Temporarily disable toggles to prevent flapping
   try { tgls.forEach(el => { if (el) el.disabled = true; }); } catch { }
   const togglingChallenges = updates && Object.prototype.hasOwnProperty.call(updates, 'challenges_visible');
-  const targetChallenges = togglingChallenges ? !!updates.challenges_visible : null;
-  const lastChallengesVisible = !!CTFD_LAST_CHALLENGES_STATE;
-  const shouldDelayReveal = togglingChallenges && targetChallenges === true && !lastChallengesVisible && ctfdCountdownNotificationActive();
-  const shouldDelayHide = togglingChallenges && targetChallenges === false && lastChallengesVisible && ctfdCountdownStopNotificationActive();
-  let countdownCuePlayed = true;
-  if (shouldDelayReveal) {
-    CTFD_CHALLENGE_REVEAL_IN_PROGRESS = true;
-    CTFD_CHALLENGE_REVEAL_EXPECTED = true;
-    CTFD_CHALLENGE_HIDE_EXPECTED = false;
-    if (statusEl) { statusEl.textContent = 'Countdown cue…'; statusEl.className = 'small text-muted'; }
-    if (chToggle) {
-      chToggle.checked = false;
-      chToggle.indeterminate = true;
-      chToggle.setAttribute('data-ctfd-pending-reveal', '1');
-    }
-    try {
-      await ctfdPlayCountdownCueForChallenges();
-    } catch (err) {
-      countdownCuePlayed = false;
-      try { shell.logWarn(`[CTFd] Countdown cue failed: ${err?.message || err}`); } catch { }
-    }
-    if (!countdownCuePlayed) CTFD_CHALLENGE_REVEAL_EXPECTED = false;
-  } else if (shouldDelayHide) {
-    CTFD_CHALLENGE_REVEAL_IN_PROGRESS = true;
-    CTFD_CHALLENGE_REVEAL_EXPECTED = false;
-    CTFD_CHALLENGE_HIDE_EXPECTED = true;
-    if (statusEl) { statusEl.textContent = 'Countdown stop…'; statusEl.className = 'small text-muted'; }
-    if (chToggle) {
-      chToggle.checked = true;
-      chToggle.indeterminate = true;
-      chToggle.setAttribute('data-ctfd-pending-reveal', '1');
-    }
-    let countdownStopPlayed = true;
-    try {
-      await ctfdPlayCountdownStopForChallenges();
-    } catch (err) {
-      countdownStopPlayed = false;
-      try { shell.logWarn(`[CTFd] Countdown stop cue failed: ${err?.message || err}`); } catch { }
-    }
-    if (!countdownStopPlayed) CTFD_CHALLENGE_HIDE_EXPECTED = false;
-  } else if (togglingChallenges && targetChallenges === false) {
+  if (togglingChallenges) {
     CTFD_CHALLENGE_REVEAL_EXPECTED = false;
     CTFD_CHALLENGE_HIDE_EXPECTED = false;
     if (chToggle) {
