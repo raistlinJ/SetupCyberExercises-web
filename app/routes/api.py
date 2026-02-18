@@ -4307,6 +4307,25 @@ def instances_users_create(pid: str):
                         created_pools_set.add(poolid)
             except Exception as e:
                 errors.append({ 'index': idx, 'reason': f'pool create failed: {e}' })
+            
+            # Ensure AcostaPowerRollback role exists and assign it to the user on the POOL
+            try:
+                # Create role if missing (idempotent-ish)
+                try:
+                     # Privileges: Power mgmt + Rollback
+                     client.create_role('AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                except Exception:
+                     pass
+                # Assign to pool
+                if poolid:
+                    client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
+            except Exception as e:
+                # Log but don't fail the whole batch, it's an enhancement
+                try:
+                    current_app.logger.warning(f"Failed to set pool-level power permissions for {userid} on {poolid}: {e}")
+                except Exception:
+                    pass
+
             # Add members for selected VMs under this index (if any mapped)
             if not poolid:
                 errors.append({ 'index': idx, 'reason': 'no pool id (credential username empty or invalid)' })
@@ -4424,12 +4443,24 @@ def instances_users_create(pid: str):
                                 except Exception:
                                     pass
                                 try:
-                                    # Ensure AcostaRollback role exists
+                                    # Ensure AcostaRollback role exists (Legacy but kept for direct VM assignment if needed)
                                     try:
                                         if not client.get_role('AcostaRollback'):
                                              client.create_role('AcostaRollback', ['VM.Snapshot.Rollback'])
                                     except Exception:
                                          pass  # Best effort
+                                    
+                                    # Ensure AcostaPowerRollback role exists for pool-wide operations (Power + Rollback)
+                                    # We do this once per user/pool creation but also here to ensure it's available.
+                                    try:
+                                        if not client.get_role('AcostaPowerRollback'):
+                                             client.create_role('AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                                    except Exception:
+                                         pass
+
+                                    # Grant AcostaPowerRollback on the POOL if not already done (idempotent driven by loop/check irrelevant)
+                                    # Actually, do this once per USER/POOL creation block above, but we can do it here to be safe or just rely on the block below.
+                                    # Let's add it to the initial pool creation block instead to be cleaner.
                                     
                                     # Assign roles: PVEUser (or PVEVMUser fallback) AND AcostaRollback
                                     # We use set_acl_user_vm which supports comma-separated roles
