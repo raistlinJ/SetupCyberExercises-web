@@ -2801,7 +2801,11 @@ async function autoSaveVm(pid, idx) {
   }
   setVmStatus(pid, idx, 'Saving…', 'text-muted');
   const vmidEl = document.getElementById(`vm-${pid}-${idx}-vmid`);
+  const userEl = document.getElementById(`vm-${pid}-${idx}-user`);
+  const passEl = document.getElementById(`vm-${pid}-${idx}-pass`);
   let vmid = null;
+  let vm_user = null;
+  let vm_pass = null;
   if (vmidEl) {
     const raw = String(vmidEl.value ?? '').trim();
     if (raw) {
@@ -2815,8 +2819,16 @@ async function autoSaveVm(pid, idx) {
   const storedSteps = getStoredCommandsFromDom(pid, idx);
   const storedCommands = stepsToServerPayload(storedSteps);
   const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z]/g, '').slice(0, 8)).filter(Boolean);
+  if (userEl && userEl.value.trim() !== '') {
+    vm_user = userEl.value.trim();
+  }
+  if (passEl && passEl.value.trim() !== '') {
+    vm_pass = passEl.value.trim();
+  }
   const payload = {
     vmid: vmid,
+    vm_user: vm_user,
+    vm_pass: vm_pass,
     start_commands: startCommands,
     stored_commands: storedCommands,
     internal_network_adaptors: adaptors
@@ -3638,6 +3650,14 @@ function renderProjectCard(p) {
           <input type="hidden" id="vm-${p.id}-${i}-start-data" value="${startDataValue}">
         </div>`;
     })()}
+        <div class="col-md-2">
+          <label class="form-label" title="Optional Username appended to notes">VM User (opt)</label>
+          <input type="text" id="vm-${p.id}-${i}-user" class="form-control form-control-sm" value="${(v.vm_user ?? '')}" placeholder="Optional user" title="Optional Username appended to notes" oninput="debounceVmSave('${p.id}', ${i})" />
+        </div>
+        <div class="col-md-2">
+          <label class="form-label" title="Optional Password appended to notes">VM Pass (opt)</label>
+          <input type="text" id="vm-${p.id}-${i}-pass" class="form-control form-control-sm" value="${(v.vm_pass ?? '')}" placeholder="Optional pass" title="Optional Password appended to notes" oninput="debounceVmSave('${p.id}', ${i})" />
+        </div>
         <div class="col-md-4">
           <label class="form-label">Stored Commands</label>
           ${(function () {

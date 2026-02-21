@@ -263,6 +263,9 @@ class VMConfig:
     clone_timeout_sec: Optional[int] = None  # override project timeout
     storage_volume: Optional[str] = None     # override project storage for full clone
     skip_post_clone_snapshot: Optional[bool] = None  # skip snapshot for this VM
+    # Instance credentials
+    vm_user: Optional[str] = None
+    vm_pass: Optional[str] = None
 
 
 @dataclass
@@ -742,6 +745,10 @@ class ProjectStore:
                     base["vmid"] = None
             base["start_commands"] = sanitize_start_command_steps(base.get("start_commands"))
             base["stored_commands"] = sanitize_start_command_steps(base.get("stored_commands"))
+            if base.get("vm_user") is not None:
+                base["vm_user"] = str(base["vm_user"])
+            if base.get("vm_pass") is not None:
+                base["vm_pass"] = str(base["vm_pass"])
             return VMConfig(**base)
         # fallback
         return VMConfig(name=str(v))

@@ -1525,6 +1525,41 @@ def instances_create(pid: str):
                 skip_snap = bool(getattr(proj, 'proxmox_skip_post_clone_snapshot', False))
         except Exception:
             skip_snap = False
+        
+        # Scenario Credentials / Notes Overwrite
+        try:
+            creds_list = list(getattr(proj, 'credentials', []) or [])
+            urec_temp = creds_list[idx-1] if idx-1 < len(creds_list) else None
+            
+            # Fetch vm_user and vm_pass from the VMConfig
+            cfg_user = getattr(cfg, 'vm_user', None)
+            cfg_pass = getattr(cfg, 'vm_pass', None)
+            
+            # Prepare notes payload
+            notes_payload = {
+                "Scenario": proj.name
+            }
+            if cfg_user:
+                notes_payload["User"] = cfg_user
+            if cfg_pass:
+                notes_payload["Pass"] = cfg_pass
+                
+            json_notes = json.dumps(notes_payload, indent=4)
+            
+            # Fetch existing config to preserve old notes, if desired (or just overwrite)
+            ex_cfg = client.get_qemu_config(node=node, vmid=int(newid)) or {}
+            old_desc = ex_cfg.get('description', '')
+            
+            if old_desc:
+                new_desc = f"{old_desc}\n\n{json_notes}"
+            else:
+                new_desc = json_notes
+                
+            client.set_qemu_options(node=node, vmid=int(newid), options={'description': new_desc})
+            debug_msgs.append(f"Successfully appended scenario credentials to VM Notes for vmid={newid}")
+        except Exception as notes_err:
+            debug_msgs.append(f"Failed to append scenario credentials to VM Notes: {notes_err}")
+
         # Pool membership: add ALL VMs to pool; ACL only per-VM for user-accessible VMs (no pool ACL grants)
         assignment_info = {}
         try:
@@ -3474,6 +3509,101 @@ def instances_start(pid: str):
     return jsonify({ 'started': started, 'resumed': resumed, 'skipped': skipped, 'errors': errors })
 
 
+@api_bp.route("/projects/<pid>/instances/actions/apply_scenario", methods=["POST"])
+def instances_apply_scenario(pid: str):
+    _start_job(pid, 'apply_scenario')
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    try:
+        body = request.get_json(force=True) or {}
+    except Exception:
+        body = {}
+    
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    
+    targets = body.get('targets') or []
+    if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
+        return jsonify({"error": "Missing Proxmox URL and credentials"}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "No targets provided"}), 400
+        
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+    applied = []
+    
+    pool_workers = _pool_workers_for(proj, len(mapped))
+    
+    # Map configurations by name for easy lookup
+    cfg_map = {}
+    for cfg in getattr(proj, 'vms', []):
+        name = getattr(cfg, 'name', '')
+        if name:
+            cfg_map[name.lower()] = cfg
+
+    def do_apply(m):
+        if _is_cancelled(pid):
+            raise RuntimeError('cancelled')
+            
+        node = m['node']
+        vmid = m['vmid']
+        base_name = str(m.get('name', '')).lower()
+        
+        # Prepare notes payload
+        notes_payload = {
+            "Scenario": proj.name
+        }
+        
+        cfg = cfg_map.get(base_name)
+        if cfg:
+            cfg_user = getattr(cfg, 'vm_user', None)
+            cfg_pass = getattr(cfg, 'vm_pass', None)
+            if cfg_user:
+                notes_payload["User"] = cfg_user
+            if cfg_pass:
+                notes_payload["Pass"] = cfg_pass
+                
+        json_notes = json.dumps(notes_payload, indent=4)
+        
+        # Fetch existing config to preserve old notes while replacing previous JSON payload
+        ex_cfg = client.get_qemu_config(node=node, vmid=int(vmid)) or {}
+        old_desc = ex_cfg.get('description', '')
+        
+        if old_desc:
+            import re
+            # Remove previous Scenario JSON block if it exists
+            clean_desc = re.sub(r'\{\s*"Scenario":\s*".*?".*?\}', '', old_desc, flags=re.DOTALL)
+            clean_desc = clean_desc.strip()
+            if clean_desc:
+                new_desc = f"{clean_desc}\n\n{json_notes}"
+            else:
+                new_desc = json_notes
+        else:
+            new_desc = json_notes
+            
+        client.set_qemu_options(node=node, vmid=int(vmid), options={'description': new_desc})
+        return ('applied', { 'index': m['index'], 'name': m['name'], 'vmid': vmid, 'node': node })
+
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        future_map = { pool.submit(do_apply, m): m for m in mapped }
+        for fut in as_completed(future_map):
+            m = future_map[fut]
+            try:
+                kind, payload = fut.result()
+                applied.append(payload)
+            except Exception as e:
+                if str(e) == 'cancelled':
+                    errors.append({ 'reason': 'cancelled' })
+                else:
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'apply scenario failed: {e}' })
+    _end_job(pid)
+    return jsonify({ 'applied': applied, 'skipped': skipped, 'errors': errors })
+
+
 @api_bp.route("/projects/<pid>/instances/actions/suspend", methods=["POST"])
 def instances_suspend(pid: str):
     _start_job(pid, 'suspend')
@@ -4446,7 +4576,7 @@ def instances_users_create(pid: str):
                                     # Ensure AcostaRollback role exists (Legacy but kept for direct VM assignment if needed)
                                     try:
                                         if not client.get_role('AcostaRollback'):
-                                             client.create_role('AcostaRollback', ['VM.Snapshot.Rollback'])
+                                             client.create_role('AcostaRollback', ['VM.Snapshot.Rollback', 'VM.Audit', 'VM.PowerMgmt'])
                                     except Exception:
                                          pass  # Best effort
                                     
@@ -4515,6 +4645,274 @@ def instances_users_create(pid: str):
             errors.append({ 'index': idx, 'reason': f'users_create failed: {e}' })
     _end_job(pid)
     return jsonify({ 'created_users': created_users, 'created_pools': created_pools, 'added_members': added_members, 'skipped': skipped, 'errors': errors, 'notices': notices })
+
+
+@api_bp.route("/projects/<pid>/instances/actions/users_perms", methods=["POST"])
+def instances_users_perms(pid: str):
+    """Update Proxmox user permissions for selected instance credential usernames and VMs."""
+    _start_job(pid, 'users_perms')
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    body = request.get_json(force=True) or {}
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+    targets = body.get('targets') or []
+    if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
+        return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "No targets provided"}), 400
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+    
+    by_index = {}
+    for m in mapped:
+        by_index.setdefault(int(m['index']), []).append(m)
+    indices = sorted({ int((t or {}).get('index', 0)) for t in (targets or []) if (t or {}).get('index') })
+    
+    existing_vms_by_name = {}
+    try:
+        for n in client.list_nodes() or []:
+            try:
+                node_name = n.get('node') or n.get('id') or n.get('name') or ''
+                if not node_name:
+                    continue
+                for q in client.list_qemu_vms(node_name) or []:
+                    try:
+                        nm = str(q.get('name') or '')
+                        if not nm:
+                            continue
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm })
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+        
+    updated_users = []
+    added_members = []
+    notices = []
+    notice_keys = set()
+    def _add_notice_once(item):
+        try:
+            key = str((item or {}).get('reason', '') or item)
+            if key not in notice_keys:
+                notices.append(item)
+                notice_keys.add(key)
+        except Exception:
+            notices.append(item)
+            
+    tag_local = str(proj.tag or '').strip()
+    def _base_from_generated(gen_name: str, idx: int) -> str:
+        try:
+            suf = f"{tag_local}{idx}"
+            if gen_name and gen_name.endswith(suf):
+                return gen_name[:len(gen_name)-len(suf)]
+        except Exception:
+            pass
+        return gen_name
+        
+    def _is_user_accessible(base_name: str) -> bool:
+        try:
+            for v in (proj.vms or []):
+                if isinstance(v, dict):
+                    if str(v.get('name') or '') == str(base_name or ''):
+                        return bool(v.get('viewable_to_user'))
+                else:
+                    if str(getattr(v, 'name', '') or '') == str(base_name or ''):
+                        return bool(getattr(v, 'viewable_to_user', False))
+        except Exception:
+            return False
+        return False
+        
+    for idx in indices:
+        mlist = by_index.get(idx, [])
+        if _is_cancelled(pid):
+            errors.append({ 'reason': 'cancelled' })
+            break
+        try:
+            cred = (proj.credentials or [])[idx-1] if idx-1 < len(proj.credentials or []) else None
+            uname = (cred or {}).get('username') or ''
+            if not uname:
+                errors.append({ 'index': idx, 'reason': 'no credential username for instance' })
+                continue
+                
+            userid = f"{uname}@pve"
+            poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
+            
+            # Check user
+            existing_user = None
+            try:
+                existing_user = client.get_user(userid)
+            except Exception:
+                pass
+                
+            if existing_user is None:
+                errors.append({ 'index': idx, 'reason': f'User {userid} does not exist, cannot set perms' })
+                continue
+                
+            updated_users.append({ 'index': idx, 'userid': userid })
+            
+            # Ensure AcostaPowerRollback role exists and assign it to the user on the POOL
+            try:
+                try:
+                    client.create_role('AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                except Exception:
+                    pass
+                if poolid:
+                    client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
+            except Exception as e:
+                try:
+                    current_app.logger.warning(f"Failed to set pool-level power permissions for {userid} on {poolid}: {e}")
+                except Exception:
+                    pass
+
+            # Add members to pool
+            if poolid:
+                for m in (mlist or []):
+                    dbg = []
+                    try:
+                        client.add_pool_member(poolid, int(m['vmid']))
+                        added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'], 'debug': dbg + [f"add_pool_member: success pool={poolid} vmid={int(m['vmid'])}"] })
+                    except Exception as e:
+                        msg = str(e)
+                        if ' 501' in msg or 'not implemented' in msg.lower():
+                            vm_node = None
+                            try:
+                                nodes = client.list_nodes()
+                                for n in nodes:
+                                    try:
+                                        nn = n.get('node') or n.get('name') or ''
+                                        lst = client.list_qemu_vms(nn)
+                                        for ent in lst:
+                                            if int(ent.get('vmid')) == int(m['vmid']):
+                                                vm_node = nn
+                                                raise StopIteration
+                                    except StopIteration:
+                                        break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                vm_node = None
+                                
+                            if vm_node:
+                                try:
+                                    client.set_qemu_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
+                                    added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'], 'via': 'vm-config', 'debug': dbg + [f"fallback:set_qemu_options pool={poolid} vmid={int(m['vmid'])} -> success"] })
+                                    notices.append({ 'index': idx, 'reason': f'pool members endpoint unsupported; set VM {m.get("vmid")} pool via config' })
+                                except Exception as e2:
+                                    notices.append({ 'index': idx, 'reason': f'pool members endpoint unsupported; VM-config fallback failed for VM {m.get("vmid")}: {e2}' })
+                            else:
+                                notices.append({ 'index': idx, 'reason': 'pool members endpoint unsupported; unable to locate VM node for VM-config fallback' })
+                        else:
+                            errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'add member failed: {e}' })
+
+            # Set VM-level permissions
+            try:
+                applied = 0
+                unsupported = False
+                acl_targets = list(mlist or [])
+                try:
+                    existing_names_set = { str(m.get('name') or '') for m in acl_targets }
+                    for v in (proj.vms or []):
+                        try:
+                            if isinstance(v, dict):
+                                viewable = bool(v.get('viewable_to_user'))
+                                base_v = str(v.get('name') or '')
+                            else:
+                                viewable = bool(getattr(v, 'viewable_to_user', False))
+                                base_v = str(getattr(v, 'name', '') or '')
+                            if not viewable or not base_v:
+                                continue
+                            gen_name_full = f"{base_v}{tag_local}{idx}"
+                            if gen_name_full in existing_names_set:
+                                continue
+                            ent_list = existing_vms_by_name.get(gen_name_full.lower()) or []
+                            if not ent_list:
+                                continue
+                            ent = ent_list[0]
+                            if ent.get('vmid') is None or ent.get('node') is None:
+                                continue
+                            acl_targets.append({ 'index': idx, 'name': gen_name_full, 'vmid': ent.get('vmid'), 'node': ent.get('node') })
+                            existing_names_set.add(gen_name_full)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                    
+                for m in acl_targets:
+                    try:
+                        gen_name = str(m.get('name') or '')
+                        base_name = _base_from_generated(gen_name, idx)
+                        is_accessible = _is_user_accessible(base_name)
+                        try:
+                            try:
+                                if not client.get_role('AcostaRollback'):
+                                    client.create_role('AcostaRollback', ['VM.Snapshot.Rollback', 'VM.Audit', 'VM.PowerMgmt'])
+                            except Exception:
+                                pass
+                                
+                            try:
+                                if not client.get_role('AcostaPowerRollback'):
+                                    client.create_role('AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                            except Exception:
+                                pass
+
+                            if is_accessible:
+                                roles_to_set = 'PVEUser,AcostaRollback'
+                                try:
+                                    client.set_acl_user_vm(userid, int(m['vmid']), roles=roles_to_set, propagate=True)
+                                except Exception as e:
+                                    msg_low = str(e).lower()
+                                    if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
+                                        client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser,AcostaRollback', propagate=True)
+                                    else:
+                                        raise
+                            else:
+                                client.set_acl_user_vm(userid, int(m['vmid']), roles='AcostaRollback', propagate=True)
+                            applied += 1
+                        except Exception as e2:
+                            if '501' in str(e2) and 'not implemented' not in str(e2).lower():
+                                errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL permission issue (501) applying user {userid}: {e2}' })
+                            elif 'not implemented' in str(e2).lower():
+                                unsupported = True
+                            else:
+                                errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'per-VM ACL failed: {e2}' })
+                    except Exception as e_outer:
+                        errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL processing failed: {e_outer}' })
+                        
+                if applied:
+                    _add_notice_once({ 'index': idx, 'reason': f'applied per-VM ACL to {applied} user-accessible VM(s)' })
+                if unsupported and applied == 0:
+                    _add_notice_once({ 'index': idx, 'reason': 'ACL endpoints unsupported; skipped ACLs' })
+            except Exception as e:
+                errors.append({ 'index': idx, 'reason': f'ACL setup failed: {e}' })
+        except Exception as e:
+            errors.append({ 'index': idx, 'reason': f'users_perms failed: {e}' })
+    _end_job(pid)
+    return jsonify({ 'updated_users': updated_users, 'added_members': added_members, 'skipped': skipped, 'errors': errors, 'notices': notices })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/users_delete", methods=["POST"])
