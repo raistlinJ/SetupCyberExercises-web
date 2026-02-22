@@ -794,7 +794,7 @@ async function refreshVmView(opts) {
           const inst = Number(p.instances || 0); const tag = String(p.tag || '').trim(); const vms = p.vms || []; const creds = p.credentials || [];
           for (let i = 1; i <= inst; i++) {
             const suffix = `${tag}${i}`; const cred = creds[i - 1] || {}; const uname = (cred.username ?? '').trim(); const pword = cred.password ?? ''; const st = statusMap.get(i) || {}; const details = Array.isArray(st.vm_details) ? st.vm_details : []; const detailMap = new Map(details.map(d => [String(d.name || ''), d]));
-            for (const v of vms) { const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; const d2 = detailMap.get(vmName) || null; const rowStatus = hasAnyStatus ? (d2 ? 'created' : 'missing') : 'n/a'; const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null; rows.push({ pid, project: p.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st }); }
+            for (const v of vms) { const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; const d2 = detailMap.get(vmName) || null; const rowStatus = hasAnyStatus ? (d2 ? 'created' : 'missing') : 'n/a'; const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null; rows.push({ pid, project: p.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass }); }
           }
         } catch (e) { try { (window.shell && shell.logWarn) ? shell.logWarn(`Refresh skipped for ${p?.name || pid}: ${e?.message || e}`) : console.warn('Refresh skipped', pid, e); } catch { } }
         resolve();
@@ -972,10 +972,60 @@ function renderMergedVmTable(rows) {
         adaptorsCell = `<div class="d-flex flex-wrap gap-1">${pills}</div>`;
       }
       const key = `${r.pid}|${r.index}|${r.vmName}`; const checked = SELECTED_ROWS.has(key) ? 'checked' : '';
+      let credApplyIcon = '';
+      if (r.vm_user || r.vm_pass) {
+        let iconColor = 'text-secondary opacity-50';
+        let statusTag = ' (Status Unknown)';
+        if (r.status === 'n/a') {
+          statusTag = ' (Needs Refresh)';
+        } else if (r.status === 'missing') {
+          statusTag = ' (VM Missing)';
+        } else {
+          const desc = (d && d.description) ? String(d.description) : '';
+          let isApplied = false;
+          let isMismatch = false;
+          try {
+            const match = desc.match(/\{[^{}]*"Scenario"[^{}]*\}/);
+            if (match) {
+              const parsed = JSON.parse(match[0]);
+              if (parsed && typeof parsed === 'object' && parsed.Scenario) {
+                isApplied = true;
+                const appliedScenario = String(parsed.Scenario || '');
+                const appliedUser = String(parsed.User || '');
+                const appliedPass = String(parsed.Pass || '');
+                const targetScenario = String(r.project || '');
+                const targetUser = String(r.vm_user || '');
+                const targetPass = String(r.vm_pass || '');
+
+                if (appliedScenario !== targetScenario) {
+                  isMismatch = true;
+                  statusTooltip = `Mismatch: Scenario (Project: '${targetScenario}', VM: '${appliedScenario}')`;
+                } else if (appliedUser !== targetUser || appliedPass !== targetPass) {
+                  isMismatch = true;
+                  statusTooltip = `Mismatch: Creds (Proj User: '${targetUser}', VM User: '${appliedUser}')`;
+                }
+              }
+            }
+          } catch (e) { }
+
+          if (isMismatch) {
+            iconColor = 'text-warning';
+            statusTag = ' (Mismatch)';
+          } else if (isApplied) {
+            iconColor = 'text-success';
+            statusTag = ' (Applied)';
+          } else {
+            iconColor = 'text-warning';
+            statusTag = ' (Not Applied)';
+          }
+        }
+        const titleText = `User: ${r.vm_user || '(Not set)'}, Pass: ${r.vm_pass || '(Not set)'}${statusTag}`;
+        credApplyIcon = ` <i class="bi bi-person-badge ${iconColor}" title="${escHtml(titleText)}"></i>`;
+      }
       html += `<tr>` +
         `<td><input type=\"checkbox\" class=\"row-chk\" data-key=\"${escHtml(key)}\" ${checked} /></td>` +
         (VM_COLS.project ? `<td><span class=\"badge bg-light text-dark\">${escHtml(r.project)}</span></td>` : '') +
-        (VM_COLS.name ? `<td>${escHtml(r.vmName)}</td>` : '') +
+        (VM_COLS.name ? `<td>${escHtml(r.vmName)}${credApplyIcon}</td>` : '') +
         (VM_COLS.cred ? (first ? `<td class="font-monospace" rowspan="${rowspan}">` +
           `<div class="d-flex align-items-center">` +
           `<div class="flex-grow-1">${credText}</div>` +
@@ -1482,7 +1532,7 @@ function renderVmTable(proj) {
       const key = `${projectKey}|${i}|${vmName}`;
       // Before first refresh, default to N/A; afterwards, show created/missing
       const rowStatus = hasAnyStatus ? (d ? 'created' : 'missing') : 'n/a';
-      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: (d && d.user_access !== undefined && d.user_access !== null) ? _coerceEnabled(d.user_access, false) : null, uname, pword, status: rowStatus, detail: d });
+      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: (d && d.user_access !== undefined && d.user_access !== null) ? _coerceEnabled(d.user_access, false) : null, uname, pword, status: rowStatus, detail: d, vm_user: v.vm_user, vm_pass: v.vm_pass });
     }
   }
   // Apply filter
@@ -1685,9 +1735,60 @@ function renderVmTable(proj) {
           credExtras = ' <i class="bi bi-people text-secondary" title="Pool state unknown"></i>';
         }
       } catch { }
+      let credApplyIcon = '';
+      if (r.vm_user || r.vm_pass) {
+        let iconColor = 'text-secondary opacity-50';
+        let statusTag = ' (Status Unknown)';
+        if (r.status === 'n/a') {
+          statusTag = ' (Needs Refresh)';
+        } else if (r.status === 'missing') {
+          statusTag = ' (VM Missing)';
+        } else {
+          const desc = (d && d.description) ? String(d.description) : '';
+          let isApplied = false;
+          let isMismatch = false;
+          try {
+            const match = desc.match(/\{[^{}]*"Scenario"[^{}]*\}/);
+            if (match) {
+              const parsed = JSON.parse(match[0]);
+              if (parsed && typeof parsed === 'object' && parsed.Scenario) {
+                isApplied = true;
+                const appliedScenario = String(parsed.Scenario || '');
+                const appliedUser = String(parsed.User || '');
+                const appliedPass = String(parsed.Pass || '');
+                // Note: PROJ is available in renderVmTable
+                const targetScenario = String(PROJ.name || '');
+                const targetUser = String(r.vm_user || '');
+                const targetPass = String(r.vm_pass || '');
+
+                if (appliedScenario !== targetScenario) {
+                  isMismatch = true;
+                  statusTooltip = `Mismatch: Scenario (Project: '${targetScenario}', VM: '${appliedScenario}')`;
+                } else if (appliedUser !== targetUser || appliedPass !== targetPass) {
+                  isMismatch = true;
+                  statusTooltip = `Mismatch: Creds (Proj User: '${targetUser}', VM User: '${appliedUser}')`;
+                }
+              }
+            }
+          } catch (e) { }
+
+          if (isMismatch) {
+            iconColor = 'text-warning';
+            statusTag = ' (Mismatch)';
+          } else if (isApplied) {
+            iconColor = 'text-success';
+            statusTag = ' (Applied)';
+          } else {
+            iconColor = 'text-warning';
+            statusTag = ' (Not Applied)';
+          }
+        }
+        const titleText = `User: ${r.vm_user || '(Not set)'}, Pass: ${r.vm_pass || '(Not set)'}${statusTag}`;
+        credApplyIcon = ` <i class="bi bi-person-badge ${iconColor}" title="${escHtml(titleText)}"></i>`;
+      }
       html += `<tr>` +
         `<td><input type="checkbox" class="row-chk" data-key="${escHtml(r.key)}" ${checked} /></td>` +
-        (VM_COLS.name ? `<td>${escHtml(r.vmName)}</td>` : '') +
+        (VM_COLS.name ? `<td>${escHtml(r.vmName)}${credApplyIcon}</td>` : '') +
         (VM_COLS.cred ? (first ? `<td class=\"font-monospace\" rowspan=\"${rowspan}\">` +
           `<div class=\"d-flex align-items-center\">` +
           `<div class=\"flex-grow-1\">${credText}</div>` +
@@ -2454,7 +2555,7 @@ function updateRefreshState() {
     const scopedSelections = multiMode ? listSelectedEntries() : (PROJ ? listSelectedEntriesForPid(PROJ.id) : []);
     const anySelected = scopedSelections.length > 0;
     const disable = !(loggedIn && anySelected);
-    ['act-startup', 'act-stop', 'act-nets', 'act-state', 'act-control'].forEach(id => {
+    ['act-power', 'act-lifecycle', 'act-state-net', 'act-control'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = disable;
     });
@@ -3952,7 +4053,7 @@ async function vmActionExec(action, opts = {}) {
       try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden', 'true'); } } catch { }
       try { hideActionProgress(); } catch { }
       try {
-        const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+        const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
         Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
       } catch { }
     }
@@ -4398,7 +4499,7 @@ async function vmActionExec(action, opts = {}) {
     try { hideActionProgress(); } catch { }
     // Always refresh after any action (even on failure) but do not block UI while pending
     try {
-      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
       Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
     } catch { }
   }
@@ -4621,7 +4722,7 @@ async function vmActionMultiExec(action, opts = {}) {
     try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden', 'true'); } } catch { }
     try { hideActionProgress(); } catch { }
     try {
-      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
       Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
     } catch { }
     return;
@@ -4801,6 +4902,12 @@ async function vmActionMultiExec(action, opts = {}) {
         ['created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'updated_users', 'skipped', 'errors', 'notices'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
+      if (action === 'apply_scenario') {
+        setAp(Math.max(20, pct), 'Working…', `Applying Scenario Name in ${projName}…`);
+        const resp = await makeReq(`/instances/actions/apply_scenario`, { ...baseBody, targets });
+        ['applied', 'skipped', 'errors'].forEach(k => addArr(k, resp[k], projName));
+        continue;
+      }
       if (action === 'start' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
         setAp(Math.max(20, pct), 'Working…', `${action} in ${projName}…`);
         const shouldPollDetail = action === 'run_startup_cmds' || action === 'run_stored_cmds';
@@ -4900,7 +5007,7 @@ async function vmActionMultiExec(action, opts = {}) {
   try { const prog = document.getElementById('vm-progress'); if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden', 'true'); } } catch { }
   try { hideActionProgress(); } catch { }
   try {
-    const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear');
+    const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
     Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
   } catch { }
 }
@@ -5138,6 +5245,7 @@ function showActionSummary(actionName, resp) {
     if (poweredOff.length) sections.push(`<h6>Powered Off</h6>${list(poweredOff, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     if (snapshotted.length) sections.push(`<h6>Snapshots</h6>${list(snapshotted, i => `<li>${esc(i.name)} — ${esc(i.snapname || 'snapshot')} ${i.vmid ? `(#${esc(i.vmid)})` : ''}</li>`)}`);
     if (restored.length) sections.push(`<h6>Restored</h6>${list(restored, i => `<li>${esc(i.name)} — ${esc(i.snapname || 'snapshot')} ${i.started ? '(started)' : ''}</li>`)}`);
+    if (!isUserAccess && appliedPerms.length) sections.push(`<h6>Applied Notes</h6>${list(appliedPerms, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     const netActionIcon = (kind) => {
       try {
         if (!isNetInterfacesAction) return '';

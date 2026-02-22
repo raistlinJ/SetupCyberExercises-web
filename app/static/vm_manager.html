@@ -181,77 +181,73 @@
             </div>
             <!-- Actions toolbar -->
             <div class="d-flex flex-wrap gap-2 mb-3" id="vm-actions-bar">
-              <!-- Startup group -->
+              <!-- Power group -->
               <div class="btn-group btn-group-sm">
-                <button id="act-startup" type="button" class="btn btn-outline-success dropdown-toggle"
-                  data-bs-toggle="dropdown" aria-expanded="false" disabled>Startup</button>
-                <ul class="dropdown-menu">
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('create')">Create</button></li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('start')">Start</button></li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('restore')">Restore</button></li>
-                </ul>
-              </div>
-              <!-- Stop group -->
-              <div class="btn-group btn-group-sm">
-                <button id="act-stop" type="button" class="btn btn-outline-danger dropdown-toggle"
+                <button id="act-power" type="button" class="btn btn-outline-primary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled
-                  title="Suspend, power off, or delete selected VMs">Stop</button>
+                  title="Power on, suspend, or power off selected VMs">Power</button>
                 <ul class="dropdown-menu">
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('start')">Start</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('suspend')">Suspend</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('poweroff')">Power Off</button></li>
+                </ul>
+              </div>
+              <!-- Lifecycle & Setup group -->
+              <div class="btn-group btn-group-sm">
+                <button id="act-lifecycle" type="button" class="btn btn-outline-secondary dropdown-toggle"
+                  data-bs-toggle="dropdown" aria-expanded="false" disabled
+                  title="Create, delete, or manage VM setup">Lifecycle &amp; Setup</button>
+                <ul class="dropdown-menu">
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('create')">Create</button></li>
+                  <li><button class="dropdown-item text-danger" type="button"
+                      onclick="vmAction('delete')">Delete</button></li>
                   <li>
                     <hr class="dropdown-divider" />
                   </li>
-                  <li><button class="dropdown-item text-danger" type="button"
-                      onclick="vmAction('delete')">Delete</button></li>
+                  <li><button class="dropdown-item"
+                      title="Notes for vm to overwrite this json with latest saved info from scenario page"
+                      type="button" onclick="vmAction('apply_scenario')">Apply Scenario Name to VMs</button></li>
                 </ul>
               </div>
-              <!-- Net Adaptors group -->
+              <!-- State & Network group -->
               <div class="btn-group btn-group-sm">
-                <button id="act-nets" type="button" class="btn btn-outline-secondary dropdown-toggle"
+                <button id="act-state-net" type="button" class="btn btn-outline-secondary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled
-                  title="Manage network interfaces for selected VMs">Net Adaptors</button>
+                  title="Manage snapshots and networks for selected VMs">State &amp; Network</button>
                 <ul class="dropdown-menu">
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('snapshot')">Snapshot</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('restore')">Restore</button></li>
+                  <li>
+                    <hr class="dropdown-divider" />
+                  </li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('nets_set')">Set Network
                       Interfaces</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('nets_remove')">Remove Network
                       Interfaces</button></li>
                 </ul>
               </div>
-              <!-- State group -->
-              <div class="btn-group btn-group-sm">
-                <button id="act-state" type="button" class="btn btn-outline-secondary dropdown-toggle"
-                  data-bs-toggle="dropdown" aria-expanded="false" disabled
-                  title="Take snapshots of selected VMs">State</button>
-                <ul class="dropdown-menu">
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('snapshot')">Snapshot</button></li>
-                </ul>
-              </div>
-              <!-- Control group -->
+              <!-- Commands group -->
               <div class="btn-group btn-group-sm">
                 <button id="act-control" type="button" class="btn btn-outline-secondary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled
-                  title="Run startup or stored commands on selected VMs">Control</button>
+                  title="Run startup or stored commands on selected VMs">Commands</button>
                 <ul class="dropdown-menu">
                   <li><button class="dropdown-item" type="button" onclick="vmAction('run_startup_cmds')">Run Startup
                       Cmds</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('run_stored_cmds')">Run Stored
                       Cmds</button></li>
-                  <li><button class="dropdown-item"
-                      title="Notes for vm to overwrite this json with latest saved info from scenario page"
-                      type="button" onclick="vmAction('apply_scenario')">Apply Scenario Name to VMs</button></li>
                 </ul>
               </div>
-              <!-- Users group -->
+              <!-- Users & Access group -->
               <div class="btn-group btn-group-sm" id="users-group" data-bs-toggle="tooltip" data-bs-placement="top"
                 title="Creates a Proxmox user and pool for the credential username, and adds selected VMs as pool members.">
                 <button id="act-users" type="button" class="btn btn-outline-secondary dropdown-toggle"
-                  data-bs-toggle="dropdown" aria-expanded="false" disabled>Users</button>
+                  data-bs-toggle="dropdown" aria-expanded="false" disabled>Users &amp; Access</button>
                 <ul class="dropdown-menu">
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_create')">Create</button>
-                  </li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_delete')">Delete</button>
-                  </li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_create')">Create User /
+                      Pool</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_delete')">Delete User /
+                      Pool</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_perms')">Set User
                       Perms</button></li>
                   <li>

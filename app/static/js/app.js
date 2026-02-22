@@ -2755,6 +2755,7 @@ async function autoSaveProjectField(pid) {
     proxmox_storage_volume: document.getElementById(`cfg-${pid}-proxmox_storage_volume`)?.value?.trim(),
     proxmox_max_create_jobs: Number(document.getElementById(`cfg-${pid}-proxmox_max_create_jobs`)?.value),
     proxmox_snapshot_delay_seconds: Number(document.getElementById(`cfg-${pid}-proxmox_snapshot_delay_seconds`)?.value),
+    proxmox_update_delay_seconds: Number(document.getElementById(`cfg-${pid}-proxmox_update_delay_seconds`)?.value),
     proxmox_use_linked_clones: !!(document.getElementById(`cfg-${pid}-proxmox_use_linked_clones`)?.checked),
   };
   // Optional future fields (skip if disabled)
@@ -2845,7 +2846,9 @@ async function autoSaveVm(pid, idx) {
             vmid: payload.vmid,
             start_commands: payload.start_commands,
             stored_commands: payload.stored_commands,
-            internal_network_adaptors: payload.internal_network_adaptors
+            internal_network_adaptors: payload.internal_network_adaptors,
+            vm_user: payload.vm_user,
+            vm_pass: payload.vm_pass
           };
         }
       }
@@ -3650,13 +3653,15 @@ function renderProjectCard(p) {
           <input type="hidden" id="vm-${p.id}-${i}-start-data" value="${startDataValue}">
         </div>`;
     })()}
-        <div class="col-md-2">
-          <label class="form-label" title="Optional Username appended to notes">VM User (opt)</label>
+        <div class="row gx-2 mb-2">
+          <div class="col-6">
+          <label class="form-label" title="Optional Username appended to notes">VM User (optional)</label>
           <input type="text" id="vm-${p.id}-${i}-user" class="form-control form-control-sm" value="${(v.vm_user ?? '')}" placeholder="Optional user" title="Optional Username appended to notes" oninput="debounceVmSave('${p.id}', ${i})" />
-        </div>
-        <div class="col-md-2">
-          <label class="form-label" title="Optional Password appended to notes">VM Pass (opt)</label>
+          </div>
+          <div class="col-6">
+          <label class="form-label" title="Optional Password appended to notes">VM Pass (optional)</label>
           <input type="text" id="vm-${p.id}-${i}-pass" class="form-control form-control-sm" value="${(v.vm_pass ?? '')}" placeholder="Optional pass" title="Optional Password appended to notes" oninput="debounceVmSave('${p.id}', ${i})" />
+          </div>
         </div>
         <div class="col-md-4">
           <label class="form-label">Stored Commands</label>
@@ -3903,10 +3908,14 @@ function renderProjectCard(p) {
               <input id="cfg-${p.id}-proxmox_max_create_jobs" type="number" class="form-control form-control-sm" value="${p.proxmox_max_create_jobs ?? 5}" oninput="debounceProjectSave('${p.id}','proxmox_max_create_jobs')" />
             </div>
             <div class="col-md-3">
-              <label class="form-label" title="Delay between snapshot operations">Snapshot Delay (seconds)</label>
-              <input id="cfg-${p.id}-proxmox_snapshot_delay_seconds" type="number" step="0.1" class="form-control form-control-sm" value="${p.proxmox_snapshot_delay_seconds ?? 2.0}" oninput="debounceProjectSave('${p.id}','proxmox_snapshot_delay_seconds')" />
+              <label class="form-label mb-1">Snapshot Delay (s)</label>
+              <input id="cfg-${p.id}-proxmox_snapshot_delay_seconds" type="number" step="0.1" class="form-control form-control-sm" value="${p.proxmox_snapshot_delay_seconds ?? 5.0}" oninput="debounceProjectSave('${p.id}','proxmox_snapshot_delay_seconds')" />
             </div>
-            <div class="col-md-3">
+            <div class="col-md-3 mb-2">
+              <label class="form-label mb-1">VM Update Delay (s)</label>
+              <input id="cfg-${p.id}-proxmox_update_delay_seconds" type="number" step="0.1" class="form-control form-control-sm" value="${p.proxmox_update_delay_seconds ?? 0.5}" oninput="debounceProjectSave('${p.id}','proxmox_update_delay_seconds')" />
+            </div>
+            <div class="col-md-6 mb-2">
               <label class="form-label">Use Linked Clones</label>
               <div class="form-check form-switch mt-1">
                 <input class="form-check-input" type="checkbox" id="cfg-${p.id}-proxmox_use_linked_clones" ${p.proxmox_use_linked_clones !== false ? 'checked' : ''} title="Linked clones share disks with the template; uncheck for full clones" onchange="debounceProjectSave('${p.id}','proxmox_use_linked_clones', 50)" />

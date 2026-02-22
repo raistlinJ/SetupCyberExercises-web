@@ -310,6 +310,7 @@ class Project:
     proxmox_storage_volume: str = "local-lvm"
     proxmox_max_create_jobs: int = 5
     proxmox_snapshot_delay_seconds: float = 5.0
+    proxmox_update_delay_seconds: float = 0.5
     proxmox_use_linked_clones: bool = True
     proxmox_clone_timeout_seconds: int = 1800
     proxmox_skip_post_clone_snapshot: bool = False
@@ -977,6 +978,8 @@ class ProjectStore:
                     "clone_timeout_sec",
                     "storage_volume",
                     "skip_post_clone_snapshot",
+                    "vm_user",
+                    "vm_pass",
                 ]:
                     if k in fields:
                         if k == "start_commands":

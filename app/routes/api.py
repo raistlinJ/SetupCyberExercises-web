@@ -1098,6 +1098,7 @@ def instances_refresh_vm(pid: str):
                     'node': node,
                     'template_id': tmpl_id,
                     'template_name': tmpl_name,
+                    'description': str(cfg.get('description') or '').strip() if isinstance(cfg, dict) else '',
                     'pool': pool_val,
                     # Effective access for the instance user (credential username)
                     'user_access': _effective_user_access(userid, int(vmid), poolid) if (userid and vmid is not None) else None,
@@ -3537,6 +3538,7 @@ def instances_apply_scenario(pid: str):
     applied = []
     
     pool_workers = _pool_workers_for(proj, len(mapped))
+    delay = float(getattr(proj, 'proxmox_update_delay_seconds', 0.5))
     
     # Map configurations by name for easy lookup
     cfg_map = {}
@@ -3551,14 +3553,24 @@ def instances_apply_scenario(pid: str):
             
         node = m['node']
         vmid = m['vmid']
-        base_name = str(m.get('name', '')).lower()
+        gen_name = str(m.get('name', ''))
+        idx_str = str(m.get('index', ''))
+        
+        # We must recover the pure template name to find it in cfg_map
+        base_name = gen_name
+        tag = str(proj.tag or '').strip()
+        suf = f"{tag}{idx_str}"
+        if suf and base_name.endswith(suf):
+            base_name = base_name[:-len(suf)]
+            
+        base_name_lc = base_name.lower()
         
         # Prepare notes payload
         notes_payload = {
             "Scenario": proj.name
         }
         
-        cfg = cfg_map.get(base_name)
+        cfg = cfg_map.get(base_name_lc)
         if cfg:
             cfg_user = getattr(cfg, 'vm_user', None)
             cfg_pass = getattr(cfg, 'vm_pass', None)
@@ -3576,7 +3588,8 @@ def instances_apply_scenario(pid: str):
         if old_desc:
             import re
             # Remove previous Scenario JSON block if it exists
-            clean_desc = re.sub(r'\{\s*"Scenario":\s*".*?".*?\}', '', old_desc, flags=re.DOTALL)
+            # This regex looks for { followed by things, "Scenario":, things, and }
+            clean_desc = re.sub(r'\{[^{}]*"Scenario"[^{}]*\}', '', old_desc, flags=re.DOTALL)
             clean_desc = clean_desc.strip()
             if clean_desc:
                 new_desc = f"{clean_desc}\n\n{json_notes}"
@@ -3589,7 +3602,14 @@ def instances_apply_scenario(pid: str):
         return ('applied', { 'index': m['index'], 'name': m['name'], 'vmid': vmid, 'node': node })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
-        future_map = { pool.submit(do_apply, m): m for m in mapped }
+        future_map = {}
+        for i, m in enumerate(mapped):
+            future_map[pool.submit(do_apply, m)] = m
+            if i < len(mapped) - 1 and delay > 0:
+                try:
+                    _safe_sleep(delay)
+                except Exception:
+                    pass
         for fut in as_completed(future_map):
             m = future_map[fut]
             try:
@@ -7516,6 +7536,8 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
         'clone_timeout_sec',
         'storage_volume',
         'skip_post_clone_snapshot',
+        'vm_user',
+        'vm_pass',
     }
     out = []
     for vm in vms_value:
@@ -8492,6 +8514,7 @@ def import_project():
                         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
                         "proxmox_qmrestore_path", "proxmox_storage_volume",
                         "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
+                        "proxmox_update_delay_seconds",
                     ]:
                         if key in pdata2:
                             setattr(proj, key, pdata2[key])
@@ -8598,6 +8621,7 @@ def import_project():
                     "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
                     "proxmox_qmrestore_path", "proxmox_storage_volume",
                     "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
+                    "proxmox_update_delay_seconds",
                 ]:
                     if key in pdata2:
                         setattr(project, key, pdata2[key])
@@ -8906,13 +8930,14 @@ def import_project_start():
                             proj = Project(id=new_id, name=pdata2.get('name', 'Imported'))
                             for key_field in [
                                 "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
-                                "guacamole_url", "guacamole_port",
+                                "guacamole_url", "guacamole_url",
                                 "keycloak_url", "keycloak_port", "keycloak_nodename",
                                 "challenge_url", "challenge_port",
                                 "instances", "tag", "vnc_start_port", "credentials",
                                 "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
                                 "proxmox_qmrestore_path", "proxmox_storage_volume",
                                 "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
+                                "proxmox_update_delay_seconds",
                             ]:
                                 if key_field in pdata2:
                                     setattr(proj, key_field, pdata2[key_field])
@@ -9022,6 +9047,7 @@ def import_project_start():
                             "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
                             "proxmox_qmrestore_path", "proxmox_storage_volume",
                             "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
+                            "proxmox_update_delay_seconds",
                         ]:
                             if key_field in pdata2:
                                 setattr(project, key_field, pdata2[key_field])
@@ -10489,6 +10515,10 @@ def update_vm(pid: str, name: str):
             fields["stored_commands"] = data.get("stored_commands")
         if "internal_network_adaptors" in data:
             fields["internal_network_adaptors"] = data.get("internal_network_adaptors")
+        if "vm_user" in data:
+            fields["vm_user"] = data.get("vm_user")
+        if "vm_pass" in data:
+            fields["vm_pass"] = data.get("vm_pass")
 
         proj = _store().update_vm(
             pid,
