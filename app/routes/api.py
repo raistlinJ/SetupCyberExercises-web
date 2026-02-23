@@ -3395,8 +3395,10 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
                         'name': nm,
                         'status': (q.get('status') or q.get('qmpstatus') or '').lower(),
                     }
-    except Exception:
-        return [], [], [{ 'reason': 'failed to list nodes' }]
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return [], [], [{ 'reason': f'failed to list nodes: {e}' }]
     mapped = []
     skipped = []
     errors = []
@@ -3527,6 +3529,25 @@ def instances_apply_scenario(pid: str):
     base_url = body.get('baseUrl') or proj.proxmox_url
     verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
     
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+        
     targets = body.get('targets') or []
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials"}), 400
