@@ -4437,6 +4437,23 @@ def instances_users_create(pid: str):
         except Exception:
             return False
         return False
+    def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
+        if not node_str or not vmid_int:
+            return False
+        try:
+            cfg = client.get_qemu_config(node_str, vmid_int)
+            desc = cfg.get('description') or ''
+            if not desc:
+                return False
+            import json
+            meta = json.loads(desc)
+            # Match project_id exactly
+            if str(meta.get('project_id', '')) == str(proj.id):
+                return True
+        except Exception:
+            pass
+        return False
+
     for idx in indices:
         mlist = by_index.get(idx, [])
         if _is_cancelled(pid):
@@ -4585,7 +4602,7 @@ def instances_users_create(pid: str):
                                     else:
                                         viewable = bool(getattr(v, 'viewable_to_user', False))
                                         base_v = str(getattr(v, 'name', '') or '')
-                                    if not viewable or not base_v:
+                                    if not base_v:
                                         continue
                                     gen_name_full = f"{base_v}{tag_local}{idx}"
                                     if gen_name_full in existing_names_set:
@@ -4606,8 +4623,9 @@ def instances_users_create(pid: str):
                             try:
                                 gen_name = str(m.get('name') or '')
                                 base_name = _base_from_generated(gen_name, idx)
-                                if not _is_user_accessible(base_name):
+                                if not _is_in_scenario(base_name) or not _is_vm_in_project_notes(m.get('node'), m.get('vmid')):
                                     continue
+                                is_accessible = _is_user_accessible(base_name)
                                 try:
                                     if current_app.config.get('ACL_DEBUG'):
                                         current_app.logger.info(f"[users_create][ACL] applying user={userid} vmid={m.get('vmid')} name={gen_name}")
@@ -4633,18 +4651,32 @@ def instances_users_create(pid: str):
                                     # Actually, do this once per USER/POOL creation block above, but we can do it here to be safe or just rely on the block below.
                                     # Let's add it to the initial pool creation block instead to be cleaner.
                                     
-                                    # Assign roles: PVEUser (or PVEVMUser fallback) AND AcostaRollback
-                                    # We use set_acl_user_vm which supports comma-separated roles
-                                    roles_to_set = 'PVEUser,AcostaRollback'
-                                    try:
-                                         client.set_acl_user_vm(userid, int(m['vmid']), roles=roles_to_set, propagate=True)
-                                    except Exception as e:
-                                        msg_low = str(e).lower()
-                                        if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
-                                             # Fallback to PVEVMUser if PVEUser missing, but still try to include AcostaRollback
-                                             client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser,AcostaRollback', propagate=True)
-                                        else:
-                                            raise
+                                    # Remove conflicting roles explicitly to avoid wiping unrelated roles
+                                    if is_accessible:
+                                        roles_to_set = 'PVEUser'
+                                        try:
+                                             client.set_acl_user_vm(userid, int(m['vmid']), roles=roles_to_set, propagate=True)
+                                        except Exception as e:
+                                            msg_low = str(e).lower()
+                                            if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
+                                                 client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser', propagate=True)
+                                            else:
+                                                raise
+                                        # Delete the contrasting role explicitly
+                                        for crole in ['AcostaRollback']:
+                                            try:
+                                                client.delete_acl_user_vm(userid, int(m['vmid']), roles=crole, propagate=True)
+                                            except Exception:
+                                                pass
+                                    else:
+                                        client.set_acl_user_vm(userid, int(m['vmid']), roles='AcostaRollback', propagate=True)
+                                        # Delete the contrasting roles explicitly
+                                        for crole in ['PVEUser', 'PVEVMUser']:
+                                            try:
+                                                client.delete_acl_user_vm(userid, int(m['vmid']), roles=crole, propagate=True)
+                                            except Exception:
+                                                pass
+
                                     applied += 1
                                 except Exception as e2:
                                     if '501' in str(e2) and 'not implemented' not in str(e2).lower():
@@ -4775,6 +4807,19 @@ def instances_users_perms(pid: str):
             pass
         return gen_name
         
+    def _is_in_scenario(base_name: str) -> bool:
+        try:
+            for v in (proj.vms or []):
+                if isinstance(v, dict):
+                    if str(v.get('name') or '') == str(base_name or ''):
+                        return True
+                else:
+                    if str(getattr(v, 'name', '') or '') == str(base_name or ''):
+                        return True
+        except Exception:
+            return False
+        return False
+        
     def _is_user_accessible(base_name: str) -> bool:
         try:
             for v in (proj.vms or []):
@@ -4786,6 +4831,22 @@ def instances_users_perms(pid: str):
                         return bool(getattr(v, 'viewable_to_user', False))
         except Exception:
             return False
+        return False
+        
+    def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
+        if not node_str or not vmid_int:
+            return False
+        try:
+            cfg = client.get_qemu_config(node_str, vmid_int)
+            desc = cfg.get('description') or ''
+            if not desc:
+                return False
+            import json
+            meta = json.loads(desc)
+            if str(meta.get('project_id', '')) == str(proj.id):
+                return True
+        except Exception:
+            pass
         return False
         
     for idx in indices:
@@ -4885,7 +4946,7 @@ def instances_users_perms(pid: str):
                             else:
                                 viewable = bool(getattr(v, 'viewable_to_user', False))
                                 base_v = str(getattr(v, 'name', '') or '')
-                            if not viewable or not base_v:
+                            if not base_v:
                                 continue
                             gen_name_full = f"{base_v}{tag_local}{idx}"
                             if gen_name_full in existing_names_set:
@@ -4907,6 +4968,8 @@ def instances_users_perms(pid: str):
                     try:
                         gen_name = str(m.get('name') or '')
                         base_name = _base_from_generated(gen_name, idx)
+                        if not _is_in_scenario(base_name) or not _is_vm_in_project_notes(m.get('node'), m.get('vmid')):
+                            continue
                         is_accessible = _is_user_accessible(base_name)
                         try:
                             try:
@@ -4921,18 +4984,31 @@ def instances_users_perms(pid: str):
                             except Exception:
                                 pass
 
+                            # Remove conflicting roles explicitly to avoid wiping unrelated roles
                             if is_accessible:
-                                roles_to_set = 'PVEUser,AcostaRollback'
+                                roles_to_set = 'PVEUser'
                                 try:
                                     client.set_acl_user_vm(userid, int(m['vmid']), roles=roles_to_set, propagate=True)
                                 except Exception as e:
                                     msg_low = str(e).lower()
                                     if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
-                                        client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser,AcostaRollback', propagate=True)
+                                        client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser', propagate=True)
                                     else:
                                         raise
+                                # Delete the contrasting role explicitly
+                                for crole in ['AcostaRollback']:
+                                    try:
+                                        client.delete_acl_user_vm(userid, int(m['vmid']), roles=crole, propagate=True)
+                                    except Exception:
+                                        pass
                             else:
                                 client.set_acl_user_vm(userid, int(m['vmid']), roles='AcostaRollback', propagate=True)
+                                # Delete the contrasting roles explicitly
+                                for crole in ['PVEUser', 'PVEVMUser']:
+                                    try:
+                                        client.delete_acl_user_vm(userid, int(m['vmid']), roles=crole, propagate=True)
+                                    except Exception:
+                                        pass
                             applied += 1
                         except Exception as e2:
                             if '501' in str(e2) and 'not implemented' not in str(e2).lower():
