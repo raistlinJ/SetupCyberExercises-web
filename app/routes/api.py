@@ -355,6 +355,54 @@ def _get_cached_vm_config(client, node: str, vmid: int, force_refresh: bool = Fa
     _VM_CONFIG_CACHE[cache_key] = (now, cfg)
     return cfg
 
+
+def _prefetch_vm_configs_parallel(
+    proj: Optional[Project],
+    vm_refs: Iterable[Tuple[str, int]],
+    *,
+    force_refresh: bool,
+    client_factory,
+) -> Dict[Tuple[str, int], Dict[str, Any]]:
+    """Fetch VM configs in parallel for refresh-heavy endpoints.
+
+    Returns a mapping of (node, vmid) -> config dict. Individual fetch failures are
+    logged and omitted so callers can still return partial status data.
+    """
+    unique_refs: List[Tuple[str, int]] = []
+    seen: Set[Tuple[str, int]] = set()
+    for raw_node, raw_vmid in vm_refs or []:
+        try:
+            ref = (str(raw_node), int(raw_vmid))
+        except Exception:
+            continue
+        if not ref[0] or ref in seen:
+            continue
+        seen.add(ref)
+        unique_refs.append(ref)
+
+    if not unique_refs:
+        return {}
+
+    results: Dict[Tuple[str, int], Dict[str, Any]] = {}
+
+    def _fetch_one(ref: Tuple[str, int]):
+        node, vmid = ref
+        thread_client = client_factory()
+        cfg = _get_cached_vm_config(thread_client, node, vmid, force_refresh=force_refresh) or {}
+        return ref, cfg
+
+    workers = _pool_workers_for(proj, len(unique_refs), hard_cap=8)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {pool.submit(_fetch_one, ref): ref for ref in unique_refs}
+        for fut in as_completed(future_map):
+            ref = future_map[fut]
+            try:
+                fetched_ref, cfg = fut.result()
+                results[fetched_ref] = cfg if isinstance(cfg, dict) else {}
+            except Exception as exc:
+                LOG.warning("Could not fetch config for VM %s/%s: %s", ref[0], ref[1], exc)
+    return results
+
 def _clear_vm_cache(project_id=None):
     """Clear cached VM data (call after create/delete/clone operations)"""
     global _VM_CONFIG_CACHE, _POOL_CACHE
@@ -885,6 +933,38 @@ def instances_refresh_vm(pid: str):
     except Exception:
         pool_ids = None
 
+    matched_vm_refs: List[Tuple[str, int]] = []
+    for instance_specs in expected.values():
+        for spec in instance_specs:
+            spec_name = spec.get('name')
+            matched = name_map.get(spec_name)
+            if not matched and spec_name:
+                lc = lower_name_to_canon.get(str(spec_name).lower())
+                if lc:
+                    matched = name_map.get(lc)
+            if not matched:
+                continue
+            node = matched.get('node')
+            vmid = matched.get('vmid')
+            if node and vmid is not None:
+                try:
+                    matched_vm_refs.append((str(node), int(vmid)))
+                except Exception:
+                    continue
+
+    prefetched_vm_configs = _prefetch_vm_configs_parallel(
+        proj,
+        matched_vm_refs,
+        force_refresh=force_refresh,
+        client_factory=lambda: ProxmoxClient(
+            base_url=base_url,
+            token=token or None,
+            username=username,
+            password=password,
+            verify=verify,
+        ),
+    )
+
     # Cache for pool members: poolid -> set of vmids (integers)
     pool_members_cache = {}
 
@@ -1038,8 +1118,7 @@ def instances_refresh_vm(pid: str):
                 tmpl_name = ''
                 try:
                     if node and vmid is not None:
-                        # Use cached config for performance; allow bypass via request flag.
-                        cfg = _get_cached_vm_config(client, node, vmid, force_refresh=force_refresh)
+                        cfg = prefetched_vm_configs.get((str(node), int(vmid))) or {}
                         nets = _extract_nets(cfg)
                         pool_val = str(cfg.get('pool') or '').strip() if isinstance(cfg, dict) else ''
                         # Try to detect clone template from disk config (best-effort)
