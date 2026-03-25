@@ -403,6 +403,71 @@ def _prefetch_vm_configs_parallel(
                 LOG.warning("Could not fetch config for VM %s/%s: %s", ref[0], ref[1], exc)
     return results
 
+
+def _get_cached_pool_members(client, poolid: str, force_refresh: bool = False) -> Set[int]:
+    cache_key = str(poolid or '').strip()
+    now = datetime.now()
+    if not cache_key:
+        return set()
+
+    if not force_refresh and cache_key in _POOL_CACHE:
+        cached_time, cached_members = _POOL_CACHE[cache_key]
+        if now - cached_time < timedelta(seconds=_CACHE_TTL_SECONDS):
+            return set(cached_members or set())
+
+    members = client.list_pool_members(cache_key) or []
+    member_vmids: Set[int] = set()
+    for member in members:
+        try:
+            if str((member or {}).get('type', '')).lower() == 'qemu':
+                member_vmids.add(int((member or {}).get('vmid')))
+        except Exception:
+            continue
+    _POOL_CACHE[cache_key] = (now, set(member_vmids))
+    return member_vmids
+
+
+def _prefetch_pool_members_parallel(
+    proj: Optional[Project],
+    poolids: Iterable[str],
+    *,
+    force_refresh: bool,
+    client_factory,
+) -> Dict[str, Set[int]]:
+    unique_poolids: List[str] = []
+    seen: Set[str] = set()
+    for raw_poolid in poolids or []:
+        try:
+            poolid = str(raw_poolid or '').strip()
+        except Exception:
+            poolid = ''
+        if not poolid or poolid in seen:
+            continue
+        seen.add(poolid)
+        unique_poolids.append(poolid)
+
+    if not unique_poolids:
+        return {}
+
+    results: Dict[str, Set[int]] = {}
+
+    def _fetch_one(poolid: str):
+        thread_client = client_factory()
+        return poolid, _get_cached_pool_members(thread_client, poolid, force_refresh=force_refresh)
+
+    workers = _pool_workers_for(proj, len(unique_poolids), hard_cap=8)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {pool.submit(_fetch_one, poolid): poolid for poolid in unique_poolids}
+        for fut in as_completed(future_map):
+            poolid = future_map[fut]
+            try:
+                fetched_poolid, members = fut.result()
+                results[fetched_poolid] = set(members or set())
+            except Exception as exc:
+                LOG.warning("Could not fetch pool members for %s: %s", poolid, exc)
+                results[poolid] = set()
+    return results
+
 def _clear_vm_cache(project_id=None):
     """Clear cached VM data (call after create/delete/clone operations)"""
     global _VM_CONFIG_CACHE, _POOL_CACHE
@@ -965,8 +1030,30 @@ def instances_refresh_vm(pid: str):
         ),
     )
 
-    # Cache for pool members: poolid -> set of vmids (integers)
-    pool_members_cache = {}
+    candidate_poolids: List[str] = []
+    for i in range(1, instances + 1):
+        try:
+            creds = list(getattr(proj, 'credentials', []) or [])
+            urec = creds[i - 1] if i - 1 < len(creds) else None
+            uname = (urec or {}).get('username') or ''
+            poolid = _poolid_from_uname(uname)
+            if poolid and (pool_ids is None or poolid in pool_ids):
+                candidate_poolids.append(poolid)
+        except Exception:
+            continue
+
+    pool_members_cache = _prefetch_pool_members_parallel(
+        proj,
+        candidate_poolids,
+        force_refresh=force_refresh,
+        client_factory=lambda: ProxmoxClient(
+            base_url=base_url,
+            token=token or None,
+            username=username,
+            password=password,
+            verify=verify,
+        ),
+    )
 
     def _norm_userid(uname: str) -> str:
         u = str(uname or '').strip()
@@ -1217,21 +1304,6 @@ def instances_refresh_vm(pid: str):
                     mgrs['pools'] = 'ready' if pool_exists else 'missing'
                     # Compute membership details when pool exists
                     if pool_exists:
-                        # Fetch pool members (cached per-poolid to avoid repeated calls)
-                        if poolid not in pool_members_cache:
-                            try:
-                                members = client.list_pool_members(poolid) or []
-                                # Extract vmids of QEMU VMs in the pool
-                                member_vmids = set()
-                                for m in members:
-                                    try:
-                                        if str(m.get('type', '')).lower() == 'qemu':
-                                            member_vmids.add(int(m.get('vmid')))
-                                    except Exception:
-                                        continue
-                                pool_members_cache[poolid] = member_vmids
-                            except Exception:
-                                pool_members_cache[poolid] = set()
                         pool_vmids = pool_members_cache.get(poolid, set())
                         
                         # All configured VMs for this instance count toward expected pool membership
