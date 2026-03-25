@@ -1,8 +1,62 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import os
 import requests
 import time
 import logging
+from urllib.parse import urlsplit, urlunsplit
+
+
+_DOCKER_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _running_in_container() -> bool:
+    try:
+        marker = os.environ.get("IN_DOCKER")
+        if marker is not None:
+            return str(marker).strip().lower() not in {"", "0", "false", "no"}
+    except Exception:
+        pass
+    return os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+
+
+def _normalize_container_localhost_url(base_url: Optional[str]) -> Optional[str]:
+    try:
+        raw = str(base_url or "").strip()
+    except Exception:
+        raw = ""
+    if not raw or not _running_in_container():
+        return base_url
+
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return base_url
+
+    host = (parsed.hostname or "").strip().lower()
+    if host not in _DOCKER_LOCAL_HOSTS:
+        return base_url
+
+    alias = str(os.environ.get("DOCKER_HOST_ALIAS") or "host.docker.internal").strip()
+    if not alias:
+        alias = "host.docker.internal"
+
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth += f":{parsed.password}"
+        auth += "@"
+
+    host_literal = alias
+    if ":" in alias and not alias.startswith("["):
+        host_literal = f"[{alias}]"
+
+    netloc = f"{auth}{host_literal}"
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 class GuestAgentUnavailableError(RuntimeError):
@@ -19,6 +73,16 @@ class ProxmoxClient:
     password: Optional[str] = None
     _session: Optional[requests.Session] = None
     _logger: logging.Logger = field(default_factory=lambda: logging.getLogger(__name__), init=False, repr=False)
+
+    def __post_init__(self):
+        normalized = _normalize_container_localhost_url(self.base_url)
+        if normalized and normalized != self.base_url:
+            self._logger.warning(
+                "Rewriting Proxmox base URL from %s to %s for container-to-host access",
+                self.base_url,
+                normalized,
+            )
+            self.base_url = normalized
 
     def _ensure_session(self) -> requests.Session:
         if self._session is not None:
@@ -233,6 +297,9 @@ class ProxmoxClient:
 
     def start_qemu(self, node: str, vmid: int) -> str:
         return self._qemu_status_action(node, vmid, 'start')
+
+    def unlock_qemu(self, node: str, vmid: int) -> str:
+        return self._qemu_status_action(node, vmid, 'unlock')
 
     def stop_qemu(self, node: str, vmid: int) -> str:
         return self._qemu_status_action(node, vmid, 'stop')

@@ -121,3 +121,31 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertEqual(kwargs.get('node'), 'node1')
             self.assertEqual(kwargs.get('vmid'), 101)
             self.assertCountEqual(kwargs.get('keys') or [], ['net0', 'net1'])
+
+    def test_unlock_calls_proxmox_unlock_for_selected_vm(self):
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+            prox.unlock_qemu.return_value = 'UPID:node1:unlock'
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/unlock',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json() or {}
+            unlocked = payload.get('unlocked') or []
+            self.assertEqual(len(unlocked), 1)
+            self.assertEqual(unlocked[0]['name'], self.target_name)
+            prox.unlock_qemu.assert_called_once_with(node='node1', vmid=101)
+            prox._wait_task.assert_called_once_with('node1', 'UPID:node1:unlock', timeout=600)

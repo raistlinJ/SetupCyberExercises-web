@@ -466,9 +466,37 @@ function mapProxmoxPowerState(raw) {
   if (['stopped', 'down', 'shutoff', 'off', 'halted'].includes(s)) return mk('stopped', 'bg-secondary', 3);
   if (['stopping', 'shutdown', 'shutting down'].includes(s)) return mk('stopping', 'bg-info text-dark', 4);
   if (['resetting', 'rebooting', 'reboot'].includes(s)) return mk('rebooting', 'bg-info text-dark', 1);
-  if (['error', 'failed', 'failure', 'crashed', 'internal-error'].includes(s)) return mk('error', 'bg-danger', 5);
+  if (['io-error', 'error', 'failed', 'failure', 'crashed', 'internal-error'].includes(s)) return mk(s === 'io-error' ? 'io-error' : 'error', 'bg-danger', 5);
   // Default: show raw string but style as secondary
   return mk(s, 'bg-secondary', 6);
+}
+
+function vmStateSortWeight(detail) {
+  const d = detail || {};
+  const qmpState = String(d.qmp_state || '').toLowerCase();
+  if (qmpState === 'io-error') return 5;
+  return mapProxmoxPowerState(d.power_state || d.state).weight;
+}
+
+function renderVmStateBadges(detail) {
+  const d = detail || {};
+  const badges = [];
+  const primaryRaw = d.power_state || d.state || d.qmp_state || '';
+  const primary = mapProxmoxPowerState(primaryRaw);
+  if (!primary || primary.label === '—') {
+    badges.push('<span class="text-muted">—</span>');
+  } else {
+    badges.push(`<span class="badge ${primary.cls}" title="${escHtml(String(primaryRaw || primary.label))}">${escHtml(primary.label)}</span>`);
+  }
+  const qmpState = String(d.qmp_state || '').toLowerCase();
+  if (qmpState === 'io-error') {
+    badges.push('<span class="badge bg-danger" title="QMP status: io-error">I/O Error</span>');
+  }
+  const lockState = String(d.lock || '').trim();
+  if (lockState) {
+    badges.push(`<span class="badge bg-warning text-dark" title="${escHtml(`Lock: ${lockState}`)}">Locked</span>`);
+  }
+  return badges.join(' ');
 }
 
 async function vmLoadProject() {
@@ -855,10 +883,10 @@ function renderMergedVmTable(rows) {
   if (f) {
     if (FILTER_IS_REGEX) {
       let re = null; try { re = new RegExp(FILTER_TEXT, 'i'); } catch { re = null; }
-      const errEl = document.getElementById('vm-filter-error'); if (re) { if (errEl) errEl.classList.add('d-none'); filtered = allRows.filter(r => { const d = r.detail || {}; const parts = [r.project, r.vmName, r.uname, String(r.status || ''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.node) parts.push(String(d.node)); if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); const hay = parts.join(' | '); return re.test(hay); }); } else { if (errEl) errEl.classList.remove('d-none'); filtered = []; }
+      const errEl = document.getElementById('vm-filter-error'); if (re) { if (errEl) errEl.classList.add('d-none'); filtered = allRows.filter(r => { const d = r.detail || {}; const parts = [r.project, r.vmName, r.uname, String(r.status || ''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.power_state) parts.push(String(d.power_state)); if (d.qmp_state) parts.push(String(d.qmp_state)); if (d.lock) parts.push(String(d.lock)); if (d.node) parts.push(String(d.node)); if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); const hay = parts.join(' | '); return re.test(hay); }); } else { if (errEl) errEl.classList.remove('d-none'); filtered = []; }
     } else {
       const errEl = document.getElementById('vm-filter-error'); if (errEl) errEl.classList.add('d-none');
-      filtered = allRows.filter(r => { const d = r.detail || {}; const parts = [r.project, r.vmName, r.uname, String(r.status || ''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.node) parts.push(String(d.node)); if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); return parts.join(' ').toLowerCase().includes(f); });
+      filtered = allRows.filter(r => { const d = r.detail || {}; const parts = [r.project, r.vmName, r.uname, String(r.status || ''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.power_state) parts.push(String(d.power_state)); if (d.qmp_state) parts.push(String(d.qmp_state)); if (d.lock) parts.push(String(d.lock)); if (d.node) parts.push(String(d.node)); if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); return parts.join(' ').toLowerCase().includes(f); });
     }
   }
   if (!filtered.length) {
@@ -867,7 +895,7 @@ function renderMergedVmTable(rows) {
     return;
   }
   // Row/group comparator based on current sort
-  const compare = (a, b) => { const dir = SORT_STATE.dir === 'desc' ? -1 : 1; const key = SORT_STATE.key; let va, vb; if (key === 'index') { va = a.index; vb = b.index; } else if (key === 'project') { va = (a.project || '').toLowerCase(); vb = (b.project || '').toLowerCase(); } else if (key === 'name') { va = (a.vmName || '').toLowerCase(); vb = (b.vmName || '').toLowerCase(); } else if (key === 'cred') { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); } else if (key === 'status') { va = (a.status || '').toLowerCase(); vb = (b.status || '').toLowerCase(); } else if (key === 'state') { va = mapProxmoxPowerState(a.detail && a.detail.state).weight; vb = mapProxmoxPowerState(b.detail && b.detail.state).weight; } else if (key === 'id') { va = a.detail && a.detail.vmid != null ? Number(a.detail.vmid) : Number.POSITIVE_INFINITY; vb = b.detail && b.detail.vmid != null ? Number(b.detail.vmid) : Number.POSITIVE_INFINITY; } else if (key === 'node') { va = String(a.detail && a.detail.node || '').toLowerCase(); vb = String(b.detail && b.detail.node || '').toLowerCase(); } else if (key === 'template') { const tnA = a.detail && a.detail.template_name ? String(a.detail.template_name) : ''; const tiA = a.detail && a.detail.template_id != null ? ('#' + a.detail.template_id) : ''; const tA = (tnA || tiA).toLowerCase(); const tnB = b.detail && b.detail.template_name ? String(b.detail.template_name) : ''; const tiB = b.detail && b.detail.template_id != null ? ('#' + b.detail.template_id) : ''; const tB = (tnB || tiB).toLowerCase(); va = tA; vb = tB; } else { va = a.index; vb = b.index; } if (va < vb) return -1 * dir; if (va > vb) return 1 * dir; const nA = (a.vmName || '').toLowerCase(); const nB = (b.vmName || '').toLowerCase(); if (nA < nB) return -1; if (nA > nB) return 1; return 0; };
+  const compare = (a, b) => { const dir = SORT_STATE.dir === 'desc' ? -1 : 1; const key = SORT_STATE.key; let va, vb; if (key === 'index') { va = a.index; vb = b.index; } else if (key === 'project') { va = (a.project || '').toLowerCase(); vb = (b.project || '').toLowerCase(); } else if (key === 'name') { va = (a.vmName || '').toLowerCase(); vb = (b.vmName || '').toLowerCase(); } else if (key === 'cred') { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); } else if (key === 'status') { va = (a.status || '').toLowerCase(); vb = (b.status || '').toLowerCase(); } else if (key === 'state') { va = vmStateSortWeight(a.detail); vb = vmStateSortWeight(b.detail); } else if (key === 'id') { va = a.detail && a.detail.vmid != null ? Number(a.detail.vmid) : Number.POSITIVE_INFINITY; vb = b.detail && b.detail.vmid != null ? Number(b.detail.vmid) : Number.POSITIVE_INFINITY; } else if (key === 'node') { va = String(a.detail && a.detail.node || '').toLowerCase(); vb = String(b.detail && b.detail.node || '').toLowerCase(); } else if (key === 'template') { const tnA = a.detail && a.detail.template_name ? String(a.detail.template_name) : ''; const tiA = a.detail && a.detail.template_id != null ? ('#' + a.detail.template_id) : ''; const tA = (tnA || tiA).toLowerCase(); const tnB = b.detail && b.detail.template_name ? String(b.detail.template_name) : ''; const tiB = b.detail && b.detail.template_id != null ? ('#' + b.detail.template_id) : ''; const tB = (tnB || tiB).toLowerCase(); va = tA; vb = tB; } else { va = a.index; vb = b.index; } if (va < vb) return -1 * dir; if (va > vb) return 1 * dir; const nA = (a.vmName || '').toLowerCase(); const nB = (b.vmName || '').toLowerCase(); if (nA < nB) return -1; if (nA > nB) return 1; return 0; };
   // Group rows by (pid,index) so we can rowspan the credentials once per instance
   const groups = new Map();
   for (const r of filtered) {
@@ -952,7 +980,7 @@ function renderMergedVmTable(rows) {
           credExtras = ' <i class="bi bi-people text-secondary" title="Pool state unknown"></i>';
         }
       } catch { }
-      const stateHtml = (() => { const m = mapProxmoxPowerState(d && d.state); if (!m || m.label === '—') return '<span class=\"text-muted\">—</span>'; return `<span class=\"badge ${m.cls}\">${escHtml(m.label)}</span>`; })();
+      const stateHtml = renderVmStateBadges(d);
       const idHtml = d && d.vmid != null ? `#${d.vmid}` : '—';
       const nodeHtml = d && d.node ? escHtml(d.node) : '—';
       const templateHtml = (() => {
@@ -1445,6 +1473,7 @@ function emitActionLogs(actionName, resp) {
     const started = Array.isArray(resp?.started) ? resp.started : [];
     const resumed = Array.isArray(resp?.resumed) ? resp.resumed : [];
     const suspended = Array.isArray(resp?.suspended) ? resp.suspended : [];
+    const unlocked = Array.isArray(resp?.unlocked) ? resp.unlocked : [];
     const poweredOff = Array.isArray(resp?.powered_off) ? resp.powered_off : [];
     const snapshotted = Array.isArray(resp?.snapshotted) ? resp.snapshotted : [];
     const restored = Array.isArray(resp?.restored) ? resp.restored : [];
@@ -1471,6 +1500,7 @@ function emitActionLogs(actionName, resp) {
     if (started.length) started.forEach(i => { try { shell.logSuccess(`${name}: started ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
     if (resumed.length) resumed.forEach(i => { try { shell.logSuccess(`${name}: resumed ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
     if (suspended.length) suspended.forEach(i => { try { shell.logSuccess(`${name}: suspended ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
+    if (unlocked.length) unlocked.forEach(i => { try { shell.logSuccess(`${name}: unlocked ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
     if (poweredOff.length) poweredOff.forEach(i => { try { shell.logSuccess(`${name}: powered off ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
     if (snapshotted.length) snapshotted.forEach(i => { try { shell.logSuccess(`${name}: snapshot ${i?.name || ''} ${i?.snapname ? `(${i.snapname})` : ''} ${i?.vmid ? `#${i.vmid}` : ''}`); } catch { } });
     if (restored.length) restored.forEach(i => { try { shell.logSuccess(`${name}: restored ${i?.name || ''} ${i?.snapname ? `(${i.snapname})` : ''} ${i?.started ? '(started)' : ''}`); } catch { } });
@@ -1549,6 +1579,9 @@ function renderVmTable(proj) {
           const d = r.detail || {};
           const parts = [r.vmName, r.uname, String(r.status || ''), String(r.index)];
           if (d.state) parts.push(String(d.state));
+          if (d.power_state) parts.push(String(d.power_state));
+          if (d.qmp_state) parts.push(String(d.qmp_state));
+          if (d.lock) parts.push(String(d.lock));
           if (d.node) parts.push(String(d.node));
           if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid));
           if (d.template_name) parts.push(String(d.template_name));
@@ -1573,6 +1606,9 @@ function renderVmTable(proj) {
         const d = r.detail || {};
         const parts = [];
         if (d.state) parts.push(String(d.state));
+        if (d.power_state) parts.push(String(d.power_state));
+        if (d.qmp_state) parts.push(String(d.qmp_state));
+        if (d.lock) parts.push(String(d.lock));
         if (d.node) parts.push(String(d.node));
         if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid));
         if (d.template_name) parts.push(String(d.template_name));
@@ -1594,9 +1630,8 @@ function renderVmTable(proj) {
     else if (key === 'cred') { va = a.uname.toLowerCase(); vb = b.uname.toLowerCase(); }
     else if (key === 'status') { va = (a.status || '').toLowerCase(); vb = (b.status || '').toLowerCase(); }
     else if (key === 'state') {
-      const ma = mapProxmoxPowerState(a.detail && a.detail.state);
-      const mb = mapProxmoxPowerState(b.detail && b.detail.state);
-      va = ma.weight; vb = mb.weight;
+      va = vmStateSortWeight(a.detail);
+      vb = vmStateSortWeight(b.detail);
     }
     else if (key === 'id') {
       const ia = (a.detail && a.detail.vmid !== undefined && a.detail.vmid !== null) ? Number(a.detail.vmid) : Number.POSITIVE_INFINITY;
@@ -1679,11 +1714,7 @@ function renderVmTable(proj) {
       const credText = (r.uname || r.pword) ? `${escHtml(r.uname || '—')} / ${SHOW_PASSWORDS ? escHtml(r.pword || '—') : masked}` : 'n/a';
       const checked = SELECTED_ROWS.has(r.key) ? 'checked' : '';
       const d = r.detail || {};
-      const stateHtml = (() => {
-        const m = mapProxmoxPowerState(d && d.state);
-        if (!m || m.label === '—') return '<span class="text-muted">—</span>';
-        return `<span class="badge ${m.cls}">${escHtml(m.label)}</span>`;
-      })();
+      const stateHtml = renderVmStateBadges(d);
       const idHtml = (d && d.vmid !== undefined && d.vmid !== null) ? `#${d.vmid}` : '—';
       const nodeHtml = d && d.node ? escHtml(d.node) : '—';
       const templateHtml = (() => {
@@ -2648,6 +2679,7 @@ function getActionableSelections() {
 
 function friendlyActionName(action) {
   const map = {
+    unlock: 'Unlock',
     nets_set: 'Set Network Interfaces',
     nets_remove: 'Remove Network Interfaces',
     // Backward-compatible aliases
@@ -4283,12 +4315,13 @@ async function vmActionExec(action, opts = {}) {
       try { shell.endActionContext(true); } catch { }
       return;
     }
-    if (action === 'start' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'apply_scenario') {
+    if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'apply_scenario') {
       try { shell.beginActionContext(action.charAt(0).toUpperCase() + action.slice(1)); } catch { }
       try { (window.shell && shell.logInfo) ? shell.logInfo(`Action: ${action} on ${targets.length} target(s)`) : console.log('Action', action, 'on', targets); } catch { }
       const setProg = (pct, text, detail) => setAp(pct, text, detail);
       const verbMap = {
         start: ['Starting…', 'Starting', 'Started'],
+        unlock: ['Unlocking…', 'Unlocking', 'Unlocked'],
         suspend: ['Suspending…', 'Suspending', 'Suspended'],
         poweroff: ['Powering off…', 'Powering off', 'Powered off'],
         snapshot: ['Snapshotting…', 'Taking snapshot(s)', 'Snapshot(s) taken'],
@@ -4386,7 +4419,7 @@ async function vmActionExec(action, opts = {}) {
         } catch { }
       }
       // Determine counts based on action response keys
-      const keyMap = { start: 'started', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', apply_scenario: 'applied' };
+      const keyMap = { start: 'started', unlock: 'unlocked', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', apply_scenario: 'applied' };
       const k = keyMap[action];
       let doneArr = Array.isArray(resp[k]) ? resp[k] : [];
       // If start action returned resumed array, include it in counts and tweak wording
@@ -4881,9 +4914,9 @@ async function vmActionMultiExec(action, opts = {}) {
           try { const prev = PROJ; PROJ = proj; const group = new Map(); for (const entry of amb) { const baseName = String(entry?.name || ''); const list = Array.isArray(entry?.candidates) ? entry.candidates : []; if (!group.has(baseName)) group.set(baseName, new Map()); const seen = group.get(baseName); for (const c of list) { const vmid = (c && (c.vmid ?? c.id)); if (vmid === undefined || vmid === null || vmid === '') continue; const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || ''; const k = `${vmid}@@${node}`; if (!seen.has(k)) seen.set(k, { vmid, node }); } } for (const [baseName, map] of group.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values())); } PROJ = prev; } catch { }
           const resp2 = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
           // Prefer second
-          ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'started', 'resumed', 'suspended', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp2[k], projName));
+          ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp2[k], projName));
         } else {
-          ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'started', 'resumed', 'suspended', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp[k], projName));
+          ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp[k], projName));
         }
         continue;
       }
@@ -4908,7 +4941,7 @@ async function vmActionMultiExec(action, opts = {}) {
         ['applied', 'skipped', 'errors'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
-      if (action === 'start' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
+      if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
         setAp(Math.max(20, pct), 'Working…', `${action} in ${projName}…`);
         const shouldPollDetail = action === 'run_startup_cmds' || action === 'run_stored_cmds';
         const requestPromise = makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
@@ -4957,7 +4990,7 @@ async function vmActionMultiExec(action, opts = {}) {
             }
           } catch { }
         }
-        ['started', 'resumed', 'suspended', 'powered_off', 'snapshotted', 'restored', 'skipped', 'errors', 'notices', 'ran'].forEach(k => addArr(k, resp[k], projName));
+        ['started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'snapshotted', 'restored', 'skipped', 'errors', 'notices', 'ran'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'delete') {
@@ -5234,6 +5267,7 @@ function showActionSummary(actionName, resp) {
     const started = Array.isArray(resp.started) ? resp.started : [];
     const resumed = Array.isArray(resp.resumed) ? resp.resumed : [];
     const suspended = Array.isArray(resp.suspended) ? resp.suspended : [];
+    const unlocked = Array.isArray(resp.unlocked) ? resp.unlocked : [];
     const poweredOff = Array.isArray(resp.powered_off) ? resp.powered_off : [];
     const snapshotted = Array.isArray(resp.snapshotted) ? resp.snapshotted : [];
     const restored = Array.isArray(resp.restored) ? resp.restored : [];
@@ -5242,6 +5276,7 @@ function showActionSummary(actionName, resp) {
     if (started.length) sections.push(`<h6>Started</h6>${list(started, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     if (resumed.length) sections.push(`<h6>Resumed</h6>${list(resumed, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     if (suspended.length) sections.push(`<h6>Suspended</h6>${list(suspended, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
+    if (unlocked.length) sections.push(`<h6>Unlocked</h6>${list(unlocked, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     if (poweredOff.length) sections.push(`<h6>Powered Off</h6>${list(poweredOff, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     if (snapshotted.length) sections.push(`<h6>Snapshots</h6>${list(snapshotted, i => `<li>${esc(i.name)} — ${esc(i.snapname || 'snapshot')} ${i.vmid ? `(#${esc(i.vmid)})` : ''}</li>`)}`);
     if (restored.length) sections.push(`<h6>Restored</h6>${list(restored, i => `<li>${esc(i.name)} — ${esc(i.snapname || 'snapshot')} ${i.started ? '(started)' : ''}</li>`)}`);
@@ -5378,6 +5413,7 @@ function showActionSummary(actionName, resp) {
       started.length ? `${started.length} started` : null,
       resumed.length ? `${resumed.length} resumed` : null,
       suspended.length ? `${suspended.length} suspended` : null,
+      unlocked.length ? `${unlocked.length} unlocked` : null,
       poweredOff.length ? `${poweredOff.length} powered off` : null,
       snapshotted.length ? `${snapshotted.length} snapshotted` : null,
       restored.length ? `${restored.length} restored` : null,

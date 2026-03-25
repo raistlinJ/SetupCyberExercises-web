@@ -35,8 +35,11 @@ services:
     environment:
       - PORT=8080
       - DATA_DIR=/data
+      - DOCKER_HOST_ALIAS=host.docker.internal
     volumes:
       - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   nginx:

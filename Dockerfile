@@ -26,4 +26,4 @@ COPY app ./app
 EXPOSE 8080
 
 # Run with gunicorn (single-line JSON array for broad parser compatibility)
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "--worker-class", "gthread", "--threads", "4", "--timeout", "60", "--graceful-timeout", "30", "--keep-alive", "2", "--log-level", "info", "app.wsgi:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "--worker-class", "gthread", "--threads", "4", "--timeout", "180", "--graceful-timeout", "30", "--keep-alive", "2", "--log-level", "info", "app.wsgi:app"]

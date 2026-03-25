@@ -866,7 +866,9 @@ def instances_refresh_vm(pid: str):
                     name_map[canon] = {
                         'node': node,
                         'vmid': vmid_val,
-                        'state': q.get('status') or q.get('qmpstatus') or ''
+                        'state': q.get('qmpstatus') or q.get('status') or '',
+                        'power_state': q.get('status') or '',
+                        'qmp_state': q.get('qmpstatus') or '',
                     }
                     lower_name_to_canon[canon.lower()] = canon
         
@@ -1094,10 +1096,13 @@ def instances_refresh_vm(pid: str):
                     'name': canon_name,
                     'vmid': vmid,
                     'state': matched.get('state') or '',
+                    'power_state': matched.get('power_state') or matched.get('state') or '',
+                    'qmp_state': matched.get('qmp_state') or '',
                     'nets': nets,
                     'node': node,
                     'template_id': tmpl_id,
                     'template_name': tmpl_name,
+                    'lock': str(cfg.get('lock') or '').strip() if isinstance(cfg, dict) else '',
                     'description': str(cfg.get('description') or '').strip() if isinstance(cfg, dict) else '',
                     'pool': pool_val,
                     # Effective access for the instance user (credential username)
@@ -3704,6 +3709,68 @@ def instances_suspend(pid: str):
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'suspend failed: {e}' })
     _end_job(pid)
     return jsonify({ 'suspended': suspended, 'skipped': skipped, 'errors': errors })
+
+
+@api_bp.route("/projects/<pid>/instances/actions/unlock", methods=["POST"])
+def instances_unlock(pid: str):
+    _start_job(pid, 'unlock')
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    body = request.get_json(force=True) or {}
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+    targets = body.get('targets') or []
+    if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
+        return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "No targets provided"}), 400
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+    unlocked = []
+    pool_workers = _pool_workers_for(proj, len(mapped))
+
+    def do_unlock(m):
+        if _is_cancelled(pid):
+            raise RuntimeError('cancelled')
+        upid = client.unlock_qemu(node=m['node'], vmid=m['vmid'])
+        client._wait_task(m['node'], upid, timeout=600)
+        return { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] }
+
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        future_map = { pool.submit(do_unlock, m): m for m in mapped }
+        for fut in as_completed(future_map):
+            m = future_map[fut]
+            try:
+                unlocked.append(fut.result())
+            except Exception as e:
+                if str(e) == 'cancelled':
+                    errors.append({ 'reason': 'cancelled' })
+                else:
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'unlock failed: {e}' })
+    _end_job(pid)
+    return jsonify({ 'unlocked': unlocked, 'skipped': skipped, 'errors': errors })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/poweroff", methods=["POST"])
