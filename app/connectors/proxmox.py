@@ -10,6 +10,15 @@ from urllib.parse import urlsplit, urlunsplit
 _DOCKER_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
+def _docker_host_alias() -> str:
+    alias = str(
+        os.environ.get("PROXMOX_API_HOST_OVERRIDE")
+        or os.environ.get("DOCKER_HOST_ALIAS")
+        or "host.docker.internal"
+    ).strip()
+    return alias or "host.docker.internal"
+
+
 def _running_in_container() -> bool:
     try:
         marker = os.environ.get("IN_DOCKER")
@@ -37,9 +46,7 @@ def _normalize_container_localhost_url(base_url: Optional[str]) -> Optional[str]
     if host not in _DOCKER_LOCAL_HOSTS:
         return base_url
 
-    alias = str(os.environ.get("DOCKER_HOST_ALIAS") or "host.docker.internal").strip()
-    if not alias:
-        alias = "host.docker.internal"
+    alias = _docker_host_alias()
 
     auth = ""
     if parsed.username:
@@ -57,6 +64,71 @@ def _normalize_container_localhost_url(base_url: Optional[str]) -> Optional[str]
         netloc = f"{netloc}:{parsed.port}"
 
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _rewrite_url_hostname(url: str, replacement_host: str) -> str:
+    parsed = urlsplit(str(url or ""))
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth += f":{parsed.password}"
+        auth += "@"
+
+    host_literal = replacement_host
+    if ":" in replacement_host and not replacement_host.startswith("["):
+        host_literal = f"[{replacement_host}]"
+
+    netloc = f"{auth}{host_literal}"
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _looks_like_name_resolution_error(exc: BaseException) -> bool:
+    pending = [exc]
+    seen = set()
+    needles = (
+        "failed to resolve",
+        "name resolution",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "nodename nor servname provided",
+    )
+    while pending:
+        current = pending.pop(0)
+        if current is None:
+            continue
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        text = f"{type(current).__name__}: {current}".lower()
+        if any(needle in text for needle in needles):
+            return True
+        reason = getattr(current, "reason", None)
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        for candidate in (reason, cause, context):
+            if isinstance(candidate, BaseException):
+                pending.append(candidate)
+    return False
+
+
+def _fallback_request_url(url: str) -> Optional[str]:
+    if not _running_in_container():
+        return None
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except Exception:
+        return None
+    host = (parsed.hostname or "").strip().lower()
+    if not host or host in _DOCKER_LOCAL_HOSTS:
+        return None
+    alias = _docker_host_alias()
+    if not alias or alias.strip().lower() == host:
+        return None
+    return _rewrite_url_hostname(url, alias)
 
 
 class GuestAgentUnavailableError(RuntimeError):
@@ -89,6 +161,7 @@ class ProxmoxClient:
             return self._session
         self._session = requests.Session()
         self._session.verify = self.verify
+        self._install_request_fallback(self._session)
         if self.token:
             self._session.headers.update({"Authorization": f"PVEAPIToken={self.token}"})
             return self._session
@@ -110,6 +183,29 @@ class ProxmoxClient:
         if csrf:
             self._session.headers.update({"CSRFPreventionToken": csrf})
         return self._session
+
+    def _install_request_fallback(self, session: requests.Session) -> None:
+        if getattr(session, "_sce_proxmox_dns_fallback_installed", False):
+            return
+        original_request = session.request
+        logger = self._logger
+
+        def request_with_fallback(method, url, *args, **kwargs):
+            try:
+                return original_request(method, url, *args, **kwargs)
+            except requests.RequestException as exc:
+                fallback_url = _fallback_request_url(str(url or "")) if _looks_like_name_resolution_error(exc) else None
+                if not fallback_url or fallback_url == url:
+                    raise
+                logger.warning(
+                    "Retrying Proxmox request via %s after DNS resolution failure for %s",
+                    fallback_url,
+                    url,
+                )
+                return original_request(method, fallback_url, *args, **kwargs)
+
+        session.request = request_with_fallback  # type: ignore[assignment]
+        session._sce_proxmox_dns_fallback_installed = True  # type: ignore[attr-defined]
 
     def list_nodes(self) -> List[Dict[str, Any]]:
         s = self._ensure_session()

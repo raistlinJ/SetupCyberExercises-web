@@ -40,6 +40,9 @@ services:
       - ./data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     restart: unless-stopped
 
   nginx:
