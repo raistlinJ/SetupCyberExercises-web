@@ -694,7 +694,7 @@ function settingsModalRenderSpeechTemplate(template, context) {
   const raw = typeof template === 'string' ? template : '';
   if (!raw.trim()) return '';
   const ctx = context && typeof context === 'object' ? context : {};
-  const replaced = raw.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, key) => {
+  const replaced = raw.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
     if (!key) return '';
     if (key === 'audio') return '';
     if (Object.prototype.hasOwnProperty.call(ctx, key) && ctx[key] != null) {
@@ -2757,6 +2757,7 @@ async function autoSaveProjectField(pid) {
     proxmox_snapshot_delay_seconds: Number(document.getElementById(`cfg-${pid}-proxmox_snapshot_delay_seconds`)?.value),
     proxmox_update_delay_seconds: Number(document.getElementById(`cfg-${pid}-proxmox_update_delay_seconds`)?.value),
     proxmox_use_linked_clones: !!(document.getElementById(`cfg-${pid}-proxmox_use_linked_clones`)?.checked),
+    proxmox_assign_rollback_on_non_viewable: !!(document.getElementById(`cfg-${pid}-proxmox_assign_rollback_on_non_viewable`)?.checked),
   };
   // Optional future fields (skip if disabled)
   const optIds = ['keycloak_url', 'keycloak_port', 'keycloak_nodename', 'challenge_url', 'challenge_port'];
@@ -3920,6 +3921,13 @@ function renderProjectCard(p) {
               <div class="form-check form-switch mt-1">
                 <input class="form-check-input" type="checkbox" id="cfg-${p.id}-proxmox_use_linked_clones" ${p.proxmox_use_linked_clones !== false ? 'checked' : ''} title="Linked clones share disks with the template; uncheck for full clones" onchange="debounceProjectSave('${p.id}','proxmox_use_linked_clones', 50)" />
                 <label class="form-check-label" for="cfg-${p.id}-proxmox_use_linked_clones">Linked (unchecked = Full)</label>
+              </div>
+            </div>
+            <div class="col-md-6 mb-2">
+              <label class="form-label">Rollback ACL For Non-Viewable VMs</label>
+              <div class="form-check form-switch mt-1">
+                <input class="form-check-input" type="checkbox" id="cfg-${p.id}-proxmox_assign_rollback_on_non_viewable" ${p.proxmox_assign_rollback_on_non_viewable !== false ? 'checked' : ''} title="Grant AcostaRollback on pool-member VMs that are not marked user accessible" onchange="debounceProjectSave('${p.id}','proxmox_assign_rollback_on_non_viewable', 50)" />
+                <label class="form-check-label" for="cfg-${p.id}-proxmox_assign_rollback_on_non_viewable">Enable AcostaRollback handoff</label>
               </div>
             </div>
             <!-- Auto-save active: manual save button removed -->

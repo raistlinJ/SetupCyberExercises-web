@@ -312,6 +312,7 @@ class Project:
     proxmox_snapshot_delay_seconds: float = 5.0
     proxmox_update_delay_seconds: float = 0.5
     proxmox_use_linked_clones: bool = True
+    proxmox_assign_rollback_on_non_viewable: bool = True
     proxmox_clone_timeout_seconds: int = 1800
     proxmox_skip_post_clone_snapshot: bool = False
     # SSH overrides: resolve node names that aren't DNS-resolvable
@@ -780,6 +781,11 @@ class ProjectStore:
                     base["credentials"] = coerced
                 except Exception:
                     base["credentials"] = []
+            elif k == "proxmox_assign_rollback_on_non_viewable":
+                try:
+                    base[k] = _coerce_enabled(v, True)
+                except Exception:
+                    base[k] = True
             elif k == "exports":
                 try:
                     if isinstance(v, list):

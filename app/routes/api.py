@@ -418,13 +418,57 @@ def _get_cached_pool_members(client, poolid: str, force_refresh: bool = False) -
     members = client.list_pool_members(cache_key) or []
     member_vmids: Set[int] = set()
     for member in members:
-        try:
-            if str((member or {}).get('type', '')).lower() == 'qemu':
-                member_vmids.add(int((member or {}).get('vmid')))
-        except Exception:
-            continue
+        vmid = _extract_pool_member_vmid(member)
+        if vmid is not None:
+            member_vmids.add(vmid)
     _POOL_CACHE[cache_key] = (now, set(member_vmids))
     return member_vmids
+
+
+def _extract_pool_member_vmid(member: Any) -> Optional[int]:
+    try:
+        entry = member if isinstance(member, dict) else {}
+    except Exception:
+        entry = {}
+
+    type_hint = str(entry.get('type') or '').strip().lower()
+    if type_hint in {'storage', 'sdn', 'group', 'user'}:
+        return None
+
+    for key in ('vmid', 'id'):
+        raw = entry.get(key)
+        if raw is None:
+            continue
+        if key == 'vmid':
+            try:
+                return int(raw)
+            except Exception:
+                pass
+        text = str(raw).strip()
+        if not text:
+            continue
+        match = re.search(r'(?:^|/)(?:qemu|vm)/(\d+)$', text, flags=re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                continue
+        if not type_hint or type_hint in {'qemu', 'vm'}:
+            try:
+                return int(text)
+            except Exception:
+                continue
+
+    if type_hint in {'qemu', 'vm'}:
+        for key in ('name', 'resource'):
+            text = str(entry.get(key) or '').strip()
+            match = re.search(r'(?:^|/)(?:qemu|vm)/(\d+)$', text, flags=re.IGNORECASE)
+            if match:
+                try:
+                    return int(match.group(1))
+                except Exception:
+                    continue
+    return None
 
 
 def _prefetch_pool_members_parallel(
@@ -467,6 +511,148 @@ def _prefetch_pool_members_parallel(
                 LOG.warning("Could not fetch pool members for %s: %s", poolid, exc)
                 results[poolid] = set()
     return results
+
+
+def _has_user_access_role(roles_set: Any) -> bool:
+    try:
+        return ('PVEUser' in roles_set) or ('PVEVMUser' in roles_set)
+    except Exception:
+        return False
+
+
+def _ensure_proxmox_role(client: ProxmoxClient, roleid: str, privileges: List[str]) -> None:
+    try:
+        if not client.get_role(roleid):
+            client.create_role(roleid, privileges)
+    except Exception:
+        pass
+
+
+def _grant_user_access_vm_role(client: ProxmoxClient, userid: str, vmid: int) -> str:
+    try:
+        client.set_acl_user_vm(userid, vmid, roles='PVEUser', propagate=True)
+        return 'PVEUser'
+    except Exception as exc:
+        msg = str(exc).lower()
+        if 'role' in msg and ('not found' in msg or 'no such' in msg or 'does not exist' in msg):
+            client.set_acl_user_vm(userid, vmid, roles='PVEVMUser', propagate=True)
+            return 'PVEVMUser'
+        raise
+
+
+def _delete_vm_acl_role(client: ProxmoxClient, userid: str, vmid: int, role: str) -> bool:
+    try:
+        client.delete_acl_user_vm(userid, vmid, roles=role, propagate=True)
+        return True
+    except Exception:
+        return False
+
+
+def _reconcile_vm_access_roles(
+    client: ProxmoxClient,
+    userid: str,
+    vmid: int,
+    *,
+    accessible: bool,
+    rollback_enabled: bool,
+    current_roles: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    removed: List[str] = []
+    granted: Optional[str] = None
+    current = set(current_roles or set())
+
+    if accessible:
+        if 'AcostaRollback' in current or current_roles is None:
+            if _delete_vm_acl_role(client, userid, vmid, 'AcostaRollback'):
+                removed.append('AcostaRollback')
+                current.discard('AcostaRollback')
+        if not _has_user_access_role(current):
+            granted = _grant_user_access_vm_role(client, userid, vmid)
+            current.add(granted)
+    else:
+        for role in ('PVEUser', 'PVEVMUser'):
+            if role in current or current_roles is None:
+                if _delete_vm_acl_role(client, userid, vmid, role):
+                    removed.append(role)
+                    current.discard(role)
+        if rollback_enabled:
+            _ensure_proxmox_role(client, 'AcostaRollback', ['VM.Snapshot.Rollback', 'VM.Audit', 'VM.PowerMgmt'])
+            if 'AcostaRollback' not in current:
+                client.set_acl_user_vm(userid, vmid, roles='AcostaRollback', propagate=True)
+                granted = 'AcostaRollback'
+                current.add('AcostaRollback')
+        else:
+            if 'AcostaRollback' in current or current_roles is None:
+                if _delete_vm_acl_role(client, userid, vmid, 'AcostaRollback'):
+                    removed.append('AcostaRollback')
+                    current.discard('AcostaRollback')
+
+    return {
+        'granted': granted,
+        'removed': removed,
+        'current_roles': current,
+    }
+
+
+def _iter_json_dicts_from_text(text: Any) -> Iterable[Dict[str, Any]]:
+    try:
+        source = str(text or '')
+    except Exception:
+        source = ''
+    if not source:
+        return []
+
+    decoder = json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    cursor = 0
+    length = len(source)
+    while cursor < length:
+        start = source.find('{', cursor)
+        if start < 0:
+            break
+        try:
+            parsed, offset = decoder.raw_decode(source[start:])
+        except Exception:
+            cursor = start + 1
+            continue
+        if isinstance(parsed, dict):
+            found.append(parsed)
+        cursor = start + max(int(offset), 1)
+    return found
+
+
+def _vm_description_matches_project(proj: Optional[Project], description: Any) -> bool:
+    project_id = str(getattr(proj, 'id', '') or '').strip()
+    project_name = str(getattr(proj, 'name', '') or '').strip()
+    for meta in _iter_json_dicts_from_text(description):
+        try:
+            meta_project_id = str(meta.get('project_id') or '').strip()
+        except Exception:
+            meta_project_id = ''
+        if project_id and meta_project_id == project_id:
+            return True
+        try:
+            scenario_name = str(meta.get('Scenario') or meta.get('scenario') or '').strip()
+        except Exception:
+            scenario_name = ''
+        if project_name and scenario_name == project_name:
+            return True
+    return False
+
+
+def _vm_is_in_project_notes(client: ProxmoxClient, proj: Optional[Project], node: Any, vmid: Any) -> bool:
+    try:
+        node_name = str(node or '').strip()
+        vmid_int = int(vmid)
+    except Exception:
+        return False
+    if not node_name:
+        return False
+    try:
+        cfg = client.get_qemu_config(node_name, vmid_int) or {}
+    except Exception:
+        return False
+    return _vm_description_matches_project(proj, cfg.get('description'))
 
 def _clear_vm_cache(project_id=None):
     """Clear cached VM data (call after create/delete/clone operations)"""
@@ -998,6 +1184,16 @@ def instances_refresh_vm(pid: str):
     except Exception:
         pool_ids = None
 
+    def _norm_userid(uname: str) -> str:
+        u = str(uname or '').strip()
+        if not u:
+            return ''
+        return u if '@' in u else f"{u}@pve"
+
+    def _poolid_from_uname(uname: str) -> str:
+        base = str(uname or '').strip().split('@', 1)[0]
+        return re.sub(r"[^A-Za-z0-9_-]+", "", base)
+
     matched_vm_refs: List[Tuple[str, int]] = []
     for instance_specs in expected.values():
         for spec in instance_specs:
@@ -1054,16 +1250,6 @@ def instances_refresh_vm(pid: str):
             verify=verify,
         ),
     )
-
-    def _norm_userid(uname: str) -> str:
-        u = str(uname or '').strip()
-        if not u:
-            return ''
-        return u if '@' in u else f"{u}@pve"
-
-    def _poolid_from_uname(uname: str) -> str:
-        base = str(uname or '').strip().split('@', 1)[0]
-        return re.sub(r"[^A-Za-z0-9_-]+", "", base)
 
     def _norm_acl_path(path: str) -> str:
         p = str(path or '').strip()
@@ -1309,19 +1495,16 @@ def instances_refresh_vm(pid: str):
                         # All configured VMs for this instance count toward expected pool membership
                         names_viewable = list(names)
                         total_expected = len(names_viewable)
-                        # Count of expected VMs that both exist and are in the pool
-                        in_count = 0
-                        for spec in names_viewable:
+                        # Count expected VMs by resolved details instead of exact generated-name equality.
+                        # Proxmox may return canonical names with different casing than the configured expectation.
+                        expected_found_vmids: Set[int] = set()
+                        for fd in found_details:
                             try:
-                                spec_name = spec.get('name') or ''
-                                # Match found_details to spec_name to get vmid (if created)
-                                fd = next((d for d in found_details if str(d.get('name') or '') == spec_name), None)
-                                if fd and fd.get('vmid') is not None:
-                                    vm_vmid = int(fd.get('vmid'))
-                                    if vm_vmid in pool_vmids:
-                                        in_count += 1
+                                if fd.get('vmid') is not None:
+                                    expected_found_vmids.add(int(fd.get('vmid')))
                             except Exception:
                                 continue
+                        in_count = sum(1 for vm_vmid in expected_found_vmids if vm_vmid in pool_vmids)
                         mgrs['pools_member_total'] = total_expected
                         mgrs['pools_member_count'] = in_count
                         # If nothing is expected, consider it satisfied (green)
@@ -4656,21 +4839,7 @@ def instances_users_create(pid: str):
             return False
         return False
     def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
-        if not node_str or not vmid_int:
-            return False
-        try:
-            cfg = client.get_qemu_config(node_str, vmid_int)
-            desc = cfg.get('description') or ''
-            if not desc:
-                return False
-            import json
-            meta = json.loads(desc)
-            # Match project_id exactly
-            if str(meta.get('project_id', '')) == str(proj.id):
-                return True
-        except Exception:
-            pass
-        return False
+        return _vm_is_in_project_notes(client, proj, node_str, vmid_int)
 
     for idx in indices:
         mlist = by_index.get(idx, [])
@@ -5005,6 +5174,7 @@ def instances_users_perms(pid: str):
     updated_users = []
     added_members = []
     notices = []
+    rollback_for_non_viewable = bool(getattr(proj, 'proxmox_assign_rollback_on_non_viewable', True))
     notice_keys = set()
     def _add_notice_once(item):
         try:
@@ -5052,20 +5222,7 @@ def instances_users_perms(pid: str):
         return False
         
     def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
-        if not node_str or not vmid_int:
-            return False
-        try:
-            cfg = client.get_qemu_config(node_str, vmid_int)
-            desc = cfg.get('description') or ''
-            if not desc:
-                return False
-            import json
-            meta = json.loads(desc)
-            if str(meta.get('project_id', '')) == str(proj.id):
-                return True
-        except Exception:
-            pass
-        return False
+        return _vm_is_in_project_notes(client, proj, node_str, vmid_int)
         
     for idx in indices:
         mlist = by_index.get(idx, [])
@@ -5190,43 +5347,15 @@ def instances_users_perms(pid: str):
                             continue
                         is_accessible = _is_user_accessible(base_name)
                         try:
-                            try:
-                                if not client.get_role('AcostaRollback'):
-                                    client.create_role('AcostaRollback', ['VM.Snapshot.Rollback', 'VM.Audit', 'VM.PowerMgmt'])
-                            except Exception:
-                                pass
-                                
-                            try:
-                                if not client.get_role('AcostaPowerRollback'):
-                                    client.create_role('AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
-                            except Exception:
-                                pass
-
-                            # Remove conflicting roles explicitly to avoid wiping unrelated roles
-                            if is_accessible:
-                                roles_to_set = 'PVEUser'
-                                try:
-                                    client.set_acl_user_vm(userid, int(m['vmid']), roles=roles_to_set, propagate=True)
-                                except Exception as e:
-                                    msg_low = str(e).lower()
-                                    if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
-                                        client.set_acl_user_vm(userid, int(m['vmid']), roles='PVEVMUser', propagate=True)
-                                    else:
-                                        raise
-                                # Delete the contrasting role explicitly
-                                for crole in ['AcostaRollback']:
-                                    try:
-                                        client.delete_acl_user_vm(userid, int(m['vmid']), roles=crole, propagate=True)
-                                    except Exception:
-                                        pass
-                            else:
-                                client.set_acl_user_vm(userid, int(m['vmid']), roles='AcostaRollback', propagate=True)
-                                # Delete the contrasting roles explicitly
-                                for crole in ['PVEUser', 'PVEVMUser']:
-                                    try:
-                                        client.delete_acl_user_vm(userid, int(m['vmid']), roles=crole, propagate=True)
-                                    except Exception:
-                                        pass
+                            _ensure_proxmox_role(client, 'AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                            _reconcile_vm_access_roles(
+                                client,
+                                userid,
+                                int(m['vmid']),
+                                accessible=is_accessible,
+                                rollback_enabled=rollback_for_non_viewable,
+                                current_roles=None,
+                            )
                             applied += 1
                         except Exception as e2:
                             if '501' in str(e2) and 'not implemented' not in str(e2).lower():
@@ -5239,7 +5368,8 @@ def instances_users_perms(pid: str):
                         errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL processing failed: {e_outer}' })
                         
                 if applied:
-                    _add_notice_once({ 'index': idx, 'reason': f'applied per-VM ACL to {applied} user-accessible VM(s)' })
+                    acl_mode = 'user-access/rollback' if rollback_for_non_viewable else 'user-access only'
+                    _add_notice_once({ 'index': idx, 'reason': f'applied per-VM ACL to {applied} VM(s) ({acl_mode})' })
                 if unsupported and applied == 0:
                     _add_notice_once({ 'index': idx, 'reason': 'ACL endpoints unsupported; skipped ACLs' })
             except Exception as e:
@@ -5565,6 +5695,7 @@ def instances_users_access_sync(pid: str):
     applied: List[Dict[str, Any]] = []
     unchanged: List[Dict[str, Any]] = []
     infos: List[Dict[str, Any]] = []
+    rollback_for_non_viewable = bool(getattr(proj, 'proxmox_assign_rollback_on_non_viewable', True))
 
     # Cache: userid -> exists?
     user_exists_cache: Dict[str, bool] = {}
@@ -5594,12 +5725,6 @@ def instances_users_access_sync(pid: str):
         have_acl_index = True
     except Exception:
         have_acl_index = False
-
-    def _has_access_role(roles_set: Any) -> bool:
-        try:
-            return ('PVEUser' in roles_set) or ('PVEVMUser' in roles_set)
-        except Exception:
-            return False
 
     # Sync permissions for each mapped VM
     for m in (mapped or []):
@@ -5643,57 +5768,43 @@ def instances_users_access_sync(pid: str):
         current_roles = existing_roles.get((userid, vm_path), set()) if have_acl_index else None
 
         try:
-            if enable:
-                if current_roles is not None and _has_access_role(current_roles):
-                    unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permission already granted' })
+            needs_change = True
+            if current_roles is not None:
+                if enable:
+                    needs_change = (not _has_user_access_role(current_roles)) or ('AcostaRollback' in current_roles)
                 else:
-                    role_used = 'PVEUser'
-                    # Prefer PVEUser; fall back to legacy role if missing.
-                    try:
-                        client.set_acl_user_vm(userid, vmid, roles='PVEUser', propagate=True)
-                    except Exception as e:
-                        msg = str(e).lower()
-                        if 'role' in msg and ('not found' in msg or 'no such' in msg or 'does not exist' in msg):
-                            client.set_acl_user_vm(userid, vmid, roles='PVEVMUser', propagate=True)
-                            role_used = 'PVEVMUser'
-                        else:
-                            raise
-                    applied.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'action': 'grant', 'role': role_used })
-                    if have_acl_index:
-                        try:
-                            existing_roles.setdefault((userid, vm_path), set()).add(role_used)
-                        except Exception:
-                            pass
+                    if rollback_for_non_viewable:
+                        needs_change = _has_user_access_role(current_roles) or ('AcostaRollback' not in current_roles)
+                    else:
+                        needs_change = _has_user_access_role(current_roles) or ('AcostaRollback' in current_roles)
+            if not needs_change:
+                unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permissions already synchronized' })
             else:
-                if current_roles is not None and not _has_access_role(current_roles):
-                    unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permission already absent' })
+                result = _reconcile_vm_access_roles(
+                    client,
+                    userid,
+                    vmid,
+                    accessible=enable,
+                    rollback_enabled=rollback_for_non_viewable,
+                    current_roles=current_roles,
+                )
+                if have_acl_index:
+                    try:
+                        existing_roles[(userid, vm_path)] = set(result.get('current_roles') or set())
+                    except Exception:
+                        pass
+                if result.get('granted') or result.get('removed'):
+                    applied.append({
+                        'index': idx,
+                        'name': name,
+                        'vmid': vmid,
+                        'userid': userid,
+                        'action': 'grant' if enable else 'reconcile',
+                        'role': result.get('granted'),
+                        'roles_removed': result.get('removed') or [],
+                    })
                 else:
-                    roles_to_remove: List[str]
-                    if current_roles is not None:
-                        roles_to_remove = [r for r in ('PVEUser', 'PVEVMUser') if r in current_roles]
-                        # If ACL listing exists but is missing role info, be defensive.
-                        if not roles_to_remove:
-                            roles_to_remove = ['PVEUser', 'PVEVMUser']
-                    else:
-                        roles_to_remove = ['PVEUser', 'PVEVMUser']
-                    removed: List[str] = []
-                    for role in roles_to_remove:
-                        try:
-                            client.delete_acl_user_vm(userid, vmid, roles=role, propagate=True)
-                            removed.append(role)
-                            if have_acl_index:
-                                try:
-                                    existing_roles.setdefault((userid, vm_path), set()).discard(role)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            # delete_acl() treats "already absent" as success in most cases;
-                            # but if a particular Proxmox build errors, we continue best-effort.
-                            continue
-                    if not removed:
-                        unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permission already absent' })
-                    else:
-                        applied.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'action': 'revoke', 'roles_removed': removed })
+                    unchanged.append({ 'index': idx, 'name': name, 'vmid': vmid, 'userid': userid, 'reason': 'permissions already synchronized' })
 
                 # Legacy cleanup: older setups may grant access via pool ACLs.
                 # Best-effort revoke on the pool path so disabled accessibility truly removes visibility.
@@ -5713,6 +5824,9 @@ def instances_users_access_sync(pid: str):
     try:
         infos.append({
             'reason': f"Permissions synced for selected rows only ({len(indices)} row(s), {len(norm_templates)} template(s))."
+        })
+        infos.append({
+            'reason': 'Non-viewable VM rollback ACLs are ' + ('enabled.' if rollback_for_non_viewable else 'disabled.')
         })
     except Exception:
         pass
@@ -8245,7 +8359,7 @@ def update_project(pid: str):
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
         "proxmox_qmrestore_path", "proxmox_storage_volume",
     "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
-    "proxmox_use_linked_clones",
+    "proxmox_use_linked_clones", "proxmox_assign_rollback_on_non_viewable",
     "instance_statuses",
     ]:
         if key in data:

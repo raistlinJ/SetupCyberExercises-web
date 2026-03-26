@@ -5311,7 +5311,9 @@ function showActionSummary(actionName, resp) {
       } catch { }
       return '';
     };
-    sections.push(`<h6>Skipped</h6>${list(skipped, s => `<li>${netSkipIcon(s)}${esc(s.name || s.index || '')} — ${esc(s.reason || '')}</li>`)}`);
+    if (skipped.length) {
+      sections.push(`<h6>Skipped</h6>${list(skipped, s => `<li>${netSkipIcon(s)}${esc(s.name || s.index || '')} — ${esc(s.reason || '')}</li>`)}`);
+    }
     if (amb.length) sections.push(`<h6>Ambiguous</h6>${list(amb, a => `<li>${esc(a.name)} — candidates: ${(a.candidates || []).map(c => `#${esc(c.vmid)} on ${esc(c.node || '')}`).join(', ')}</li>`)}`);
     if (isUserAccess) {
       try {
@@ -5371,9 +5373,11 @@ function showActionSummary(actionName, resp) {
           const e = errorsBy.get(k) || [];
           const grants = a.filter(x => String(x?.action || '').toLowerCase() === 'grant').length;
           const revokes = a.filter(x => String(x?.action || '').toLowerCase() === 'revoke').length;
+          const reconciles = a.filter(x => String(x?.action || '').toLowerCase() === 'reconcile').length;
           const parts = [];
           if (grants) parts.push(`${grants} granted`);
           if (revokes) parts.push(`${revokes} revoked`);
+          if (reconciles) parts.push(`${reconciles} updated`);
           if (u.length) parts.push(`${u.length} unchanged`);
           if (s.length) parts.push(`${s.length} skipped`);
           if (e.length) parts.push(`${e.length} error(s)`);

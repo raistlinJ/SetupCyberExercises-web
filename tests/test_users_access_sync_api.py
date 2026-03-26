@@ -23,6 +23,7 @@ class UsersAccessSyncApiTests(unittest.TestCase):
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
         self.project = Project(id='proj-ua-sync', name='UA Sync Project')
+        self.project.proxmox_assign_rollback_on_non_viewable = False
         self.project.instances = 2
         self.project.tag = '-set-'
         self.project.proxmox_url = 'https://proxmox.local'
@@ -154,6 +155,73 @@ class UsersAccessSyncApiTests(unittest.TestCase):
             self.assertEqual(mock_client.set_acl_user_vm.call_count, 2)
             roles = [c.kwargs.get('roles') for c in mock_client.set_acl_user_vm.call_args_list]
             self.assertEqual(roles, ['PVEUser', 'PVEVMUser'])
+
+    def test_disable_adds_rollback_role_when_toggle_enabled(self):
+        self.project.proxmox_assign_rollback_on_non_viewable = True
+        with ExitStack() as stack:
+            store_patch, resolve_patch, start_patch, end_patch = self._common_patches()
+            stack.enter_context(store_patch)
+            stack.enter_context(resolve_patch)
+            stack.enter_context(start_patch)
+            stack.enter_context(end_patch)
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_user.return_value = {'userid': 'alice@pve'}
+            mock_client.list_acls.return_value = [
+                {'ugid': 'alice@pve', 'path': '/vms/101', 'roleid': 'PVEVMUser', 'type': 'user', 'propagate': 1},
+            ]
+            mock_client.get_role.return_value = {'roleid': 'AcostaRollback'}
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/users_access_sync',
+                json={
+                    'templates': ['web'],
+                    'enable': False,
+                    'indices': [1],
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'verifySSL': False,
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            mock_client.delete_acl_user_vm.assert_called_once_with('alice@pve', 101, roles='PVEVMUser', propagate=True)
+            mock_client.set_acl_user_vm.assert_called_once_with('alice@pve', 101, roles='AcostaRollback', propagate=True)
+
+    def test_enable_removes_rollback_role_before_access_role(self):
+        self.project.proxmox_assign_rollback_on_non_viewable = True
+        with ExitStack() as stack:
+            store_patch, resolve_patch, start_patch, end_patch = self._common_patches()
+            stack.enter_context(store_patch)
+            stack.enter_context(resolve_patch)
+            stack.enter_context(start_patch)
+            stack.enter_context(end_patch)
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_user.return_value = {'userid': 'alice@pve'}
+            mock_client.list_acls.return_value = [
+                {'ugid': 'alice@pve', 'path': '/vms/101', 'roleid': 'AcostaRollback', 'type': 'user', 'propagate': 1},
+            ]
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/users_access_sync',
+                json={
+                    'templates': ['web'],
+                    'enable': True,
+                    'indices': [1],
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'verifySSL': False,
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            mock_client.delete_acl_user_vm.assert_called_once_with('alice@pve', 101, roles='AcostaRollback', propagate=True)
+            mock_client.set_acl_user_vm.assert_called_once_with('alice@pve', 101, roles='PVEUser', propagate=True)
 
 
 if __name__ == '__main__':

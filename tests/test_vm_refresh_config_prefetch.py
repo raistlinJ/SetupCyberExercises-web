@@ -35,6 +35,8 @@ class VmRefreshConfigPrefetchTests(unittest.TestCase):
                     {'type': 'qemu', 'vmid': 101},
                     {'type': 'storage', 'vmid': 999},
                     {'type': 'qemu', 'vmid': 202},
+                    {'type': 'qemu', 'id': 'qemu/303'},
+                    {'id': '/vm/404'},
                 ]
 
         result = api._prefetch_pool_members_parallel(
@@ -45,8 +47,8 @@ class VmRefreshConfigPrefetchTests(unittest.TestCase):
         )
 
         self.assertEqual(set(seen), {'alpha', 'beta'})
-        self.assertEqual(result['alpha'], {101, 202})
-        self.assertEqual(result['beta'], {101, 202})
+        self.assertEqual(result['alpha'], {101, 202, 303, 404})
+        self.assertEqual(result['beta'], {101, 202, 303, 404})
 
 
 if __name__ == '__main__':
