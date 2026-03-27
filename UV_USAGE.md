@@ -1,4 +1,4 @@
-# Running AN3S with uv
+# Running DeployForge with uv
 
 [uv](https://github.com/astral-sh/uv) is a fast Python package manager written in Rust. Here's how to use it with this project.
 

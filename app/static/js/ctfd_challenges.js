@@ -1018,8 +1018,8 @@
       if(btnDownload) btnDownload.disabled = true;
       // Optional: reflect project in title
       try {
-        if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) document.title = `AN3S — CTFd Challenges (Multiple)`;
-        else { const name = (projectInfo && projectInfo.name) ? String(projectInfo.name) : pid; if (hasPid) document.title = `AN3S — CTFd Challenges (${name})`; }
+        if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) document.title = `DeployForge — CTFd Challenges (Multiple)`;
+        else { const name = (projectInfo && projectInfo.name) ? String(projectInfo.name) : pid; if (hasPid) document.title = `DeployForge — CTFd Challenges (${name})`; }
       } catch {}
       refresh();
       applyAuto();

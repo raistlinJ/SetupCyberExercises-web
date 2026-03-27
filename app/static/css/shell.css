@@ -124,8 +124,8 @@ body.sidebar-collapsed .sidebar-toggle-btn .icon {
 .modal .modal-dialog { margin-top: 10vh; }
 
 /* App-wide top banner */
-.app-banner { position: relative; width: 100%; color: #fff; background: linear-gradient(90deg, #0d6efd 0%, #6f42c1 100%); }
-.app-banner .banner-title { font-size: 1.1rem; font-weight: 600; letter-spacing: .2px; }
+.app-banner { position: relative; width: 100%; color: #e2e8f0; background: linear-gradient(90deg, #0a0e17 0%, #022c22 100%); border-bottom: 1px solid #10b981; }
+.app-banner .banner-title { font-size: 1.15rem; font-weight: 700; letter-spacing: 1.5px; color: #10b981; text-shadow: 0 0 6px rgba(16, 185, 129, 0.35); text-transform: uppercase; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
 .app-banner .banner-icon svg { display: block; }
 .app-banner .banner-overlay { position: absolute; inset: 0; pointer-events: none;
 	background:
@@ -617,3 +617,55 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 /* No dark-mode override to avoid black boxes after login */
 
 /* Overlay login removed in favor of dedicated page; keep placeholder for future */
+
+/* DeployForge Hacker Theme Overrides */
+[data-bs-theme="dark"] {
+    --bs-body-bg: #0d1117;
+    --bs-body-color: #c9d1d9;
+    --bs-primary: #10b981;
+    --bs-primary-rgb: 16, 185, 129;
+    --bs-primary-bg-subtle: rgba(16, 185, 129, 0.15);
+    --bs-primary-border-subtle: rgba(16, 185, 129, 0.3);
+    --bs-link-color: #34d399;
+    --bs-link-hover-color: #6ee7b7;
+    --bs-body-font-family: system-ui, -apple-system, sans-serif;
+    --bs-border-color: #30363d;
+}
+
+[data-bs-theme="dark"] .btn-primary {
+    --bs-btn-bg: #10b981;
+    --bs-btn-border-color: #059669;
+    --bs-btn-hover-bg: #059669;
+    --bs-btn-hover-border-color: #047857;
+    --bs-btn-active-bg: #047857;
+    --bs-btn-color: #022c22;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-weight: 600;
+}
+
+[data-bs-theme="dark"] .shell-sidebar {
+    background-color: #0a0e12 !important;
+    border-right-color: #30363d;
+}
+
+[data-bs-theme="dark"] .data-scrollbox {
+    background-color: rgba(13, 17, 23, 0.85);
+    border-color: #30363d;
+}
+
+[data-bs-theme="dark"] .data-scrollbox table thead th {
+    background-color: #161b22;
+    box-shadow: inset 0 -1px 0 #30363d, 0 1px 0 rgba(255,255,255,0.05);
+}
+
+[data-bs-theme="dark"] .section-box {
+    background: linear-gradient(180deg, #161b22 0%, #0d1117 100%);
+    border-color: #30363d;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+[data-bs-theme="dark"] pre, [data-bs-theme="dark"] code {
+    color: #10b981;
+    background-color: rgba(16, 185, 129, 0.1);
+}
+

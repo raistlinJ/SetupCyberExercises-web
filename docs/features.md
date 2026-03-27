@@ -1,6 +1,6 @@
 # Features
 
-AN3S focuses on fast project setup with an opinionated UI. The sections below capture the details that moved out of the compact README.
+DeployForge focuses on fast project setup with an opinionated UI. The sections below capture the details that moved out of the compact README.
 
 ## Project Configuration & Credentials
 

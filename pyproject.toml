@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "an3s"
+name = "deployforge"
 version = "0.1.0"
-description = "Acosta Network Scenario Setup System (AN3S) - A Dockerized web GUI for configuring networked CTF/scenario projects"
+description = "DeployForge - A Dockerized web GUI for configuring networked CTF/scenario projects"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}

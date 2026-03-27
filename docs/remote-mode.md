@@ -1,6 +1,6 @@
 # Remote mode
 
-AN3S supports a “Remote mode” intended for deployments where file transfer / import-export should be disabled.
+DeployForge supports a “Remote mode” intended for deployments where file transfer / import-export should be disabled.
 
 ## Behavior
 

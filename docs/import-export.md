@@ -1,6 +1,6 @@
 # Import / Export
 
-AN3S supports exporting Projects to a ZIP bundle and importing them back later.
+DeployForge supports exporting Projects to a ZIP bundle and importing them back later.
 
 ## Export
 
@@ -27,7 +27,7 @@ The Import Options dialog controls what is applied:
   - When disabled, VM configuration is imported but VMIDs are treated as config-only.
 - **Import VMs as templates**:
   - Only applies when importing VMs.
-  - After each VM restore, AN3S will attempt to run `qm template <vmid>` on the target Proxmox node (best-effort).
+  - After each VM restore, DeployForge will attempt to run `qm template <vmid>` on the target Proxmox node (best-effort).
 
 ### Legacy vs async import endpoints
 
