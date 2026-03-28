@@ -2605,8 +2605,8 @@ function updateRefreshState() {
       } else {
         tip.enable();
         wrap.setAttribute('tabindex', '0');
-        wrap.setAttribute('title', 'Please log in to Proxmox first.');
-        wrap.setAttribute('data-bs-original-title', 'Please log in to Proxmox first.');
+        wrap.setAttribute('title', 'Please authenticate to Proxmox first.');
+        wrap.setAttribute('data-bs-original-title', 'Please authenticate to Proxmox first.');
       }
     }
     // Ensure Users group tooltip is initialized
