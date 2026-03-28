@@ -106,7 +106,7 @@ Security Notes:
 ## Using the CTFd Manager & Challenges popup
 
 1) Open the app and select a project, then click the "CTFd" tab.
-2) Click "Update CTFd Creds" and paste an Admin/Teacher API token; Save and let it validate.
+2) Click "Authenticate to CTFd" and paste an Admin/Teacher API token; Save and let it validate.
 3) From the CTFd dropdown, choose "Challenges" to open the popup.
 4) In the popup:
 - Use the text filter to search across name/category, solves, points, visibility, team/user names, and counts.
@@ -122,7 +122,7 @@ Notes:
 
 ## Screenshots
 
-CTFd Manager — Update CTFd Creds
+CTFd Manager — Authenticate to CTFd
 
 ![CTFd Manager Creds](images/ctfd_manager_creds.svg)
 

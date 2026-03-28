@@ -6110,7 +6110,7 @@ async function startExportJob(pid, opts) {
   // Read Proxmox session creds from sessionStorage
   const creds = readBestProxCreds(pid) || {};
   const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, includeNotifyAudio: opts.includeNotifyAudio !== false, username: creds.username || '', password: creds.password || '' };
-  if (!body.username || !body.password) { alert('Please log into Proxmox (Update Proxmox Creds) before exporting VMs.'); return; }
+  if (!body.username || !body.password) { alert('Please log into Proxmox (Authenticate to Proxmox) before exporting VMs.'); return; }
   // Ensure console dock shows debug-level messages
   try { if (window.shell && shell.enableConsoleDebug) shell.enableConsoleDebug(true); } catch { }
   try { (window.shell && shell.logInfo) ? shell.logInfo('Config: starting export job…') : console.log('Starting export job…'); } catch { }
