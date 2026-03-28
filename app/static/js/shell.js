@@ -68,6 +68,24 @@ function readToolhubSettings(){
 function writeToolhubSettings(s){
   try { localStorage.setItem(TOOLHUB_SETTINGS_KEY, JSON.stringify(s || {})); } catch {}
 }
+function applyTheme() {
+  try {
+    const raw = localStorage.getItem('toolhub.uiSettings.v2');
+    let s = {};
+    if (raw) {
+      s = JSON.parse(raw);
+    } else {
+      s = JSON.parse(localStorage.getItem('toolhub.settings.v1') || '{}') || {};
+    }
+    if (s.hackerTheme !== false) {
+      document.documentElement.setAttribute('data-bs-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-bs-theme', 'light');
+    }
+  } catch {}
+}
+applyTheme();
+document.addEventListener('settings-changed', applyTheme);
 function getRunMode(){
   try {
     const s = readToolhubSettings();

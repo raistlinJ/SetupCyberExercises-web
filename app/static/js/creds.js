@@ -186,6 +186,10 @@
           <div class="tab-pane fade show active" id="settings-pane-general" role="tabpanel" aria-labelledby="settings-tab-general">
             <h6 class="text-uppercase text-muted mb-2">View</h6>
             <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="settings-hacker-theme">
+              <label class="form-check-label" for="settings-hacker-theme">Enable Hacker Theme</label>
+            </div>
+            <div class="form-check form-switch mb-2">
               <input class="form-check-input" type="checkbox" id="def-cfg">
               <label class="form-check-label" for="def-cfg">Expand Project Configuration by default</label>
             </div>

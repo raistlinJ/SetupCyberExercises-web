@@ -2091,9 +2091,11 @@ async function settingsModalResetFromStorage() {
   const defCfg = document.getElementById('def-cfg');
   const defVm = document.getElementById('def-vm');
   const defMat = document.getElementById('def-mat');
+  const hackerThemeToggle = document.getElementById('settings-hacker-theme');
   if (defCfg) defCfg.checked = !!settings.defaultCfgExpanded;
   if (defVm) defVm.checked = !!settings.defaultVmExpanded;
   if (defMat) defMat.checked = !!settings.defaultMatExpanded;
+  if (hackerThemeToggle) hackerThemeToggle.checked = settings.hackerTheme !== false;
   try {
     const remoteToggle = document.getElementById('settings-run-remote');
     if (remoteToggle) {
@@ -2504,9 +2506,11 @@ async function saveSettingsInternal() {
   const defCfg = document.getElementById('def-cfg');
   const defVm = document.getElementById('def-vm');
   const defMat = document.getElementById('def-mat');
+  const hackerThemeToggle = document.getElementById('settings-hacker-theme');
   if (defCfg) settings.defaultCfgExpanded = !!defCfg.checked;
   if (defVm) settings.defaultVmExpanded = !!defVm.checked;
   if (defMat) settings.defaultMatExpanded = !!defMat.checked;
+  if (hackerThemeToggle) settings.hackerTheme = !!hackerThemeToggle.checked;
   let remoteMode = false;
   let runModeSavedOk = true;
   let runModeSaveStatus = 0;
