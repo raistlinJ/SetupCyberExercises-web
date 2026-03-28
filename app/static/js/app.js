@@ -3769,7 +3769,7 @@ function renderProjectCard(p) {
               <input id="cfg-${p.id}-proxmox_node" class="form-control form-control-sm" value="${p.proxmox_node || ''}" placeholder="(auto)" title="Explicit Proxmox node name for export validation" oninput="debounceProjectSave('${p.id}','proxmox_node')" />
             </div>
             <div class="col-12"><hr class="my-3"/></div>
-            <div class="col-md-6">
+            <div class="col-md-9">
               <label class="form-label" title="Base URL to the CTFd platform">CTFd URL</label>
               <input id="cfg-${p.id}-challenge_url" class="form-control form-control-sm" value="${p.challenge_url || ''}" placeholder="https://ctfd.example.com" title="CTFd platform URL" oninput="debounceProjectSave('${p.id}','challenge_url')" />
             </div>
@@ -3777,12 +3777,13 @@ function renderProjectCard(p) {
               <label class="form-label" title="CTFd platform port">CTFd Port</label>
               <input id="cfg-${p.id}-challenge_port" type="number" class="form-control form-control-sm" value="${p.challenge_port ?? 443}" placeholder="443" title="CTFd port" oninput="debounceProjectSave('${p.id}','challenge_port')" />
             </div>
-              <div class="col-md-3">
-                <label class="form-label" title="Number of student/participant instances">Instances</label>
-                <input id="cfg-${p.id}-instances" type="number" min="1" class="form-control form-control-sm" value="${p.instances ?? 10}" oninput="onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" onchange="onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" title="Total instances to provision" />
-              </div>
-            <div class="col-md-3">
-              <label class="form-label" title="Suffix inserted before the instance index (letters and dashes)">Tag</label>
+            <div class="col-12"><hr class="my-3"/></div>
+            <div class="col-md-6">
+              <label class="form-label" title="Number of student/participant instances">Number of VM Clones to Create</label>
+              <input id="cfg-${p.id}-instances" type="number" min="1" class="form-control form-control-sm" value="${p.instances ?? 10}" oninput="onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" onchange="onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" title="Total instances to provision" />
+            </div>
+            <div class="col-md-6">
+              <label class="form-label" title="Suffix inserted before the instance index (letters and dashes)">Project Tag</label>
               <input id="cfg-${p.id}-tag" class="form-control form-control-sm" value="${p.tag || '-set-'}" oninput="onTagChange('${p.id}'); debounceProjectSave('${p.id}','tag')" onchange="onTagChange('${p.id}'); debounceProjectSave('${p.id}','tag')" title="Letters and dashes only" />
             </div>
             
