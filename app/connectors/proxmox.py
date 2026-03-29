@@ -147,6 +147,9 @@ class ProxmoxClient:
     _logger: logging.Logger = field(default_factory=lambda: logging.getLogger(__name__), init=False, repr=False)
 
     def __post_init__(self):
+        if self.username and '@' not in self.username:
+            self.username += '@pam'
+            
         normalized = _normalize_container_localhost_url(self.base_url)
         if normalized and normalized != self.base_url:
             self._logger.warning(

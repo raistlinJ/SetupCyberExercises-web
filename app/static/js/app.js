@@ -2624,32 +2624,1113 @@ async function loadProjects() {
   }
 }
 
+// --- New Scenario Wizard State Machine ---
+let currentWizardStep = 0;
+const totalWizardSteps = 5;
+let wizFetchedTemplates = [];
+let wizSelectedTemplates = [];
+
+window.wizToggleVmActions = function() {
+  const isCreate = document.getElementById('wiz-act-vm-create')?.checked;
+  const deps = document.getElementById('wiz-act-vm-deps');
+  if (deps) deps.classList.toggle('d-none', !isCreate);
+};
+
+window.toggleWizCapMode = function() {
+  const mode = document.querySelector('input[name="wiz-cap-mode"]:checked')?.value || 'num';
+  const numCont = document.getElementById('wiz-users');
+  const csvCont = document.getElementById('wiz-cap-csv-container');
+  if (numCont) numCont.classList.toggle('d-none', mode !== 'num');
+  if (csvCont) csvCont.classList.toggle('d-none', mode !== 'csv');
+};
+
+window.checkWizCsvFile = async function() {
+  const fileIn = document.getElementById('wiz-csv-file');
+  const feedback = document.getElementById('wiz-csv-feedback');
+  if (!fileIn || !feedback) return;
+
+  if (!fileIn.files || fileIn.files.length === 0) {
+    feedback.innerHTML = 'CSV should not have a header row. Format: username,password';
+    feedback.className = 'text-muted d-block mt-1';
+    return;
+  }
+
+  try {
+    const fileContent = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.onerror = e => reject(e);
+      reader.readAsText(fileIn.files[0]);
+    });
+    
+    let validCount = 0;
+    const lines = fileContent.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const parts = line.split(',');
+        let a = (parts[0] || '').trim();
+        let b = (parts[1] || '').trim();
+        
+        const isHeader = (x, y) => {
+          if (!y) return false;
+          return x.toLowerCase() === 'username' || x.toLowerCase() === 'user' || y.toLowerCase() === 'password' || y.toLowerCase() === 'pass';
+        };
+        if (i === 0 && isHeader(a, b)) continue; // skip header
+        if (!a && !b) continue;
+        validCount++;
+    }
+
+    if (validCount > 0) {
+      feedback.innerHTML = `<i class="bi bi-check-circle text-success pe-1"></i> Successfully read <strong>${validCount}</strong> user${validCount === 1 ? '' : 's'}.`;
+      feedback.className = 'text-success d-block mt-1';
+    } else {
+      feedback.innerHTML = `<i class="bi bi-exclamation-triangle-fill text-warning pe-1"></i> No pairs found.`;
+      feedback.className = 'text-warning d-block mt-1';
+    }
+  } catch (e) {
+    feedback.innerHTML = `<i class="bi bi-exclamation-triangle-fill text-danger pe-1"></i> Failed to read.`;
+    feedback.className = 'text-danger d-block mt-1';
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// Wizard Step 4 — Interactive Network Topology Graph
+// ═══════════════════════════════════════════════════════════════
+(function() {
+  // Palette of distinct colors for network adapters
+  const ADAPTER_COLORS = [
+    '#0d6efd','#198754','#dc3545','#fd7e14','#6f42c1',
+    '#20c997','#d63384','#0dcaf0','#ffc107','#6c757d'
+  ];
+
+  const NODE_W = 90, NODE_H = 44, NODE_R = 10;
+
+  let nodes    = [];   // { id, vmid, name, finalName, user_accessible, x, y, el }
+  let links    = [];   // { id, a, b, adapter, color, el }
+  let adapters = [];   // { name, color }
+  let dragSrc  = null;
+  let selectedNode = null;
+  let adapterCounter = 0;
+  let svgEl, linksG, nodesG, dragLine, legendEl;
+  let activePopover = null;
+
+  function svgNS() { return 'http://www.w3.org/2000/svg'; }
+
+  function getAdapterForPair(aId, bId) {
+    return links.find(l => (l.a === aId && l.b === bId) || (l.a === bId && l.b === aId)) || null;
+  }
+
+  function getNodeAdapters(nodeId) {
+    // Returns adapters sorted by their iface number on this node
+    const ifaceMap = {};
+    for (const l of links) {
+      if (l.a === nodeId) ifaceMap[l.ifaceA] = l.adapter;
+      if (l.b === nodeId) ifaceMap[l.ifaceB] = l.adapter;
+    }
+    return Object.keys(ifaceMap).map(Number).sort((a,b) => a-b).map(i => ifaceMap[i]);
+  }
+
+  function getNextIface(nodeId, excludeLinkId) {
+    const used = new Set();
+    for (const l of links) {
+      if (l.id === excludeLinkId) continue;
+      if (l.a === nodeId) used.add(l.ifaceA);
+      if (l.b === nodeId) used.add(l.ifaceB);
+    }
+    let n = 0; while (used.has(n)) n++;
+    return n;
+  }
+
+  // Returns the point on a VM's rect edge in the direction toward (tx,ty)
+  function rectEdgePoint(cx, cy, tx, ty) {
+    const dx = tx - cx, dy = ty - cy;
+    if (!dx && !dy) return { x: cx, y: cy };
+    const hw = NODE_W / 2 + 2, hh = NODE_H / 2 + 2;
+    const scaleX = dx ? hw / Math.abs(dx) : Infinity;
+    const scaleY = dy ? hh / Math.abs(dy) : Infinity;
+    const s = Math.min(scaleX, scaleY);
+    return { x: Math.round(cx + dx * s), y: Math.round(cy + dy * s) };
+  }
+
+  function allocateAdapter() {
+    // Find the lowest free net number
+    const usedNums = new Set(
+      adapters.map(a => { const m = a.name.match(/^net(\d+)$/); return m ? parseInt(m[1]) : -1; })
+    );
+    let n = 0;
+    while (usedNums.has(n)) n++;
+    adapterCounter = n + 1;
+    const name = 'net' + n;
+    const color = ADAPTER_COLORS[n % ADAPTER_COLORS.length];
+    const a = { name, color };
+    adapters.push(a);
+    return a;
+  }
+
+  function pruneAdapter(adapterName) {
+    // If no remaining links reference this adapter, remove it from the list
+    const stillUsed = links.some(l => l.adapter === adapterName);
+    if (!stillUsed) {
+      adapters = adapters.filter(a => a.name !== adapterName);
+      // Reset counter to lowest free number so next alloc reuses the gap
+      const usedNums = new Set(
+        adapters.map(a => { const m = a.name.match(/^net(\d+)$/); return m ? parseInt(m[1]) : -1; })
+      );
+      let n = 0;
+      while (usedNums.has(n)) n++;
+      adapterCounter = n;
+    }
+  }
+
+  function renderLegend() {
+    if (!legendEl) return;
+    legendEl.innerHTML = adapters.map(a =>
+      `<span class="me-2 d-inline-flex align-items-center gap-1">
+         <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${a.color};"></span>
+         <span>${a.name}</span>
+       </span>`
+    ).join('');
+  }
+
+  function dismissPopover() {
+    if (activePopover) { activePopover.remove(); activePopover = null; }
+    if (svgEl) svgEl.style.pointerEvents = '';
+  }
+
+  // Appends a popover div, focuses an optional input, and wires outside-click dismiss.
+  // Stops mousedown inside the div so e.preventDefault() on SVG nodes can't block focus.
+  function mountPopover(div, focusSelector) {
+    document.body.appendChild(div);
+    activePopover = div;
+    // Focus the target input after a short delay so the opening click settles first
+    if (focusSelector) {
+      setTimeout(() => {
+        const el = div.querySelector(focusSelector);
+        if (el) { el.focus(); }
+      }, 40);
+    }
+    // Outside-mousedown dismiss — composedPath reliably includes div when clicking any child
+    setTimeout(() => {
+      document.addEventListener('mousedown', function oc(e) {
+        const path = e.composedPath ? e.composedPath() : [];
+        if (!path.includes(div) && !div.contains(e.target)) {
+          dismissPopover();
+          document.removeEventListener('mousedown', oc);
+        }
+      });
+    }, 80);
+  }
+
+  function showLinkPopover(linkObj, svgMx, svgMy) {
+    dismissPopover();
+    // Disable SVG pointer events so they don't bleed through into the popover
+    if (svgEl) svgEl.style.pointerEvents = 'none';
+    const svgRect = svgEl.getBoundingClientRect();
+    const px = svgRect.left + svgMx;
+    const py = svgRect.top  + svgMy;
+    const div = document.createElement('div');
+    div.style.cssText = `position:fixed;z-index:9999;background:var(--bs-body-bg,#fff);
+      border:1px solid var(--bs-border-color,#dee2e6);border-radius:8px;
+      box-shadow:0 4px 16px rgba(0,0,0,0.2);padding:10px 14px;min-width:200px;`;
+    div.style.left = Math.min(px + 12, window.innerWidth - 230) + 'px';
+    div.style.top  = (py - 10) + 'px';
+    div.innerHTML = `
+      <div class="mb-2 fw-semibold small d-flex align-items-center gap-2">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${linkObj.color};"></span>
+        Adapter: <code>${linkObj.adapter}</code>
+      </div>
+      <button class="btn btn-sm btn-danger w-100" id="wiz-pop-del" type="button"><i class="bi bi-trash me-1"></i>Delete</button>`;
+    document.body.appendChild(div);
+    activePopover = div;
+    div.querySelector('#wiz-pop-del').addEventListener('click', () => {
+      const deletedName = linkObj.adapter;
+      links = links.filter(x => x.id !== linkObj.id);
+      pruneAdapter(deletedName);
+      dismissPopover(); renderAll();
+    });
+    mountPopover(div);
+  }
+
+  function showIfacePopover(linkObj, isA, portX, portY) {
+    dismissPopover();
+    if (svgEl) svgEl.style.pointerEvents = 'none';
+    const nodeId  = isA ? linkObj.a : linkObj.b;
+    const node    = nodes.find(n => n.id === nodeId);
+    const current = isA ? linkObj.ifaceA : linkObj.ifaceB;
+    const svgRect = svgEl.getBoundingClientRect();
+    const div = document.createElement('div');
+    div.style.cssText = `position:fixed;z-index:9999;background:var(--bs-body-bg,#fff);
+      border:1px solid var(--bs-border-color,#dee2e6);border-radius:8px;
+      box-shadow:0 4px 16px rgba(0,0,0,0.2);padding:10px 14px;min-width:190px;`;
+    div.style.left = Math.min(svgRect.left + portX + 14, window.innerWidth - 210) + 'px';
+    div.style.top  = (svgRect.top + portY - 10) + 'px';
+    div.innerHTML = `
+      <div class="mb-2 fw-semibold small">
+        Interface on <em>${node ? node.finalName || node.name : nodeId}</em>
+      </div>
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${linkObj.color};"></span>
+        <span class="small text-muted">${linkObj.adapter}</span>
+      </div>
+      <div class="input-group input-group-sm">
+        <span class="input-group-text">net</span>
+        <input type="number" class="form-control" id="wiz-iface-inp" min="0" max="15" value="${current}" style="width:60px;">
+        <button class="btn btn-outline-primary" id="wiz-iface-ok" type="button">Set</button>
+      </div>`;
+    document.body.appendChild(div);
+    activePopover = div;
+    div.querySelector('#wiz-iface-ok').addEventListener('click', () => {
+      const val = parseInt(div.querySelector('#wiz-iface-inp').value);
+      if (isNaN(val) || val < 0) return;
+      const nodeId = isA ? linkObj.a : linkObj.b;
+      const oldVal = isA ? linkObj.ifaceA : linkObj.ifaceB;
+      if (val === oldVal) { dismissPopover(); return; }
+      // Find any other link on this node that already uses the target number → swap
+      const conflict = links.find(l => {
+        if (l.id === linkObj.id) return false;
+        if (l.a === nodeId && l.ifaceA === val) return true;
+        if (l.b === nodeId && l.ifaceB === val) return true;
+        return false;
+      });
+      if (conflict) {
+        // Swap: give the conflicting link the number we're vacating
+        if (conflict.a === nodeId) conflict.ifaceA = oldVal;
+        else                       conflict.ifaceB = oldVal;
+      }
+      if (isA) linkObj.ifaceA = val; else linkObj.ifaceB = val;
+      dismissPopover(); renderAll();
+      if (selectedNode) updateSettingsPanel();
+    });
+    mountPopover(div, '#wiz-iface-inp');
+  }
+
+  function renderLinks() {
+    if (!linksG) return;
+    linksG.innerHTML = '';
+    for (const l of links) {
+      const na = nodes.find(n => n.id === l.a);
+      const nb = nodes.find(n => n.id === l.b);
+      if (!na || !nb) continue;
+      // Edge intersection points on each VM's rect
+      const epA = rectEdgePoint(na.x, na.y, nb.x, nb.y);
+      const epB = rectEdgePoint(nb.x, nb.y, na.x, na.y);
+      const mx  = (epA.x + epB.x) / 2, my = (epA.y + epB.y) / 2;
+      // Thick invisible hit target on the line
+      const hit = document.createElementNS(svgNS(), 'line');
+      hit.setAttribute('x1', epA.x); hit.setAttribute('y1', epA.y);
+      hit.setAttribute('x2', epB.x); hit.setAttribute('y2', epB.y);
+      hit.setAttribute('stroke', 'transparent'); hit.setAttribute('stroke-width', '14');
+      hit.style.cursor = 'pointer';
+      // Visible line
+      const line = document.createElementNS(svgNS(), 'line');
+      line.setAttribute('x1', epA.x); line.setAttribute('y1', epA.y);
+      line.setAttribute('x2', epB.x); line.setAttribute('y2', epB.y);
+      line.setAttribute('stroke', l.color); line.setAttribute('stroke-width', '2.5');
+      line.setAttribute('stroke-linecap', 'round'); line.setAttribute('pointer-events', 'none');
+      // Midpoint adapter label
+      const text = document.createElementNS(svgNS(), 'text');
+      text.setAttribute('x', mx); text.setAttribute('y', my - 7);
+      text.setAttribute('text-anchor', 'middle'); text.setAttribute('font-size', '10');
+      text.setAttribute('fill', l.color); text.setAttribute('font-weight', 'bold');
+      text.setAttribute('pointer-events', 'none'); text.textContent = l.adapter;
+      const capturedL = l;
+      hit.addEventListener('click', (e) => { e.stopPropagation(); showLinkPopover(capturedL, mx, my); });
+      linksG.appendChild(line); linksG.appendChild(hit); linksG.appendChild(text);
+      // ── Port nodes at each VM edge ──
+      [[epA, l.ifaceA, true], [epB, l.ifaceB, false]].forEach(([ep, iface, isA]) => {
+        const PORT_R = 9;
+        // Hit target
+        const portHit = document.createElementNS(svgNS(), 'circle');
+        portHit.setAttribute('cx', ep.x); portHit.setAttribute('cy', ep.y);
+        portHit.setAttribute('r', PORT_R + 4);
+        portHit.setAttribute('fill', 'transparent');
+        portHit.style.cursor = 'pointer';
+        // Visible circle
+        const portCircle = document.createElementNS(svgNS(), 'circle');
+        portCircle.setAttribute('cx', ep.x); portCircle.setAttribute('cy', ep.y);
+        portCircle.setAttribute('r', PORT_R);
+        portCircle.setAttribute('fill', '#fff');
+        portCircle.setAttribute('stroke', l.color); portCircle.setAttribute('stroke-width', '2');
+        portCircle.setAttribute('pointer-events', 'none');
+        // Interface number label
+        const portLabel = document.createElementNS(svgNS(), 'text');
+        portLabel.setAttribute('x', ep.x); portLabel.setAttribute('y', ep.y + 4);
+        portLabel.setAttribute('text-anchor', 'middle'); portLabel.setAttribute('font-size', '9');
+        portLabel.setAttribute('font-weight', 'bold'); portLabel.setAttribute('fill', l.color);
+        portLabel.setAttribute('pointer-events', 'none');
+        portLabel.textContent = iface;
+        portHit.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showIfacePopover(capturedL, isA, ep.x, ep.y);
+        });
+        linksG.appendChild(portCircle); linksG.appendChild(portLabel); linksG.appendChild(portHit);
+      });
+    }
+  }
+
+  function renderNodes() {
+    if (!nodesG) return;
+    nodesG.innerHTML = '';
+    for (const n of nodes) {
+      const g = document.createElementNS(svgNS(), 'g');
+      g.style.cursor = 'cell';
+      g.setAttribute('transform', `translate(${n.x},${n.y})`);
+      const hw = NODE_W / 2, hh = NODE_H / 2;
+      // Selection ring
+      if (selectedNode && selectedNode.id === n.id) {
+        const ring = document.createElementNS(svgNS(), 'rect');
+        ring.setAttribute('x', -(hw + 4)); ring.setAttribute('y', -(hh + 4));
+        ring.setAttribute('width', NODE_W + 8); ring.setAttribute('height', NODE_H + 8);
+        ring.setAttribute('rx', NODE_R + 3); ring.setAttribute('ry', NODE_R + 3);
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('stroke', '#0d6efd'); ring.setAttribute('stroke-width', '2');
+        ring.setAttribute('stroke-dasharray', '5,3');
+        g.appendChild(ring);
+      }
+      // Rounded rect body
+      const rect = document.createElementNS(svgNS(), 'rect');
+      rect.setAttribute('x', -hw); rect.setAttribute('y', -hh);
+      rect.setAttribute('width', NODE_W); rect.setAttribute('height', NODE_H);
+      rect.setAttribute('rx', NODE_R); rect.setAttribute('ry', NODE_R);
+      rect.setAttribute('fill', n.user_accessible ? '#0d6efd' : '#6c757d');
+      rect.setAttribute('stroke', '#fff'); rect.setAttribute('stroke-width', '2');
+      g.appendChild(rect);
+      // Name label
+      const label = document.createElementNS(svgNS(), 'text');
+      label.setAttribute('text-anchor', 'middle'); label.setAttribute('dy', '-3');
+      label.setAttribute('font-size', '11'); label.setAttribute('font-weight', 'bold');
+      label.setAttribute('fill', '#fff'); label.setAttribute('pointer-events', 'none');
+      label.textContent = (n.finalName || n.name || '').slice(0, 12);
+      g.appendChild(label);
+      // VMID sub-label
+      const sublabel = document.createElementNS(svgNS(), 'text');
+      sublabel.setAttribute('text-anchor', 'middle'); sublabel.setAttribute('dy', '11');
+      sublabel.setAttribute('font-size', '9'); sublabel.setAttribute('fill', 'rgba(255,255,255,0.75)');
+      sublabel.setAttribute('pointer-events', 'none'); sublabel.textContent = 'ID:' + n.vmid;
+      g.appendChild(sublabel);
+      // No extra adapter dots — ports on link edges show that info
+
+      // Drag start
+      g.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        if (e.button !== 0) return;
+        dismissPopover();
+        dragSrc = n;
+        dragLine.style.display = '';
+        dragLine.setAttribute('x1', n.x); dragLine.setAttribute('y1', n.y);
+        dragLine.setAttribute('x2', n.x); dragLine.setAttribute('y2', n.y);
+      });
+      // Click = select
+      g.addEventListener('click', (e) => {
+        e.stopPropagation();
+        selectedNode = (selectedNode && selectedNode.id === n.id) ? null : n;
+        updateSettingsPanel();
+        renderNodes();
+      });
+      n.el = g;
+      nodesG.appendChild(g);
+    }
+  }
+
+  function renderAll() {
+    renderLinks();
+    renderNodes();
+    renderLegend();
+  }
+
+  function updateSettingsPanel() {
+    const hint = document.getElementById('wiz-vm-settings-hint');
+    const form = document.getElementById('wiz-vm-settings-form');
+    if (!selectedNode) {
+      hint && (hint.style.display = '');
+      form && form.classList.add('d-none');
+      return;
+    }
+    hint && (hint.style.display = 'none');
+    form && form.classList.remove('d-none');
+    const title = document.getElementById('wiz-vm-settings-title');
+    if (title) title.textContent = selectedNode.name;
+    const nameIn = document.getElementById('wiz-vm-set-name');
+    if (nameIn) {
+      nameIn.value = selectedNode.finalName || '';
+      nameIn.oninput = () => { selectedNode.finalName = nameIn.value; };
+    }
+    const accIn = document.getElementById('wiz-vm-set-acc');
+    if (accIn) {
+      accIn.checked = selectedNode.user_accessible;
+      accIn.onchange = () => { selectedNode.user_accessible = accIn.checked; renderNodes(); };
+    }
+    const netsDiv = document.getElementById('wiz-vm-set-nets');
+    if (netsDiv) {
+      const adps = getNodeAdapters(selectedNode.id);
+      netsDiv.textContent = adps.length > 0 ? adps.join(', ') : '–';
+    }
+  }
+
+  function init(templates) {
+    svgEl    = document.getElementById('wiz-net-canvas');
+    linksG   = document.getElementById('wiz-net-links');
+    nodesG   = document.getElementById('wiz-net-nodes');
+    dragLine = document.getElementById('wiz-drag-line');
+    legendEl = document.getElementById('wiz-net-legend');
+    if (!svgEl) return;
+
+    // Reset state
+    nodes = []; links = []; adapters = [];
+    adapterCounter = 0; dragSrc = null; selectedNode = null;
+
+    // Layout nodes in a circle
+    const cx = svgEl.clientWidth / 2 || 320;
+    const cy = 210;
+    const r  = Math.min(cx - 60, cy - 60, 150);
+    templates.forEach((t, i) => {
+      const angle = (i / templates.length) * 2 * Math.PI - Math.PI / 2;
+      nodes.push({
+        id: t.vmid,
+        vmid: t.vmid,
+        name: t.name,
+        finalName: t.finalName || t.name,
+        user_accessible: t.user_accessible !== false,
+        x: Math.round(cx + r * Math.cos(angle)),
+        y: Math.round(cy + r * Math.sin(angle)),
+        el: null
+      });
+    });
+
+    // SVG mouse events
+    svgEl.addEventListener('mousemove', onMouseMove);
+    svgEl.addEventListener('mouseup', onMouseUp);
+    svgEl.addEventListener('click', () => {
+      if (!dragSrc) { dismissPopover(); selectedNode = null; updateSettingsPanel(); renderNodes(); }
+    });
+
+    renderAll();
+    updateSettingsPanel();
+  }
+
+  function onMouseMove(e) {
+    if (!dragSrc) return;
+    const rect = svgEl.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    dragLine.setAttribute('x2', mx);
+    dragLine.setAttribute('y2', my);
+  }
+
+  function onMouseUp(e) {
+    if (!dragSrc) return;
+    const rect = svgEl.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    dragLine.style.display = 'none';
+
+    // Hit detection uses rounded-rect bounds
+    const target = nodes.find(n => {
+      if (n.id === dragSrc.id) return false;
+      const dx = n.x - mx, dy = n.y - my;
+      return Math.abs(dx) < NODE_W/2 + 8 && Math.abs(dy) < NODE_H/2 + 8;
+    });
+
+    if (target) {
+      const adapter = allocateAdapter();
+      const ifaceA  = getNextIface(dragSrc.id, null);
+      const ifaceB  = getNextIface(target.id, null);
+      links.push({ id: Date.now() + Math.random(), a: dragSrc.id, b: target.id, adapter: adapter.name, color: adapter.color, ifaceA, ifaceB });
+      renderAll();
+      if (selectedNode) updateSettingsPanel();
+    }
+
+    dragSrc = null;
+  }
+
+  function saveState() {
+    for (const n of nodes) {
+      const t = window.wizSelectedTemplates && window.wizSelectedTemplates.find(t => t.vmid === n.id);
+      if (!t) continue;
+      t.finalName = n.finalName || n.name;
+      t.user_accessible = n.user_accessible;
+      // Build nets list sorted by assigned iface number
+      const ifaceMap = {};
+      for (const l of links) {
+        if (l.a === n.id) ifaceMap[l.ifaceA] = l.adapter;
+        if (l.b === n.id) ifaceMap[l.ifaceB] = l.adapter;
+      }
+      const sorted = Object.keys(ifaceMap).map(Number).sort((a, b) => a - b);
+      t.nets = sorted.map(i => ifaceMap[i]);
+    }
+  }
+
+  window.wizNetGraph = { init, saveState, restore };
+  window.wizVmSettingsClear = () => { selectedNode = null; updateSettingsPanel(); renderNodes(); };
+
+  // Rename all adapter basenames (e.g. "net" → "vmbr"), preserving their numeric suffix.
+  // Only renames adapters whose current name matches /^[a-zA-Z]+\d+$/ pattern.
+  window.wizRenameAdapterBase = function(newBase) {
+    newBase = (newBase || '').trim();
+    if (!newBase) return;
+    // Detect the current base from the first adapter
+    const baseInp = document.getElementById('wiz-adapter-base');
+    adapters.forEach(a => {
+      const m = a.name.match(/^([a-zA-Z][a-zA-Z0-9_-]*)(\d+)$/);
+      if (!m) return;
+      const num = m[2];
+      const oldName = a.name;
+      const newName = newBase + num;
+      a.name = newName;
+      links.forEach(l => { if (l.adapter === oldName) l.adapter = newName; });
+    });
+    if (baseInp) baseInp.value = newBase;
+    renderAll();
+    if (selectedNode) updateSettingsPanel();
+  };
+
+  function restore() {
+    // Re-grab DOM refs (in case the modal was hidden/shown) and re-render without resetting state
+    svgEl    = document.getElementById('wiz-net-canvas');
+    linksG   = document.getElementById('wiz-net-links');
+    nodesG   = document.getElementById('wiz-net-nodes');
+    dragLine = document.getElementById('wiz-drag-line');
+    legendEl = document.getElementById('wiz-net-legend');
+    if (!svgEl) return;
+    // Re-attach mouse events (may have been lost if element was recreated)
+    svgEl.addEventListener('mousemove', onMouseMove);
+    svgEl.addEventListener('mouseup', onMouseUp);
+    svgEl.addEventListener('click', () => {
+      if (!dragSrc) { dismissPopover(); selectedNode = null; updateSettingsPanel(); renderNodes(); }
+    });
+    renderAll();
+    updateSettingsPanel();
+  }
+})();
+
+
+function resetWizard() {
+  currentWizardStep = 0;
+  wizFetchedTemplates = [];
+  wizSelectedTemplates = [];
+  try {
+    const numRadio = document.getElementById('wiz-cap-mode-num');
+    if (numRadio) { numRadio.checked = true; window.toggleWizCapMode(); }
+    document.getElementById('wiz-users').value = '1';
+    const csvFile = document.getElementById('wiz-csv-file');
+    if (csvFile) csvFile.value = '';
+    
+    const feedback = document.getElementById('wiz-csv-feedback');
+    if (feedback) {
+       feedback.innerHTML = 'CSV should not have a header row. Format: username,password';
+       feedback.className = 'text-muted d-block mt-1';
+    }
+    
+    document.getElementById('wiz-feat-vm').checked = true;
+    document.getElementById('wiz-feat-ctfd').checked = false;
+    document.getElementById('wiz-proxmox-url').value = '';
+    document.getElementById('wiz-proxmox-user').value = '';
+    document.getElementById('wiz-proxmox-pass').value = '';
+    document.getElementById('wiz-proxmox-node').value = '';
+    const tagIn = document.getElementById('wiz-scenario-tag');
+    if (tagIn) tagIn.value = '';
+    
+    // Clear graph selection cache if template list re-fetched
+    window._wizNetGraphTemplateIds = [];
+    document.getElementById('wiz-proxmox-verify').checked = true;
+    document.getElementById('wiz-ctfd-url').value = '';
+    document.getElementById('wiz-ctfd-token').value = '';
+    document.getElementById('wiz-ctfd-verify').checked = true;
+    
+    document.getElementById('wiz-act-vm-create').checked = true;
+    document.getElementById('wiz-act-vm-start').checked = true;
+    document.getElementById('wiz-act-vm-users').checked = true;
+    document.getElementById('wiz-act-ctfd-users').checked = true;
+    window.wizToggleVmActions && window.wizToggleVmActions();
+  } catch {}
+  wizardGotoStep(0);
+}
+
+window.wizardGotoStep = function(step) {
+  if (step < 0) step = 0;
+  if (step > totalWizardSteps) step = totalWizardSteps;
+  
+  const vmChecked = document.getElementById('wiz-feat-vm')?.checked;
+  const ctfdChecked = document.getElementById('wiz-feat-ctfd')?.checked;
+
+  try {
+    if (step === 2) {
+      if (!vmChecked && !ctfdChecked) {
+        submitProjectCreation('wizard');
+        return;
+      }
+      document.getElementById('wiz-creds-vm')?.classList.toggle('d-none', !vmChecked);
+      document.getElementById('wiz-creds-ctfd')?.classList.toggle('d-none', !ctfdChecked);
+    }
+    if (step === 3 && !vmChecked) step = 5;
+    if (step === 4 && !vmChecked) step = 5;
+    if (step === 5) {
+      document.getElementById('wiz-act-vm')?.classList.toggle('d-none', !vmChecked);
+      document.getElementById('wiz-act-ctfd')?.classList.toggle('d-none', !ctfdChecked);
+    }
+  } catch {}
+
+  // Hide all steps
+  for (let i = 0; i <= totalWizardSteps; i++) {
+    const el = document.getElementById('wiz-step-' + i);
+    if (el) el.classList.add('d-none');
+  }
+  const loadingEl = document.getElementById('wiz-step-loading');
+  if (loadingEl) loadingEl.classList.add('d-none');
+  
+  // Show target
+  const targetEl = document.getElementById('wiz-step-' + step);
+  if (targetEl) targetEl.classList.remove('d-none');
+  
+  const footer = document.getElementById('wiz-footer');
+  if (footer) {
+    if (step === 0) {
+      footer.classList.add('d-none');
+    } else {
+      footer.classList.remove('d-none');
+      const nextBtn = document.getElementById('wiz-btn-next');
+      if (nextBtn) {
+        nextBtn.innerText = (step === totalWizardSteps) ? "Create Scenario" : "Next";
+      }
+      // Back button: hide on step 1 (no meaningful step 0 to go back to via Back)
+      const backBtn = document.getElementById('wiz-btn-back');
+      if (backBtn) {
+        backBtn.classList.toggle('invisible', step <= 1);
+      }
+    }
+  }
+  
+  currentWizardStep = step;
+};
+
+window.wizardNext = async function() {
+  const vmChecked = document.getElementById('wiz-feat-vm')?.checked;
+
+  // Step 1 Check
+  if (currentWizardStep === 1) {
+    const mode = document.querySelector('input[name="wiz-cap-mode"]:checked')?.value || 'num';
+    if (mode === 'num') {
+      const users = document.getElementById('wiz-users');
+      if (!users || !users.value || parseInt(users.value) < 1) {
+        return showToast('Please specify a valid number of VM clones/users.', 'warning');
+      }
+    } else {
+      const csvFile = document.getElementById('wiz-csv-file');
+      if (!csvFile || !csvFile.files || csvFile.files.length === 0) {
+        return showToast('Please select a CSV file to upload.', 'warning');
+      }
+    }
+
+    // Scenario Tag Uniqueness & Generation
+    const tagIn = document.getElementById('wiz-scenario-tag');
+    let tag = (tagIn && tagIn.value ? tagIn.value.trim() : '');
+    const existingTags = Object.values(window.PROJ_CACHE || {}).map(p => (p.tag || '').toLowerCase());
+
+    if (!tag) {
+      // Auto-generate using only lowercase letters to satisfy backend validation
+      const genTag = () => {
+        const letters = 'abcdefghijklmnopqrstuvwxyz';
+        let res = 'scen-';
+        for (let i = 0; i < 4; i++) res += letters.charAt(Math.floor(Math.random() * letters.length));
+        return res;
+      };
+      let newTag = genTag();
+      let attempts = 0;
+      while (existingTags.includes(newTag) && attempts < 10) {
+        newTag = genTag();
+        attempts++;
+      }
+      tag = newTag;
+      if (tagIn) tagIn.value = tag;
+    } else {
+      // Validate provided tag
+      if (existingTags.includes(tag.toLowerCase())) {
+        return showToast(`The tag "${tag}" is already in use by another scenario. Please choose a different one.`, 'danger');
+      }
+    }
+  }
+  
+  // Step 2 -> 3 Check (Fetch Templates if VM enabled)
+  if (currentWizardStep === 2 && vmChecked) {
+    const url = document.getElementById('wiz-proxmox-url')?.value?.trim();
+    const user = document.getElementById('wiz-proxmox-user')?.value?.trim();
+    const pwd = document.getElementById('wiz-proxmox-pass')?.value;
+    const verifySSL = document.getElementById('wiz-proxmox-verify')?.checked;
+    
+    const ctfdChecked = document.getElementById('wiz-feat-ctfd')?.checked;
+    let ctfdCreds = undefined;
+    if (ctfdChecked) {
+      const ctfdUrl = document.getElementById('wiz-ctfd-url')?.value?.trim();
+      const ctfdToken = document.getElementById('wiz-ctfd-token')?.value?.trim();
+      const ctfdVerify = document.getElementById('wiz-ctfd-verify')?.checked;
+      ctfdCreds = { url: ctfdUrl, token: ctfdToken, verify_ssl: ctfdVerify };
+    }
+    
+    if (!url || !user || !pwd) {
+      return showToast('Proxmox credentials are required to fetch templates.', 'warning');
+    }
+
+    // Show loading
+    document.getElementById('wiz-step-2').classList.add('d-none');
+    document.getElementById('wiz-footer').classList.add('d-none');
+    document.getElementById('wiz-step-loading').classList.remove('d-none');
+    document.getElementById('wiz-loading-text').innerText = 'Validating credentials and fetching templates...';
+
+    try {
+      const testRes = await http('POST', '/api/test/credentials', { proxmox: { url, username: user, password: pwd, verify_ssl: verifySSL }, ctfd: ctfdCreds });
+      if (testRes && testRes.ok === false) throw new Error(testRes.error || 'Validation failed');
+      
+      const res = await http('POST', '/api/proxmox/templates', { baseUrl: url, username: user, password: pwd, verifySSL: verifySSL });
+      wizFetchedTemplates = res.templates || [];
+      
+      const tplContainer = document.getElementById('wiz-templates-list');
+      tplContainer.innerHTML = '';
+      
+      if (wizFetchedTemplates.length === 0) {
+         tplContainer.innerHTML = '<div class="text-muted text-center py-3">No templates found in Proxmox.</div>';
+      } else {
+         let filterNode = document.getElementById('wiz-proxmox-node')?.value?.trim();
+         if (!filterNode) {
+             filterNode = wizFetchedTemplates[0].node;
+             const nodeInput = document.getElementById('wiz-proxmox-node');
+             if (nodeInput) nodeInput.value = filterNode;
+         }
+         
+         const filtered = wizFetchedTemplates.filter(t => t.node === filterNode);
+         
+         tplContainer.innerHTML = `<div class="alert alert-info py-2 small mb-3">Only templates from Proxmox node <strong>${escHtml(filterNode)}</strong> are shown.</div>`;
+         
+         if (filtered.length === 0) {
+             tplContainer.insertAdjacentHTML('beforeend', '<div class="text-muted text-center py-3">No templates found on this node.</div>');
+         } else {
+             tplContainer.insertAdjacentHTML('beforeend', `
+               <table class="table table-sm table-hover mb-0">
+                 <thead class="table-light">
+                   <tr>
+                     <th style="width:32px;"></th>
+                     <th>VM Name</th>
+                     <th>Node</th>
+                     <th class="text-center" style="width:150px; cursor:help;" title="These VMs will be directly accessible by participants">Make User Accessible</th>
+                   </tr>
+                 </thead>
+                 <tbody id="wiz-tpl-tbody"></tbody>
+               </table>`);
+             const tbody = tplContainer.querySelector('#wiz-tpl-tbody');
+             filtered.forEach(t => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                  <td class="align-middle">
+                    <input class="form-check-input" type="checkbox" value="${t.vmid}" data-name="${escHtml(t.name)}" id="wiz-tpl-chk-${t.vmid}">
+                  </td>
+                  <td class="align-middle">
+                    <label for="wiz-tpl-chk-${t.vmid}" class="mb-0" style="cursor:pointer;">
+                      <strong>${escHtml(t.name)}</strong>
+                      <small class="text-muted ms-1">[${escHtml(t.vmid)}]</small>
+                    </label>
+                  </td>
+                  <td class="align-middle text-muted small">${escHtml(t.node)}</td>
+                  <td class="text-center align-middle">
+                    <input class="form-check-input" type="checkbox" id="wiz-tpl-acc-${t.vmid}" checked
+                      title="Mark VMs from this template as user-accessible"
+                      style="visibility:hidden;">
+                  </td>
+                `;
+                // Wire selection checkbox to show/hide the user-accessible checkbox
+                const selChk = row.querySelector(`#wiz-tpl-chk-${t.vmid}`);
+                const accChk = row.querySelector(`#wiz-tpl-acc-${t.vmid}`);
+                selChk.addEventListener('change', () => {
+                  accChk.style.visibility = selChk.checked ? '' : 'hidden';
+                });
+                tbody.appendChild(row);
+             });
+         }
+      }
+      wizardGotoStep(3);
+      return;
+    } catch (e) {
+      showToast('Fetch failed: ' + (e?.message || e), 'danger');
+      wizardGotoStep(2);
+      return;
+    }
+  }
+
+  // Step 3 -> 4 Check (Build network topology graph)
+  if (currentWizardStep === 3) {
+     wizSelectedTemplates = [];
+     const chks = document.querySelectorAll('input[id^="wiz-tpl-chk-"]:checked');
+     chks.forEach(c => {
+       const vmid = c.value;
+       const accEl = document.getElementById('wiz-tpl-acc-' + vmid);
+       wizSelectedTemplates.push({
+         vmid,
+         name: c.getAttribute('data-name'),
+         finalName: c.getAttribute('data-name'),
+         user_accessible: accEl ? accEl.checked : true,
+         nets: []
+       });
+     });
+     
+     if (wizSelectedTemplates.length === 0) {
+       return showToast('Please select at least one template, or go back and disable VM features.', 'warning');
+     }
+
+     // Clean names
+     wizSelectedTemplates.forEach(t => {
+       let n = t.name;
+       n = n.replace(/base-?/gi, '').replace(/template-?/gi, '').trim() || t.name;
+       t.finalName = n;
+     });
+
+     wizardGotoStep(4);
+     if (window.wizNetGraph) {
+       // Only fully re-init if the template selection changed
+       const prevIds = (window._wizNetGraphTemplateIds || []).join(',');
+       const newIds  = wizSelectedTemplates.map(t => t.vmid).join(',');
+       if (prevIds !== newIds) {
+         window._wizNetGraphTemplateIds = wizSelectedTemplates.map(t => t.vmid);
+         window.wizNetGraph.init(wizSelectedTemplates);
+       } else {
+         window.wizNetGraph.restore();
+       }
+     }
+     return;
+  }
+
+  // Step 4 -> 5 (Save graph state into wizSelectedTemplates)
+  if (currentWizardStep === 4) {
+     if (window.wizNetGraph) window.wizNetGraph.saveState();
+     return wizardGotoStep(5);
+  }
+
+  if (currentWizardStep === totalWizardSteps) {
+    submitProjectCreation('wizard');
+  } else {
+    wizardGotoStep(currentWizardStep + 1);
+  }
+};
+
+window.wizardBack = function() {
+  // Save graph state when navigating away from step 4
+  if (currentWizardStep === 4 && window.wizNetGraph) window.wizNetGraph.saveState();
+  let prev = currentWizardStep - 1;
+  const vmChecked = document.getElementById('wiz-feat-vm')?.checked;
+  if (!vmChecked) {
+     if (currentWizardStep === 5) prev = 2;
+  }
+  wizardGotoStep(prev);
+};
+
 // Create a new project from the sidebar input
 async function createProject() {
   const input = document.getElementById('proj-name');
   const name = (input && input.value ? input.value.trim() : '');
-  if (!name) { try { showToast('Enter a project name.', 'warning'); } catch { } return; }
+  if (!name) { try { showToast('Enter a project/scenario name first.', 'warning'); } catch { } return; }
+  
+  resetWizard();
+  const modalEl = document.getElementById('projectWizardModal');
+  if (modalEl) {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+  } else {
+    // Fallback if UI not loaded
+    submitProjectCreation('manual');
+  }
+}
+
+window.submitProjectCreation = async function(mode) {
+  const input = document.getElementById('proj-name');
+  const name = (input && input.value ? input.value.trim() : '');
+  if (!name) { try { showToast('Project name is missing.', 'warning'); } catch { } return; }
+
+  const loadingText = document.getElementById('wiz-loading-text');
+  let vmUrl = '', vmUser = '', vmPass = '', ctfdToken = '';
+  let payload = { name };
+
+  if (mode === 'wizard') {
+    const tagVal = document.getElementById('wiz-scenario-tag')?.value?.trim();
+    if (tagVal) payload.tag = tagVal;
+    
+    const capMode = document.querySelector('input[name="wiz-cap-mode"]:checked')?.value || 'num';
+    if (capMode === 'num') {
+      const inst = document.getElementById('wiz-users')?.value;
+      if (inst) payload.instances = parseInt(inst, 10);
+    } else {
+      const fileIn = document.getElementById('wiz-csv-file');
+      if (fileIn && fileIn.files && fileIn.files.length > 0) {
+        let fileContent = '';
+        try {
+          fileContent = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = e => resolve(e.target.result);
+            reader.onerror = e => reject(e);
+            reader.readAsText(fileIn.files[0]);
+          });
+        } catch (e) {
+          showToast('Failed to read CSV file: ' + e, 'danger');
+          return;
+        }
+        
+        let creds = [];
+        const lines = fileContent.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const parts = line.split(',');
+          let a = (parts[0] || '').trim();
+          let b = (parts[1] || '').trim();
+          
+          const isHeader = (x, y) => {
+            if (!y) return false;
+            return x.toLowerCase() === 'username' || x.toLowerCase() === 'user' || y.toLowerCase() === 'password' || y.toLowerCase() === 'pass';
+          };
+          if (i === 0 && isHeader(a, b)) continue; // skip header
+          if (!a && !b) continue;
+          creds.push({ username: a, password: b });
+        }
+        
+        if (creds.length > 0) {
+          payload.credentials = creds;
+          payload.instances = creds.length;
+        } else {
+          payload.instances = 0;
+        }
+      } else {
+        showToast('Please select a CSV file.', 'warning');
+        return;
+      }
+    }
+    
+    if (document.getElementById('wiz-feat-vm')?.checked) {
+      vmUrl = document.getElementById('wiz-proxmox-url')?.value || '';
+      vmUser = document.getElementById('wiz-proxmox-user')?.value || '';
+      vmPass = document.getElementById('wiz-proxmox-pass')?.value || '';
+      if (vmUrl) payload.proxmox_url = vmUrl;
+      const vmNode = document.getElementById('wiz-proxmox-node')?.value?.trim();
+      if (vmNode) payload.proxmox_node = vmNode;
+      const vmVerify = document.getElementById('wiz-proxmox-verify')?.checked;
+      payload.proxmox_verify_ssl = vmVerify === true;
+    }
+    
+    if (document.getElementById('wiz-feat-ctfd')?.checked) {
+      const ctfdUrl = document.getElementById('wiz-ctfd-url')?.value || '';
+      if (ctfdUrl) payload.challenge_url = ctfdUrl;
+      ctfdToken = document.getElementById('wiz-ctfd-token')?.value || '';
+      const ctfdVerify = document.getElementById('wiz-ctfd-verify')?.checked;
+      payload.challenge_verify_ssl = ctfdVerify === true;
+    }
+    
+    // Testing and Loading State
+    for (let i = 0; i <= totalWizardSteps; i++) {
+      const el = document.getElementById('wiz-step-' + i);
+      if (el) el.classList.add('d-none');
+    }
+    const footer = document.getElementById('wiz-footer');
+    if (footer) footer.classList.add('d-none');
+    const loadingEl = document.getElementById('wiz-step-loading');
+    if (loadingEl) loadingEl.classList.remove('d-none');
+
+    // Live validation
+    if (vmUrl || vmUser || ctfdToken || payload.challenge_url) {
+      if (loadingText) loadingText.innerText = 'Validating credentials...';
+      const testPayload = {
+         proxmox: (vmUrl || vmUser) ? { url: vmUrl, username: vmUser, password: vmPass } : null,
+         ctfd: (payload.challenge_url || ctfdToken) ? { url: payload.challenge_url, token: ctfdToken } : null
+      };
+      try {
+        const testRes = await http('POST', '/api/test/credentials', testPayload);
+        if (testRes && testRes.ok === false) {
+           throw new Error(testRes.error || 'Validation failed');
+        }
+      } catch (e) {
+         showToast('Credential validation failed: ' + (e?.message || e), 'danger');
+         wizardGotoStep(2); // Return to credential screen for retry
+         return;
+      }
+    }
+    if (loadingText) loadingText.innerText = 'Creating scenario...';
+  }
+
   try {
     try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: creating project \"${name}\"…`) : console.log('Creating project', name); } catch { }
-    const res = await http('POST', '/api/projects', { name });
+    const res = await http('POST', '/api/projects', payload);
+    const pid = res && (res.id || res.pid) ? (res.id || res.pid) : '';
+    
+    // If wizard mode and we collected credentials, send the secrets
+    if (mode === 'wizard' && pid && (vmUser || vmPass || ctfdToken)) {
+      const secretsPayload = {
+        proxmox: (vmUser || vmPass) ? { username: vmUser, password: vmPass } : undefined,
+        ctfd: ctfdToken ? { token: ctfdToken } : undefined
+      };
+      await http('PUT', `/api/projects/${pid}/secrets`, secretsPayload);
+
+      if (wizSelectedTemplates && wizSelectedTemplates.length > 0) {
+        if (loadingText) loadingText.innerText = 'Applying VM setups...';
+        const mappedVms = wizSelectedTemplates.map(t => ({
+          name: t.finalName,
+          vmid: t.vmid,
+          viewable_to_user: t.user_accessible,
+          internal_network_adaptors: (t.nets && t.nets.length > 0) ? t.nets : undefined
+        }));
+        await http('PUT', `/api/projects/${pid}`, { vms: mappedVms });
+      }
+
+      // Background Orchestration Layer
+      const isCreate = document.getElementById('wiz-act-vm-create')?.checked;
+      const isStart = document.getElementById('wiz-act-vm-start')?.checked;
+      const isUsersVm = document.getElementById('wiz-act-vm-users')?.checked;
+      const isUsersCtfd = document.getElementById('wiz-act-ctfd-users')?.checked;
+
+      (async () => {
+        try {
+          const baseBody = { targets: [{ project: pid }] };
+          if (isCreate) {
+             await http('POST', `/api/projects/${pid}/instances/actions/create`, baseBody);
+             if (isStart) await http('POST', `/api/projects/${pid}/instances/actions/start`, baseBody);
+          }
+          if (isUsersVm || isUsersCtfd) {
+             await http('POST', `/api/projects/${pid}/instances/actions/users_access_sync`, { ...baseBody, enable: true });
+          }
+          if (window.vmRefresh) setTimeout(() => window.vmRefresh(), 1000);
+        } catch(e) {
+          console.error("Background wizard orchestrator failed processing", e);
+        }
+      })();
+    }
+
+    // Hide Modal if open
+    const modalEl = document.getElementById('projectWizardModal');
+    if (modalEl) {
+      const modal = bootstrap.Modal.getInstance(modalEl);
+      if (modal) modal.hide();
+    }
+
     // Clear input
     try { if (input) input.value = ''; } catch { }
-    const pid = res && (res.id || res.pid) ? (res.id || res.pid) : '';
+    
     // Select the newly created project and refresh views
     try { if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch { }
+    
     // Always navigate (or stay) on configuration page so the new project loads expanded
     try {
       if (location.pathname !== '/' && location.pathname !== '/index.html') {
-        // Persist selection then redirect; index page on load will call loadProjects and show it
         return location.href = '/';
       }
     } catch { }
+    
     await loadProjects(); // already on configuration page
     try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
     try { showToast('Project created.', 'success'); } catch { }
   } catch (e) {
     try { showToast('Failed to create project: ' + (e?.message || e), 'danger'); } catch { }
     try { (window.shell && shell.logError) ? shell.logError('Config: create project failed: ' + (e?.message || e)) : console.error('Create project failed:', e); } catch { }
+    
+    // Hide Modal if open
+    const modalEl = document.getElementById('projectWizardModal');
+    if (modalEl) {
+      const modal = bootstrap.Modal.getInstance(modalEl);
+      if (modal) modal.hide();
+    }
   }
 }
 

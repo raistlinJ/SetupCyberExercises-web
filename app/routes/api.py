@@ -34,6 +34,43 @@ from ..storage.user_secrets import UserSecretsStore
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
 
+@api_bp.route("/test/credentials", methods=["POST"])
+def api_test_credentials():
+    body = request.get_json(silent=True) or {}
+    pmx_creds = body.get("proxmox")
+    ctf_creds = body.get("ctfd")
+    
+    if pmx_creds:
+        url = (pmx_creds.get("url") or "").strip()
+        user = (pmx_creds.get("username") or "").strip()
+        pwd = pmx_creds.get("password") or ""
+        verify_ssl = bool(pmx_creds.get("verify_ssl", False))
+        if not url or not user or not pwd:
+            return jsonify({"ok": False, "error": "Proxmox URL, Username, and Password are required."})
+        try:
+            client = ProxmoxClient(url, username=user, password=pwd, verify=verify_ssl)
+            nodes = client.list_nodes()
+            if not nodes:
+                return jsonify({"ok": False, "error": "Proxmox connection succeeded but returned no nodes. Check token permissions."})
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Proxmox validation failed: {str(e)}"})
+            
+    if ctf_creds:
+        url = (ctf_creds.get("url") or "").strip()
+        token = (ctf_creds.get("token") or "").strip()
+        verify_ssl = bool(ctf_creds.get("verify_ssl", False))
+        if not url or not token:
+            return jsonify({"ok": False, "error": "CTFd URL and Admin Access Token are required."})
+        try:
+            client = CTFdClient(url, token, verify_ssl=verify_ssl)
+            u = client.get_current_user()
+            if not u:
+                return jsonify({"ok": False, "error": "CTFd connection failed or token is invalid."})
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"CTFd validation failed: {str(e)}"})
+            
+    return jsonify({"ok": True})
+
 
 def _hash_audio_data_url(data_url: str) -> Optional[str]:
     try:

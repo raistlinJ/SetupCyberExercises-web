@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -9,372 +10,418 @@
   <link rel="icon" href="/static/favicon.ico">
   <style>
     /* Make each project section fill the viewport height only when expanded */
-    .project-card.expanded { min-height: 100vh; }
-  /* Small chevron rotation helper for dropdown-style toggles */
-  .chevron { display: inline-block; transition: transform .15s ease; width: 1rem; text-align: center; }
-  .chevron.rotate { transform: rotate(90deg); }
-  /* VM block separation */
-  .vm-header { border-bottom: 1px solid rgba(0,0,0,.075); padding-bottom: .25rem; margin-bottom: .25rem; }
-  .material-input-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-  .material-select {
-    min-width: 200px;
-    flex: 1 1 240px;
-    max-width: 100%;
-  }
-  .btn-group-vertical.btn-group-sm.flex-shrink-0 > .btn {
-    min-width: 140px;
-  }
-  @media (max-width: 576px) {
+    .project-card.expanded {
+      min-height: 100vh;
+    }
+
+    /* Small chevron rotation helper for dropdown-style toggles */
+    .chevron {
+      display: inline-block;
+      transition: transform .15s ease;
+      width: 1rem;
+      text-align: center;
+    }
+
+    .chevron.rotate {
+      transform: rotate(90deg);
+    }
+
+    /* VM block separation */
+    .vm-header {
+      border-bottom: 1px solid rgba(0, 0, 0, .075);
+      padding-bottom: .25rem;
+      margin-bottom: .25rem;
+    }
+
+    .material-input-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .material-select {
-      width: 100%;
-      flex: 1 1 auto;
+      min-width: 200px;
+      flex: 1 1 240px;
+      max-width: 100%;
     }
-    .btn-group-vertical.btn-group-sm.flex-shrink-0 > .btn {
-      width: 100%;
+
+    .btn-group-vertical.btn-group-sm.flex-shrink-0>.btn {
+      min-width: 140px;
     }
-  }
+
+    @media (max-width: 576px) {
+      .material-select {
+        width: 100%;
+        flex: 1 1 auto;
+      }
+
+      .btn-group-vertical.btn-group-sm.flex-shrink-0>.btn {
+        width: 100%;
+      }
+    }
   </style>
 </head>
+
 <body class="shell-body">
-<header class="app-banner">
-  <div class="container-fluid d-flex align-items-center justify-content-between py-2">
-    <div class="d-flex align-items-center gap-2">
-      <span aria-hidden="true" class="banner-icon">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="5" cy="5" r="3" stroke="white" stroke-width="1.5"/>
-          <circle cx="19" cy="5" r="3" stroke="white" stroke-width="1.5"/>
-          <circle cx="12" cy="19" r="3" stroke="white" stroke-width="1.5"/>
-          <line x1="7.5" y1="6.5" x2="16.5" y2="6.5" stroke="white" stroke-width="1.5"/>
-          <line x1="10.2" y1="9.2" x2="6.8" y2="16.2" stroke="white" stroke-width="1.5"/>
-          <line x1="13.8" y1="9.2" x2="17.2" y2="16.2" stroke="white" stroke-width="1.5"/>
-        </svg>
-      </span>
-  <span class="banner-title">DeployForge</span>
+  <header class="app-banner">
+    <div class="container-fluid d-flex align-items-center justify-content-between py-2">
+      <div class="d-flex align-items-center gap-2">
+        <span aria-hidden="true" class="banner-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="5" cy="5" r="3" stroke="white" stroke-width="1.5" />
+            <circle cx="19" cy="5" r="3" stroke="white" stroke-width="1.5" />
+            <circle cx="12" cy="19" r="3" stroke="white" stroke-width="1.5" />
+            <line x1="7.5" y1="6.5" x2="16.5" y2="6.5" stroke="white" stroke-width="1.5" />
+            <line x1="10.2" y1="9.2" x2="6.8" y2="16.2" stroke="white" stroke-width="1.5" />
+            <line x1="13.8" y1="9.2" x2="17.2" y2="16.2" stroke="white" stroke-width="1.5" />
+          </svg>
+        </span>
+        <span class="banner-title">DeployForge</span>
+      </div>
+      <div class="d-flex align-items-center gap-3" id="banner-user-region"
+        style="min-width:260px;justify-content:flex-end;">
+        <div id="banner-user-label" class="small text-white-50">User: <span id="banner-username"
+            class="text-white">…</span></div>
+        <div class="dropdown">
+          <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown"
+            aria-expanded="false">Menu</button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li><a class="dropdown-item" href="#" data-act="open-settings">Settings</a></li>
+            <li><a class="dropdown-item" href="/static/admin_users.html" data-act="open-users">Users</a></li>
+            <li>
+              <hr class="dropdown-divider" />
+            </li>
+            <li><button class="dropdown-item text-danger" id="banner-logout" type="button">Logout</button></li>
+          </ul>
+        </div>
+      </div>
     </div>
-    <div class="d-flex align-items-center gap-3" id="banner-user-region" style="min-width:260px;justify-content:flex-end;">
-      <div id="banner-user-label" class="small text-white-50">User: <span id="banner-username" class="text-white">…</span></div>
-      <div class="dropdown">
-        <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Menu</button>
-        <ul class="dropdown-menu dropdown-menu-end">
-          <li><a class="dropdown-item" href="#" data-act="open-settings">Settings</a></li>
-          <li><a class="dropdown-item" href="/static/admin_users.html" data-act="open-users">Users</a></li>
-          <li><hr class="dropdown-divider" /></li>
-          <li><button class="dropdown-item text-danger" id="banner-logout" type="button">Logout</button></li>
-        </ul>
+    <div class="banner-overlay" aria-hidden="true"></div>
+  </header>
+  <div class="container-fluid shell-container">
+    <div class="row g-0">
+      <aside class="col-12 col-md-3 col-lg-2 shell-sidebar bg-light d-flex flex-column">
+        <div class="p-2 border-bottom d-flex gap-2">
+          <input id="proj-name" class="form-control form-control-sm" placeholder="New project name"
+            title="Project name" />
+          <button class="btn btn-sm btn-primary" onclick="createProject()" title="Create project">Add</button>
+        </div>
+        <div class="p-2 border-bottom">
+          <label class="btn btn-outline-secondary btn-sm mb-0 w-100" title="Import a project ZIP"
+            data-remote-disable="import" data-remote-tooltip="Import is disabled when app is running in remote mode.">
+            Import Project <input type="file" id="import-file" accept=".zip" hidden onchange="importProject()" />
+          </label>
+        </div>
+        <div id="sidebar-projects" class="flex-grow-1"></div>
+      </aside>
+      <main class="col-12 col-md-9 col-lg-10 shell-content p-3">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <ul class="nav nav-pills flex-nowrap">
+            <li class="nav-item">
+              <a class="nav-link active" aria-current="page" data-shell-link href="/">Configuration</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-shell-link href="/static/vm_manager.html">VM Manager</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-shell-link href="/static/exports.html">Exports</a>
+            </li>
+          </ul>
+          <div></div>
+        </div>
+        <div id="projects" class="d-flex flex-column gap-4"></div>
+        <div class="mt-4 text-center text-muted">
+          <small>Configure projects, virtual machines, and materials.</small>
+        </div>
+      </main>
+    </div>
+  </div>
+  <!-- Export Options Modal -->
+  <div class="modal fade" id="exportOptionsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Export Options</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2 d-flex gap-2">
+            <button id="exp-sel-all" class="btn btn-sm btn-outline-secondary">Select All</button>
+            <button id="exp-sel-none" class="btn btn-sm btn-outline-secondary">Select None</button>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="exp-cfg" checked disabled>
+            <label class="form-check-label" for="exp-cfg">Configuration (always included)</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="exp-creds" checked>
+            <label class="form-check-label" for="exp-creds">Credentials</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="exp-vms" checked>
+            <label class="form-check-label" for="exp-vms">VMs</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="exp-notify-audio" checked>
+            <label class="form-check-label" for="exp-notify-audio">Notification audio files</label>
+            <div class="small text-muted">Includes uploaded audio (Settings → Media Manager). Notifications are always
+              exported; this only controls whether the audio files are included.</div>
+          </div>
+          <div id="exp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
+            Exporting VMs can take a long time. This runs on the remote host, downloads disk files, and compresses them.
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          <button id="exp-download" type="button" class="btn btn-primary" data-remote-disable="export"
+            data-remote-tooltip="Export is disabled when app is running in remote mode.">Export</button>
+        </div>
       </div>
     </div>
   </div>
-  <div class="banner-overlay" aria-hidden="true"></div>
-</header>
-<div class="container-fluid shell-container">
-  <div class="row g-0">
-    <aside class="col-12 col-md-3 col-lg-2 shell-sidebar bg-light d-flex flex-column">
-      <div class="p-2 border-bottom d-flex gap-2">
-        <input id="proj-name" class="form-control form-control-sm" placeholder="New project name" title="Project name" />
-        <button class="btn btn-sm btn-primary" onclick="createProject()" title="Create project">Add</button>
-      </div>
-      <div class="p-2 border-bottom">
-        <label class="btn btn-outline-secondary btn-sm mb-0 w-100" title="Import a project ZIP" data-remote-disable="import" data-remote-tooltip="Import is disabled when app is running in remote mode.">
-          Import Project <input type="file" id="import-file" accept=".zip" hidden onchange="importProject()" />
-        </label>
-      </div>
-      <div id="sidebar-projects" class="flex-grow-1"></div>
-    </aside>
-    <main class="col-12 col-md-9 col-lg-10 shell-content p-3">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <ul class="nav nav-pills flex-nowrap">
-          <li class="nav-item">
-            <a class="nav-link active" aria-current="page" data-shell-link href="/">Configuration</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" data-shell-link href="/static/vm_manager.html">VM Manager</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" data-shell-link href="/static/exports.html">Exports</a>
-          </li>
-        </ul>
-  <div></div>
-      </div>
-      <div id="projects" class="d-flex flex-column gap-4"></div>
-      <div class="mt-4 text-center text-muted">
-        <small>Configure projects, virtual machines, and materials.</small>
-      </div>
-    </main>
-  </div>
- </div>
-<!-- Export Options Modal -->
-<div class="modal fade" id="exportOptionsModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Export Options</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="mb-2 d-flex gap-2">
-          <button id="exp-sel-all" class="btn btn-sm btn-outline-secondary">Select All</button>
-          <button id="exp-sel-none" class="btn btn-sm btn-outline-secondary">Select None</button>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="exp-cfg" checked disabled>
-          <label class="form-check-label" for="exp-cfg">Configuration (always included)</label>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="exp-creds" checked>
-          <label class="form-check-label" for="exp-creds">Credentials</label>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="exp-vms" checked>
-          <label class="form-check-label" for="exp-vms">VMs</label>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="exp-notify-audio" checked>
-          <label class="form-check-label" for="exp-notify-audio">Notification audio files</label>
-          <div class="small text-muted">Includes uploaded audio (Settings → Media Manager). Notifications are always exported; this only controls whether the audio files are included.</div>
-        </div>
-        <div id="exp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
-          Exporting VMs can take a long time. This runs on the remote host, downloads disk files, and compresses them.
-        </div>
-      </div>
-      <div class="modal-footer">
-  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-  <button id="exp-download" type="button" class="btn btn-primary" data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode.">Export</button>
-      </div>
-    </div>
-  </div>
-</div>
-<script>
-  // Banner user & dropdown wiring
-  document.addEventListener('DOMContentLoaded', async () => {
-    try {
-      const d = await AUTH.me();
-      const user = d?.user;
+  <script>
+    // Banner user & dropdown wiring
+    document.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const d = await AUTH.me();
+        const user = d?.user;
+        const nameEl = document.getElementById('banner-username');
+        if (nameEl) nameEl.textContent = user ? user.username : 'anonymous';
+        if (document.getElementById('banner-logout')) {
+          document.getElementById('banner-logout').addEventListener('click', async () => {
+            await AUTH.logout();
+            location.href = '/';
+          });
+        }
+      } catch { }
+    });
+    document.addEventListener('auth-changed', (e) => {
+      const u = e.detail?.user;
       const nameEl = document.getElementById('banner-username');
-      if (nameEl) nameEl.textContent = user? user.username : 'anonymous';
-      if (document.getElementById('banner-logout')){
-        document.getElementById('banner-logout').addEventListener('click', async () => {
-          await AUTH.logout();
-          location.href = '/';
-        });
-      }
-    } catch {}
-  });
-  document.addEventListener('auth-changed', (e)=>{
-    const u = e.detail?.user;
-    const nameEl = document.getElementById('banner-username');
-    if(nameEl) nameEl.textContent = u? u.username : 'anonymous';
-  });
-</script>
-<!-- Export Progress Modal -->
-<div class="modal fade" id="exportProgressModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Export in Progress</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="mb-2">
-          <div class="progress">
-            <div id="exp-prog-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+      if (nameEl) nameEl.textContent = u ? u.username : 'anonymous';
+    });
+  </script>
+  <!-- Export Progress Modal -->
+  <div class="modal fade" id="exportProgressModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Export in Progress</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2">
+            <div class="progress">
+              <div id="exp-prog-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
+                style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+            </div>
+          </div>
+          <div id="exp-status" class="small text-muted mb-2">Starting…</div>
+          <div class="border rounded p-2" style="max-height: 260px; overflow:auto; background: #fafafa;">
+            <pre id="exp-log" class="mb-0 small" style="white-space: pre-wrap; word-break: break-word;">Waiting…</pre>
           </div>
         </div>
-        <div id="exp-status" class="small text-muted mb-2">Starting…</div>
-        <div class="border rounded p-2" style="max-height: 260px; overflow:auto; background: #fafafa;">
-          <pre id="exp-log" class="mb-0 small" style="white-space: pre-wrap; word-break: break-word;">Waiting…</pre>
-        </div>
-      </div>
-      <div class="modal-footer d-flex justify-content-between align-items-center">
-        <div class="text-muted small text-truncate me-2" id="exp-path-note"></div>
-        <div class="d-flex gap-2">
-          <a id="exp-download-final" class="btn btn-primary disabled" role="button" aria-disabled="true" href="#" data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode.">Download ZIP</a>
-          <button id="exp-open-folder" type="button" class="btn btn-outline-secondary" disabled data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode.">Open Folder</button>
-          <button type="button" id="exp-close-btn" class="btn btn-secondary">Close</button>
+        <div class="modal-footer d-flex justify-content-between align-items-center">
+          <div class="text-muted small text-truncate me-2" id="exp-path-note"></div>
+          <div class="d-flex gap-2">
+            <a id="exp-download-final" class="btn btn-primary disabled" role="button" aria-disabled="true" href="#"
+              data-remote-disable="export"
+              data-remote-tooltip="Export is disabled when app is running in remote mode.">Download ZIP</a>
+            <button id="exp-open-folder" type="button" class="btn btn-outline-secondary" disabled
+              data-remote-disable="export"
+              data-remote-tooltip="Export is disabled when app is running in remote mode.">Open Folder</button>
+            <button type="button" id="exp-close-btn" class="btn btn-secondary">Close</button>
+          </div>
         </div>
       </div>
     </div>
   </div>
-</div>
 
-<!-- Import Progress Modal -->
-<div class="modal fade" id="importProgressModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Import in Progress</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="mb-2">
-          <div class="progress">
-            <div id="imp-prog-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
-          </div>
+  <!-- Import Progress Modal -->
+  <div class="modal fade" id="importProgressModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Import in Progress</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-        <div id="imp-status" class="small text-muted mb-2">Starting…</div>
-        <div class="border rounded p-2" style="max-height: 260px; overflow:auto; background: #fafafa;">
-          <pre id="imp-log" class="mb-0 small" style="white-space: pre-wrap; word-break: break-word;">Waiting…</pre>
-        </div>
-      </div>
-      <div class="modal-footer d-flex justify-content-between align-items-center">
-        <button type="button" id="imp-cancel-btn" class="btn btn-outline-danger" disabled>Cancel Import</button>
-        <button type="button" id="imp-close-btn" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-      </div>
-    </div>
-  </div>
-</div>
-<!-- Import Options Modal -->
-<div class="modal fade" id="importOptionsModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Import Options</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="mb-2 d-flex gap-2">
-          <button id="imp-sel-all" class="btn btn-sm btn-outline-secondary">Select All</button>
-          <button id="imp-sel-none" class="btn btn-sm btn-outline-secondary">Select None</button>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="imp-cfg" checked disabled>
-          <label class="form-check-label" for="imp-cfg">Configuration (always included)</label>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="imp-creds" checked>
-          <label class="form-check-label" for="imp-creds">Credentials</label>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="imp-vms" checked>
-          <label class="form-check-label" for="imp-vms">VMs</label>
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="imp-notify-audio" checked>
-          <label class="form-check-label" for="imp-notify-audio">Notification audio files</label>
-          <div class="small text-muted">Imports uploaded audio (Settings → Media Manager). Notifications are always imported; this only controls whether the audio files are imported.</div>
-        </div>
-        <div class="form-check form-switch ms-4 mt-1">
-          <input class="form-check-input" type="checkbox" id="imp-as-templates">
-          <label class="form-check-label" for="imp-as-templates">Import VMs as templates</label>
-        </div>
-        <div id="imp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
-          Importing VMs can be very time-consuming. This runs on the remote host, downloads disk files, and compresses them.
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button id="imp-continue" type="button" class="btn btn-primary">Continue</button>
-      </div>
-    </div>
-  </div>
-</div>
-<!-- Add from Server Modal -->
-<div class="modal fade" id="addFromServerModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Add VMs from Proxmox Templates</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="row g-2 mb-2">
-          <div class="col-md-6">
-            <label class="form-label">Proxmox URL</label>
-            <input id="afs-url" class="form-control form-control-sm" placeholder="https://proxmox.example.com" />
-          </div>
-          <div class="col-md-3">
-            <label class="form-label">API Port</label>
-            <input id="afs-port" type="number" class="form-control form-control-sm" placeholder="8006" />
-          </div>
-          <div class="col-md-3 d-flex align-items-end">
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" id="afs-verify" checked>
-              <label class="form-check-label" for="afs-verify">Verify SSL</label>
+        <div class="modal-body">
+          <div class="mb-2">
+            <div class="progress">
+              <div id="imp-prog-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
+                style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
             </div>
           </div>
-          <div class="col-md-5">
-            <label class="form-label">Username</label>
-            <input id="afs-username" class="form-control form-control-sm" placeholder="E.g., root@pam" />
-          </div>
-          <div class="col-md-5">
-            <label class="form-label">Password</label>
-            <input id="afs-password" type="password" class="form-control form-control-sm" />
-          </div>
-          <div class="col-md-10">
-            <div class="form-check form-switch mt-1">
-              <input class="form-check-input" type="checkbox" id="afs-save-creds">
-              <label class="form-check-label" for="afs-save-creds">Save credentials for this project</label>
-            </div>
-            <div class="small text-muted">If enabled, the username/password are saved with the project (encrypted at rest) and reused in Proxmox login dialogs.</div>
-          </div>
-          <div class="col-md-2 d-flex align-items-end">
-            <button id="afs-fetch" type="button" class="btn btn-sm btn-primary w-100" aria-busy="false">
-              <span id="afs-fetch-label">Fetch</span>
-              <span id="afs-fetch-spinner" class="spinner-border spinner-border-sm ms-2 d-none" role="status" aria-hidden="true"></span>
-            </button>
+          <div id="imp-status" class="small text-muted mb-2">Starting…</div>
+          <div class="border rounded p-2" style="max-height: 260px; overflow:auto; background: #fafafa;">
+            <pre id="imp-log" class="mb-0 small" style="white-space: pre-wrap; word-break: break-word;">Waiting…</pre>
           </div>
         </div>
-        <div id="afs-filter-group" class="mb-2" style="display:none;">
-          <label for="afs-filter" class="form-label small mb-1">Filter</label>
-          <input id="afs-filter" class="form-control form-control-sm" placeholder="Filter templates by name or VMID" />
+        <div class="modal-footer d-flex justify-content-between align-items-center">
+          <button type="button" id="imp-cancel-btn" class="btn btn-outline-danger" disabled>Cancel Import</button>
+          <button type="button" id="imp-close-btn" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
         </div>
-        <div id="afs-feedback" class="alert alert-info small py-2 px-3 d-none" role="status"></div>
-        <div class="border rounded" style="max-height: 300px; overflow:auto; display:none;" id="afs-list"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-        <button id="afs-add" class="btn btn-success" disabled>Add Selected</button>
       </div>
     </div>
   </div>
-</div>
+  <!-- Import Options Modal -->
+  <div class="modal fade" id="importOptionsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Import Options</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2 d-flex gap-2">
+            <button id="imp-sel-all" class="btn btn-sm btn-outline-secondary">Select All</button>
+            <button id="imp-sel-none" class="btn btn-sm btn-outline-secondary">Select None</button>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="imp-cfg" checked disabled>
+            <label class="form-check-label" for="imp-cfg">Configuration (always included)</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="imp-creds" checked>
+            <label class="form-check-label" for="imp-creds">Credentials</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="imp-vms" checked>
+            <label class="form-check-label" for="imp-vms">VMs</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="imp-notify-audio" checked>
+            <label class="form-check-label" for="imp-notify-audio">Notification audio files</label>
+            <div class="small text-muted">Imports uploaded audio (Settings → Media Manager). Notifications are always
+              imported; this only controls whether the audio files are imported.</div>
+          </div>
+          <div class="form-check form-switch ms-4 mt-1">
+            <input class="form-check-input" type="checkbox" id="imp-as-templates">
+            <label class="form-check-label" for="imp-as-templates">Import VMs as templates</label>
+          </div>
+          <div id="imp-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
+            Importing VMs can be very time-consuming. This runs on the remote host, downloads disk files, and compresses
+            them.
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button id="imp-continue" type="button" class="btn btn-primary">Continue</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Add from Server Modal -->
+  <div class="modal fade" id="addFromServerModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Add VMs from Proxmox Templates</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="row g-2 mb-2">
+            <div class="col-md-6">
+              <label class="form-label">Proxmox URL</label>
+              <input id="afs-url" class="form-control form-control-sm" placeholder="https://proxmox.example.com" />
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">API Port</label>
+              <input id="afs-port" type="number" class="form-control form-control-sm" placeholder="8006" />
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="afs-verify" checked>
+                <label class="form-check-label" for="afs-verify">Verify SSL</label>
+              </div>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">Username</label>
+              <input id="afs-username" class="form-control form-control-sm" placeholder="E.g., root@pam" />
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">Password</label>
+              <input id="afs-password" type="password" class="form-control form-control-sm" />
+            </div>
+            <div class="col-md-10">
+              <div class="form-check form-switch mt-1">
+                <input class="form-check-input" type="checkbox" id="afs-save-creds">
+                <label class="form-check-label" for="afs-save-creds">Save credentials for this project</label>
+              </div>
+              <div class="small text-muted">If enabled, the username/password are saved with the project (encrypted at
+                rest) and reused in Proxmox login dialogs.</div>
+            </div>
+            <div class="col-md-2 d-flex align-items-end">
+              <button id="afs-fetch" type="button" class="btn btn-sm btn-primary w-100" aria-busy="false">
+                <span id="afs-fetch-label">Fetch</span>
+                <span id="afs-fetch-spinner" class="spinner-border spinner-border-sm ms-2 d-none" role="status"
+                  aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+          <div id="afs-filter-group" class="mb-2" style="display:none;">
+            <label for="afs-filter" class="form-label small mb-1">Filter</label>
+            <input id="afs-filter" class="form-control form-control-sm"
+              placeholder="Filter templates by name or VMID" />
+          </div>
+          <div id="afs-feedback" class="alert alert-info small py-2 px-3 d-none" role="status"></div>
+          <div class="border rounded" style="max-height: 300px; overflow:auto; display:none;" id="afs-list"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          <button id="afs-add" class="btn btn-success" disabled>Add Selected</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
-<!-- Start Commands Manager Modal -->
-<div class="modal fade" id="startCommandsModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="startCommandsModalLabel">Manage Start Commands</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <p class="small text-muted">Create steps to run commands. Each step waits for its delay, then runs its commands at the same time.</p>
-        <div class="mb-3">
-          <a class="small fw-semibold" data-bs-toggle="collapse" href="#start-commands-sample" role="button" aria-expanded="false" aria-controls="start-commands-sample">Sample Commands</a>
-          <div class="collapse mt-2" id="start-commands-sample">
-            <div class="bg-light border rounded p-2 small">
-              <p class="mb-1 text-muted text-uppercase">Last login</p>
-              <pre class="mb-2"><code>lastlog -u &lt;username&gt;</code></pre>
-              <p class="mb-1 text-muted text-uppercase">Notify user</p>
-              <pre class="mb-0"><code>su &lt;username&gt; -c 'notify-send -u critical "FROM ADMIN" "HELLO"'</code></pre>
+  <!-- Start Commands Manager Modal -->
+  <div class="modal fade" id="startCommandsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="startCommandsModalLabel">Manage Start Commands</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="small text-muted">Create steps to run commands. Each step waits for its delay, then runs its
+            commands at the same time.</p>
+          <div class="mb-3">
+            <a class="small fw-semibold" data-bs-toggle="collapse" href="#start-commands-sample" role="button"
+              aria-expanded="false" aria-controls="start-commands-sample">Sample Commands</a>
+            <div class="collapse mt-2" id="start-commands-sample">
+              <div class="bg-light border rounded p-2 small">
+                <p class="mb-1 text-muted text-uppercase">Last login</p>
+                <pre class="mb-2"><code>lastlog -u &lt;username&gt;</code></pre>
+                <p class="mb-1 text-muted text-uppercase">Notify user</p>
+                <pre
+                  class="mb-0"><code>su &lt;username&gt; -c 'notify-send -u critical "FROM ADMIN" "HELLO"'</code></pre>
+              </div>
             </div>
           </div>
+          <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
+            <div class="list-group list-group-flush" id="start-commands-steps"></div>
+            <div id="start-commands-empty" class="text-muted small text-center py-3 d-none">No commands configured.
+            </div>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline-primary" id="start-commands-add-step">Add Step</button>
         </div>
-        <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
-          <div class="list-group list-group-flush" id="start-commands-steps"></div>
-          <div id="start-commands-empty" class="text-muted small text-center py-3 d-none">No commands configured.</div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="start-commands-save">Save</button>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-primary" id="start-commands-add-step">Add Step</button>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" id="start-commands-save">Save</button>
       </div>
     </div>
   </div>
-</div>
 
   <!-- Stored Commands Manager Modal -->
   <div class="modal fade" id="storedCommandsModal" tabindex="-1" aria-hidden="true">
@@ -385,21 +432,25 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <p class="small text-muted">Create steps for stored commands just like startup commands. Each step waits for its delay, then runs its commands together.</p>
+          <p class="small text-muted">Create steps for stored commands just like startup commands. Each step waits for
+            its delay, then runs its commands together.</p>
           <div class="mb-3">
-            <a class="small fw-semibold" data-bs-toggle="collapse" href="#stored-commands-sample" role="button" aria-expanded="false" aria-controls="stored-commands-sample">Sample Commands</a>
+            <a class="small fw-semibold" data-bs-toggle="collapse" href="#stored-commands-sample" role="button"
+              aria-expanded="false" aria-controls="stored-commands-sample">Sample Commands</a>
             <div class="collapse mt-2" id="stored-commands-sample">
               <div class="bg-light border rounded p-2 small">
                 <p class="mb-1 text-muted text-uppercase">Last login</p>
                 <pre class="mb-2"><code>lastlog -u &lt;username&gt;</code></pre>
                 <p class="mb-1 text-muted text-uppercase">Notify user</p>
-                <pre class="mb-0"><code>su &lt;username&gt; -c 'notify-send -u critical "FROM ADMIN" "HELLO"'</code></pre>
+                <pre
+                  class="mb-0"><code>su &lt;username&gt; -c 'notify-send -u critical "FROM ADMIN" "HELLO"'</code></pre>
               </div>
             </div>
           </div>
           <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
             <div class="list-group list-group-flush" id="stored-commands-steps"></div>
-            <div id="stored-commands-empty" class="text-muted small text-center py-3 d-none">No stored commands configured.</div>
+            <div id="stored-commands-empty" class="text-muted small text-center py-3 d-none">No stored commands
+              configured.</div>
           </div>
           <button type="button" class="btn btn-sm btn-outline-primary" id="stored-commands-add-step">Add Step</button>
         </div>
@@ -411,139 +462,385 @@
     </div>
   </div>
 
-<!-- Proxmox Login Modal (session-only, used before VM export) -->
-<div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Proxmox Login</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <form id="prox-login-form" class="modal-body" autocomplete="off" onsubmit="return false;">
-        <div class="mb-2">
-          <label class="form-label" title="Base URL to your Proxmox node or cluster">Proxmox URL</label>
-          <input id="prox-url" class="form-control" placeholder="https://proxmox.example.com" title="https://host or host (scheme auto-added)" />
+  <!-- Proxmox Login Modal (session-only, used before VM export) -->
+  <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Proxmox Login</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-        <div class="row g-2 mb-2">
-          <div class="col">
-            <label class="form-label" title="Proxmox API port (default 8006)">API Port</label>
-            <input id="prox-api-port" type="number" class="form-control" placeholder="8006" title="Proxmox API port" />
+        <form id="prox-login-form" class="modal-body" autocomplete="off" onsubmit="return false;">
+          <div class="mb-2">
+            <label class="form-label" title="Base URL to your Proxmox node or cluster">Proxmox URL</label>
+            <input id="prox-url" class="form-control" placeholder="https://proxmox.example.com"
+              title="https://host or host (scheme auto-added)" />
           </div>
-          <div class="col">
-            <label class="form-label" title="SSH port">SSH Port</label>
-            <input id="prox-ssh-port" type="number" class="form-control" placeholder="22" title="SSH port" />
+          <div class="row g-2 mb-2">
+            <div class="col">
+              <label class="form-label" title="Proxmox API port (default 8006)">API Port</label>
+              <input id="prox-api-port" type="number" class="form-control" placeholder="8006"
+                title="Proxmox API port" />
+            </div>
+            <div class="col">
+              <label class="form-label" title="SSH port">SSH Port</label>
+              <input id="prox-ssh-port" type="number" class="form-control" placeholder="22" title="SSH port" />
+            </div>
           </div>
+          <div class="mb-2">
+            <label class="form-label" title="Proxmox username (realm included)">Username</label>
+            <input id="prox-username" class="form-control" placeholder="E.g., root@pam" title="E.g., root@pam" />
+          </div>
+          <div class="mb-2">
+            <label class="form-label" title="Proxmox password (not persisted)">Password</label>
+            <input id="prox-password" type="password" class="form-control" title="Stored only in this session" />
+          </div>
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="prox-verify-ssl" checked>
+            <label class="form-check-label" for="prox-verify-ssl"
+              title="When enabled, the app will verify HTTPS certificates when connecting to the Proxmox API">Verify SSL
+              certificates</label>
+          </div>
+        </form>
+        <div class="modal-footer">
+          <div id="prox-login-feedback" class="me-auto small"></div>
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" id="btn-prox-save" class="btn btn-primary" onclick="exportProxLoginSave()">Save &
+            Continue</button>
         </div>
-        <div class="mb-2">
-          <label class="form-label" title="Proxmox username (realm included)">Username</label>
-          <input id="prox-username" class="form-control" placeholder="E.g., root@pam" title="E.g., root@pam" />
-        </div>
-        <div class="mb-2">
-          <label class="form-label" title="Proxmox password (not persisted)">Password</label>
-          <input id="prox-password" type="password" class="form-control" title="Stored only in this session" />
-        </div>
-        <div class="form-check form-switch mb-2">
-          <input class="form-check-input" type="checkbox" id="prox-verify-ssl" checked>
-          <label class="form-check-label" for="prox-verify-ssl" title="When enabled, the app will verify HTTPS certificates when connecting to the Proxmox API">Verify SSL certificates</label>
-        </div>
-      </form>
-      <div class="modal-footer">
-        <div id="prox-login-feedback" class="me-auto small"></div>
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" id="btn-prox-save" class="btn btn-primary" onclick="exportProxLoginSave()">Save & Continue</button>
       </div>
     </div>
   </div>
- </div>
 
-<!-- Action Progress Modal (used by queue/progress helpers for non-VM actions) -->
-<div class="modal fade" id="actionProgressModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog" aria-label="Action progress">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 id="action-progress-title" class="modal-title">Working…</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div id="action-progress-text" class="small mb-2" aria-live="polite"></div>
-        <div class="progress">
-          <div id="action-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">Starting…</div>
+  <!-- Action Progress Modal (used by queue/progress helpers for non-VM actions) -->
+  <div class="modal fade" id="actionProgressModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog" aria-label="Action progress">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 id="action-progress-title" class="modal-title">Working…</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
+        <div class="modal-body">
+          <div id="action-progress-text" class="small mb-2" aria-live="polite"></div>
+          <div class="progress">
+            <div id="action-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+              role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">Starting…
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
+        </div>
       </div>
     </div>
   </div>
-</div>
-<!-- Settings modal injected via creds.js -->
-<script src="/static/js/creds.js"></script>
-<script src="/static/js/auth.js"></script>
-<script src="/static/js/shell.js"></script>
-<script src="/static/js/app.js?v=20250829-1"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-  document.addEventListener('DOMContentLoaded', async () => {
-    await shell.initShell('config');
-  // (Removed inline auth badge bubble; banner now shows user globally)
-    // Keep selection in sync: when a project is picked in sidebar, scroll to it and expand
-    document.addEventListener('project-selected', (e) => {
+  <!-- Settings modal injected via creds.js -->
+  <script src="/static/js/creds.js"></script>
+  <script src="/static/js/auth.js"></script>
+  <script src="/static/js/shell.js"></script>
+  <script src="/static/js/app.js?v=20250829-1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', async () => {
+      await shell.initShell('config');
+      // (Removed inline auth badge bubble; banner now shows user globally)
+      // Keep selection in sync: when a project is picked in sidebar, scroll to it and expand
+      document.addEventListener('project-selected', (e) => {
+        try {
+          const pid = e.detail;
+          if (!pid) return;
+          // Re-render to show only this project
+          if (typeof loadProjects === 'function') loadProjects();
+        } catch { }
+      });
+      // Wire export modal controls
       try {
-        const pid = e.detail;
-        if (!pid) return;
-  // Re-render to show only this project
-  if (typeof loadProjects === 'function') loadProjects();
-      } catch {}
+        const allBtn = document.getElementById('exp-sel-all');
+        const noneBtn = document.getElementById('exp-sel-none');
+        const c = document.getElementById('exp-creds');
+        const v = document.getElementById('exp-vms');
+        const a = document.getElementById('exp-notify-audio');
+        if (allBtn && noneBtn && c && v) {
+          allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (a) a.checked = true; });
+          noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (a) a.checked = false; });
+        }
+      } catch { }
+      // Wire import modal controls
+      try {
+        const allBtn = document.getElementById('imp-sel-all');
+        const noneBtn = document.getElementById('imp-sel-none');
+        const c = document.getElementById('imp-creds');
+        const v = document.getElementById('imp-vms');
+        const a = document.getElementById('imp-notify-audio');
+        const t = document.getElementById('imp-as-templates');
+        const warn = document.getElementById('imp-vms-warning');
+        if (allBtn && noneBtn && c && v) {
+          allBtn.addEventListener('click', () => {
+            c.checked = true;
+            v.checked = true;
+            if (a) a.checked = true;
+            if (warn) warn.style.display = 'block';
+            if (t) { t.disabled = false; }
+          });
+          noneBtn.addEventListener('click', () => {
+            c.checked = false;
+            v.checked = false;
+            if (a) a.checked = false;
+            if (warn) warn.style.display = 'none';
+            if (t) { t.checked = false; t.disabled = true; }
+          });
+          v.addEventListener('change', () => {
+            if (warn) warn.style.display = v.checked ? 'block' : 'none';
+            if (t) {
+              t.disabled = !v.checked;
+              if (!v.checked) t.checked = false;
+            }
+          });
+          if (t) { t.disabled = !v.checked; if (!v.checked) t.checked = false; }
+        }
+      } catch { }
     });
-    // Wire export modal controls
-    try {
-      const allBtn = document.getElementById('exp-sel-all');
-      const noneBtn = document.getElementById('exp-sel-none');
-      const c = document.getElementById('exp-creds');
-      const v = document.getElementById('exp-vms');
-      const a = document.getElementById('exp-notify-audio');
-      if (allBtn && noneBtn && c && v) {
-        allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (a) a.checked = true; });
-        noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (a) a.checked = false; });
-      }
-    } catch {}
-    // Wire import modal controls
-    try {
-      const allBtn = document.getElementById('imp-sel-all');
-      const noneBtn = document.getElementById('imp-sel-none');
-      const c = document.getElementById('imp-creds');
-      const v = document.getElementById('imp-vms');
-      const a = document.getElementById('imp-notify-audio');
-      const t = document.getElementById('imp-as-templates');
-      const warn = document.getElementById('imp-vms-warning');
-      if (allBtn && noneBtn && c && v) {
-        allBtn.addEventListener('click', () => {
-          c.checked = true;
-          v.checked = true;
-          if (a) a.checked = true;
-          if (warn) warn.style.display = 'block';
-          if (t) { t.disabled = false; }
-        });
-        noneBtn.addEventListener('click', () => {
-          c.checked = false;
-          v.checked = false;
-          if (a) a.checked = false;
-          if (warn) warn.style.display = 'none';
-          if (t) { t.checked = false; t.disabled = true; }
-        });
-        v.addEventListener('change', () => {
-          if (warn) warn.style.display = v.checked ? 'block' : 'none';
-          if (t) {
-            t.disabled = !v.checked;
-            if (!v.checked) t.checked = false;
-          }
-        });
-        if (t) { t.disabled = !v.checked; if (!v.checked) t.checked = false; }
-      }
-    } catch {}
-  });
- </script>
- <!-- Toast container for validation messages -->
- <div class="toast-container position-fixed top-0 end-0 p-3" id="toastContainer" style="z-index: 1080"></div>
- </body>
+  </script>
+  <!-- Toast container for validation messages -->
+  <div class="toast-container position-fixed top-0 end-0 p-3" id="toastContainer" style="z-index: 1080"></div>
+
+  <!-- New Scenario Wizard Modal -->
+  <div class="modal fade" id="projectWizardModal" tabindex="-1" aria-labelledby="projectWizardModalLabel"
+    aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h1 class="modal-title fs-5" id="projectWizardModalLabel">Create New Scenario</h1>
+        </div>
+        <div class="modal-body" style="min-height: 250px;">
+          <!-- Step 0: Choice -->
+          <div id="wiz-step-0">
+            <p>How would you like to configure this scenario?</p>
+            <div class="d-flex flex-column gap-2 mt-4">
+              <button type="button" class="btn btn-primary" onclick="wizardGotoStep(1)">Wizard Setup</button>
+              <button type="button" class="btn btn-outline-primary" onclick="submitProjectCreation('manual')">Manual
+                Configuration</button>
+              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            </div>
+          </div>
+          <!-- Step 1: Basics & Features -->
+          <div id="wiz-step-1" class="d-none">
+            <h5>Configuration Basics</h5>
+            <p class="text-muted small">Let's set up the capacity and scope.</p>
+
+            <div class="mb-3 mt-3">
+              <label class="form-label fw-bold mb-1">Capacity Configuration <span class="text-danger">*</span></label>
+              <div class="form-check d-flex align-items-center mb-2">
+                <input class="form-check-input mt-0 me-2" type="radio" name="wiz-cap-mode" id="wiz-cap-mode-num"
+                  value="num" checked onchange="window.toggleWizCapMode && window.toggleWizCapMode()">
+                <label class="form-check-label small mb-0 me-2" style="white-space: nowrap;"
+                  for="wiz-cap-mode-num">Specify Number of Clones/Users</label>
+                <input type="number" class="form-control form-control-sm d-inline-block w-auto" style="max-width: 80px;"
+                  id="wiz-users" min="1" value="1" required>
+              </div>
+              <div class="form-check d-flex align-items-center mb-2">
+                <input class="form-check-input mt-0 me-2" type="radio" name="wiz-cap-mode" id="wiz-cap-mode-csv"
+                  value="csv" onchange="window.toggleWizCapMode && window.toggleWizCapMode()">
+                <label class="form-check-label small mb-0" for="wiz-cap-mode-csv">Upload Username/Password CSV</label>
+              </div>
+
+              <div class="ms-4 mt-1 d-none" id="wiz-cap-csv-container">
+                <input type="file" class="form-control form-control-sm w-75" id="wiz-csv-file" accept=".csv"
+                  onchange="window.checkWizCsvFile && window.checkWizCsvFile()">
+                <small id="wiz-csv-feedback" class="text-muted d-block mt-1" style="font-size: 0.75rem;">CSV should not
+                  have a header row. Format: username,password</small>
+              </div>
+            </div>
+
+            <hr>
+
+            <div class="mb-2">
+              <label class="form-label fw-bold mb-1">Managed Integrations</label>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="wiz-feat-vm" checked>
+                <label class="form-check-label small" for="wiz-feat-vm">VM Management (Proxmox)</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="wiz-feat-ctfd">
+                <label class="form-check-label small" for="wiz-feat-ctfd">CTFd Management</label>
+              </div>
+            </div>
+
+            <hr>
+
+            <div class="mb-3">
+              <label for="wiz-scenario-tag" class="form-label fw-bold mb-0">Scenario Tag</label>
+              <p class="text-muted mb-2" style="font-size: 0.75rem;">A unique identifier for this scenario's resources. Use only letters and dashes. Leave blank to auto-generate.</p>
+              <input type="text" class="form-control form-control-sm w-50" id="wiz-scenario-tag" 
+                placeholder="e.g. my-scenario" pattern="^[a-zA-Z-]+$"
+                oninput="this.value=this.value.replace(/[^a-zA-Z-]/g,'')">
+            </div>
+          </div>
+          <!-- Step 2: Credentials -->
+          <div id="wiz-step-2" class="d-none">
+            <h5>Integration Credentials</h5>
+            <p class="text-muted small">Provide the credentials for your selected integrations.</p>
+            <div id="wiz-creds-vm" class="mb-3">
+              <h6 class="border-bottom pb-1 border-secondary">Proxmox Integration</h6>
+              <div class="mb-2">
+                <label for="wiz-proxmox-url" class="form-label small text-muted mb-0">URL (e.g.
+                  https://192.168.1.10:8006)</label>
+                <input type="url" class="form-control form-control-sm" id="wiz-proxmox-url"
+                  placeholder="https://192.168.1.100:8006">
+              </div>
+              <div class="mb-2">
+                <label for="wiz-proxmox-user" class="form-label small text-muted mb-0">Username</label>
+                <input type="text" class="form-control form-control-sm" id="wiz-proxmox-user" placeholder="root@pam">
+              </div>
+              <div class="mb-2">
+                <label for="wiz-proxmox-pass" class="form-label small text-muted mb-0">Password</label>
+                <input type="password" class="form-control form-control-sm" id="wiz-proxmox-pass">
+              </div>
+              <div class="mb-2">
+                <label for="wiz-proxmox-node" class="form-label small text-muted mb-0">Node Name (Optional)</label>
+                <input type="text" class="form-control form-control-sm" id="wiz-proxmox-node">
+              </div>
+              <div class="form-check mt-2 mb-2">
+                <input class="form-check-input" type="checkbox" id="wiz-proxmox-verify" checked>
+                <label class="form-check-label small text-muted" for="wiz-proxmox-verify">Verify SSL Certs</label>
+              </div>
+            </div>
+            <div id="wiz-creds-ctfd" class="mb-3 d-none">
+              <h6 class="border-bottom pb-1 border-secondary mt-3">CTFd Integration</h6>
+              <div class="mb-2">
+                <label for="wiz-ctfd-url" class="form-label small text-muted mb-0">URL (e.g. https://ctfd.local)</label>
+                <input type="url" class="form-control form-control-sm" id="wiz-ctfd-url"
+                  placeholder="https://ctfd.local">
+              </div>
+              <div class="mb-2">
+                <label for="wiz-ctfd-token" class="form-label small text-muted mb-0">Admin Access Token</label>
+                <input type="password" class="form-control form-control-sm" id="wiz-ctfd-token">
+              </div>
+              <div class="form-check mt-2 mb-2">
+                <input class="form-check-input" type="checkbox" id="wiz-ctfd-verify" checked>
+                <label class="form-check-label small text-muted" for="wiz-ctfd-verify">Verify SSL Certs</label>
+              </div>
+            </div>
+          </div>
+          <!-- Step 3: Template Selection -->
+          <div id="wiz-step-3" class="d-none">
+            <h5>Select Source Templates</h5>
+            <p class="text-muted small">Select the Proxmox templates to use for your scenario.</p>
+            <div id="wiz-templates-list" class="list-group list-group-sm mb-3"
+              style="max-height: 250px; overflow-y: auto;">
+              <!-- Populated via JS -->
+            </div>
+          </div>
+          <!-- Step 4: Template Configuration -->
+          <div id="wiz-step-4" class="d-none">
+            <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+              <h5 class="mb-0">Configure VM Connections</h5>
+              <div class="d-flex align-items-center gap-2 ms-2">
+                <label class="form-label small mb-0 text-muted text-nowrap">
+                  Basename:
+                  <input type="text" class="form-control form-control-sm d-inline-block ms-1" id="wiz-adapter-base"
+                    value="net" style="width:70px;"
+                    title="Letters only — all adapters will be renamed to basename+N"
+                    oninput="this.value=this.value.replace(/[^a-zA-Z]/g,'')"
+                    onblur="window.wizRenameAdapterBase && window.wizRenameAdapterBase(this.value)">
+                </label>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="wiz-base-toggle"
+                  title="Apply basename to all adapters (letters only, e.g. net, vmbr, eth)"
+                  onclick="window.wizRenameAdapterBase && window.wizRenameAdapterBase(document.getElementById('wiz-adapter-base').value)">
+                  Change Adapter Basenames
+                </button>
+              </div>
+            </div>
+            <p class="text-muted small">Click a VM, then drag to another to connect them on the same network adapter.
+              Click a connection to remove it. Right-click a VM to rename it or toggle user access.</p>
+            <div class="d-flex gap-3" style="min-height: 400px;">
+              <!-- Network Topology Canvas -->
+              <div class="position-relative flex-grow-1"
+                style="min-width: 0; border: 1px solid var(--bs-border-color); border-radius: 6px; background: var(--bs-body-bg);">
+                <svg id="wiz-net-canvas" width="100%" height="420" style="display:block; cursor:default;">
+                  <defs>
+                    <marker id="wiz-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                      <path d="M0,0 L0,6 L8,3 z" fill="#6c757d" />
+                    </marker>
+                  </defs>
+                  <g id="wiz-net-links"></g>
+                  <g id="wiz-net-nodes"></g>
+                  <line id="wiz-drag-line" x1="0" y1="0" x2="0" y2="0" stroke="#0d6efd" stroke-width="2"
+                    stroke-dasharray="6,3" style="display:none; pointer-events:none;" />
+                </svg>
+                <!-- Adapter legend -->
+                <div id="wiz-net-legend" class="position-absolute bottom-0 start-0 p-2" style="font-size:0.7rem;"></div>
+              </div>
+              <!-- Per-VM settings panel -->
+              <div id="wiz-vm-settings-panel" style="width:220px; flex-shrink:0; overflow-y:auto;">
+                <div class="text-muted small text-center pt-5" id="wiz-vm-settings-hint">Click a VM node to edit its
+                  settings.</div>
+                <div id="wiz-vm-settings-form" class="d-none">
+                  <h6 class="fw-bold mb-2" id="wiz-vm-settings-title"></h6>
+                  <div class="mb-2 form-check">
+                    <input class="form-check-input" type="checkbox" id="wiz-vm-set-acc">
+                    <label class="form-check-label small" for="wiz-vm-set-acc">User Accessible</label>
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label small text-muted mb-0">Adapters</label>
+                    <div id="wiz-vm-set-nets" class="small text-muted" style="word-break:break-all;">–</div>
+                  </div>
+                  <button class="btn btn-sm btn-outline-danger w-100 mt-1"
+                    onclick="window.wizVmSettingsClear && window.wizVmSettingsClear()">Deselect</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Step 5: Post-Creation Actions -->
+          <div id="wiz-step-5" class="d-none">
+            <h5>Scenario Orchestration</h5>
+            <p class="text-muted small">Select which actions should automatically execute upon creation.</p>
+
+            <div id="wiz-act-vm" class="mb-3">
+              <h6 class="border-bottom pb-1 border-secondary">Proxmox Lifecycle</h6>
+              <div class="form-check mb-1">
+                <input class="form-check-input" type="checkbox" id="wiz-act-vm-create" checked
+                  onchange="window.wizToggleVmActions && window.wizToggleVmActions()">
+                <label class="form-check-label small" for="wiz-act-vm-create">Create VMs (Clone Templates)</label>
+              </div>
+              <div class="ms-4" id="wiz-act-vm-deps">
+                <div class="form-check mb-1">
+                  <input class="form-check-input" type="checkbox" id="wiz-act-vm-start" checked>
+                  <label class="form-check-label small" for="wiz-act-vm-start">Start VMs (Power On)</label>
+                </div>
+                <div class="form-check mb-1">
+                  <input class="form-check-input" type="checkbox" id="wiz-act-vm-users" checked>
+                  <label class="form-check-label small" for="wiz-act-vm-users">Create & Sync External Users</label>
+                </div>
+              </div>
+            </div>
+
+            <div id="wiz-act-ctfd" class="mb-3 d-none">
+              <h6 class="border-bottom pb-1 border-secondary">CTFd Lifecycle</h6>
+              <div class="form-check mb-1">
+                <input class="form-check-input" type="checkbox" id="wiz-act-ctfd-users" checked>
+                <label class="form-check-label small" for="wiz-act-ctfd-users">Create & Sync CTFd Users</label>
+              </div>
+            </div>
+          </div>
+          <!-- Step Loading -->
+          <div id="wiz-step-loading" class="d-none text-center pt-5">
+            <div class="spinner-border text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-2 text-muted" id="wiz-loading-text">Creating scenario...</p>
+          </div>
+        </div>
+        <div class="modal-footer" id="wiz-footer">
+          <button type="button" class="btn btn-secondary" onclick="wizardBack()" id="wiz-btn-back">Back</button>
+          <button type="button" class="btn btn-outline-danger ms-auto" data-bs-dismiss="modal"
+            onclick="resetWizard()">Cancel</button>
+          <button type="button" class="btn btn-primary" onclick="wizardNext()" id="wiz-btn-next">Next</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+
 </html>
