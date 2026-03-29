@@ -1979,3 +1979,60 @@ window.addEventListener('beforeunload', (ev) => {
   }
   return undefined;
 });
+
+// Dynamic Bootstrap Confirm Modal Utility
+window.showConfirmModal = function(title, bodyTextHtml, config = {}) {
+  return new Promise((resolve) => {
+    const modalId = 'dynamic-confirm-' + Math.floor(Math.random() * 1000000);
+    const wrap = document.createElement('div');
+    const confirmBtnClass = config.confirmClass || 'btn-primary';
+    const confirmBtnText = config.confirmText || 'OK';
+    const cancelBtnText = config.cancelText || 'Cancel';
+    const noBtnText = config.noText || null;
+    const noBtnClass = config.noClass || 'btn-outline-secondary';
+    const titleHtml = typeof window.escapeHtml === 'function' ? window.escapeHtml(title) : title;
+    
+    let result = noBtnText ? 'cancel' : false;
+    
+    wrap.innerHTML = `
+      <div class="modal fade" id="${modalId}" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">${titleHtml}</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" style="white-space: pre-wrap;">${bodyTextHtml}</div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="${modalId}-cancel">${cancelBtnText}</button>
+              ${noBtnText ? `<button type="button" class="btn ${noBtnClass}" id="${modalId}-no">${noBtnText}</button>` : ''}
+              <button type="button" class="btn ${confirmBtnClass}" id="${modalId}-confirm">${confirmBtnText}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap.firstElementChild);
+    const el = document.getElementById(modalId);
+    const bsModal = new bootstrap.Modal(el);
+    
+    document.getElementById(`${modalId}-confirm`).addEventListener('click', () => {
+      result = noBtnText ? 'yes' : true;
+      bsModal.hide();
+    });
+    
+    if (noBtnText) {
+      document.getElementById(`${modalId}-no`).addEventListener('click', () => {
+        result = 'no';
+        bsModal.hide();
+      });
+    }
+    
+    el.addEventListener('hidden.bs.modal', () => {
+      el.remove();
+      resolve(result);
+    });
+    
+    bsModal.show();
+  });
+};

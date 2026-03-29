@@ -3818,7 +3818,15 @@ function renderProjectCard(p) {
     <div class="collapse ${credShow ? 'show' : ''}" id="${credsId}">
           <div class="row g-2">
             <div class="col-12">
-              <label class="form-label" title="One credential pair per instance">Credentials (username / password)</label>
+              <div class="d-flex justify-content-between align-items-end mb-2">
+                <label class="form-label mb-0" title="One credential pair per instance">Credentials (username / password)</label>
+                <div class="d-flex align-items-center gap-2">
+                  <label class="form-label mb-0 small text-muted" style="white-space: nowrap;">Number of VM Clones/Users:</label>
+                  <input type="number" id="cred-${p.id}-instances" min="1" class="form-control form-control-sm" style="width: 70px;" value="${p.instances ?? 10}" 
+                    oninput="document.getElementById('cfg-${p.id}-instances').value = this.value; onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" 
+                    onchange="document.getElementById('cfg-${p.id}-instances').value = this.value; onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" />
+                </div>
+              </div>
               <div class="d-flex flex-wrap gap-2 mb-2">
                 <label class="btn btn-outline-secondary btn-sm mb-0">
                   Upload CSV <input type="file" id="cfg-${p.id}-cred-file" accept=".csv,.txt" hidden onchange="uploadCredentialsFile('${p.id}')" />
@@ -6491,10 +6499,24 @@ function addCredentialRow(pid) {
   try {
     const host = document.getElementById(`cred-${pid}-list`);
     if (!host) return;
+    const currentList = collectCredentials(pid);
+    const inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
+    const digits = Math.max(String(inst).length, 1);
+    const pad = (n) => String(n).padStart(digits, '0');
+    const randPwd = () => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      let s = '';
+      for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)];
+      return s;
+    };
+    const nextIdx = currentList.length + 1;
+    const username = `user${pad(nextIdx)}`;
+    const password = randPwd();
+
     const wrapper = document.createElement('div');
     wrapper.className = 'row g-2 align-items-center mb-1';
-    wrapper.innerHTML = `<div class="col-md-5"><input class="form-control form-control-sm" placeholder="username" title="Credential username"></div>
-      <div class="col-md-5"><input class="form-control form-control-sm" placeholder="password" title="Credential password (8+ chars)"></div>
+    wrapper.innerHTML = `<div class="col-md-5"><input class="form-control form-control-sm" placeholder="username" title="Credential username" value="${username}"></div>
+      <div class="col-md-5"><input class="form-control form-control-sm" placeholder="password" title="Credential password (8+ chars)" value="${password}"></div>
       <div class="col-md-2 d-flex justify-content-end"><button class="btn btn-sm btn-outline-danger">Remove</button></div>`;
     wrapper.querySelector('button')?.addEventListener('click', () => { wrapper.remove(); onCredentialChanged(pid); });
     host.appendChild(wrapper);
@@ -6518,7 +6540,19 @@ function collectCredentials(pid) {
 function harmonizeCredentialsToInstances(pid, creds) {
   const inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
   const arr = Array.isArray(creds) ? creds.slice(0, Math.max(inst, 0)) : [];
-  while (arr.length < inst) arr.push({ username: '', password: '' });
+  if (arr.length < inst) {
+    const digits = Math.max(String(inst).length, 1);
+    const pad = (n) => String(n).padStart(digits, '0');
+    const randPwd = () => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      let s = '';
+      for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)];
+      return s;
+    };
+    while (arr.length < inst) {
+      arr.push({ username: `user${pad(arr.length + 1)}`, password: randPwd() });
+    }
+  }
   return arr;
 }
 function updateCredControls(pid) {
@@ -6543,7 +6577,15 @@ function updateCredDownloadState(pid) {
 // Harmonize credential rows when Instances or Tag change
 function onInstancesChange(pid) {
   try {
-    const inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
+    const instInput = document.getElementById(`cfg-${pid}-instances`);
+    const inst = Number(instInput?.value || 0);
+    const credInst = document.getElementById(`cred-${pid}-instances`);
+    if (credInst && Number(credInst.value) !== inst) {
+      credInst.value = inst;
+    }
+    if (instInput && Number(instInput.value) !== inst) {
+      instInput.value = inst;
+    }
     const warn = document.getElementById(`cred-warn-${pid}`);
     const current = collectCredentials(pid);
     const next = harmonizeCredentialsToInstances(pid, current);
@@ -6610,7 +6652,30 @@ async function uploadCredentialsFile(pid) {
       if (!a && !b) continue;
       creds.push({ username: a, password: b });
     }
-    const inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
+    let inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
+    if (inst > 0 && creds.length !== inst && creds.length > 0) {
+      const msg = `The CSV contains ${creds.length} rows, but the number of VM clones/users is currently set to ${inst}.\n\nWould you like to change the number of clones/users to ${creds.length} to match the file?`;
+      const selection = await window.showConfirmModal("Update Instance Count?", msg, {
+        confirmText: "Yes, Change Count",
+        confirmClass: "btn-primary",
+        noText: "No, Keep Count",
+        noClass: "btn-outline-secondary",
+        cancelText: "Cancel Import"
+      });
+      if (selection === 'cancel') {
+        try { input.value = ''; } catch { }
+        return;
+      }
+      if (selection === 'yes') {
+        const instInput = document.getElementById(`cfg-${pid}-instances`);
+        if (instInput) {
+          instInput.value = creds.length;
+          onInstancesChange(pid);
+          debounceProjectSave(pid, 'instances');
+          inst = creds.length;
+        }
+      }
+    }
     let applied = creds;
     if (inst > 0) applied = creds.slice(0, inst);
     const targetLength = inst > 0 ? inst : Math.max(existing.length, applied.length);
