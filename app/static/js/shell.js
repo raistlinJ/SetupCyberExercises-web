@@ -1258,6 +1258,48 @@ function openActionProgressModal(){
     try { inst && inst.show(); } catch {}
   }, 10);
 }
+
+function _modalDefaultActionButton(modal) {
+  if (!modal) return null;
+  const selectors = [
+    '[data-modal-default="true"]',
+    '.modal-footer .btn.btn-primary',
+    'button[type="submit"]',
+  ];
+  for (const selector of selectors) {
+    const candidates = Array.from(modal.querySelectorAll(selector));
+    const match = candidates.find((el) => {
+      if (!el) return false;
+      if (el.disabled) return false;
+      if (el.getAttribute('aria-disabled') === 'true') return false;
+      if (el.classList.contains('disabled')) return false;
+      if (el.offsetParent === null) return false;
+      return true;
+    });
+    if (match) return match;
+  }
+  return null;
+}
+
+document.addEventListener('keydown', (ev) => {
+  if (!ev || ev.defaultPrevented || ev.key !== 'Enter') return;
+  if (ev.isComposing || ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const modalStack = Array.from(document.querySelectorAll('.modal.show'));
+  const modal = modalStack.length ? modalStack[modalStack.length - 1] : null;
+  if (!modal) return;
+  const target = ev.target instanceof Element ? ev.target : null;
+  if (target && !modal.contains(target)) return;
+  if (target) {
+    const tag = (target.tagName || '').toLowerCase();
+    if (tag === 'textarea' || target.isContentEditable) return;
+    if (target.closest('button, a, [role="button"]')) return;
+  }
+  const defaultButton = _modalDefaultActionButton(modal);
+  if (!defaultButton) return;
+  ev.preventDefault();
+  defaultButton.click();
+});
+
 document.addEventListener('hidden.bs.modal', (ev)=>{
   if (!ev || !ev.target || ev.target.id !== 'actionProgressModal') return;
   ACTION_PROGRESS_STATE.visible = false;
@@ -1564,9 +1606,54 @@ const ConsoleDock = (() => {
     try { if (titleEl) titleEl.textContent = (state.mode === 'queue') ? 'Queue' : 'Console'; } catch {}
   }
 
+  function updateQueueModeLabels(activeCount, totalCount){
+    const active = Math.max(0, Number(activeCount) || 0);
+    const total = Math.max(0, Number(totalCount) || 0);
+    let queueLabel = 'Queue';
+    if (active > 0) {
+      const itemWord = active === 1 ? 'item' : 'items';
+      queueLabel = total > 0
+        ? `Queue (processing ${active} ${itemWord} of ${total})`
+        : `Queue (processing ${active} ${itemWord})`;
+    }
+    try {
+      if (state.mode === 'queue' && titleEl) titleEl.textContent = queueLabel;
+    } catch {}
+    try {
+      if (dropBtn) {
+        const dropLabel = dropBtn.querySelector('.label');
+        if (dropLabel) {
+          if (state.mode === 'queue') dropLabel.textContent = queueLabel;
+          else if (active > 0) dropLabel.textContent = `Console • ${active}/${total || active}`;
+          else dropLabel.textContent = 'Console';
+        }
+        const titleText = active > 0
+          ? `Choose Console or Queue (${active} item${active === 1 ? '' : 's'} processing${total > 0 ? ` of ${total}` : ''})`
+          : 'Choose Console or Queue';
+        dropBtn.title = titleText;
+      }
+    } catch {}
+  }
+
+  function refreshQueueModeLabelsFromState(){
+    if (!window.getRemoteQueueState) {
+      updateQueueModeLabels(0, 0);
+      return;
+    }
+    try {
+      const st = window.getRemoteQueueState();
+      const activeItems = Array.isArray(st.activeItems) ? st.activeItems : (st.current ? [st.current] : []);
+      const waitingItems = Array.isArray(st.items) ? st.items : [];
+      updateQueueModeLabels(activeItems.length, activeItems.length + waitingItems.length);
+    } catch {
+      updateQueueModeLabels(0, 0);
+    }
+  }
+
   function renderQueue(){
     if (!body) return;
     if (!window.getRemoteQueueState) {
+      refreshQueueModeLabelsFromState();
       body.innerHTML = '<div class="queue-view"><div class="queue-empty">Queue API not available on this page.</div></div>';
       return;
     }
@@ -1595,6 +1682,7 @@ const ConsoleDock = (() => {
     const completedCount = completedItems.length;
     const activeCount = activeItems.length;
     const total = waitingCount + activeCount;
+    refreshQueueModeLabelsFromState();
     const totalLabel = `${total} item${total===1?'':'s'}`;
     const completedLabel = completedCount ? ` • ${completedCount} completed` : '';
     const statusClass = activeCount ? 'active' : 'idle';
@@ -1816,13 +1904,20 @@ const ConsoleDock = (() => {
     if (s.levels && typeof s.levels === 'object') state.levels = Object.assign(state.levels, s.levels);
     if (typeof s.mode === 'string') state.mode = (s.mode === 'queue') ? 'queue' : 'console';
     applyState();
+    refreshQueueModeLabelsFromState();
     renderAll();
     hookConsole();
     try {
-      document.addEventListener('remote-queue-changed', () => { if (state.mode === 'queue') renderAll(); });
+      document.addEventListener('remote-queue-changed', () => {
+        refreshQueueModeLabelsFromState();
+        if (state.mode === 'queue') renderAll();
+      });
     } catch {}
     try {
-      document.addEventListener('queue-progress-updated', () => { if (state.mode === 'queue') renderAll(); });
+      document.addEventListener('queue-progress-updated', () => {
+        refreshQueueModeLabelsFromState();
+        if (state.mode === 'queue') renderAll();
+      });
     } catch {}
   }
 

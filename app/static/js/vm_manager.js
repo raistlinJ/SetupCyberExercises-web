@@ -392,6 +392,33 @@ function proxMetaKey(pid) { return `toolhub.vm.mgr.proxMeta.${pid}`; }
 function readProxCreds(pid) { try { return JSON.parse(sessionStorage.getItem(proxCredKey(pid)) || '{}') || {}; } catch { return {}; } }
 function writeProxCreds(pid, obj) { try { sessionStorage.setItem(proxCredKey(pid), JSON.stringify(obj || {})); } catch { } }
 
+function readPersistedProxCreds(pid) {
+  try {
+    if (window.CREDS && typeof CREDS.readPersistProxCreds === 'function') {
+      return CREDS.readPersistProxCreds(pid) || {};
+    }
+  } catch { }
+  return {};
+}
+
+async function hydrateProxCredsFromPersisted(pid) {
+  const targetPid = String(pid || '').trim();
+  if (!targetPid) return readProxCreds(targetPid) || {};
+  let sess = readProxCreds(targetPid) || {};
+  if (sess.username && sess.password) return sess;
+  try {
+    if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
+      await CREDS.fetchProjectSecrets(targetPid);
+    }
+  } catch { }
+  const persisted = readPersistedProxCreds(targetPid);
+  if (persisted && persisted.username && persisted.password) {
+    sess = { ...sess, username: persisted.username, password: persisted.password };
+    writeProxCreds(targetPid, sess);
+  }
+  return sess;
+}
+
 // Utility helpers for conn/meta
 function readProxMeta(pid) { try { return JSON.parse(sessionStorage.getItem(proxMetaKey(pid)) || '{}'); } catch { return {}; } }
 function writeProxMeta(pid, obj) { try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj || {})); } catch { } }
@@ -539,6 +566,7 @@ async function vmLoadProjectById(pid) {
   PROJ = proj;
   if (info) info.textContent = '';
   try { vmUpdateProxmoxNavLinkForCurrent(); } catch { }
+  try { await hydrateProxCredsFromPersisted(PROJ.id); } catch { }
   try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
   renderVmTable(proj);
   updateRefreshState();
@@ -731,7 +759,8 @@ async function refreshVmView(opts) {
     const key = canonicalPid(pid);
     const proj = byId[key]; if (!proj) continue;
     const tokenOk = !!(proj && typeof proj.proxmox_api_token === 'string' && proj.proxmox_api_token.trim());
-    const sess = readProxCreds(pid) || {}; const sessOk = !!(sess.username && sess.password);
+    const sess = await hydrateProxCredsFromPersisted(pid);
+    const sessOk = !!(sess.username && sess.password);
     if (tokenOk || sessOk) ok.push(pid); else skipped.push(pid);
   }
   const note = document.getElementById('vm-skipped-note');
@@ -813,7 +842,7 @@ async function refreshVmView(opts) {
     await new Promise((resolve) => {
       queueRemoteAction(`Refresh VMs for project ${p.name || pid}`, async () => {
         try {
-          const sess = readProxCreds(pid) || {};
+          const sess = await hydrateProxCredsFromPersisted(pid);
           const body = { username: sess.username || undefined, password: sess.password || undefined, baseUrl: p.proxmox_url || undefined, apiPort: p.proxmox_api_port || undefined, verifySSL: p.proxmox_verify_ssl !== false, forceRefresh: forceRefresh || undefined };
           const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
           const statuses = resp.instance_statuses || [];
@@ -1271,7 +1300,7 @@ async function vmRefresh(opts) {
         }
       } catch { }
       try { shell.step('Progress bar shown'); } catch { }
-      const sess = readProxCreds(refreshPid) || {};
+      const sess = await hydrateProxCredsFromPersisted(refreshPid);
       const body = {
         username: sess.username || undefined,
         password: sess.password || undefined,
@@ -2140,6 +2169,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch { }
   }, true);
   try { await refreshVmView(); } catch { }
+  try {
+    const u = new URL(window.location.href);
+    const refreshFlag = String(u.searchParams.get('refresh') || '').trim().toLowerCase();
+    if (refreshFlag === '1' || refreshFlag === 'true') {
+      await vmRefresh({ forceRefresh: true });
+      u.searchParams.delete('refresh');
+      window.history.replaceState({}, '', u.pathname + u.search + u.hash);
+    }
+  } catch { }
 });
 
 async function prefillProxLoginModal() {
@@ -2554,6 +2592,8 @@ function hasAuth() {
   if (!PROJ) return false;
   if (hasSessionCreds()) return true;
   try {
+    const persisted = readPersistedProxCreds(PROJ.id);
+    if (persisted && persisted.username && persisted.password) return true;
     const pid = PROJ.id;
     const cache = (window.PROJ_CACHE && window.PROJ_CACHE[pid]) ? window.PROJ_CACHE[pid] : PROJ;
     return !!(cache && typeof cache.proxmox_api_token === 'string' && cache.proxmox_api_token.trim().length > 0);
@@ -2621,6 +2661,7 @@ function updateRefreshState() {
 function hasAuthForPid(pid) {
   try {
     const sess = readProxCreds(pid) || {}; if (sess.username && sess.password) return true;
+    const persisted = readPersistedProxCreds(pid) || {}; if (persisted.username && persisted.password) return true;
     const p = (ALL_PROJECTS || []).find(pp => canonicalPid(pp.id) === canonicalPid(pid));
     return !!(p && typeof p.proxmox_api_token === 'string' && p.proxmox_api_token.trim());
   } catch { return false; }

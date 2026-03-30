@@ -732,6 +732,9 @@ class ProjectStore:
         if isinstance(v, dict):
             base = asdict(VMConfig(name=v.get("name", "")))
             for k, val in v.items():
+                # Canonicalize spelling variant
+                if k == "internal_network_adapters" and "internal_network_adaptors" not in v:
+                    k = "internal_network_adaptors"
                 if k in base:
                     base[k] = val
             # Ensure viewable_to_user is a real bool (older data may store strings)

@@ -2629,6 +2629,80 @@ let currentWizardStep = 0;
 const totalWizardSteps = 5;
 let wizFetchedTemplates = [];
 let wizSelectedTemplates = [];
+let wizTemplateCreds = {};
+let wizActiveTemplateCredsVmid = '';
+
+function wizardGetTemplateCreds(vmid) {
+  const key = String(vmid || '').trim();
+  if (!key) return { username: '', password: '' };
+  const creds = wizTemplateCreds[key];
+  if (!creds || typeof creds !== 'object') return { username: '', password: '' };
+  return {
+    username: typeof creds.username === 'string' ? creds.username : '',
+    password: typeof creds.password === 'string' ? creds.password : ''
+  };
+}
+
+function wizardHasTemplateCreds(vmid) {
+  const creds = wizardGetTemplateCreds(vmid);
+  return !!(creds.username && creds.password);
+}
+
+function wizardRefreshTemplateCredsButton(vmid) {
+  const button = document.querySelector(`[data-wiz-template-creds="${String(vmid || '').replace(/"/g, '&quot;')}"]`);
+  if (!button) return;
+  const hasCreds = wizardHasTemplateCreds(vmid);
+  button.textContent = hasCreds ? 'Stored' : 'Specify';
+  button.classList.toggle('btn-outline-success', hasCreds);
+  button.classList.toggle('btn-outline-secondary', !hasCreds);
+  button.setAttribute('aria-label', hasCreds ? 'Edit stored VM credentials' : 'Specify VM credentials');
+  button.title = hasCreds ? 'Edit stored VM credentials' : 'Specify VM credentials';
+}
+
+window.openWizardTemplateCreds = function(vmid, templateName) {
+  const key = String(vmid || '').trim();
+  const modalEl = document.getElementById('wizardTemplateCredsModal');
+  if (!key || !modalEl) return;
+  wizActiveTemplateCredsVmid = key;
+  const titleEl = document.getElementById('wiz-template-creds-name');
+  if (titleEl) titleEl.textContent = templateName || key;
+  const creds = wizardGetTemplateCreds(key);
+  const userEl = document.getElementById('wiz-template-creds-user');
+  const passEl = document.getElementById('wiz-template-creds-pass');
+  if (userEl) userEl.value = creds.username;
+  if (passEl) passEl.value = creds.password;
+  if (window.bootstrap && window.bootstrap.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  }
+};
+
+window.saveWizardTemplateCreds = function() {
+  const key = String(wizActiveTemplateCredsVmid || '').trim();
+  const modalEl = document.getElementById('wizardTemplateCredsModal');
+  if (!key || !modalEl) return;
+  const userEl = document.getElementById('wiz-template-creds-user');
+  const passEl = document.getElementById('wiz-template-creds-pass');
+  const username = userEl ? userEl.value.trim() : '';
+  const password = passEl ? passEl.value : '';
+  if ((username && !password) || (!username && password)) {
+    return showToast('Enter both VM username and password, or leave both blank to clear them.', 'warning');
+  }
+  if (username && password) {
+    wizTemplateCreds[key] = { username, password };
+  } else {
+    delete wizTemplateCreds[key];
+  }
+  wizardRefreshTemplateCredsButton(key);
+  const selected = (wizSelectedTemplates || []).find(item => String(item.vmid) === key);
+  if (selected) {
+    selected.vm_user = username;
+    selected.vm_pass = password;
+  }
+  if (window.bootstrap && window.bootstrap.Modal) {
+    const modal = window.bootstrap.Modal.getInstance(modalEl);
+    if (modal) modal.hide();
+  }
+};
 
 window.wizToggleVmActions = function() {
   const isCreate = document.getElementById('wiz-act-vm-create')?.checked;
@@ -2704,7 +2778,7 @@ window.checkWizCsvFile = async function() {
     '#20c997','#d63384','#0dcaf0','#ffc107','#6c757d'
   ];
 
-  const NODE_W = 90, NODE_H = 44, NODE_R = 10;
+  const NODE_W = 164, NODE_H = 78, NODE_R = 18;
 
   let nodes    = [];   // { id, vmid, name, finalName, user_accessible, x, y, el }
   let links    = [];   // { id, a, b, adapter, color, el }
@@ -2803,6 +2877,25 @@ window.checkWizCsvFile = async function() {
   function mountPopover(div, focusSelector) {
     document.body.appendChild(div);
     activePopover = div;
+    div.addEventListener('keydown', (ev) => {
+      if (!ev || ev.defaultPrevented || ev.key !== 'Enter') return;
+      if (ev.isComposing || ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      const target = ev.target instanceof Element ? ev.target : null;
+      if (target) {
+        const tag = (target.tagName || '').toLowerCase();
+        if (tag === 'textarea' || target.isContentEditable) return;
+        if (target.closest('button, a, [role="button"]')) return;
+      }
+      const buttons = Array.from(div.querySelectorAll('button')).filter((btn) => {
+        if (!btn) return false;
+        if (btn.disabled || btn.classList.contains('disabled')) return false;
+        if (btn.offsetParent === null) return false;
+        return true;
+      });
+      if (buttons.length !== 1) return;
+      ev.preventDefault();
+      buttons[0].click();
+    });
     // Focus the target input after a short delay so the opening click settles first
     if (focusSelector) {
       setTimeout(() => {
@@ -2831,8 +2924,8 @@ window.checkWizCsvFile = async function() {
     const py = svgRect.top  + svgMy;
     const div = document.createElement('div');
     div.style.cssText = `position:fixed;z-index:9999;background:var(--bs-body-bg,#fff);
-      border:1px solid var(--bs-border-color,#dee2e6);border-radius:8px;
-      box-shadow:0 4px 16px rgba(0,0,0,0.2);padding:10px 14px;min-width:200px;`;
+      border:1px solid var(--bs-border-color,#dee2e6);border-radius:10px;
+      box-shadow:0 6px 20px rgba(0,0,0,0.2);padding:14px 16px;min-width:240px;font-size:1rem;`;
     div.style.left = Math.min(px + 12, window.innerWidth - 230) + 'px';
     div.style.top  = (py - 10) + 'px';
     div.innerHTML = `
@@ -2861,8 +2954,8 @@ window.checkWizCsvFile = async function() {
     const svgRect = svgEl.getBoundingClientRect();
     const div = document.createElement('div');
     div.style.cssText = `position:fixed;z-index:9999;background:var(--bs-body-bg,#fff);
-      border:1px solid var(--bs-border-color,#dee2e6);border-radius:8px;
-      box-shadow:0 4px 16px rgba(0,0,0,0.2);padding:10px 14px;min-width:190px;`;
+      border:1px solid var(--bs-border-color,#dee2e6);border-radius:10px;
+      box-shadow:0 6px 20px rgba(0,0,0,0.2);padding:14px 16px;min-width:240px;font-size:1rem;`;
     div.style.left = Math.min(svgRect.left + portX + 14, window.innerWidth - 210) + 'px';
     div.style.top  = (svgRect.top + portY - 10) + 'px';
     div.innerHTML = `
@@ -2875,7 +2968,7 @@ window.checkWizCsvFile = async function() {
       </div>
       <div class="input-group input-group-sm">
         <span class="input-group-text">net</span>
-        <input type="number" class="form-control" id="wiz-iface-inp" min="0" max="15" value="${current}" style="width:60px;">
+        <input type="number" class="form-control" id="wiz-iface-inp" min="0" max="15" value="${current}" style="width:84px;">
         <button class="btn btn-outline-primary" id="wiz-iface-ok" type="button">Set</button>
       </div>`;
     document.body.appendChild(div);
@@ -2931,7 +3024,7 @@ window.checkWizCsvFile = async function() {
       // Midpoint adapter label
       const text = document.createElementNS(svgNS(), 'text');
       text.setAttribute('x', mx); text.setAttribute('y', my - 7);
-      text.setAttribute('text-anchor', 'middle'); text.setAttribute('font-size', '10');
+      text.setAttribute('text-anchor', 'middle'); text.setAttribute('font-size', '13');
       text.setAttribute('fill', l.color); text.setAttribute('font-weight', 'bold');
       text.setAttribute('pointer-events', 'none'); text.textContent = l.adapter;
       const capturedL = l;
@@ -2939,7 +3032,7 @@ window.checkWizCsvFile = async function() {
       linksG.appendChild(line); linksG.appendChild(hit); linksG.appendChild(text);
       // ── Port nodes at each VM edge ──
       [[epA, l.ifaceA, true], [epB, l.ifaceB, false]].forEach(([ep, iface, isA]) => {
-        const PORT_R = 9;
+        const PORT_R = 12;
         // Hit target
         const portHit = document.createElementNS(svgNS(), 'circle');
         portHit.setAttribute('cx', ep.x); portHit.setAttribute('cy', ep.y);
@@ -2956,7 +3049,7 @@ window.checkWizCsvFile = async function() {
         // Interface number label
         const portLabel = document.createElementNS(svgNS(), 'text');
         portLabel.setAttribute('x', ep.x); portLabel.setAttribute('y', ep.y + 4);
-        portLabel.setAttribute('text-anchor', 'middle'); portLabel.setAttribute('font-size', '9');
+        portLabel.setAttribute('text-anchor', 'middle'); portLabel.setAttribute('font-size', '11');
         portLabel.setAttribute('font-weight', 'bold'); portLabel.setAttribute('fill', l.color);
         portLabel.setAttribute('pointer-events', 'none');
         portLabel.textContent = iface;
@@ -2998,15 +3091,16 @@ window.checkWizCsvFile = async function() {
       g.appendChild(rect);
       // Name label
       const label = document.createElementNS(svgNS(), 'text');
-      label.setAttribute('text-anchor', 'middle'); label.setAttribute('dy', '-3');
-      label.setAttribute('font-size', '11'); label.setAttribute('font-weight', 'bold');
+      label.setAttribute('text-anchor', 'middle'); label.setAttribute('dy', '-8');
+      label.setAttribute('font-size', '17'); label.setAttribute('font-weight', 'bold');
       label.setAttribute('fill', '#fff'); label.setAttribute('pointer-events', 'none');
-      label.textContent = (n.finalName || n.name || '').slice(0, 12);
+      label.textContent = (n.finalName || n.name || '').slice(0, 18);
       g.appendChild(label);
       // VMID sub-label
       const sublabel = document.createElementNS(svgNS(), 'text');
-      sublabel.setAttribute('text-anchor', 'middle'); sublabel.setAttribute('dy', '11');
-      sublabel.setAttribute('font-size', '9'); sublabel.setAttribute('fill', 'rgba(255,255,255,0.75)');
+      sublabel.setAttribute('text-anchor', 'middle'); sublabel.setAttribute('dy', '20');
+      sublabel.setAttribute('font-size', '13'); sublabel.setAttribute('font-weight', '600');
+      sublabel.setAttribute('fill', 'rgba(255,255,255,0.88)');
       sublabel.setAttribute('pointer-events', 'none'); sublabel.textContent = 'ID:' + n.vmid;
       g.appendChild(sublabel);
       // No extra adapter dots — ports on link edges show that info
@@ -3050,21 +3144,32 @@ window.checkWizCsvFile = async function() {
     hint && (hint.style.display = 'none');
     form && form.classList.remove('d-none');
     const title = document.getElementById('wiz-vm-settings-title');
-    if (title) title.textContent = selectedNode.name;
-    const nameIn = document.getElementById('wiz-vm-set-name');
-    if (nameIn) {
-      nameIn.value = selectedNode.finalName || '';
-      nameIn.oninput = () => { selectedNode.finalName = nameIn.value; };
+    if (title) title.textContent = 'Selected VM';
+    const nameValue = document.getElementById('wiz-vm-set-name');
+    if (nameValue) {
+      nameValue.textContent = selectedNode.finalName || selectedNode.name || '–';
     }
     const accIn = document.getElementById('wiz-vm-set-acc');
+    const accLabel = document.getElementById('wiz-vm-set-acc-label');
     if (accIn) {
       accIn.checked = selectedNode.user_accessible;
-      accIn.onchange = () => { selectedNode.user_accessible = accIn.checked; renderNodes(); };
+      if (accLabel) accLabel.textContent = accIn.checked ? 'Enabled' : 'Disabled';
+      accIn.onchange = () => {
+        selectedNode.user_accessible = accIn.checked;
+        if (accLabel) accLabel.textContent = accIn.checked ? 'Enabled' : 'Disabled';
+        renderNodes();
+      };
     }
     const netsDiv = document.getElementById('wiz-vm-set-nets');
     if (netsDiv) {
       const adps = getNodeAdapters(selectedNode.id);
-      netsDiv.textContent = adps.length > 0 ? adps.join(', ') : '–';
+      if (adps.length > 0) {
+        netsDiv.classList.remove('wiz-vm-summary-value--muted');
+        netsDiv.innerHTML = adps.map((name) => `<span class="wiz-net-chip">${name}</span>`).join('');
+      } else {
+        netsDiv.classList.add('wiz-vm-summary-value--muted');
+        netsDiv.textContent = '–';
+      }
     }
   }
 
@@ -3082,12 +3187,12 @@ window.checkWizCsvFile = async function() {
 
     // Layout nodes in a circle
     const cx = svgEl.clientWidth / 2 || 320;
-    const cy = 210;
-    const r  = Math.min(cx - 60, cy - 60, 150);
+    const cy = Math.max((svgEl.clientHeight || 560) / 2, 240);
+    const r  = Math.min(cx - 100, cy - 90, 220);
     templates.forEach((t, i) => {
       const angle = (i / templates.length) * 2 * Math.PI - Math.PI / 2;
       nodes.push({
-        id: t.vmid,
+        id: t._wizId,
         vmid: t.vmid,
         name: t.name,
         finalName: t.finalName || t.name,
@@ -3146,7 +3251,7 @@ window.checkWizCsvFile = async function() {
 
   function saveState() {
     for (const n of nodes) {
-      const t = window.wizSelectedTemplates && window.wizSelectedTemplates.find(t => t.vmid === n.id);
+      const t = wizSelectedTemplates && wizSelectedTemplates.find(t => t._wizId === n.id);
       if (!t) continue;
       t.finalName = n.finalName || n.name;
       t.user_accessible = n.user_accessible;
@@ -3209,7 +3314,15 @@ function resetWizard() {
   currentWizardStep = 0;
   wizFetchedTemplates = [];
   wizSelectedTemplates = [];
+  wizTemplateCreds = {};
+  wizActiveTemplateCredsVmid = '';
+  wizardResetRunState();
   try {
+    const credsModalEl = document.getElementById('wizardTemplateCredsModal');
+    if (credsModalEl && window.bootstrap && window.bootstrap.Modal) {
+      const credsModal = window.bootstrap.Modal.getInstance(credsModalEl);
+      if (credsModal) credsModal.hide();
+    }
     const numRadio = document.getElementById('wiz-cap-mode-num');
     if (numRadio) { numRadio.checked = true; window.toggleWizCapMode(); }
     document.getElementById('wiz-users').value = '1';
@@ -3247,6 +3360,30 @@ function resetWizard() {
   wizardGotoStep(0);
 }
 
+function setWizardLayout(layout) {
+  const modalEl = document.getElementById('projectWizardModal');
+  if (!modalEl) return;
+  modalEl.setAttribute('data-wiz-layout', layout || 'form');
+}
+
+function getWizardLayoutForStep(step) {
+  switch (step) {
+    case 0:
+      return 'choice';
+    case 1:
+    case 2:
+      return 'form';
+    case 3:
+      return 'list';
+    case 4:
+      return 'graph';
+    case 5:
+      return 'summary';
+    default:
+      return 'form';
+  }
+}
+
 window.wizardGotoStep = function(step) {
   if (step < 0) step = 0;
   if (step > totalWizardSteps) step = totalWizardSteps;
@@ -3282,25 +3419,41 @@ window.wizardGotoStep = function(step) {
   // Show target
   const targetEl = document.getElementById('wiz-step-' + step);
   if (targetEl) targetEl.classList.remove('d-none');
+  setWizardLayout(getWizardLayoutForStep(step));
   
+  // Step Indicator & Progress bar handling
+  const indicator = document.getElementById('wiz-step-indicator');
+  const progressContainer = document.getElementById('wiz-progress-container');
+  const progressBar = document.getElementById('wiz-progress-bar');
   const footer = document.getElementById('wiz-footer');
-  if (footer) {
-    if (step === 0) {
-      footer.classList.add('d-none');
-    } else {
+  
+  if (step === 0) {
+    if (indicator) indicator.classList.add('d-none');
+    if (progressContainer) progressContainer.classList.add('d-none');
+    if (footer) footer.classList.add('d-none');
+  } else {
+    if (indicator) {
+      indicator.classList.remove('d-none');
+      indicator.innerText = `Step ${step} of ${totalWizardSteps}`;
+    }
+    if (progressContainer) {
+      progressContainer.classList.remove('d-none');
+      const progressPercent = (step / totalWizardSteps) * 100;
+      if (progressBar) progressBar.style.width = progressPercent + '%';
+    }
+    if (footer) {
       footer.classList.remove('d-none');
       const nextBtn = document.getElementById('wiz-btn-next');
       if (nextBtn) {
         nextBtn.innerText = (step === totalWizardSteps) ? "Create Scenario" : "Next";
       }
-      // Back button: hide on step 1 (no meaningful step 0 to go back to via Back)
       const backBtn = document.getElementById('wiz-btn-back');
       if (backBtn) {
         backBtn.classList.toggle('invisible', step <= 1);
       }
     }
   }
-  
+
   currentWizardStep = step;
 };
 
@@ -3376,6 +3529,7 @@ window.wizardNext = async function() {
     document.getElementById('wiz-footer').classList.add('d-none');
     document.getElementById('wiz-step-loading').classList.remove('d-none');
     document.getElementById('wiz-loading-text').innerText = 'Validating credentials and fetching templates...';
+    setWizardLayout('loading');
 
     try {
       const testRes = await http('POST', '/api/test/credentials', { proxmox: { url, username: user, password: pwd, verify_ssl: verifySSL }, ctfd: ctfdCreds });
@@ -3411,6 +3565,7 @@ window.wizardNext = async function() {
                      <th style="width:32px;"></th>
                      <th>VM Name</th>
                      <th>Node</th>
+                     <th class="text-center" style="width:120px;">Creds</th>
                      <th class="text-center" style="width:150px; cursor:help;" title="These VMs will be directly accessible by participants">Make User Accessible</th>
                    </tr>
                  </thead>
@@ -3418,6 +3573,8 @@ window.wizardNext = async function() {
                </table>`);
              const tbody = tplContainer.querySelector('#wiz-tpl-tbody');
              filtered.forEach(t => {
+                const creds = wizardGetTemplateCreds(t.vmid);
+                const hasCreds = !!(creds.username && creds.password);
                 const row = document.createElement('tr');
                 row.innerHTML = `
                   <td class="align-middle">
@@ -3431,6 +3588,9 @@ window.wizardNext = async function() {
                   </td>
                   <td class="align-middle text-muted small">${escHtml(t.node)}</td>
                   <td class="text-center align-middle">
+                    <button type="button" class="btn btn-sm d-none ${hasCreds ? 'btn-outline-success' : 'btn-outline-secondary'}" data-wiz-template-creds="${t.vmid}">${hasCreds ? 'Stored' : 'Specify'}</button>
+                  </td>
+                  <td class="text-center align-middle">
                     <input class="form-check-input" type="checkbox" id="wiz-tpl-acc-${t.vmid}" checked
                       title="Mark VMs from this template as user-accessible"
                       style="visibility:hidden;">
@@ -3439,9 +3599,16 @@ window.wizardNext = async function() {
                 // Wire selection checkbox to show/hide the user-accessible checkbox
                 const selChk = row.querySelector(`#wiz-tpl-chk-${t.vmid}`);
                 const accChk = row.querySelector(`#wiz-tpl-acc-${t.vmid}`);
+                const credsBtn = row.querySelector('[data-wiz-template-creds]');
                 selChk.addEventListener('change', () => {
                   accChk.style.visibility = selChk.checked ? '' : 'hidden';
+                  if (credsBtn) credsBtn.classList.toggle('d-none', !selChk.checked);
                 });
+                if (credsBtn) {
+                  credsBtn.addEventListener('click', () => {
+                    if (window.openWizardTemplateCreds) window.openWizardTemplateCreds(String(t.vmid), t.name);
+                  });
+                }
                 tbody.appendChild(row);
              });
          }
@@ -3449,6 +3616,12 @@ window.wizardNext = async function() {
       wizardGotoStep(3);
       return;
     } catch (e) {
+      // Restore UI on error so buttons come back
+      const loadingEl = document.getElementById('wiz-step-loading');
+      if (loadingEl) loadingEl.classList.add('d-none');
+      const footer = document.getElementById('wiz-footer');
+      if (footer) footer.classList.remove('d-none');
+      
       showToast('Fetch failed: ' + (e?.message || e), 'danger');
       wizardGotoStep(2);
       return;
@@ -3462,11 +3635,15 @@ window.wizardNext = async function() {
      chks.forEach(c => {
        const vmid = c.value;
        const accEl = document.getElementById('wiz-tpl-acc-' + vmid);
+       const creds = wizardGetTemplateCreds(vmid);
        wizSelectedTemplates.push({
+        _wizId: Date.now() + Math.random(),
          vmid,
          name: c.getAttribute('data-name'),
          finalName: c.getAttribute('data-name'),
          user_accessible: accEl ? accEl.checked : true,
+         vm_user: creds.username,
+         vm_pass: creds.password,
          nets: []
        });
      });
@@ -3521,6 +3698,464 @@ window.wizardBack = function() {
   wizardGotoStep(prev);
 };
 
+let wizardRunState = { items: [], projectId: '', done: false, failed: false, summary: '', detail: '' };
+let wizardAutoRedirectTimer = null;
+
+function clearWizardAutoRedirect() {
+  if (!wizardAutoRedirectTimer) return;
+  try { clearTimeout(wizardAutoRedirectTimer); } catch { }
+  wizardAutoRedirectTimer = null;
+}
+
+function scheduleWizardAutoRedirect(delayMs = 1600) {
+  clearWizardAutoRedirect();
+  wizardAutoRedirectTimer = setTimeout(() => {
+    wizardAutoRedirectTimer = null;
+    try {
+      if (wizardRunState.done && !wizardRunState.failed && typeof window.finishWizardRun === 'function') {
+        window.finishWizardRun();
+      }
+    } catch { }
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function wizardFindRunItem(key) {
+  return (wizardRunState.items || []).find(item => item.key === key) || null;
+}
+
+function wizardRunStatusLabel(status) {
+  switch (String(status || 'pending').toLowerCase()) {
+    case 'running': return 'Running';
+    case 'success': return 'Success';
+    case 'error': return 'Error';
+    case 'skipped': return 'Skipped';
+    default: return 'Pending';
+  }
+}
+
+function wizardDeriveJobStatusText(status) {
+  if (!status || typeof status !== 'object') return '';
+  const detail = status.detail && typeof status.detail === 'object' ? status.detail : {};
+  const bits = [];
+  const message = typeof status.message === 'string' ? status.message.trim() : '';
+  const current = typeof status.current === 'string' ? status.current.trim() : '';
+  const command = typeof detail.command === 'string' ? detail.command.trim() : '';
+  const delayLabel = typeof detail.delay_label === 'string' ? detail.delay_label.trim() : '';
+  if (message) bits.push(message);
+  if (current && (!message || !message.includes(current))) bits.push(current);
+  if (command && (!message || !message.includes(command))) bits.push(command);
+  if (delayLabel) bits.push(`delay ${delayLabel}`);
+  return bits.join(' - ');
+}
+
+function wizardRenderRunState() {
+  const queueEl = document.getElementById('wiz-run-queue');
+  const statusEl = document.getElementById('wiz-run-status');
+  const progressBar = document.getElementById('wiz-run-progress-bar');
+  const closeBtn = document.getElementById('wiz-btn-close-after-run');
+  const spinner = document.getElementById('wiz-loading-spinner');
+  const loadingText = document.getElementById('wiz-loading-text');
+  const subtext = document.getElementById('wiz-loading-subtext');
+  const items = Array.isArray(wizardRunState.items) ? wizardRunState.items : [];
+  const total = items.length || 1;
+  let completedUnits = 0;
+  items.forEach(item => {
+    const status = String(item.status || 'pending').toLowerCase();
+    if (status === 'running') completedUnits += Math.max(0, Math.min(100, Number(item.progress) || 0)) / 100;
+    else if (status === 'success' || status === 'error' || status === 'skipped') completedUnits += 1;
+  });
+  const percent = Math.max(0, Math.min(100, Math.round((completedUnits / total) * 100)));
+  if (progressBar) progressBar.style.width = `${percent}%`;
+  if (loadingText) loadingText.textContent = wizardRunState.summary || (wizardRunState.done ? 'Wizard run complete' : 'Running selected operations...');
+  if (subtext) subtext.textContent = wizardRunState.detail || (wizardRunState.done ? 'Review the results, then close the wizard.' : 'The queue will update live as each operation runs.');
+  const active = items.find(item => String(item.status || '').toLowerCase() === 'running') || null;
+  if (statusEl) {
+    statusEl.textContent = wizardRunState.done
+      ? (wizardRunState.failed ? 'One or more operations failed.' : 'All queued operations completed successfully.')
+      : (active?.detail || 'Preparing wizard queue...');
+    statusEl.className = wizardRunState.failed ? 'small text-danger text-center' : 'small text-muted text-center';
+  }
+  if (spinner) spinner.classList.toggle('d-none', !!wizardRunState.done);
+  if (closeBtn) closeBtn.classList.toggle('d-none', !wizardRunState.done);
+  if (closeBtn) {
+    const shouldOpenVmManager = !!(
+      wizardRunState.done
+      && !wizardRunState.failed
+      && String(wizardRunState.projectId || '').trim()
+      && Array.isArray(wizSelectedTemplates)
+      && wizSelectedTemplates.length > 0
+    );
+    closeBtn.textContent = shouldOpenVmManager ? 'Open VM Manager' : 'Close';
+  }
+  if (queueEl) {
+    queueEl.innerHTML = items.map(item => {
+      const status = String(item.status || 'pending').toLowerCase();
+      const summaryText = item.summary || item.detail || '';
+      const summary = summaryText ? `<div class="wiz-run-item-summary small">${escHtml(summaryText)}</div>` : '';
+      const runningDetail = (status === 'running' && item.detail)
+        ? `<div class="wiz-run-item-detail small">${escHtml(item.detail)}</div>`
+        : '';
+      const issues = Array.isArray(item.issues) ? item.issues.filter(Boolean) : [];
+      const issuePreviewLimit = 5;
+      const shownIssues = issues.slice(0, issuePreviewLimit);
+      const issueLabel = shownIssues.length ? '<div class="wiz-run-item-issues-label">Issues</div>' : '';
+      const issueList = shownIssues.length
+        ? `<ul class="wiz-run-item-issues small">${shownIssues.map(issue => {
+            const text = String(issue || '').trim();
+            const splitAt = text.indexOf(': ');
+            const title = splitAt > 0 ? text.slice(0, splitAt).trim() : '';
+            const body = splitAt > 0 ? text.slice(splitAt + 2).trim() : text;
+            const titleHtml = title ? `<div class="wiz-run-issue-title">${escHtml(title)}</div>` : '';
+            const bodyHtml = body ? `<div class="wiz-run-issue-body">${escHtml(body)}</div>` : '';
+            return `<li class="wiz-run-issue">${titleHtml}${bodyHtml}</li>`;
+          }).join('')}</ul>`
+        : '';
+      const issueMore = issues.length > issuePreviewLimit
+        ? `<div class="wiz-run-item-more small">${escHtml(`+${issues.length - issuePreviewLimit} more issue${issues.length - issuePreviewLimit === 1 ? '' : 's'} in the log dock`)}</div>`
+        : '';
+      return `
+        <div class="wiz-run-item wiz-run-item--${status}">
+          <div class="wiz-run-item-head">
+            <div class="wiz-run-item-label">${escHtml(item.label || item.key || 'Operation')}</div>
+            <span class="wiz-run-badge wiz-run-badge--${status}">${escHtml(wizardRunStatusLabel(status))}</span>
+          </div>
+          ${runningDetail || summary}
+          ${status !== 'running' ? issueLabel : ''}
+          ${status !== 'running' ? issueList : ''}
+          ${status !== 'running' ? issueMore : ''}
+        </div>`;
+    }).join('');
+  }
+}
+
+function wizardSetRunState(summary, detail) {
+  if (summary !== undefined) wizardRunState.summary = String(summary || '');
+  if (detail !== undefined) wizardRunState.detail = String(detail || '');
+  wizardRenderRunState();
+}
+
+function wizardResetRunState() {
+  clearWizardAutoRedirect();
+  wizardRunState = { items: [], projectId: '', done: false, failed: false, summary: '', detail: '' };
+  const progressBar = document.getElementById('wiz-run-progress-bar');
+  if (progressBar) progressBar.style.width = '0%';
+  const queueEl = document.getElementById('wiz-run-queue');
+  if (queueEl) queueEl.innerHTML = '';
+  const statusEl = document.getElementById('wiz-run-status');
+  if (statusEl) { statusEl.textContent = ''; statusEl.className = 'small text-muted text-center'; }
+  const closeBtn = document.getElementById('wiz-btn-close-after-run');
+  if (closeBtn) closeBtn.classList.add('d-none');
+  const spinner = document.getElementById('wiz-loading-spinner');
+  if (spinner) spinner.classList.remove('d-none');
+  const subtext = document.getElementById('wiz-loading-subtext');
+  if (subtext) subtext.textContent = 'This may take a few moments...';
+  const loadingText = document.getElementById('wiz-loading-text');
+  if (loadingText) loadingText.textContent = 'Creating scenario...';
+}
+
+function wizardShowLoadingStep(summary, detail) {
+  for (let i = 0; i <= totalWizardSteps; i++) {
+    const el = document.getElementById('wiz-step-' + i);
+    if (el) el.classList.add('d-none');
+  }
+  const loadingEl = document.getElementById('wiz-step-loading');
+  if (loadingEl) loadingEl.classList.remove('d-none');
+  const footer = document.getElementById('wiz-footer');
+  if (footer) footer.classList.add('d-none');
+  const indicator = document.getElementById('wiz-step-indicator');
+  if (indicator) indicator.classList.add('d-none');
+  const progressContainer = document.getElementById('wiz-progress-container');
+  if (progressContainer) progressContainer.classList.add('d-none');
+  setWizardLayout('loading');
+  wizardSetRunState(summary, detail);
+}
+
+function wizardStartQueue(items, summary, detail) {
+  wizardRunState = {
+    items: (Array.isArray(items) ? items : []).map(item => ({ ...item, status: item.status || 'pending', progress: Number(item.progress) || 0, detail: item.detail || '', summary: item.summary || '', issues: Array.isArray(item.issues) ? item.issues : [] })),
+    projectId: '',
+    done: false,
+    failed: false,
+    summary: summary || '',
+    detail: detail || ''
+  };
+  wizardShowLoadingStep(summary, detail);
+}
+
+function wizardUpdateRunItem(key, patch) {
+  const item = wizardFindRunItem(key);
+  if (!item) return;
+  Object.assign(item, patch || {});
+  wizardRenderRunState();
+}
+
+function wizardFinishQueue(ok, summary, detail) {
+  clearWizardAutoRedirect();
+  const hasItemErrors = (wizardRunState.items || []).some(item => String(item.status || '').toLowerCase() === 'error');
+  wizardRunState.done = true;
+  wizardRunState.failed = !ok || hasItemErrors;
+  if (summary !== undefined) {
+    wizardRunState.summary = hasItemErrors && ok ? 'Wizard run completed with issues.' : summary;
+  }
+  if (detail !== undefined) {
+    wizardRunState.detail = hasItemErrors && ok
+      ? 'Review the queue below for operations that need attention.'
+      : detail;
+  }
+  wizardRenderRunState();
+}
+
+function wizardBuildRunItems(options) {
+  const opts = options || {};
+  const items = [{ key: 'project-create', label: 'Create scenario', status: 'pending', detail: 'Waiting to submit the project.' }];
+  if (opts.hasSecrets) items.push({ key: 'save-secrets', label: 'Save manager credentials', status: 'pending', detail: 'Will persist credentials for later manager refreshes.', blocking: false });
+  if (opts.createVms) items.push({ key: 'vm-create', label: 'Create VMs', status: 'pending', detail: 'Templates will be cloned into scenario instances.' });
+  if (opts.startVms) items.push({ key: 'vm-start', label: 'Start VMs', status: 'pending', detail: 'Created instances will be powered on.' });
+  if (opts.syncUsers) items.push({ key: 'user-sync', label: opts.syncLabel || 'Sync external users', status: 'pending', detail: 'Selected user integrations will be synchronized.' });
+  return items;
+}
+
+function wizardCountEntries(value) {
+  if (Array.isArray(value)) return value.length;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function wizardSummarizeActionResult(action, result) {
+  const res = (result && typeof result === 'object') ? result : {};
+  if (action === 'create') {
+    const created = wizardCountEntries(res.created);
+    const skipped = wizardCountEntries(res.skipped);
+    const issues = wizardCountEntries(res.errors) + wizardCountEntries(res.network_apply_errors) + wizardCountEntries(res?.verify?.issues);
+    const bits = [`Created ${created} VM${created === 1 ? '' : 's'}`];
+    if (skipped) bits.push(`${skipped} skipped`);
+    if (issues) bits.push(`${issues} issue${issues === 1 ? '' : 's'}`);
+    return bits.join(', ');
+  }
+  if (action === 'start') {
+    const started = wizardCountEntries(res.started);
+    const resumed = wizardCountEntries(res.resumed);
+    const errors = wizardCountEntries(res.errors);
+    const total = started + resumed;
+    const bits = [`Started ${total} VM${total === 1 ? '' : 's'}`];
+    if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
+    return bits.join(', ');
+  }
+  if (action === 'users_access_sync') {
+    const applied = wizardCountEntries(res.applied);
+    const unchanged = wizardCountEntries(res.unchanged);
+    const errors = wizardCountEntries(res.errors);
+    const bits = [`Applied ${applied} change${applied === 1 ? '' : 's'}`];
+    if (unchanged) bits.push(`${unchanged} unchanged`);
+    if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
+    return bits.join(', ');
+  }
+  return 'Completed';
+}
+
+function wizardFormatCreateVerifyIssue(issue) {
+  const item = (issue && typeof issue === 'object') ? issue : {};
+  const label = String(item.name || item.vmid || 'VM').trim();
+  const parts = [];
+  if (item.missing_snapshot) parts.push('missing post-clone snapshot');
+  if (item.nets_ok === false) {
+    const expected = Array.isArray(item.nets_expected) ? item.nets_expected.filter(Boolean).join(', ') : '';
+    const actual = Array.isArray(item.nets_actual) ? item.nets_actual.filter(Boolean).join(', ') : '';
+    if (expected || actual) parts.push(`network mismatch${expected ? ` expected [${expected}]` : ''}${actual ? ` actual [${actual}]` : ''}`);
+    else parts.push('network mismatch');
+  }
+  if (Array.isArray(item.ageing_missing) && item.ageing_missing.length) {
+    parts.push(`ageing missing [${item.ageing_missing.join(', ')}]`);
+  }
+  if (!parts.length) return label;
+  return `${label}: ${parts.join('; ')}`;
+}
+
+function wizardCollectActionIssues(action, result) {
+  const res = (result && typeof result === 'object') ? result : {};
+  const issues = [];
+  if (action === 'create') {
+    (Array.isArray(res.errors) ? res.errors : []).forEach(entry => {
+      if (!entry) return;
+      const name = String(entry.name || entry.index || '').trim();
+      const reason = String(entry.reason || entry.error || '').trim();
+      if (name && reason) issues.push(`${name}: ${reason}`);
+      else if (reason) issues.push(reason);
+    });
+    (Array.isArray(res.network_apply_errors) ? res.network_apply_errors : []).forEach(entry => {
+      if (!entry) return;
+      const node = String(entry.node || '').trim();
+      const reason = String(entry.reason || entry.error || '').trim();
+      if (node && reason) issues.push(`network ${node}: ${reason}`);
+      else if (reason) issues.push(reason);
+    });
+    (Array.isArray(res?.verify?.issues) ? res.verify.issues : []).forEach(entry => {
+      const text = wizardFormatCreateVerifyIssue(entry);
+      if (text) issues.push(text);
+    });
+    return issues;
+  }
+  if (action === 'start' || action === 'users_access_sync') {
+    (Array.isArray(res.errors) ? res.errors : []).forEach(entry => {
+      if (!entry) return;
+      const name = String(entry.name || entry.index || '').trim();
+      const reason = String(entry.reason || entry.error || '').trim();
+      if (name && reason) issues.push(`${name}: ${reason}`);
+      else if (reason) issues.push(reason);
+    });
+    return issues;
+  }
+  return issues;
+}
+
+function wizardPreviewActionIssues(issues, limit = 3) {
+  const list = Array.isArray(issues) ? issues.filter(Boolean) : [];
+  if (!list.length) return '';
+  const shown = list.slice(0, limit);
+  const suffix = list.length > limit ? ` (+${list.length - limit} more)` : '';
+  return `${shown.join(' | ')}${suffix}`;
+}
+
+function wizardLogActionIssues(action, issues) {
+  const list = Array.isArray(issues) ? issues.filter(Boolean) : [];
+  if (!list.length) return;
+  const prefix = `Wizard ${action}`;
+  list.forEach(issue => {
+    try {
+      if (window.shell && typeof shell.logError === 'function') shell.logError(`${prefix}: ${issue}`);
+      else console.error(prefix, issue);
+    } catch { }
+  });
+}
+
+function wizardActionHasErrors(action, result) {
+  const res = (result && typeof result === 'object') ? result : {};
+  if (action === 'create') {
+    return wizardCountEntries(res.errors) > 0 || wizardCountEntries(res.network_apply_errors) > 0 || wizardCountEntries(res?.verify?.issues) > 0;
+  }
+  if (action === 'start' || action === 'users_access_sync') {
+    return wizardCountEntries(res.errors) > 0;
+  }
+  return false;
+}
+
+function startWizardJobStatusPolling(pid, options = {}) {
+  const projectId = String(pid || '').trim();
+  if (!projectId || typeof http !== 'function') return () => { };
+  const interval = Math.max(600, Number(options.interval) || 1200);
+  const onStatus = typeof options.onStatus === 'function' ? options.onStatus : null;
+  const initialDelay = Math.max(0, Number(options.initialDelay) || 0);
+  let stopped = false;
+  let timer = null;
+  let seenActive = false;
+
+  const clearTimer = () => { if (timer) { try { clearTimeout(timer); } catch { } timer = null; } };
+  const stop = () => { stopped = true; clearTimer(); };
+  const schedule = () => {
+    if (stopped) return;
+    clearTimer();
+    timer = setTimeout(run, interval);
+  };
+  const handleNoActive = () => {
+    if (seenActive) {
+      stop();
+      return true;
+    }
+    return false;
+  };
+  const run = async () => {
+    if (stopped) return;
+    try {
+      const status = await http('GET', `/api/projects/${encodeURIComponent(projectId)}/instances/actions/status`);
+      if (status && !status.error) {
+        seenActive = true;
+        if (onStatus) onStatus(status);
+        const normalized = String(status.status || '').toLowerCase();
+        if (normalized && normalized !== 'running') {
+          stop();
+          return;
+        }
+      } else if (status && status.error) {
+        const errText = String(status.error || '').toLowerCase();
+        if (errText.includes('no active job') && handleNoActive()) return;
+      }
+    } catch (err) {
+      const msg = String(err?.message || err || '').toLowerCase();
+      if (msg.includes('no active job') && handleNoActive()) return;
+    }
+    schedule();
+  };
+
+  if (initialDelay > 0) timer = setTimeout(run, initialDelay);
+  else run();
+  return stop;
+}
+
+async function wizardRunTrackedAction(pid, itemKey, actionKey, requestFactory) {
+  wizardUpdateRunItem(itemKey, { status: 'running', progress: 2, detail: 'Submitting request...', summary: '', issues: [] });
+  const stopPoll = startWizardJobStatusPolling(pid, {
+    initialDelay: 150,
+    onStatus: (status) => {
+      wizardUpdateRunItem(itemKey, {
+        progress: Math.max(2, Math.min(100, Number(status.progress) || 0)),
+        detail: wizardDeriveJobStatusText(status) || 'Processing...'
+      });
+    }
+  });
+  try {
+    const result = await requestFactory();
+    stopPoll();
+    const summary = wizardSummarizeActionResult(actionKey, result);
+    const hasErrors = wizardActionHasErrors(actionKey, result);
+    const issues = wizardCollectActionIssues(actionKey, result);
+    wizardUpdateRunItem(itemKey, {
+      status: hasErrors ? 'error' : 'success',
+      progress: 100,
+      detail: summary,
+      summary,
+      issues
+    });
+    if (hasErrors) {
+      wizardLogActionIssues(actionKey, issues);
+      throw new Error(wizardPreviewActionIssues(issues, 1) || summary || `${actionKey} failed`);
+    }
+    return result;
+  } catch (err) {
+    stopPoll();
+    const message = String(err?.message || err || `${actionKey} failed`);
+    wizardUpdateRunItem(itemKey, { status: 'error', progress: 100, detail: message, summary: message });
+    throw err;
+  }
+}
+
+window.finishWizardRun = function() {
+  const projectId = String(wizardRunState.projectId || '').trim();
+  const shouldOpenVmManager = !!(
+    wizardRunState.done
+    && !wizardRunState.failed
+    && projectId
+    && Array.isArray(wizSelectedTemplates)
+    && wizSelectedTemplates.length > 0
+  );
+  const modalEl = document.getElementById('projectWizardModal');
+  if (modalEl) {
+    try {
+      const modal = bootstrap.Modal.getInstance(modalEl) || bootstrap.Modal.getOrCreateInstance(modalEl);
+      modal.hide();
+    } catch { }
+  }
+  resetWizard();
+  if (shouldOpenVmManager) {
+    try {
+      const url = new URL('/static/vm_manager.html', window.location.origin);
+      url.searchParams.set('id', projectId);
+      url.searchParams.set('refresh', '1');
+      window.location.href = url.pathname + url.search;
+      return;
+    } catch { }
+  }
+};
+
 // Create a new project from the sidebar input
 async function createProject() {
   const input = document.getElementById('proj-name');
@@ -3543,11 +4178,17 @@ window.submitProjectCreation = async function(mode) {
   const name = (input && input.value ? input.value.trim() : '');
   if (!name) { try { showToast('Project name is missing.', 'warning'); } catch { } return; }
 
-  const loadingText = document.getElementById('wiz-loading-text');
   let vmUrl = '', vmUser = '', vmPass = '', ctfdToken = '';
   let payload = { name };
+  let wizardRunOptions = null;
 
   if (mode === 'wizard') {
+    try {
+      if (window.wizNetGraph && (currentWizardStep >= 4 || (wizSelectedTemplates && wizSelectedTemplates.length > 0))) {
+        window.wizNetGraph.saveState();
+      }
+    } catch { }
+
     const tagVal = document.getElementById('wiz-scenario-tag')?.value?.trim();
     if (tagVal) payload.tag = tagVal;
     
@@ -3619,20 +4260,42 @@ window.submitProjectCreation = async function(mode) {
       const ctfdVerify = document.getElementById('wiz-ctfd-verify')?.checked;
       payload.challenge_verify_ssl = ctfdVerify === true;
     }
-    
-    // Testing and Loading State
-    for (let i = 0; i <= totalWizardSteps; i++) {
-      const el = document.getElementById('wiz-step-' + i);
-      if (el) el.classList.add('d-none');
+
+    if (document.getElementById('wiz-feat-vm')?.checked && wizSelectedTemplates && wizSelectedTemplates.length > 0) {
+      payload.vms = wizSelectedTemplates.map(t => ({
+        name: t.finalName,
+        vmid: t.vmid,
+        viewable_to_user: t.user_accessible,
+        vm_user: t.vm_user || null,
+        vm_pass: t.vm_pass || null,
+        internal_network_adaptors: Array.isArray(t.nets) && t.nets.length > 0 ? t.nets : []
+      }));
     }
-    const footer = document.getElementById('wiz-footer');
-    if (footer) footer.classList.add('d-none');
-    const loadingEl = document.getElementById('wiz-step-loading');
-    if (loadingEl) loadingEl.classList.remove('d-none');
+    
+    const isCreate = !!document.getElementById('wiz-act-vm-create')?.checked;
+    const isStart = !!document.getElementById('wiz-act-vm-start')?.checked;
+    const isUsersVm = !!document.getElementById('wiz-act-vm-users')?.checked;
+    const isUsersCtfd = !!document.getElementById('wiz-act-ctfd-users')?.checked;
+    const syncUsers = isUsersVm || isUsersCtfd;
+    const syncLabel = isUsersVm && isUsersCtfd
+      ? 'Sync Proxmox and CTFd users'
+      : (isUsersCtfd ? 'Sync CTFd users' : 'Sync external users');
+    wizardRunOptions = {
+      createVms: isCreate,
+      startVms: isCreate && isStart,
+      syncUsers,
+      syncLabel,
+      hasSecrets: !!(vmUser || vmPass || ctfdToken)
+    };
+    wizardStartQueue(
+      wizardBuildRunItems(wizardRunOptions),
+      'Preparing wizard queue...',
+      'Validating credentials and staging the selected operations.'
+    );
 
     // Live validation
     if (vmUrl || vmUser || ctfdToken || payload.challenge_url) {
-      if (loadingText) loadingText.innerText = 'Validating credentials...';
+      wizardSetRunState('Validating credentials...', 'Checking the manager connections before scenario creation starts.');
       const testPayload = {
          proxmox: (vmUrl || vmUser) ? { url: vmUrl, username: vmUser, password: vmPass } : null,
          ctfd: (payload.challenge_url || ctfdToken) ? { url: payload.challenge_url, token: ctfdToken } : null
@@ -3643,18 +4306,44 @@ window.submitProjectCreation = async function(mode) {
            throw new Error(testRes.error || 'Validation failed');
         }
       } catch (e) {
+         wizardResetRunState();
          showToast('Credential validation failed: ' + (e?.message || e), 'danger');
          wizardGotoStep(2); // Return to credential screen for retry
          return;
       }
     }
-    if (loadingText) loadingText.innerText = 'Creating scenario...';
+    wizardSetRunState('Creating scenario...', 'Submitting the scenario definition and preparing follow-up actions.');
   }
 
   try {
+    if (mode === 'wizard') {
+      wizardUpdateRunItem('project-create', { status: 'running', progress: 15, detail: 'Sending create request...' });
+    }
     try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: creating project \"${name}\"…`) : console.log('Creating project', name); } catch { }
     const res = await http('POST', '/api/projects', payload);
     const pid = res && (res.id || res.pid) ? (res.id || res.pid) : '';
+    if (mode === 'wizard') {
+      wizardRunState.projectId = pid;
+      wizardUpdateRunItem('project-create', { status: 'success', progress: 100, detail: pid ? `Scenario created with project id ${pid}.` : 'Scenario created.' });
+      wizardSetRunState('Scenario created.', 'Running the selected follow-up operations.');
+    }
+
+    // Clear input after a successful create request so a stale name is not retained.
+    try { if (input) input.value = ''; } catch { }
+
+    try { if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch { }
+
+    if (mode !== 'wizard') {
+      // Always navigate (or stay) on configuration page so the new project loads expanded
+      try {
+        if (location.pathname !== '/' && location.pathname !== '/index.html') {
+          return location.href = '/';
+        }
+      } catch { }
+    }
+
+    try { await loadProjects(); } catch { }
+    try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
     
     // If wizard mode and we collected credentials, send the secrets
     if (mode === 'wizard' && pid && (vmUser || vmPass || ctfdToken)) {
@@ -3662,75 +4351,98 @@ window.submitProjectCreation = async function(mode) {
         proxmox: (vmUser || vmPass) ? { username: vmUser, password: vmPass } : undefined,
         ctfd: ctfdToken ? { token: ctfdToken } : undefined
       };
-      await http('PUT', `/api/projects/${pid}/secrets`, secretsPayload);
-
-      if (wizSelectedTemplates && wizSelectedTemplates.length > 0) {
-        if (loadingText) loadingText.innerText = 'Applying VM setups...';
-        const mappedVms = wizSelectedTemplates.map(t => ({
-          name: t.finalName,
-          vmid: t.vmid,
-          viewable_to_user: t.user_accessible,
-          internal_network_adaptors: (t.nets && t.nets.length > 0) ? t.nets : undefined
-        }));
-        await http('PUT', `/api/projects/${pid}`, { vms: mappedVms });
+      try {
+        wizardUpdateRunItem('save-secrets', { status: 'running', progress: 15, detail: 'Saving credentials for manager pages...' });
+        await http('PUT', `/api/projects/${pid}/secrets`, secretsPayload);
+        wizardUpdateRunItem('save-secrets', { status: 'success', progress: 100, detail: 'Credentials saved.' });
+      } catch (e) {
+        console.error("Secrets sync failed", e);
+        wizardUpdateRunItem('save-secrets', { status: 'error', progress: 100, detail: `Credentials were not saved: ${e?.message || e}` });
       }
+    } else if (mode === 'wizard' && wizardFindRunItem('save-secrets')) {
+      wizardUpdateRunItem('save-secrets', { status: 'skipped', progress: 100, detail: 'No credentials were provided.' });
+    }
 
-      // Background Orchestration Layer
-      const isCreate = document.getElementById('wiz-act-vm-create')?.checked;
-      const isStart = document.getElementById('wiz-act-vm-start')?.checked;
-      const isUsersVm = document.getElementById('wiz-act-vm-users')?.checked;
-      const isUsersCtfd = document.getElementById('wiz-act-ctfd-users')?.checked;
-
-      (async () => {
-        try {
-          const baseBody = { targets: [{ project: pid }] };
-          if (isCreate) {
-             await http('POST', `/api/projects/${pid}/instances/actions/create`, baseBody);
-             if (isStart) await http('POST', `/api/projects/${pid}/instances/actions/start`, baseBody);
-          }
-          if (isUsersVm || isUsersCtfd) {
-             await http('POST', `/api/projects/${pid}/instances/actions/users_access_sync`, { ...baseBody, enable: true });
-          }
-          if (window.vmRefresh) setTimeout(() => window.vmRefresh(), 1000);
-        } catch(e) {
-          console.error("Background wizard orchestrator failed processing", e);
+    if (mode === 'wizard' && pid) {
+      const proxmoxActionBody = {
+        username: vmUser || undefined,
+        password: vmPass || undefined,
+        baseUrl: vmUrl || payload.proxmox_url || undefined,
+        verifySSL: payload.proxmox_verify_ssl !== false,
+      };
+      const instanceCount = Math.max(0, parseInt(String(payload.instances || 0), 10) || 0);
+      const templateNames = Array.isArray(payload.vms)
+        ? payload.vms.map(vm => String(vm?.name || '').trim()).filter(Boolean)
+        : [];
+      const targets = [];
+      for (let index = 1; index <= instanceCount; index += 1) {
+        templateNames.forEach(name => {
+          targets.push({ index, name });
+        });
+      }
+      const indices = Array.from({ length: instanceCount }, (_, idx) => idx + 1);
+      const createStartBody = { ...proxmoxActionBody, targets };
+      try {
+        if (wizardRunOptions?.createVms) {
+          wizardSetRunState('Running selected operations...', 'Creating the selected VMs for the new scenario.');
+          await wizardRunTrackedAction(pid, 'vm-create', 'create', () => http('POST', `/api/projects/${pid}/instances/actions/create`, createStartBody));
+        } else if (wizardFindRunItem('vm-create')) {
+          wizardUpdateRunItem('vm-create', { status: 'skipped', progress: 100, detail: 'VM creation was not selected.' });
         }
-      })();
-    }
-
-    // Hide Modal if open
-    const modalEl = document.getElementById('projectWizardModal');
-    if (modalEl) {
-      const modal = bootstrap.Modal.getInstance(modalEl);
-      if (modal) modal.hide();
-    }
-
-    // Clear input
-    try { if (input) input.value = ''; } catch { }
-    
-    // Select the newly created project and refresh views
-    try { if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch { }
-    
-    // Always navigate (or stay) on configuration page so the new project loads expanded
-    try {
-      if (location.pathname !== '/' && location.pathname !== '/index.html') {
-        return location.href = '/';
+        if (wizardRunOptions?.startVms) {
+          wizardSetRunState('Running selected operations...', 'Starting the created VMs.');
+          await wizardRunTrackedAction(pid, 'vm-start', 'start', () => http('POST', `/api/projects/${pid}/instances/actions/start`, createStartBody));
+        } else if (wizardFindRunItem('vm-start')) {
+          wizardUpdateRunItem('vm-start', { status: 'skipped', progress: 100, detail: 'VM start was not selected.' });
+        }
+        if (wizardRunOptions?.syncUsers && templateNames.length > 0 && indices.length > 0) {
+          wizardSetRunState('Running selected operations...', 'Synchronizing the selected user integrations.');
+          await wizardRunTrackedAction(pid, 'user-sync', 'users_access_sync', () => http('POST', `/api/projects/${pid}/instances/actions/users_access_sync`, {
+            ...proxmoxActionBody,
+            templates: templateNames,
+            indices,
+            enable: true,
+          }));
+        } else if (wizardFindRunItem('user-sync')) {
+          wizardUpdateRunItem('user-sync', {
+            status: 'skipped',
+            progress: 100,
+            detail: wizardRunOptions?.syncUsers
+              ? 'No VM templates were available to synchronize.'
+              : 'User synchronization was not selected.'
+          });
+        }
+      } finally {
+        if (window.vmRefresh) setTimeout(() => window.vmRefresh(), 1000);
       }
-    } catch { }
-    
-    await loadProjects(); // already on configuration page
-    try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
+
+      try { await loadProjects(); } catch { }
+      try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
+      wizardFinishQueue(true, 'Wizard run complete.', 'The scenario and all selected operations finished successfully.');
+      if (Array.isArray(wizSelectedTemplates) && wizSelectedTemplates.length > 0) {
+        wizardSetRunState('Wizard run complete.', 'Opening VM Manager and refreshing the new scenario...');
+        scheduleWizardAutoRedirect(1400);
+      }
+      try { showToast('Project created and selected operations completed.', 'success'); } catch { }
+      return;
+    }
+
     try { showToast('Project created.', 'success'); } catch { }
   } catch (e) {
+    if (mode === 'wizard') {
+      const item = wizardFindRunItem('project-create');
+      if (item && item.status === 'running') {
+        wizardUpdateRunItem('project-create', { status: 'error', progress: 100, detail: String(e?.message || e || 'Failed to create scenario') });
+      }
+      try { await loadProjects(); } catch { }
+      try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
+      wizardFinishQueue(false, 'Wizard run stopped.', String(e?.message || e || 'One or more operations failed.'));
+      try { showToast('Wizard run failed: ' + (e?.message || e), 'danger'); } catch { }
+      try { (window.shell && shell.logError) ? shell.logError('Config: create project failed: ' + (e?.message || e)) : console.error('Create project failed:', e); } catch { }
+      return;
+    }
     try { showToast('Failed to create project: ' + (e?.message || e), 'danger'); } catch { }
     try { (window.shell && shell.logError) ? shell.logError('Config: create project failed: ' + (e?.message || e)) : console.error('Create project failed:', e); } catch { }
-    
-    // Hide Modal if open
-    const modalEl = document.getElementById('projectWizardModal');
-    if (modalEl) {
-      const modal = bootstrap.Modal.getInstance(modalEl);
-      if (modal) modal.hide();
-    }
   }
 }
 
@@ -3905,7 +4617,7 @@ async function autoSaveVm(pid, idx) {
   const startCommands = stepsToServerPayload(startSteps);
   const storedSteps = getStoredCommandsFromDom(pid, idx);
   const storedCommands = stepsToServerPayload(storedSteps);
-  const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z]/g, '').slice(0, 8)).filter(Boolean);
+  const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)).filter(Boolean);
   if (userEl && userEl.value.trim() !== '') {
     vm_user = userEl.value.trim();
   }
@@ -4773,7 +5485,7 @@ function renderProjectCard(p) {
             <button id="btn-add-net-${p.id}-${i}" class="btn btn-sm btn-outline-primary" onclick="addListItem('vm-${p.id}-${i}-nets-list','vm-${p.id}-${i}-nets-input')" disabled>Add</button>
           </div>
           <ul class="list-group list-group-sm" id="vm-${p.id}-${i}-nets-list">
-            ${(v.internal_network_adaptors || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx)).join('')}
+            ${(v.internal_network_adaptors || v.internal_network_adapters || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx)).join('')}
           </ul>
         </div>
   <div class="col-12"><div class="small text-muted" id="vm-save-status-${p.id}-${i}"></div></div>
@@ -5585,7 +6297,7 @@ async function addSelectedTemplates() {
   // We will batch sequentially to keep API simple
   const sanitizeAdaptor = (s) => {
     // Letters only, up to 8 chars per UI rules
-    try { return (String(s || '').replace(/[^A-Za-z]/g, '').slice(0, 8)); } catch { return ''; }
+    try { return (String(s || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 16)); } catch { return ''; }
   };
   // collect a mapping from name->sanitized adaptors derived from bridges
   const adaptorByName = {};
@@ -5610,7 +6322,9 @@ async function addSelectedTemplates() {
     try {
       const patch = { vmid };
       if (adaptorByName[name] && adaptorByName[name].length) {
+        // Support both naming variants during patch creation
         patch.internal_network_adaptors = adaptorByName[name];
+        patch.internal_network_adapters = adaptorByName[name];
       }
       await http('PATCH', `/api/projects/${pid}/vms/${encodeURIComponent(name)}`, patch);
     } catch (e) {
@@ -5700,7 +6414,7 @@ function renderInstancesPreview(p) {
   for (let i = 1; i <= inst; i++) {
     const suffix = `${tag}${i}`;
     const names = vms.map(v => `${v.name}${suffix}`);
-    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors || []).map(a => `${a}${suffix}`)));
+    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors || v.internal_network_adapters || []).map(a => `${a}${suffix}`)));
     const st = statusMap.get(i) || {};
     const mgr = st.managers || {};
     const mgrBadges = managers.map(m => badgeForStatus(m, mgr[m])).join(' ');
@@ -5735,7 +6449,7 @@ function onListItemEdit(listId, inputEl) {
   try {
     if (String(listId).includes('-nets-list')) {
       const v = (inputEl.value || '').trim();
-      const valid = /^[A-Za-z]{0,8}$/.test(v); // allow empty while typing
+      const valid = /^[A-Za-z0-9]{0,16}$/.test(v); // allow empty/numeric while typing
       inputEl.classList.toggle('is-invalid', !valid);
       if (!valid) showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger');
     }
@@ -5775,7 +6489,7 @@ function onAdaptorInput(pid, idx, el) {
     const input = el || document.getElementById(`vm-${pid}-${idx}-nets-input`);
     const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
     const v = (input?.value || '').trim();
-    const ok = /^[A-Za-z]{1,8}$/.test(v);
+    const ok = /^[A-Za-z0-9]{1,16}$/.test(v);
     if (input) input.classList.toggle('is-invalid', !ok && v.length > 0);
     if (btn) btn.disabled = !ok;
   } catch { }
@@ -5803,7 +6517,7 @@ function addListItem(listId, inputId) {
   if (!val) return;
   // If this is a nets list, enforce letters-only up to 8
   if (String(listId).includes('-nets-list')) {
-    if (!/^[A-Za-z]{1,8}$/.test(val)) {
+    if (!/^[A-Za-z0-9]{1,16}$/.test(val)) {
       input.classList.add('is-invalid');
       try { showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger'); } catch { alert('Invalid adaptor name: letters only, up to 8 characters.'); }
       return;

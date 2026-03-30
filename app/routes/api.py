@@ -2491,6 +2491,7 @@ def instances_create(pid: str):
 
         if snapshot_tasks:
             _update_job_detail(pid, phase='snapshotting', message=f'Creating post-network snapshots ({len(snapshot_tasks)} VMs)…')
+            snapshot_workers = _pool_workers_for(proj, len(snapshot_tasks))
             def _do_post_snap(item):
                 try:
                     # Timeout matching the original logic (900s)
@@ -2500,7 +2501,7 @@ def instances_create(pid: str):
                 except Exception as e:
                     return f"snapshot failed for {item.get('name')}: {e}"
 
-            with ThreadPoolExecutor(max_workers=len(snapshot_tasks) or 1) as pool:
+            with ThreadPoolExecutor(max_workers=snapshot_workers) as pool:
                 snap_futs = {pool.submit(_do_post_snap, t): t for t in snapshot_tasks}
                 for fut in as_completed(snap_futs):
                     res = fut.result()
@@ -7947,7 +7948,7 @@ def _is_valid_url(url: str) -> bool:
 def _is_valid_adaptor_name(name: str) -> bool:
     # Letters only, 1-8 chars
     try:
-        return bool(re.fullmatch(r"[A-Za-z]{1,8}", str(name or "")))
+        return bool(re.fullmatch(r"[A-Za-z0-9]{1,16}", str(name or "")))
     except Exception:
         return False
 
@@ -8343,6 +8344,7 @@ def create_project():
     "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
     "proxmox_use_linked_clones",
     "instance_statuses",
+    "vms",
     ]:
         if key in data:
             setattr(project, key, data[key])
@@ -8391,7 +8393,7 @@ def update_project(pid: str):
         "guacamole_url", "guacamole_port",
         "keycloak_url", "keycloak_port", "keycloak_nodename",
         "challenge_url", "challenge_port",
-        "instances", "tag", "vnc_start_port", "credentials",
+        "instances", "tag", "vnc_start_port", "credentials", "vms",
         # Advanced Proxmox
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
         "proxmox_qmrestore_path", "proxmox_storage_volume",
@@ -8400,7 +8402,14 @@ def update_project(pid: str):
     "instance_statuses",
     ]:
         if key in data:
-            setattr(proj, key, data[key])
+            if key == "vms" and isinstance(data[key], list):
+                try:
+                    proj.vms = [s._coerce_vm(x) for x in data[key]]
+                except Exception as e:
+                    LOG.error(f"Failed to coerce vms list: {e}")
+                    setattr(proj, key, data[key])
+            else:
+                setattr(proj, key, data[key])
     # Handle associated_projects update with sanitization against known IDs
     if 'associated_projects' in data:
         ap = data.get('associated_projects')
@@ -10965,7 +10974,7 @@ def update_vm(pid: str, name: str):
             bad = [a for a in adaptors if not _is_valid_adaptor_name(a)]
             if bad:
                 return jsonify({
-                    "error": "Invalid adaptor names: letters only, max 8 characters",
+                    "error": "Invalid adaptor names: letters and numbers only, max 16 characters",
                     "invalid": bad,
                 }), 400
     try:

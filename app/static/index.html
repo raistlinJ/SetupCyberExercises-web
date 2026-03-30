@@ -65,6 +65,443 @@
         width: 100%;
       }
     }
+
+    #projectWizardModal {
+      --wiz-modal-max-width: min(980px, 94vw);
+      --wiz-modal-min-height: min(640px, 80vh);
+    }
+
+    #projectWizardModal[data-wiz-layout="choice"] {
+      --wiz-modal-max-width: min(980px, 94vw);
+      --wiz-modal-min-height: min(620px, 76vh);
+    }
+
+    #projectWizardModal[data-wiz-layout="form"] {
+      --wiz-modal-max-width: min(1040px, 95vw);
+      --wiz-modal-min-height: min(650px, 80vh);
+    }
+
+    #projectWizardModal[data-wiz-layout="list"] {
+      --wiz-modal-max-width: min(1260px, 96vw);
+      --wiz-modal-min-height: min(780px, 86vh);
+    }
+
+    #projectWizardModal[data-wiz-layout="graph"] {
+      --wiz-modal-max-width: min(1400px, 96vw);
+      --wiz-modal-min-height: min(920px, 92vh);
+    }
+
+    #projectWizardModal[data-wiz-layout="summary"] {
+      --wiz-modal-max-width: min(980px, 94vw);
+      --wiz-modal-min-height: min(560px, 72vh);
+    }
+
+    #projectWizardModal[data-wiz-layout="loading"] {
+      --wiz-modal-max-width: min(860px, 92vw);
+      --wiz-modal-min-height: min(420px, 54vh);
+    }
+
+    #projectWizardModal .modal-dialog {
+      max-width: var(--wiz-modal-max-width);
+      transition: max-width .18s ease;
+    }
+
+    #projectWizardModal .modal-content {
+      display: flex;
+      flex-direction: column;
+      min-height: var(--wiz-modal-min-height);
+      transition: min-height .18s ease;
+    }
+
+    #projectWizardModal .modal-header,
+    #projectWizardModal .modal-body,
+    #projectWizardModal .modal-footer {
+      font-size: 1.04rem;
+    }
+
+    #projectWizardModal .modal-body {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #projectWizardModal [id^="wiz-step-"] {
+      width: 100%;
+    }
+
+    #projectWizardModal #wiz-step-loading {
+      flex: 1 1 auto;
+      min-height: 280px;
+    }
+
+    #projectWizardModal .wiz-run-shell {
+      width: min(960px, 100%);
+      margin: 0 auto;
+    }
+
+    #projectWizardModal .wiz-run-progress {
+      height: 0.9rem;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+
+    #projectWizardModal .wiz-run-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #0d6efd 0%, #3aa0ff 100%);
+      transition: width 0.2s ease;
+    }
+
+    #projectWizardModal #wiz-run-status {
+      min-height: 1.5rem;
+    }
+
+    #projectWizardModal #wiz-run-queue {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      width: 100%;
+      max-height: 340px;
+      overflow-y: auto;
+      padding-right: 0.25rem;
+    }
+
+    #projectWizardModal .wiz-run-item {
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      border-radius: 0.85rem;
+      background: rgba(255, 255, 255, 0.94);
+      color: #000;
+      padding: 0.9rem 1rem;
+    }
+
+    #projectWizardModal .wiz-run-item--running {
+      border-color: rgba(13, 110, 253, 0.35);
+      box-shadow: 0 0 0 1px rgba(13, 110, 253, 0.08);
+    }
+
+    #projectWizardModal .wiz-run-item--success {
+      border-color: rgba(25, 135, 84, 0.28);
+    }
+
+    #projectWizardModal .wiz-run-item--error {
+      border-color: rgba(220, 53, 69, 0.3);
+    }
+
+    #projectWizardModal .wiz-run-item--skipped {
+      border-color: rgba(108, 117, 125, 0.22);
+      background: rgba(248, 249, 250, 0.96);
+    }
+
+    #projectWizardModal .wiz-run-item-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    #projectWizardModal .wiz-run-item-label {
+      font-weight: 700;
+      color: #000;
+    }
+
+    #projectWizardModal .wiz-run-item-detail {
+      margin-top: 0.4rem;
+      color: #000;
+      word-break: break-word;
+    }
+
+    #projectWizardModal .wiz-run-item-summary {
+      margin-top: 0.45rem;
+      color: #000;
+      word-break: break-word;
+    }
+
+    #projectWizardModal .wiz-run-item-issues {
+      list-style: none;
+      margin: 0.7rem 0 0;
+      padding: 0;
+    }
+
+    #projectWizardModal .wiz-run-item-issues li + li {
+      margin-top: 0.55rem;
+    }
+
+    #projectWizardModal .wiz-run-item-issues-label {
+      margin-top: 0.7rem;
+      font-size: 0.78rem !important;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #842029;
+    }
+
+    #projectWizardModal .wiz-run-issue {
+      border-radius: 0.75rem;
+      background: rgba(220, 53, 69, 0.06);
+      border: 1px solid rgba(220, 53, 69, 0.14);
+      padding: 0.7rem 0.85rem;
+    }
+
+    #projectWizardModal .wiz-run-issue-title {
+      font-weight: 700;
+      color: #842029;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    #projectWizardModal .wiz-run-issue-body {
+      margin-top: 0.2rem;
+      color: #842029;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    #projectWizardModal .wiz-run-item-more {
+      margin-top: 0.45rem;
+      color: #000;
+      font-style: italic;
+    }
+
+    #projectWizardModal .wiz-run-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 6.25rem;
+      padding: 0.3rem 0.65rem;
+      border-radius: 999px;
+      font-size: 0.78rem !important;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    #projectWizardModal .wiz-run-badge--pending {
+      background: rgba(108, 117, 125, 0.14);
+      color: #5c636a;
+    }
+
+    #projectWizardModal .wiz-run-badge--running {
+      background: rgba(13, 110, 253, 0.14);
+      color: #0a58ca;
+    }
+
+    #projectWizardModal .wiz-run-badge--success {
+      background: rgba(25, 135, 84, 0.14);
+      color: #146c43;
+    }
+
+    #projectWizardModal .wiz-run-badge--error {
+      background: rgba(220, 53, 69, 0.14);
+      color: #b02a37;
+    }
+
+    #projectWizardModal .wiz-run-badge--skipped {
+      background: rgba(108, 117, 125, 0.14);
+      color: #5c636a;
+    }
+
+    #projectWizardModal .modal-title {
+      font-size: 1.45rem;
+    }
+
+    #projectWizardModal .form-label,
+    #projectWizardModal .form-check-label,
+    #projectWizardModal .text-muted,
+    #projectWizardModal .small,
+    #projectWizardModal small {
+      font-size: 0.98rem !important;
+    }
+
+    #projectWizardModal .form-control,
+    #projectWizardModal .form-select,
+    #projectWizardModal .input-group-text,
+    #projectWizardModal .btn {
+      font-size: 1rem;
+    }
+
+    #projectWizardModal .form-control,
+    #projectWizardModal .form-select {
+      min-height: 2.9rem;
+    }
+
+    #projectWizardModal .form-check-input {
+      width: 1.15rem;
+      height: 1.15rem;
+      margin-top: 0.18rem;
+    }
+
+    #projectWizardModal #wiz-step-indicator {
+      font-size: 0.95rem;
+      padding: 0.5rem 0.8rem;
+    }
+
+    #projectWizardModal #wiz-footer .btn {
+      min-width: 8.5rem;
+      min-height: 3rem;
+    }
+
+    #projectWizardModal #wiz-step-0 .card-body {
+      padding: 2rem !important;
+    }
+
+    #projectWizardModal #wiz-step-1 .mx-auto,
+    #projectWizardModal #wiz-step-2 .mx-auto,
+    #projectWizardModal #wiz-step-3 .mx-auto,
+    #projectWizardModal #wiz-step-5 .mx-auto {
+      width: min(1120px, 100%);
+      max-width: none !important;
+    }
+
+    #projectWizardModal #wiz-step-3,
+    #projectWizardModal #wiz-step-4 {
+      flex: 1 1 auto;
+    }
+
+    #projectWizardModal #wiz-step-3 .mx-auto {
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
+    }
+
+    #projectWizardModal #wiz-templates-list {
+      flex: 1 1 auto;
+      min-height: 460px;
+      max-height: none !important;
+      overflow-y: auto;
+    }
+
+    #projectWizardModal #wiz-templates-list .alert {
+      font-size: 1rem;
+      padding: 0.9rem 1rem !important;
+    }
+
+    #projectWizardModal #wiz-templates-list table {
+      font-size: 1.05rem;
+    }
+
+    #projectWizardModal #wiz-templates-list .table > :not(caption) > * > * {
+      padding: 0.9rem 0.8rem;
+    }
+
+    #projectWizardModal #wiz-templates-list .form-check-input {
+      transform: scale(1.12);
+    }
+
+    #projectWizardModal #wiz-step-4 .mx-auto {
+      max-width: 1180px !important;
+    }
+
+    #projectWizardModal #wiz-net-canvas {
+      height: 560px;
+    }
+
+    #projectWizardModal #wiz-net-legend {
+      font-size: 0.95rem !important;
+      max-width: calc(100% - 1rem);
+      color: #000;
+    }
+
+    #projectWizardModal #wiz-net-legend *,
+    #projectWizardModal #wiz-net-legend .text-muted {
+      color: #000 !important;
+    }
+
+    #projectWizardModal #wiz-vm-settings-panel {
+      width: 290px !important;
+    }
+
+    #projectWizardModal .wiz-vm-summary {
+      border: 1px solid var(--bs-border-color);
+      border-radius: 0.75rem;
+      background: rgba(255,255,255,0.78);
+      color: #000;
+      overflow: hidden;
+    }
+
+    #projectWizardModal .wiz-vm-summary-row {
+      display: grid;
+      grid-template-columns: minmax(96px, 108px) minmax(0, 1fr);
+      gap: 0.75rem;
+      padding: 0.85rem 0.95rem;
+      align-items: start;
+      border-top: 1px solid rgba(0,0,0,0.06);
+    }
+
+    #projectWizardModal .wiz-vm-summary-row:first-child {
+      border-top: 0;
+    }
+
+    #projectWizardModal .wiz-vm-summary-label {
+      font-size: 0.88rem !important;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #000;
+      line-height: 1.35;
+    }
+
+    #projectWizardModal .wiz-vm-summary-value {
+      min-width: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #000;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    #projectWizardModal .wiz-vm-summary-value--muted {
+      color: #000;
+      font-weight: 500;
+    }
+
+    #projectWizardModal .wiz-vm-summary .form-check-label,
+    #projectWizardModal #wiz-vm-settings-title,
+    #projectWizardModal #wiz-vm-settings-hint {
+      color: #000;
+    }
+
+    #projectWizardModal #wiz-vm-set-nets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+    }
+
+    #projectWizardModal .wiz-net-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.24rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(13,110,253,0.12);
+      color: #0d6efd;
+      font-size: 0.94rem;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    @media (max-width: 991.98px) {
+      #projectWizardModal .modal-dialog {
+        max-width: 98vw;
+        margin: 0.5rem auto;
+      }
+
+      #projectWizardModal .modal-content {
+        min-height: auto;
+      }
+
+      #projectWizardModal #wiz-step-4 .d-flex.gap-3 {
+        flex-direction: column;
+      }
+
+      #projectWizardModal #wiz-vm-settings-panel {
+        width: 100% !important;
+      }
+
+      #projectWizardModal #wiz-net-canvas {
+        height: 460px;
+      }
+    }
   </style>
 </head>
 
@@ -609,155 +1046,201 @@
     aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
       <div class="modal-content">
-        <div class="modal-header">
-          <h1 class="modal-title fs-5" id="projectWizardModalLabel">Create New Scenario</h1>
+        <div class="modal-header d-flex flex-column align-items-stretch">
+          <div class="d-flex align-items-center justify-content-between">
+            <h1 class="modal-title fs-5" id="projectWizardModalLabel">Create New Scenario</h1>
+            <span id="wiz-step-indicator" class="badge rounded-pill bg-primary border d-none small">Step 1 of 5</span>
+          </div>
+          <div id="wiz-progress-container" class="progress mt-2 d-none" style="height: 6px;">
+            <div id="wiz-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+              role="progressbar" style="width: 0%"></div>
+          </div>
         </div>
-        <div class="modal-body" style="min-height: 250px;">
+        <div class="modal-body bg-light-subtle">
           <!-- Step 0: Choice -->
-          <div id="wiz-step-0">
-            <p>How would you like to configure this scenario?</p>
-            <div class="d-flex flex-column gap-2 mt-4">
-              <button type="button" class="btn btn-primary" onclick="wizardGotoStep(1)">Wizard Setup</button>
-              <button type="button" class="btn btn-outline-primary" onclick="submitProjectCreation('manual')">Manual
-                Configuration</button>
-              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <div id="wiz-step-0" class="h-100 d-flex flex-column align-items-center justify-content-center py-5">
+            <div class="text-center mb-5">
+              <h2 class="fw-bold">Configuration Setup</h2>
+              <p class="text-muted">How would you like to set up your new scenario?</p>
             </div>
+
+            <div class="row g-4 justify-content-center w-100" style="max-width: 800px;">
+              <div class="col-md-6">
+                <div class="card h-100 border-primary-subtle shadow-sm hover-elevate" role="button"
+                  onclick="wizardGotoStep(1)">
+                  <div class="card-body text-center p-4">
+                    <div class="display-6 text-primary mb-3">🪄</div>
+                    <h5 class="card-title fw-bold">Wizard Setup</h5>
+                    <p class="card-text text-muted small">Step-by-step assistant to configure capacity, integrations,
+                      and network topology.</p>
+                    <button type="button" class="btn btn-primary w-100 mt-2">Start Wizard</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-md-6">
+                <div class="card h-100 border-secondary-subtle shadow-sm hover-elevate" role="button"
+                  onclick="submitProjectCreation('manual')">
+                  <div class="card-body text-center p-4">
+                    <div class="display-6 text-secondary mb-3">⚙️</div>
+                    <h5 class="card-title fw-bold">Manual Configuration</h5>
+                    <p class="card-text text-muted small">Create an empty scenario and configure all settings manually
+                      from the dashboard.</p>
+                    <button type="button" class="btn btn-outline-secondary w-100 mt-2">Manual Setup</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <button type="button" class="btn btn-link text-muted mt-5" data-bs-dismiss="modal">Cancel and Go
+              Back</button>
           </div>
           <!-- Step 1: Basics & Features -->
           <div id="wiz-step-1" class="d-none">
-            <h5>Configuration Basics</h5>
-            <p class="text-muted small">Let's set up the capacity and scope.</p>
+            <div class="mx-auto" style="max-width: 1120px;">
+              <h5>Configuration Basics</h5>
+              <p class="text-muted small">Let's set up the capacity and scope.</p>
 
-            <div class="mb-3 mt-3">
-              <label class="form-label fw-bold mb-1">Capacity Configuration <span class="text-danger">*</span></label>
-              <div class="form-check d-flex align-items-center mb-2">
-                <input class="form-check-input mt-0 me-2" type="radio" name="wiz-cap-mode" id="wiz-cap-mode-num"
-                  value="num" checked onchange="window.toggleWizCapMode && window.toggleWizCapMode()">
-                <label class="form-check-label small mb-0 me-2" style="white-space: nowrap;"
-                  for="wiz-cap-mode-num">Specify Number of Clones/Users</label>
-                <input type="number" class="form-control form-control-sm d-inline-block w-auto" style="max-width: 80px;"
-                  id="wiz-users" min="1" value="1" required>
-              </div>
-              <div class="form-check d-flex align-items-center mb-2">
-                <input class="form-check-input mt-0 me-2" type="radio" name="wiz-cap-mode" id="wiz-cap-mode-csv"
-                  value="csv" onchange="window.toggleWizCapMode && window.toggleWizCapMode()">
-                <label class="form-check-label small mb-0" for="wiz-cap-mode-csv">Upload Username/Password CSV</label>
+              <div class="mb-3 mt-3">
+                <label class="form-label fw-bold mb-1">Capacity Configuration <span class="text-danger">*</span></label>
+                <div class="form-check d-flex align-items-center mb-2">
+                  <input class="form-check-input mt-0 me-2" type="radio" name="wiz-cap-mode" id="wiz-cap-mode-num"
+                    value="num" checked onchange="window.toggleWizCapMode && window.toggleWizCapMode()">
+                  <label class="form-check-label small mb-0 me-2" style="white-space: nowrap;"
+                    for="wiz-cap-mode-num">Specify Number of Clones/Users</label>
+                  <input type="number" class="form-control form-control-sm d-inline-block w-auto"
+                    style="max-width: 120px;" id="wiz-users" min="1" value="1" required>
+                </div>
+                <div class="form-check d-flex align-items-center mb-2">
+                  <input class="form-check-input mt-0 me-2" type="radio" name="wiz-cap-mode" id="wiz-cap-mode-csv"
+                    value="csv" onchange="window.toggleWizCapMode && window.toggleWizCapMode()">
+                  <label class="form-check-label small mb-0" for="wiz-cap-mode-csv">Upload Username/Password CSV</label>
+                </div>
+
+                <div class="ms-4 mt-1 d-none" id="wiz-cap-csv-container">
+                  <input type="file" class="form-control form-control-sm w-100" id="wiz-csv-file" accept=".csv"
+                    onchange="window.checkWizCsvFile && window.checkWizCsvFile()">
+                  <small id="wiz-csv-feedback" class="text-muted d-block mt-1" style="font-size: 0.75rem;">CSV should
+                    not
+                    have a header row. Format: username,password</small>
+                </div>
               </div>
 
-              <div class="ms-4 mt-1 d-none" id="wiz-cap-csv-container">
-                <input type="file" class="form-control form-control-sm w-75" id="wiz-csv-file" accept=".csv"
-                  onchange="window.checkWizCsvFile && window.checkWizCsvFile()">
-                <small id="wiz-csv-feedback" class="text-muted d-block mt-1" style="font-size: 0.75rem;">CSV should not
-                  have a header row. Format: username,password</small>
+              <hr>
+
+              <div class="mb-2">
+                <label class="form-label fw-bold mb-1">Managed Integrations</label>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" id="wiz-feat-vm" checked>
+                  <label class="form-check-label small" for="wiz-feat-vm">VM Management (Proxmox)</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" id="wiz-feat-ctfd">
+                  <label class="form-check-label small" for="wiz-feat-ctfd">CTFd Management</label>
+                </div>
+              </div>
+
+              <hr>
+
+              <div class="mb-3">
+                <label for="wiz-scenario-tag" class="form-label fw-bold mb-0">Scenario Tag</label>
+                <p class="text-muted mb-2" style="font-size: 0.75rem;">A unique identifier for this scenario's
+                  resources. Use only letters and dashes. Leave blank to auto-generate.</p>
+                <input type="text" class="form-control form-control-sm w-100" style="max-width: 360px;" id="wiz-scenario-tag"
+                  placeholder="e.g. my-scenario" pattern="^[a-zA-Z-]+$"
+                  oninput="this.value=this.value.replace(/[^a-zA-Z-]/g,'')">
               </div>
             </div>
+          </div> <!-- end Step 1 -->
 
-            <hr>
-
-            <div class="mb-2">
-              <label class="form-label fw-bold mb-1">Managed Integrations</label>
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="wiz-feat-vm" checked>
-                <label class="form-check-label small" for="wiz-feat-vm">VM Management (Proxmox)</label>
-              </div>
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="wiz-feat-ctfd">
-                <label class="form-check-label small" for="wiz-feat-ctfd">CTFd Management</label>
-              </div>
-            </div>
-
-            <hr>
-
-            <div class="mb-3">
-              <label for="wiz-scenario-tag" class="form-label fw-bold mb-0">Scenario Tag</label>
-              <p class="text-muted mb-2" style="font-size: 0.75rem;">A unique identifier for this scenario's resources. Use only letters and dashes. Leave blank to auto-generate.</p>
-              <input type="text" class="form-control form-control-sm w-50" id="wiz-scenario-tag" 
-                placeholder="e.g. my-scenario" pattern="^[a-zA-Z-]+$"
-                oninput="this.value=this.value.replace(/[^a-zA-Z-]/g,'')">
-            </div>
-          </div>
           <!-- Step 2: Credentials -->
           <div id="wiz-step-2" class="d-none">
-            <h5>Integration Credentials</h5>
-            <p class="text-muted small">Provide the credentials for your selected integrations.</p>
-            <div id="wiz-creds-vm" class="mb-3">
-              <h6 class="border-bottom pb-1 border-secondary">Proxmox Integration</h6>
-              <div class="mb-2">
-                <label for="wiz-proxmox-url" class="form-label small text-muted mb-0">URL (e.g.
-                  https://192.168.1.10:8006)</label>
-                <input type="url" class="form-control form-control-sm" id="wiz-proxmox-url"
-                  placeholder="https://192.168.1.100:8006">
+            <div class="mx-auto" style="max-width: 1040px;">
+              <h5>Integration Credentials</h5>
+              <p class="text-muted small">Provide the credentials for your selected integrations.</p>
+              <div id="wiz-creds-vm" class="mb-3">
+                <h6 class="border-bottom pb-1 border-secondary">Proxmox Integration</h6>
+                <div class="mb-2">
+                  <label for="wiz-proxmox-url" class="form-label small text-muted mb-0">URL (e.g.
+                    https://192.168.1.10:8006)</label>
+                  <input type="url" class="form-control form-control-sm" id="wiz-proxmox-url"
+                    placeholder="https://192.168.1.100:8006">
+                </div>
+                <div class="mb-2">
+                  <label for="wiz-proxmox-user" class="form-label small text-muted mb-0">Username</label>
+                  <input type="text" class="form-control form-control-sm" id="wiz-proxmox-user" placeholder="root@pam">
+                </div>
+                <div class="mb-2">
+                  <label for="wiz-proxmox-pass" class="form-label small text-muted mb-0">Password</label>
+                  <input type="password" class="form-control form-control-sm" id="wiz-proxmox-pass">
+                </div>
+                <div class="mb-2">
+                  <label for="wiz-proxmox-node" class="form-label small text-muted mb-0">Node Name (Optional)</label>
+                  <input type="text" class="form-control form-control-sm" id="wiz-proxmox-node">
+                </div>
+                <div class="form-check mt-2 mb-2">
+                  <input class="form-check-input" type="checkbox" id="wiz-proxmox-verify" checked>
+                  <label class="form-check-label small text-muted" for="wiz-proxmox-verify">Verify SSL Certs</label>
+                </div>
               </div>
-              <div class="mb-2">
-                <label for="wiz-proxmox-user" class="form-label small text-muted mb-0">Username</label>
-                <input type="text" class="form-control form-control-sm" id="wiz-proxmox-user" placeholder="root@pam">
-              </div>
-              <div class="mb-2">
-                <label for="wiz-proxmox-pass" class="form-label small text-muted mb-0">Password</label>
-                <input type="password" class="form-control form-control-sm" id="wiz-proxmox-pass">
-              </div>
-              <div class="mb-2">
-                <label for="wiz-proxmox-node" class="form-label small text-muted mb-0">Node Name (Optional)</label>
-                <input type="text" class="form-control form-control-sm" id="wiz-proxmox-node">
-              </div>
-              <div class="form-check mt-2 mb-2">
-                <input class="form-check-input" type="checkbox" id="wiz-proxmox-verify" checked>
-                <label class="form-check-label small text-muted" for="wiz-proxmox-verify">Verify SSL Certs</label>
-              </div>
-            </div>
-            <div id="wiz-creds-ctfd" class="mb-3 d-none">
-              <h6 class="border-bottom pb-1 border-secondary mt-3">CTFd Integration</h6>
-              <div class="mb-2">
-                <label for="wiz-ctfd-url" class="form-label small text-muted mb-0">URL (e.g. https://ctfd.local)</label>
-                <input type="url" class="form-control form-control-sm" id="wiz-ctfd-url"
-                  placeholder="https://ctfd.local">
-              </div>
-              <div class="mb-2">
-                <label for="wiz-ctfd-token" class="form-label small text-muted mb-0">Admin Access Token</label>
-                <input type="password" class="form-control form-control-sm" id="wiz-ctfd-token">
-              </div>
-              <div class="form-check mt-2 mb-2">
-                <input class="form-check-input" type="checkbox" id="wiz-ctfd-verify" checked>
-                <label class="form-check-label small text-muted" for="wiz-ctfd-verify">Verify SSL Certs</label>
+              <div id="wiz-creds-ctfd" class="mb-3 d-none">
+                <h6 class="border-bottom pb-1 border-secondary mt-3">CTFd Integration</h6>
+                <div class="mb-2">
+                  <label for="wiz-ctfd-url" class="form-label small text-muted mb-0">URL (e.g.
+                    https://ctfd.local)</label>
+                  <input type="url" class="form-control form-control-sm" id="wiz-ctfd-url"
+                    placeholder="https://ctfd.local">
+                </div>
+                <div class="mb-2">
+                  <label for="wiz-ctfd-token" class="form-label small text-muted mb-0">Admin Access Token</label>
+                  <input type="password" class="form-control form-control-sm" id="wiz-ctfd-token">
+                </div>
+                <div class="form-check mt-2 mb-2">
+                  <input class="form-check-input" type="checkbox" id="wiz-ctfd-verify" checked>
+                  <label class="form-check-label small text-muted" for="wiz-ctfd-verify">Verify SSL Certs</label>
+                </div>
               </div>
             </div>
           </div>
           <!-- Step 3: Template Selection -->
           <div id="wiz-step-3" class="d-none">
-            <h5>Select Source Templates</h5>
-            <p class="text-muted small">Select the Proxmox templates to use for your scenario.</p>
-            <div id="wiz-templates-list" class="list-group list-group-sm mb-3"
-              style="max-height: 250px; overflow-y: auto;">
-              <!-- Populated via JS -->
+            <div class="mx-auto h-100" style="max-width: 1120px;">
+              <h5>Select Source Templates</h5>
+              <p class="text-muted small">Select the Proxmox templates to use for your scenario (Step 3 of 5).</p>
+              <div id="wiz-templates-list" class="list-group list-group-sm mb-3"
+                style="overflow-y: auto;">
+                <!-- Populated via JS -->
+              </div>
             </div>
-          </div>
+          </div> <!-- end Step 3 -->
+
           <!-- Step 4: Template Configuration -->
-          <div id="wiz-step-4" class="d-none">
+        <div id="wiz-step-4" class="d-none">
+          <div class="mx-auto" style="max-width: 1180px;">
             <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
               <h5 class="mb-0">Configure VM Connections</h5>
               <div class="d-flex align-items-center gap-2 ms-2">
                 <label class="form-label small mb-0 text-muted text-nowrap">
                   Basename:
                   <input type="text" class="form-control form-control-sm d-inline-block ms-1" id="wiz-adapter-base"
-                    value="net" style="width:70px;"
-                    title="Letters only — all adapters will be renamed to basename+N"
+                    value="net" style="width:100px;" title="Letters only — all adapters will be renamed to basename+N"
                     oninput="this.value=this.value.replace(/[^a-zA-Z]/g,'')"
                     onblur="window.wizRenameAdapterBase && window.wizRenameAdapterBase(this.value)">
                 </label>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="wiz-base-toggle"
                   title="Apply basename to all adapters (letters only, e.g. net, vmbr, eth)"
                   onclick="window.wizRenameAdapterBase && window.wizRenameAdapterBase(document.getElementById('wiz-adapter-base').value)">
-                  Change Adapter Basenames
+                  Update Adapter Basenames
                 </button>
               </div>
             </div>
             <p class="text-muted small">Click a VM, then drag to another to connect them on the same network adapter.
               Click a connection to remove it. Right-click a VM to rename it or toggle user access.</p>
-            <div class="d-flex gap-3" style="min-height: 400px;">
+            <div class="d-flex gap-3" style="min-height: 560px;">
               <!-- Network Topology Canvas -->
               <div class="position-relative flex-grow-1"
-                style="min-width: 0; border: 1px solid var(--bs-border-color); border-radius: 6px; background: var(--bs-body-bg);">
-                <svg id="wiz-net-canvas" width="100%" height="420" style="display:block; cursor:default;">
+                style="min-width: 0; border: 1px solid var(--bs-border-color); border-radius: 6px; background: #d9dee6;">
+                <svg id="wiz-net-canvas" width="100%" height="560" style="display:block; cursor:default; background:#d9dee6;">
                   <defs>
                     <marker id="wiz-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
                       <path d="M0,0 L0,6 L8,3 z" fill="#6c757d" />
@@ -769,73 +1252,133 @@
                     stroke-dasharray="6,3" style="display:none; pointer-events:none;" />
                 </svg>
                 <!-- Adapter legend -->
-                <div id="wiz-net-legend" class="position-absolute bottom-0 start-0 p-2" style="font-size:0.7rem;"></div>
+                <div id="wiz-net-legend" class="position-absolute bottom-0 start-0 p-3" style="font-size:0.95rem;"></div>
               </div>
               <!-- Per-VM settings panel -->
-              <div id="wiz-vm-settings-panel" style="width:220px; flex-shrink:0; overflow-y:auto;">
+              <div id="wiz-vm-settings-panel" style="width:290px; flex-shrink:0; overflow-y:auto;">
                 <div class="text-muted small text-center pt-5" id="wiz-vm-settings-hint">Click a VM node to edit its
                   settings.</div>
                 <div id="wiz-vm-settings-form" class="d-none">
-                  <h6 class="fw-bold mb-2" id="wiz-vm-settings-title"></h6>
-                  <div class="mb-2 form-check">
-                    <input class="form-check-input" type="checkbox" id="wiz-vm-set-acc">
-                    <label class="form-check-label small" for="wiz-vm-set-acc">User Accessible</label>
+                  <h6 class="fw-bold mb-3" id="wiz-vm-settings-title">Selected VM</h6>
+                  <div class="wiz-vm-summary">
+                    <div class="wiz-vm-summary-row">
+                      <div class="wiz-vm-summary-label">VM</div>
+                      <div class="wiz-vm-summary-value" id="wiz-vm-set-name">–</div>
+                    </div>
+                    <div class="wiz-vm-summary-row">
+                      <div class="wiz-vm-summary-label">User Accessible</div>
+                      <div class="wiz-vm-summary-value">
+                        <div class="form-check mb-0">
+                          <input class="form-check-input" type="checkbox" id="wiz-vm-set-acc">
+                          <label class="form-check-label" for="wiz-vm-set-acc" id="wiz-vm-set-acc-label">Enabled</label>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="wiz-vm-summary-row">
+                      <div class="wiz-vm-summary-label">Adapters</div>
+                      <div id="wiz-vm-set-nets" class="wiz-vm-summary-value wiz-vm-summary-value--muted">–</div>
+                    </div>
                   </div>
-                  <div class="mb-2">
-                    <label class="form-label small text-muted mb-0">Adapters</label>
-                    <div id="wiz-vm-set-nets" class="small text-muted" style="word-break:break-all;">–</div>
-                  </div>
-                  <button class="btn btn-sm btn-outline-danger w-100 mt-1"
-                    onclick="window.wizVmSettingsClear && window.wizVmSettingsClear()">Deselect</button>
                 </div>
               </div>
             </div>
           </div>
+        </div> <!-- end Step 4 -->
+
           <!-- Step 5: Post-Creation Actions -->
           <div id="wiz-step-5" class="d-none">
-            <h5>Scenario Orchestration</h5>
-            <p class="text-muted small">Select which actions should automatically execute upon creation.</p>
+            <div class="mx-auto" style="max-width: 1040px;">
+              <h5>Final Scenario Orchestration</h5>
+              <p class="text-muted small">Setup is almost complete. Choose which actions to automatically execute (Step
+                5 of 5).</p>
 
-            <div id="wiz-act-vm" class="mb-3">
-              <h6 class="border-bottom pb-1 border-secondary">Proxmox Lifecycle</h6>
-              <div class="form-check mb-1">
-                <input class="form-check-input" type="checkbox" id="wiz-act-vm-create" checked
-                  onchange="window.wizToggleVmActions && window.wizToggleVmActions()">
-                <label class="form-check-label small" for="wiz-act-vm-create">Create VMs (Clone Templates)</label>
-              </div>
-              <div class="ms-4" id="wiz-act-vm-deps">
+              <div id="wiz-act-vm" class="mb-3">
+                <h6 class="border-bottom pb-1 border-secondary">Proxmox Lifecycle</h6>
                 <div class="form-check mb-1">
-                  <input class="form-check-input" type="checkbox" id="wiz-act-vm-start" checked>
-                  <label class="form-check-label small" for="wiz-act-vm-start">Start VMs (Power On)</label>
+                  <input class="form-check-input" type="checkbox" id="wiz-act-vm-create" checked
+                    onchange="window.wizToggleVmActions && window.wizToggleVmActions()">
+                  <label class="form-check-label small" for="wiz-act-vm-create">Create VMs (Clone Templates)</label>
                 </div>
+                <div class="ms-4" id="wiz-act-vm-deps">
+                  <div class="form-check mb-1">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-start" checked>
+                    <label class="form-check-label small" for="wiz-act-vm-start">Start VMs (Power On)</label>
+                  </div>
+                  <div class="form-check mb-1">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-users" checked>
+                    <label class="form-check-label small" for="wiz-act-vm-users">Create & Sync External Users</label>
+                  </div>
+                </div>
+              </div>
+
+              <div id="wiz-act-ctfd" class="mb-3 d-none">
+                <h6 class="border-bottom pb-1 border-secondary">CTFd Lifecycle</h6>
                 <div class="form-check mb-1">
-                  <input class="form-check-input" type="checkbox" id="wiz-act-vm-users" checked>
-                  <label class="form-check-label small" for="wiz-act-vm-users">Create & Sync External Users</label>
+                  <input class="form-check-input" type="checkbox" id="wiz-act-ctfd-users" checked>
+                  <label class="form-check-label small" for="wiz-act-ctfd-users">Create & Sync CTFd Users</label>
                 </div>
               </div>
             </div>
+          </div> <!-- end Step 5 -->
 
-            <div id="wiz-act-ctfd" class="mb-3 d-none">
-              <h6 class="border-bottom pb-1 border-secondary">CTFd Lifecycle</h6>
-              <div class="form-check mb-1">
-                <input class="form-check-input" type="checkbox" id="wiz-act-ctfd-users" checked>
-                <label class="form-check-label small" for="wiz-act-ctfd-users">Create & Sync CTFd Users</label>
-              </div>
-            </div>
-          </div>
           <!-- Step Loading -->
-          <div id="wiz-step-loading" class="d-none text-center pt-5">
-            <div class="spinner-border text-primary" role="status">
-              <span class="visually-hidden">Loading...</span>
+          <div id="wiz-step-loading"
+            class="d-none h-100 d-flex flex-column align-items-center justify-content-center py-5">
+            <div class="wiz-run-shell d-flex flex-column align-items-stretch gap-3">
+              <div class="d-flex flex-column align-items-center text-center gap-2">
+                <div id="wiz-loading-spinner" class="spinner-border text-primary" style="width: 3rem; height: 3rem;" role="status">
+                  <span class="visually-hidden">Loading...</span>
+                </div>
+                <h5 class="mt-2 fw-bold mb-0" id="wiz-loading-text">Creating scenario...</h5>
+                <p class="text-muted small mb-0" id="wiz-loading-subtext">This may take a few moments...</p>
+              </div>
+              <div class="wiz-run-progress" aria-hidden="true">
+                <div id="wiz-run-progress-bar" class="wiz-run-progress-bar"></div>
+              </div>
+              <div id="wiz-run-status" class="small text-muted text-center"></div>
+              <div id="wiz-run-queue" class="w-100"></div>
+              <div class="d-flex justify-content-center">
+                <button type="button" id="wiz-btn-close-after-run" class="btn btn-primary d-none" onclick="window.finishWizardRun && window.finishWizardRun()">Close</button>
+              </div>
             </div>
-            <p class="mt-2 text-muted" id="wiz-loading-text">Creating scenario...</p>
           </div>
-        </div>
+        </div> <!-- end Modal Body -->
+
         <div class="modal-footer" id="wiz-footer">
           <button type="button" class="btn btn-secondary" onclick="wizardBack()" id="wiz-btn-back">Back</button>
           <button type="button" class="btn btn-outline-danger ms-auto" data-bs-dismiss="modal"
             onclick="resetWizard()">Cancel</button>
           <button type="button" class="btn btn-primary" onclick="wizardNext()" id="wiz-btn-next">Next</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="wizardTemplateCredsModal" tabindex="-1" aria-labelledby="wizardTemplateCredsModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h1 class="modal-title fs-5" id="wizardTemplateCredsModalLabel">VM Credentials</h1>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3">Credentials stored here are saved into this VM's configuration and later appear on its Configuration card.</p>
+          <div class="mb-3">
+            <label class="form-label small text-muted mb-1">Template</label>
+            <div class="fw-semibold" id="wiz-template-creds-name">-</div>
+          </div>
+          <div class="mb-3">
+            <label for="wiz-template-creds-user" class="form-label small text-muted mb-1">VM Username</label>
+            <input type="text" class="form-control form-control-sm" id="wiz-template-creds-user" autocomplete="off">
+          </div>
+          <div class="mb-0">
+            <label for="wiz-template-creds-pass" class="form-label small text-muted mb-1">VM Password</label>
+            <input type="password" class="form-control form-control-sm" id="wiz-template-creds-pass" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" onclick="window.saveWizardTemplateCreds && window.saveWizardTemplateCreds()">Save</button>
         </div>
       </div>
     </div>

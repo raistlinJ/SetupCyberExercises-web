@@ -4228,6 +4228,7 @@ async function ctfdLoadProjectConfig(pid) {
     } catch { }
     // Render table; most meta columns will show 'n/a' as intended
     renderCtfdTable(PROJ);
+    try { await hydrateCtfdCredsFromPersisted(PROJ.id); } catch { }
     updateCtfdControlsEnabled();
     ctfdRestoreSkippedIndicator();
   } catch (e) { try { shell.logError(`CTFd config load failed: ${e?.message || e}`); } catch { } }
@@ -4362,7 +4363,7 @@ async function ctfdLoadProjectById(pid) {
     const creds = Array.isArray(PROJ.credentials) ? PROJ.credentials : [];
     const usernames = creds.map(c => String(c?.username || '').trim()).filter(Boolean);
     const total = usernames.length;
-    const sess = readCtfdCreds(PROJ.id) || {};
+    const sess = await hydrateCtfdCredsFromPersisted(PROJ.id);
     const hasValidatedAuth = !!(sess?.validated && (sess.token || (sess.username && sess.password)));
     if (!hasValidatedAuth) {
       try { shell?.logInfo?.(`CTFd: skipping state refresh for ${PROJ.name || PROJ.id}; credentials not validated.`); } catch { }
@@ -4505,7 +4506,7 @@ async function ctfdPreflightPids(pids) {
     const missing = []; const invalid = [];
     for (const pid of pids) {
       const proj = byId[String(pid)] || null; if (!proj) { invalid.push(String(pid)); continue; }
-      const sess = readCtfdCreds(String(pid)) || {};
+      const sess = await hydrateCtfdCredsFromPersisted(String(pid));
       const url = (proj.challenge_url || '').trim();
       if (!url) invalid.push(String(pid));
       if (!(sess && (sess.token || (sess.username && sess.password)) && sess.validated)) missing.push(String(pid));
@@ -4724,6 +4725,7 @@ async function ctfdRefresh() {
       try { shell.logWarn('CTFd refresh skipped: no project selected.'); } catch { }
       return;
     }
+    await hydrateCtfdCredsFromPersisted(target);
     await ctfdLoadProjectById(target);
   } catch (e) { console.error('CTFd refresh failed', e); }
 }
@@ -4834,7 +4836,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     function key() { try { return `toolhub.ctfd.mgr.auto.${PROJ ? PROJ.id : 'none'}`; } catch { return 'toolhub.ctfd.mgr.auto.none'; } }
     function readAuto() { try { const v = sessionStorage.getItem(key()); return parseInt(v || '0', 10) || 0; } catch { return 0; } }
     function writeAuto(v) { try { sessionStorage.setItem(key(), String(v || 0)); } catch { } }
-    function hasAuth() { try { const s = PROJ ? readCtfdCreds(PROJ.id) : {}; return !!(PROJ && s?.validated && (s.token || (s.username && s.password))); } catch { return false; } }
+    function hasAuth() {
+      try {
+        if (!PROJ) return false;
+        const s = readCtfdCreds(PROJ.id) || {};
+        const persistedToken = readPersistedCtfdToken(PROJ.id);
+        return !!((((s?.validated || !!persistedToken) && (s.token || (s.username && s.password))) || persistedToken));
+      } catch {
+        return false;
+      }
+    }
     function busy() {
       try {
         const wrap = document.getElementById('ctfd-progress');
@@ -5149,6 +5160,30 @@ function confirmCtfdDownload() {
 // --- CTFd session creds management ---
 function ctfdCredKey(pid) { return `toolhub.session.ctfd.${pid}`; }
 function readCtfdCreds(pid) { try { return JSON.parse(sessionStorage.getItem(ctfdCredKey(pid)) || '{}'); } catch { return {}; } }
+function readPersistedCtfdToken(pid) {
+  try {
+    const credsApi = window.CREDS;
+    if (!credsApi?.readPersistCtfdToken) return '';
+    return String(credsApi.readPersistCtfdToken(pid) || '').trim();
+  } catch {
+    return '';
+  }
+}
+async function hydrateCtfdCredsFromPersisted(pid, options) {
+  const opts = options || {};
+  const projectId = String(pid || '').trim();
+  if (!projectId) return readCtfdCreds(projectId);
+  let sess = readCtfdCreds(projectId) || {};
+  if (sess?.token) return sess;
+  try {
+    if (!opts.skipFetch) await window.CREDS?.fetchProjectSecrets?.(projectId);
+  } catch { }
+  const token = readPersistedCtfdToken(projectId);
+  if (!token) return sess;
+  sess = { ...sess, token, validated: true };
+  writeCtfdCreds(projectId, sess);
+  return sess;
+}
 function writeCtfdCreds(pid, obj) {
   try {
     sessionStorage.setItem(ctfdCredKey(pid), JSON.stringify({
@@ -5187,12 +5222,12 @@ function updateCtfdControlsEnabled() {
   const dlBtn = document.getElementById('ctfd-download');
   const activePid = PROJ?.id !== undefined ? PROJ.id : ctfdCurrentPid();
   const sess = activePid ? readCtfdCreds(activePid) : {};
-  // Only enable controls when credentials have been validated
-  const hasAuth = !!(activePid && sess?.validated && ((sess?.username && sess?.password) || sess?.token));
+  const persistedToken = activePid ? readPersistedCtfdToken(activePid) : '';
+  const hasAuth = !!(activePid && (((sess?.validated || !!persistedToken) && ((sess?.username && sess?.password) || sess?.token)) || persistedToken));
   const singleReady = !!PROJ && hasAuth;
   const multi = Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
   if (btnLogin) {
-    btnLogin.setAttribute('title', multi ? 'Update CTFd creds for all selected projects' : 'Set CTFd URL/port and token');
+    btnLogin.setAttribute('title', multi ? 'Update CTFd creds for all selected projects' : 'Update CTFd URL/port and token');
   }
   // Refresh is allowed in multi mode (we'll preflight per-pid) or when single-project auth is valid
   const refreshEnabled = (multi || hasAuth);
