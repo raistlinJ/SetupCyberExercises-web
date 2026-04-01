@@ -265,6 +265,11 @@
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_perms')"
                       title="Set user permissions for selected VMs">Set User
                       Perms</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_creds_check')"
+                      title="Audit selected users for password, pool, and VM access drift">Check Credential
+                      Sync</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_creds_set')"
+                      title="Set selected Proxmox users, pools, memberships, and VM access to match the current credential list">Set Credentials to Current List</button></li>
                   <li>
                     <hr class="dropdown-divider" />
                   </li>

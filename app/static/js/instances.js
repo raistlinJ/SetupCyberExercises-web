@@ -81,28 +81,6 @@ async function refreshInstances() {
 function renderTable(proj) {
   const host = document.getElementById('instances-table');
   if (!proj) { host.innerHTML = ''; return; }
-  const alphaSuffix = (value) => {
-    let num = Number(value);
-    if (!Number.isFinite(num)) num = 1;
-    num = Math.max(1, Math.trunc(num)) - 1;
-    let out = '';
-    while (true) {
-      const rem = num % 26;
-      out = String.fromCharCode(65 + rem) + out;
-      num = Math.floor(num / 26);
-      if (num === 0) break;
-      num -= 1;
-    }
-    return out;
-  };
-  const normalizeAdaptor = (value) => String(value || '').replace(/[0-9]/g, (digit) => 'ABCDEFGHIJ'[Number(digit)] || '').replace(/[^A-Za-z]/g, '').slice(0, 8);
-  const expectedAdaptorName = (value, idx) => {
-    const base = normalizeAdaptor(value);
-    const suffix = alphaSuffix(idx);
-    let name = base ? `${base}${suffix}` : `br${suffix}`;
-    if (name.length > 15) name = name.slice(0, 15);
-    return name;
-  };
   const inst = Number(proj.instances || 0);
   const tag = String(proj.tag || '');
   const vms = proj.vms || [];
@@ -112,7 +90,7 @@ function renderTable(proj) {
   for (let i = 1; i <= inst; i++) {
     const suffix = `${tag}${i}`;
     const names = vms.map(v => `${v.name}${suffix}`);
-    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors||[]).map(a => expectedAdaptorName(a, i))));
+  const adaptors = (vms.flatMap(v => (v.internal_network_adaptors||[]).map(a => `${String(a||'')}${suffix}`)));
     const st = statusMap.get(i) || {};
     const mgr = st.managers || {};
     const mgrBadges = ['vm','guacamole','pools','keycloak','rocketchat','ctfd'].map(m => badgeForStatus(m, mgr[m])).join(' ');

@@ -3,7 +3,6 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 from app import create_app
-from app.routes.api import _is_valid_adaptor_name
 from app.storage.projects import Project, VMConfig
 
 
@@ -40,7 +39,7 @@ class NetsSetRemoveApiTests(unittest.TestCase):
 
     def test_nets_set_idempotent_and_applies_network_once(self):
         existing_cfg = {
-            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=labA,firewall=1',
+            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=lab1,firewall=1',
             'net1': 'e1000=11:22:33:44:55:66,bridge=wrong,firewall=1',
             'net2': 'virtio=DE:AD:BE:EF:00:01,bridge=extra0',
         }
@@ -53,7 +52,7 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             prox = MagicMock()
             prox_cls.return_value = prox
 
-            prox.list_network.return_value = [{'iface': 'labA'}]
+            prox.list_network.return_value = [{'iface': 'lab1'}]
             prox.get_qemu_config.return_value = existing_cfg
 
             resp = self.client.post(
@@ -72,7 +71,7 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertEqual(len(updated), 1)
 
             # Missing bridge should be created, and networking reloaded once per node after the batch.
-            prox.create_bridge.assert_called_with(node='node1', iface='dmzA', autostart=True, ports=None, comments='Auto-created (nets_set batch)')
+            prox.create_bridge.assert_called_with(node='node1', iface='dmz1', autostart=True, ports=None, comments='Auto-created (nets_set batch)')
             prox.reload_network.assert_called_once_with('node1')
 
             # net0 already matches (model + bridge); net1 corrected and net2 deleted.
@@ -82,14 +81,14 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertEqual(options.get('delete'), 'net2')
             self.assertNotIn('net0', options)
             self.assertIn('net1', options)
-            self.assertIn('bridge=dmzA', options['net1'])
+            self.assertIn('bridge=dmz1', options['net1'])
             self.assertTrue(options['net1'].startswith('e1000='), options['net1'])
             self.assertIn('firewall=1', options['net1'])
 
     def test_nets_remove_deletes_all_net_keys(self):
         existing_cfg = {
-            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=labA',
-            'net1': 'e1000=11:22:33:44:55:66,bridge=dmzA',
+            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=lab1',
+            'net1': 'e1000=11:22:33:44:55:66,bridge=dmz1',
         }
 
         with ExitStack() as stack:
@@ -122,12 +121,6 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertEqual(kwargs.get('node'), 'node1')
             self.assertEqual(kwargs.get('vmid'), 101)
             self.assertCountEqual(kwargs.get('keys') or [], ['net0', 'net1'])
-
-    def test_adaptor_names_allow_letters_only(self):
-        self.assertTrue(_is_valid_adaptor_name('lab'))
-        self.assertTrue(_is_valid_adaptor_name('DMZ'))
-        self.assertFalse(_is_valid_adaptor_name('lab1'))
-        self.assertFalse(_is_valid_adaptor_name('abcdefghi'))
 
     def test_unlock_calls_proxmox_unlock_for_selected_vm(self):
         with ExitStack() as stack:

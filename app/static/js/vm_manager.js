@@ -1349,22 +1349,11 @@ async function vmRefresh(opts) {
 function _vmExpectedBridgeName(adaptorLabel, idx) {
   try {
     const base = String(adaptorLabel || '').replace(/[^A-Za-z]/g, '').slice(0, 8);
-    let n = Number(idx);
-    if (!Number.isFinite(n)) n = 1;
-    n = Math.max(1, Math.trunc(n)) - 1;
-    let suffix = '';
-    while (true) {
-      const rem = n % 26;
-      suffix = String.fromCharCode(65 + rem) + suffix;
-      n = Math.floor(n / 26);
-      if (n === 0) break;
-      n -= 1;
-    }
-    let name = base ? `${base}${suffix}` : `br${suffix}`;
+    let name = base ? `${base}${idx}` : `br${idx}`;
     if (name.length > 15) name = name.slice(0, 15);
     return name;
   } catch {
-    return 'brA';
+    return `br${idx}`;
   }
 }
 
@@ -1525,6 +1514,7 @@ function emitActionLogs(actionName, resp) {
     const deletedUsers = Array.isArray(resp?.deleted_users) ? resp.deleted_users : [];
     const deletedPools = Array.isArray(resp?.deleted_pools) ? resp.deleted_pools : [];
     const updatedUsers = Array.isArray(resp?.updated_users) ? resp.updated_users : [];
+    const checkedCreds = Array.isArray(resp?.checked) ? resp.checked : [];
     const notices = Array.isArray(resp?.notices) ? resp.notices : [];
     const infos = Array.isArray(resp?.infos) ? resp.infos : [];
     const applied = Array.isArray(resp?.applied) ? resp.applied : [];
@@ -1558,6 +1548,13 @@ function emitActionLogs(actionName, resp) {
     if (deletedUsers.length) deletedUsers.forEach(i => { try { shell.logSuccess(`${name}: user deleted ${i?.userid || ''}`); } catch { } });
     if (deletedPools.length) deletedPools.forEach(i => { try { shell.logSuccess(`${name}: pool deleted ${i?.pool || ''}${i?.index ? ` (instance ${i.index})` : ''}`); } catch { } });
     if (updatedUsers.length) updatedUsers.forEach(i => { try { shell.logSuccess(`${name}: user updated ${i?.userid || ''}`); } catch { } });
+    if (checkedCreds.length) checkedCreds.forEach(i => {
+      try {
+        const status = String(i?.status || '') === 'ok' ? 'in sync' : (i?.reason || 'drift');
+        const access = i?.expected_access ? ` expected=${i.expected_access}` : '';
+        shell.logInfo(`${name}: credential check ${i?.userid || ''}${i?.name ? ` for ${i.name}` : ''} — ${status}${access}`);
+      } catch { }
+    });
     if (infos.length) infos.forEach(n => { try { shell.logInfo(`${name}: info — ${n?.reason || n}`); } catch { } });
     if (applied.length) applied.forEach(a => {
       try {
@@ -2729,6 +2726,69 @@ function getActionableSelections() {
   return [];
 }
 
+function countExplicitActionTargets(opts = {}) {
+  try {
+    if (Array.isArray(opts.targets) && opts.targets.length) return opts.targets.length;
+    const byPid = opts.targetsByPid;
+    if (byPid && typeof byPid === 'object') {
+      return Object.values(byPid).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
+    }
+  } catch { }
+  return 0;
+}
+
+function explicitActionProjectCount(opts = {}) {
+  try {
+    const byPid = opts.targetsByPid;
+    if (byPid && typeof byPid === 'object') {
+      return Object.keys(byPid).filter(pid => Array.isArray(byPid[pid]) && byPid[pid].length).length;
+    }
+  } catch { }
+  return 0;
+}
+
+function buildCredsSetConfirmationMessage(opts = {}) {
+  const explicitCount = countExplicitActionTargets(opts);
+  const targetCount = explicitCount || getActionableSelections().length;
+  const projectCount = explicitActionProjectCount(opts);
+  const rowLabel = `${targetCount} row${targetCount === 1 ? '' : 's'}`;
+  const projectLabel = projectCount > 1 ? ` across ${projectCount} projects` : '';
+  return `This will create or update Proxmox users, reset passwords to the current credential list, ensure pools and memberships, and reconcile VM access for ${rowLabel}${projectLabel}. Continue?`;
+}
+
+function deriveCredsRepairTargetsFromChecked(checked) {
+  const rows = Array.isArray(checked) ? checked : [];
+  const drift = rows.filter(item => String(item?.status || '') !== 'ok');
+  if (!drift.length) return null;
+  const hasProjectDimension = drift.some(item => item && typeof item === 'object' && item.project);
+  if (hasProjectDimension) {
+    const out = {};
+    drift.forEach(item => {
+      const pid = String(item?.project || '').trim();
+      if (!pid) return;
+      const rawName = String(item?.name || '').trim();
+      const cleanName = rawName.replace(/^\[[^\]]+\]\s+/, '');
+      const index = Number(item?.index);
+      if (!Number.isFinite(index) || !cleanName) return;
+      if (!Array.isArray(out[pid])) out[pid] = [];
+      if (!out[pid].some(entry => Number(entry?.index) === index && String(entry?.name || '') === cleanName)) {
+        out[pid].push({ index, name: cleanName });
+      }
+    });
+    return Object.keys(out).length ? { targetsByPid: out, count: drift.length } : null;
+  }
+  const targets = [];
+  drift.forEach(item => {
+    const name = String(item?.name || '').trim();
+    const index = Number(item?.index);
+    if (!Number.isFinite(index) || !name) return;
+    if (!targets.some(entry => Number(entry?.index) === index && String(entry?.name || '') === name)) {
+      targets.push({ index, name });
+    }
+  });
+  return targets.length ? { targets, count: drift.length } : null;
+}
+
 function friendlyActionName(action) {
   const map = {
     unlock: 'Unlock',
@@ -2742,6 +2802,8 @@ function friendlyActionName(action) {
     users_create: 'Create Users',
     users_delete: 'Delete Users',
     users_perms: 'Set User Perms',
+    users_creds_check: 'Check Credential Sync',
+    users_creds_set: 'Set Credentials to Current List',
     users_access_enable: 'Enable User Accessibility',
     users_access_disable: 'Disable User Accessibility',
   };
@@ -3977,6 +4039,10 @@ function interpretStoredCommandSelection(value) {
 // Dispatch VM actions (queued wrapper)
 async function vmAction(action, opts) {
   const options = opts ? { ...opts } : {};
+  if (action === 'users_creds_set') {
+    const confirmed = window.confirm(buildCredsSetConfirmationMessage(options));
+    if (!confirmed) return;
+  }
   if (action === 'run_stored_cmds') {
     const initial = interpretStoredCommandSelection(options.selectedCommands || options.selectedCommand);
     let selectedCommands = initial.commands;
@@ -3995,8 +4061,8 @@ async function vmAction(action, opts) {
       delete options.storedCommandOverrides;
     }
   }
-  const multi = (vmIsMulti && vmIsMulti());
-  const selCount = getActionableSelections().length;
+  const multi = (vmIsMulti && vmIsMulti()) || !!(options && options.targetsByPid);
+  const selCount = countExplicitActionTargets(options) || getActionableSelections().length;
   const labelName = friendlyActionName(action) || action;
   const commandSuffix = (() => {
     const cmds = Array.isArray(options.selectedCommands) ? options.selectedCommands : [];
@@ -4012,9 +4078,11 @@ async function vmAction(action, opts) {
 
 // Original implementation moved to vmActionExec
 async function vmActionExec(action, opts = {}) {
-  if (vmIsMulti && vmIsMulti()) { return vmActionMultiExec(action, opts); }
+  if ((vmIsMulti && vmIsMulti()) || !!opts.targetsByPid) { return vmActionMultiExec(action, opts); }
   if (!PROJ) { alert('Select a project first.'); return; }
-  const selected = listSelectedEntriesForPid(PROJ.id);
+  const selected = Array.isArray(opts.targets) && opts.targets.length
+    ? opts.targets.map(entry => ({ index: Number(entry.index), name: String(entry.name || '') })).filter(entry => Number.isFinite(entry.index) && entry.name)
+    : listSelectedEntriesForPid(PROJ.id);
   if (!selected.length) { alert('Select at least one VM row in this project.'); return; }
 
   // Configuration-only actions: toggle whether VM templates are user-accessible.
@@ -4345,10 +4413,16 @@ async function vmActionExec(action, opts = {}) {
       try { shell.endActionContext(true); } catch { }
       return;
     }
-    if (action === 'users_create' || action === 'users_delete' || action === 'users_perms') {
-      try { shell.beginActionContext(action === 'users_create' ? 'Users Create' : action === 'users_delete' ? 'Users Delete' : 'Set User Perms'); } catch { }
+    if (action === 'users_create' || action === 'users_delete' || action === 'users_perms' || action === 'users_creds_check' || action === 'users_creds_set') {
+      const actionTitle = friendlyActionName(action) || action;
+      try { shell.beginActionContext(actionTitle); } catch { }
       const setProg = (pct, text, detail) => setAp(pct, text, detail);
-      setProg(10, 'Preparing…', `${action === 'users_create' ? 'Creating' : action === 'users_delete' ? 'Deleting' : 'Updating'} user/pool…`);
+      const actionVerb = action === 'users_create'
+        ? 'Creating'
+        : (action === 'users_delete'
+          ? 'Deleting'
+          : (action === 'users_creds_check' ? 'Checking' : (action === 'users_creds_set' ? 'Syncing' : 'Updating')));
+      setProg(10, 'Preparing…', `${actionVerb} user/pool state…`);
       const sess = readProxCreds(PROJ.id) || {};
       // Reuse precomputed targets from the current selection
       try { shell.step('Submitting user action'); } catch { }
@@ -4361,9 +4435,21 @@ async function vmActionExec(action, opts = {}) {
         targets,
       });
       try { shell.step('User action response'); } catch { }
-      setProg(100, 'Done', `${action === 'users_create' ? 'Created/updated' : action === 'users_delete' ? 'Deleted' : 'Updated'} user/pool`);
-      try { showActionSummary(action === 'users_create' ? 'Users Create' : action === 'users_delete' ? 'Users Delete' : 'Set User Perms', resp || {}); } catch { }
-      try { emitActionLogs(action === 'users_create' ? 'Users Create' : action === 'users_delete' ? 'Users Delete' : 'Set User Perms', resp || {}); } catch { }
+      const checkedCount = Array.isArray(resp?.checked) ? resp.checked.length : 0;
+      const driftCount = Array.isArray(resp?.checked) ? resp.checked.filter(item => String(item?.status || '') !== 'ok').length : 0;
+      const syncedCount = (Array.isArray(resp?.created_users) ? resp.created_users.length : 0) + (Array.isArray(resp?.updated_users) ? resp.updated_users.length : 0);
+      const doneText = action === 'users_create'
+        ? 'Created/updated user/pool'
+        : (action === 'users_delete'
+          ? 'Deleted user/pool'
+          : (action === 'users_creds_check'
+            ? `Checked ${checkedCount} row(s)${driftCount ? `, ${driftCount} drift` : ''}`
+            : (action === 'users_creds_set'
+              ? `Synced ${syncedCount} user row(s)`
+              : 'Updated user/pool')));
+      setProg(100, 'Done', doneText);
+      try { showActionSummary(actionTitle, resp || {}); } catch { }
+      try { emitActionLogs(actionTitle, resp || {}); } catch { }
       try { shell.endActionContext(true); } catch { }
       return;
     }
@@ -4626,7 +4712,21 @@ async function vmActionMulti(action, opts) {
 // Original implementation moved to vmActionMultiExec
 async function vmActionMultiExec(action, opts = {}) {
   try { shell.beginActionContext(`Multi ${friendlyActionName(action) || action}`); } catch { }
-  const selected = listSelectedEntries();
+  const selected = (() => {
+    if (opts.targetsByPid && typeof opts.targetsByPid === 'object') {
+      const out = [];
+      Object.entries(opts.targetsByPid).forEach(([pid, arr]) => {
+        (Array.isArray(arr) ? arr : []).forEach(entry => {
+          const index = Number(entry?.index);
+          const name = String(entry?.name || '');
+          if (!pid || !Number.isFinite(index) || !name) return;
+          out.push({ pid, pidCanonical: canonicalPid(pid), index, name });
+        });
+      });
+      return out;
+    }
+    return listSelectedEntries();
+  })();
   if (!selected.length) { alert('Select at least one VM row.'); return; }
   // Group selections by project id
   const byPid = new Map();
@@ -4981,10 +5081,16 @@ async function vmActionMultiExec(action, opts = {}) {
         ['skipped', 'errors', 'notices', 'network_applied_nodes', 'network_apply_errors'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
-      if (action === 'users_create' || action === 'users_delete' || action === 'users_perms') {
-        setAp(Math.max(20, pct), 'Working…', `${action === 'users_create' ? 'Creating' : action === 'users_delete' ? 'Deleting' : 'Updating'} users in ${projName}…`);
+      if (action === 'users_create' || action === 'users_delete' || action === 'users_perms' || action === 'users_creds_check' || action === 'users_creds_set') {
+        const actionVerb = action === 'users_create'
+          ? 'Creating'
+          : (action === 'users_delete'
+            ? 'Deleting'
+            : (action === 'users_creds_check' ? 'Checking' : (action === 'users_creds_set' ? 'Syncing' : 'Updating')));
+        setAp(Math.max(20, pct), 'Working…', `${actionVerb} users in ${projName}…`);
         const resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
         ['created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'updated_users', 'skipped', 'errors', 'notices'].forEach(k => addArr(k, resp[k], projName));
+        addArr('checked', resp?.checked, projName);
         continue;
       }
       if (action === 'apply_scenario') {
@@ -5273,6 +5379,10 @@ function showActionSummary(actionName, resp) {
     const infos = Array.isArray(resp.infos) ? resp.infos : [];
     const appliedPerms = Array.isArray(resp.applied) ? resp.applied : [];
     const unchangedPerms = Array.isArray(resp.unchanged) ? resp.unchanged : [];
+    const checkedCreds = Array.isArray(resp.checked) ? resp.checked : [];
+    const credsRepairPlan = /check credential sync/i.test(String(actionName || ''))
+      ? deriveCredsRepairTargetsFromChecked(checkedCreds)
+      : null;
     const isUserAccess = /user accessibility/i.test(String(actionName || '')) || ((resp && typeof resp.enable === 'boolean') && (appliedPerms.length || unchangedPerms.length));
     const isNetInterfacesAction = /network interfaces/i.test(String(actionName || ''));
     // Historically, ACL-related items were filtered out to keep other action summaries tidy.
@@ -5350,6 +5460,17 @@ function showActionSummary(actionName, resp) {
     if (deletedUsers.length) sections.push(`<h6>Users Deleted</h6>${list(deletedUsers, i => `<li>${esc(i.userid || '')}</li>`)}`);
     if (deletedPools.length) sections.push(`<h6>Pools Deleted</h6>${list(deletedPools, i => `<li>${esc(i.pool || '')} ${i.index ? `(instance ${esc(i.index)})` : ''}</li>`)}`);
     if (updatedUsers.length) sections.push(`<h6>Users Updated</h6>${list(updatedUsers, i => `<li>${esc(i.userid || '')}</li>`)}`);
+    if (checkedCreds.length) sections.push(`<h6>Credential Sync</h6>${list(checkedCreds, i => {
+      const details = [];
+      if (typeof i.user_exists === 'boolean') details.push(`user ${i.user_exists ? 'ok' : 'missing'}`);
+      if (typeof i.password_verified === 'boolean') details.push(`password ${i.password_verified ? 'ok' : 'failed'}`);
+      else if (i.password_verified === null) details.push('password n/a');
+      if (typeof i.pool_exists === 'boolean') details.push(`pool ${i.pool_exists ? 'ok' : 'missing'}`);
+      if (typeof i.pool_member === 'boolean') details.push(`member ${i.pool_member ? 'ok' : 'missing'}`);
+      if (i.expected_access) details.push(`expected ${i.expected_access}`);
+      if (Array.isArray(i.actual_roles) && i.actual_roles.length) details.push(`actual ${i.actual_roles.join(', ')}`);
+      return `<li>${esc(i.name || i.userid || i.index || '')} ${i.vmid ? `(#${esc(i.vmid)})` : ''} — <strong class="${String(i.status || '') === 'ok' ? 'text-success' : 'text-warning'}">${esc(i.status || 'checked')}</strong> — ${esc(i.reason || '')}${details.length ? `<div class="text-muted">${esc(details.join(' · '))}</div>` : ''}</li>`;
+    })}`);
     const netSkipIcon = (s) => {
       try {
         if (!isNetInterfacesAction) return '';
@@ -5484,6 +5605,8 @@ function showActionSummary(actionName, resp) {
       deletedUsers.length ? `${deletedUsers.length} user(s) deleted` : null,
       deletedPools.length ? `${deletedPools.length} pool(s) deleted` : null,
       updatedUsers.length ? `${updatedUsers.length} user(s) updated` : null,
+      checkedCreds.length ? `${checkedCreds.length} checked` : null,
+      checkedCreds.filter(i => String(i?.status || '') !== 'ok').length ? `${checkedCreds.filter(i => String(i?.status || '') !== 'ok').length} drift` : null,
       netsUpdated.length ? `${netsUpdated.length} network assigned` : null,
       netsCleared.length ? `${netsCleared.length} network removed` : null,
       appliedNodes.length ? `network applied on ${appliedNodes.length} node(s)` : null,
@@ -5492,6 +5615,35 @@ function showActionSummary(actionName, resp) {
 
     const contentSections = leadSections.concat(sections);
     body.innerHTML = `<div class="mb-2 text-muted">${esc(summaryCounts || 'No changes')}</div>${contentSections.join('\n') || '<div class="text-muted small">No results to display.</div>'}`;
+    if (credsRepairPlan && (credsRepairPlan.count || 0) > 0) {
+      const actionWrap = document.createElement('div');
+      actionWrap.className = 'mt-3 pt-2 border-top d-flex flex-column gap-2';
+      const note = document.createElement('div');
+      note.className = 'small text-muted';
+      note.textContent = `Found drift on ${credsRepairPlan.count} row${credsRepairPlan.count === 1 ? '' : 's'}. You can apply the current credential list to just those rows.`;
+      actionWrap.appendChild(note);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-sm btn-outline-primary align-self-start';
+      btn.textContent = 'Repair Drifted Rows';
+      btn.addEventListener('click', () => {
+        try {
+          const modalEl = document.getElementById('actionSummaryModal');
+          if (modalEl && window.bootstrap) {
+            const bs = bootstrap.Modal.getOrCreateInstance(modalEl);
+            bs.hide();
+          }
+        } catch { }
+        const payload = credsRepairPlan.targetsByPid
+          ? { targetsByPid: credsRepairPlan.targetsByPid }
+          : { targets: credsRepairPlan.targets || [] };
+        Promise.resolve().then(() => vmAction('users_creds_set', payload)).catch(err => {
+          try { alert(`Credential repair failed: ${err?.message || err}`); } catch { }
+        });
+      });
+      actionWrap.appendChild(btn);
+      body.appendChild(actionWrap);
+    }
     const modalEl = document.getElementById('actionSummaryModal');
     if (outputsZipInfo) {
       try {

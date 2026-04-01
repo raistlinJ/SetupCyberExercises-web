@@ -671,6 +671,25 @@ class ProxmoxClient:
             raise RuntimeError(f"Proxmox delete user error {r.status_code}: {r.text}")
         return True
 
+    def update_user(self, userid: str, password: Optional[str] = None, enable: Optional[bool] = None, expire: Optional[int] = None, comment: Optional[str] = None):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/users/{requests.utils.quote(userid, safe='')}"
+        data: Dict[str, Any] = {}
+        if password is not None:
+            data['password'] = password
+        if enable is not None:
+            data['enable'] = 1 if enable else 0
+        if expire is not None:
+            data['expire'] = int(expire)
+        if comment is not None:
+            data['comment'] = comment
+        r = s.put(url, data=data, timeout=30)
+        if r.status_code in (405, 501):
+            r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox update user error {r.status_code}: {r.text}")
+        return True
+
     def get_role(self, roleid: str) -> Optional[Dict[str, Any]]:
         s = self._ensure_session()
         url = f"{self.base_url.rstrip('/')}/api2/json/access/roles/{requests.utils.quote(roleid, safe='')}"

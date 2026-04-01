@@ -156,38 +156,6 @@ def _safe_sleep(sec: float):
             time.sleep(sec)
     except Exception:
         pass
-
-
-def _alpha_suffix(value: Any, one_based: bool = True) -> str:
-    try:
-        num = int(value)
-    except Exception:
-        num = 1 if one_based else 0
-    if one_based:
-        num = max(1, num) - 1
-    else:
-        num = max(0, num)
-    chars: List[str] = []
-    while True:
-        num, rem = divmod(num, 26)
-        chars.append(chr(ord('A') + rem))
-        if num == 0:
-            break
-        num -= 1
-    return ''.join(reversed(chars))
-
-
-def _expected_bridge_name(adaptor_name: Any, idx: Any) -> str:
-    try:
-        base = re.sub(r"[^A-Za-z]", "", str(adaptor_name or ""))[:8]
-        suffix = _alpha_suffix(idx, one_based=True)
-        name = f"{base}{suffix}" if base else f"br{suffix}"
-        if len(name) > 15:
-            name = name[:15]
-        return name or f"br{suffix}"
-    except Exception:
-        suffix = _alpha_suffix(idx, one_based=True)
-        return f"br{suffix}"
 # ...existing code...
 AGEING_LOCK = threading.Lock()
 AGEING_APPLIED = {}  # key: node -> set of bridge names ensured in interfaces.new
@@ -1404,18 +1372,13 @@ def instances_refresh_vm(pid: str):
                 ks = str(k)
                 if not ks.startswith('net'):
                     continue
-                try:
-                    raw = str(v or '')
-                    bridge_match = re.search(r'(?:^|,)bridge=([^,]+)', raw)
-                    bridge = bridge_match.group(1) if bridge_match else ''
-                    model = ''
-                    model_match = re.match(r'([^=]+)=', raw)
-                    if model_match:
-                        model = model_match.group(1)
-                    label = model or bridge or ''
-                    nets.append(f"{ks}({label})" if label else ks)
-                except Exception:
-                    nets.append(ks)
+                label = ''
+                if isinstance(v, str):
+                    parts = [p.strip() for p in v.split(',') if p]
+                    name = next((p.split('=',1)[1] for p in parts if p.startswith('name=')), '')
+                    bridge = next((p.split('=',1)[1] for p in parts if p.startswith('bridge=')), '')
+                    label = name or bridge or ''
+                nets.append(f"{ks}({label})" if label else ks)
         except Exception:
             pass
         return nets
@@ -1427,6 +1390,7 @@ def instances_refresh_vm(pid: str):
         entry = current.get(i) or { 'index': i, 'created': False, 'managers': {} }
         mgrs = entry.get('managers') or {}
         names = expected[i]
+        # Pre-compute per-instance userid/poolid for access reporting
         userid = None
         poolid = None
         try:
@@ -1439,14 +1403,17 @@ def instances_refresh_vm(pid: str):
         except Exception:
             userid = None
             poolid = None
-
+        # Mark created if all expected VM names exist; partial -> pending
         count = 0
         found_details = []
         for spec in names:
+            # Match clones by their expected name; do NOT match by configured template VMID
             matched = None
+            spec_vmid = spec.get('vmid')
             spec_name = spec.get('name')
             matched = name_map.get(spec_name)
             canon_name = spec_name
+            # Fallback: case-insensitive match on VM name
             if not matched and spec_name:
                 lc = lower_name_to_canon.get(str(spec_name).lower())
                 if lc:
@@ -1459,23 +1426,25 @@ def instances_refresh_vm(pid: str):
                 nets = []
                 tmpl_id = None
                 tmpl_name = ''
-                cfg = {}
-                pool_val = ''
                 try:
                     if node and vmid is not None:
                         cfg = prefetched_vm_configs.get((str(node), int(vmid))) or {}
                         nets = _extract_nets(cfg)
                         pool_val = str(cfg.get('pool') or '').strip() if isinstance(cfg, dict) else ''
+                        # Try to detect clone template from disk config (best-effort)
                         try:
                             if cfg.get('template'):
                                 tmpl_id = vmid
                                 tmpl_name = str(name_map.get(canon_name, {}).get('name', ''))
                             else:
+                                # Detect base template from disk config. Note: these prefixes refer to DISK device keys
+                                # (virtio/scsi/ide/sata), not NIC models. NIC default model is handled elsewhere and set to e1000.
                                 for ck, cv in (cfg or {}).items():
                                     cks = str(ck)
                                     if not any(cks.startswith(p) for p in ('virtio', 'scsi', 'ide', 'sata')):
                                         continue
                                     if isinstance(cv, str) and 'base=' in cv:
+                                        # Look for base=vm-<id>-disk
                                         m = re.search(r"base=vm-(\d+)-disk", cv)
                                         if m:
                                             try:
@@ -1484,8 +1453,10 @@ def instances_refresh_vm(pid: str):
                                                 break
                                             except Exception:
                                                 pass
+                                # If we didn't detect from config (full clone), use configured expectation
                                 if tmpl_id is None and tmpl_name == '':
                                     try:
+                                        # Find spec for this detail
                                         if spec_name:
                                             for sp in names:
                                                 if sp.get('name') == spec_name:
@@ -1493,6 +1464,7 @@ def instances_refresh_vm(pid: str):
                                                         tmpl_id = int(sp['vmid'])
                                                         tmpl_name = id_map.get(tmpl_id, '') or ''
                                                     else:
+                                                        # Use configured base name (strip tag+index suffix from spec_name)
                                                         try:
                                                             base_tn = spec_name
                                                             suf = f"{tag_clean}{i}"
@@ -1500,7 +1472,7 @@ def instances_refresh_vm(pid: str):
                                                                 base_tn = base_tn[:len(base_tn)-len(suf)]
                                                             tmpl_name = base_tn or ''
                                                         except Exception:
-                                                            tmpl_name = spec_name or ''
+                                                            tmpl_name = (spec_name or '')
                                                     break
                                     except Exception:
                                         pass
@@ -1522,9 +1494,9 @@ def instances_refresh_vm(pid: str):
                     'lock': str(cfg.get('lock') or '').strip() if isinstance(cfg, dict) else '',
                     'description': str(cfg.get('description') or '').strip() if isinstance(cfg, dict) else '',
                     'pool': pool_val,
+                    # Effective access for the instance user (credential username)
                     'user_access': _effective_user_access(userid, int(vmid), poolid) if (userid and vmid is not None) else None,
                 })
-
         if count == len(names) and len(names) > 0:
             mgrs['vm'] = 'created'
             entry['created'] = True
@@ -1535,9 +1507,12 @@ def instances_refresh_vm(pid: str):
             mgrs['vm'] = 'missing'
             entry['created'] = False
         entry['managers'] = mgrs
-        entry['preview_vm_names'] = [(sp.get('name') or f"#{sp.get('vmid')}") for sp in names]
+        # For preview, show names we expect (fall back to vmid if name absent)
+        entry['preview_vm_names'] = [ (sp.get('name') or f"#{sp.get('vmid')}") for sp in names ]
         entry['vm_details'] = found_details
+        # Determine pools status and membership completeness for this instance based on credential username
         try:
+            # Reuse computed poolid above where possible
             if poolid is None:
                 creds = list(getattr(proj, 'credentials', []) or [])
                 urec = creds[i-1] if i-1 < len(creds) else None
@@ -1550,9 +1525,15 @@ def instances_refresh_vm(pid: str):
                     else:
                         pool_exists = bool(client.get_pool(poolid) is not None)
                     mgrs['pools'] = 'ready' if pool_exists else 'missing'
+                    # Compute membership details when pool exists
                     if pool_exists:
                         pool_vmids = pool_members_cache.get(poolid, set())
-                        total_expected = len(names)
+                        
+                        # All configured VMs for this instance count toward expected pool membership
+                        names_viewable = list(names)
+                        total_expected = len(names_viewable)
+                        # Count expected VMs by resolved details instead of exact generated-name equality.
+                        # Proxmox may return canonical names with different casing than the configured expectation.
                         expected_found_vmids: Set[int] = set()
                         for fd in found_details:
                             try:
@@ -1563,11 +1544,13 @@ def instances_refresh_vm(pid: str):
                         in_count = sum(1 for vm_vmid in expected_found_vmids if vm_vmid in pool_vmids)
                         mgrs['pools_member_total'] = total_expected
                         mgrs['pools_member_count'] = in_count
+                        # If nothing is expected, consider it satisfied (green)
                         if total_expected == 0:
                             mgrs['pools_member_state'] = 'all'
                         elif in_count == total_expected:
                             mgrs['pools_member_state'] = 'all'
                         else:
+                            # Pool exists but not all configured VMs are members yet
                             mgrs['pools_member_state'] = 'partial'
                 except Exception:
                     mgrs['pools'] = 'error'
@@ -1903,7 +1886,13 @@ def instances_create(pid: str):
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
         expected_bridges_for_vm = []
         for i, a in enumerate(adaptors):
-            bname = _expected_bridge_name(a, idx)
+            try:
+                base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
+                bname = f"{base}{idx}" if base else f"br{idx}"
+                if len(bname) > 15:
+                    bname = bname[:15]
+            except Exception:
+                bname = f"br{idx}"
             expected_bridges_for_vm.append(bname)
         post_errors = []  # will accumulate only pool/acl errors now
         # Optional post-clone snapshot (deferred to post-networking phase)
@@ -2047,33 +2036,37 @@ def instances_create(pid: str):
                                 except Exception:
                                     pass
                                 post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e}' })
-                # ACLs: apply only for user-accessible (viewable) VMs; skip otherwise
+                # ACLs: every VM must reconcile into exactly one role state.
+                # Viewable VMs get user access; non-viewable VMs get rollback-only when enabled.
                 try:
-                    if uname and viewable:
+                    if uname:
                         try:
                             if current_app.config.get('ACL_DEBUG'):
-                                current_app.logger.info(f"[create][ACL] checking (user-accessible) user={userid} for vmid={newid} name={newname}")
+                                current_app.logger.info(f"[create][ACL] reconciling user={userid} for vmid={newid} name={newname} accessible={viewable}")
                         except Exception:
                             pass
                         user_rec = client.get_user(userid)
                         if user_rec is not None:
                             try:
                                 if current_app.config.get('ACL_DEBUG'):
-                                    current_app.logger.info(f"[create][ACL] applying role=PVEUser user={userid} vmid={newid}")
+                                    current_app.logger.info(f"[create][ACL] applying reconciled role user={userid} vmid={newid} accessible={viewable}")
                             except Exception:
                                 pass
                             try:
-                                try:
-                                    client.set_acl_user_vm(userid, int(newid), roles='PVEUser', propagate=True)
-                                except Exception as e:
-                                    msg_low = str(e).lower()
-                                    if 'role' in msg_low and ('not found' in msg_low or 'no such' in msg_low or 'does not exist' in msg_low):
-                                        client.set_acl_user_vm(userid, int(newid), roles='PVEVMUser', propagate=True)
-                                    else:
-                                        raise
+                                acl_result = _reconcile_vm_access_roles(
+                                    client,
+                                    userid,
+                                    int(newid),
+                                    accessible=viewable,
+                                    rollback_enabled=bool(getattr(proj, 'proxmox_assign_rollback_on_non_viewable', True)),
+                                    current_roles=None,
+                                )
                                 assignment_info['acl_set'] = True
+                                assignment_info['acl_role'] = acl_result.get('granted')
                                 try:
-                                    debug_msgs.append(f"acl_set: user={userid} vmid={int(newid)} role=PVEUser")
+                                    debug_msgs.append(
+                                        f"acl_set: user={userid} vmid={int(newid)} accessible={viewable} role={acl_result.get('granted') or 'unchanged'} removed={','.join(acl_result.get('removed') or []) or 'none'}"
+                                    )
                                 except Exception:
                                     pass
                                 # Verify presence in ACL list (best effort)
@@ -2115,12 +2108,6 @@ def instances_create(pid: str):
                             except Exception:
                                 pass
                             post_errors.append({ 'index': idx, 'name': newname, 'reason': f'user {userid} not found; skipping ACL set' })
-                    elif uname and not viewable:
-                        try:
-                            if current_app.config.get('ACL_DEBUG'):
-                                current_app.logger.info(f"[create][ACL] skipping non user-accessible VM user={userid} vmid={newid} name={newname}")
-                        except Exception:
-                            pass
                 except Exception as e:
                     try:
                         current_app.logger.error(f"[create][ACL] ACL processing failed user={userid} vmid={newid}: {e}")
@@ -3222,7 +3209,13 @@ def instances_fix_ageing(pid: str):
                     cfg = v; break
             adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if cfg else []
             for a in adaptors:
-                bname = _expected_bridge_name(a, idx)
+                try:
+                    base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
+                    bname = f"{base}{idx}" if base else f"br{idx}"
+                    if len(bname) > 15:
+                        bname = bname[:15]
+                except Exception:
+                    bname = f"br{idx}"
                 expected.append(bname)
         except Exception:
             expected = []
@@ -3429,7 +3422,13 @@ def instances_delete(pid: str):
     bulk_bridge_deletions = {}
 
     def _record_bridge_for_cleanup(node: str, idx: int, adaptor_name: str, gen_name: str):
-        bname = _expected_bridge_name(adaptor_name, idx)
+        try:
+            base = re.sub(r"[^A-Za-z]", "", str(adaptor_name or ""))[:8]
+            bname = f"{base}{idx}" if base else f"br{idx}"
+            if len(bname) > 15:
+                bname = bname[:15]
+        except Exception:
+            bname = f"br{idx}"
         bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'legacy': False })
         # Legacy hashed bridge variant
         try:
@@ -3562,7 +3561,13 @@ def instances_delete(pid: str):
                     adaptors = []
                 bridges_expected = []
                 for a in adaptors:
-                    bname = _expected_bridge_name(a, idx)
+                    try:
+                        base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
+                        bname = f"{base}{idx}" if base else f"br{idx}"
+                        if len(bname) > 15:
+                            bname = bname[:15]
+                    except Exception:
+                        bname = f"br{idx}"
                     bridges_expected.append(bname)
                 lingering_nets = []
                 try:
@@ -4479,7 +4484,13 @@ def instances_nets_set(pid: str):
                 continue
             adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
             for a in adaptors:
-                bname = _expected_bridge_name(a, idx)
+                try:
+                    base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
+                    bname = f"{base}{idx}" if base else f"br{idx}"
+                    if len(bname) > 15:
+                        bname = bname[:15]
+                except Exception:
+                    bname = f"br{idx}"
                 if bname:
                     bridges_needed.setdefault(node, set()).add(bname)
         except Exception:
@@ -4541,7 +4552,13 @@ def instances_nets_set(pid: str):
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'no adaptors configured' })
         netspecs = []
         for a in adaptors:
-            bname = _expected_bridge_name(a, idx)
+            try:
+                base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
+                bname = f"{base}{idx}" if base else f"br{idx}"
+                if len(bname) > 15:
+                    bname = bname[:15]
+            except Exception:
+                bname = f"br{idx}"
             netspecs.append(f"e1000,bridge={bname}")
         try:
             thread_client = _make_thread_client()
@@ -5397,6 +5414,528 @@ def instances_users_perms(pid: str):
             errors.append({ 'index': idx, 'reason': f'users_perms failed: {e}' })
     _end_job(pid)
     return jsonify({ 'updated_users': updated_users, 'added_members': added_members, 'skipped': skipped, 'errors': errors, 'notices': notices })
+
+
+@api_bp.route("/projects/<pid>/instances/actions/users_creds_check", methods=["POST"])
+def instances_users_creds_check(pid: str):
+    """Audit participant credential, pool, and VM access drift for selected rows."""
+    _start_job(pid, 'users_creds_check')
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    body = request.get_json(force=True) or {}
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+    targets = body.get('targets') or []
+    if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
+        return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "No targets provided"}), 400
+
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj, 'proxmox_api_token', '') or None, username=username, password=password, verify=verify)
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+
+    rollback_for_non_viewable = bool(getattr(proj, 'proxmox_assign_rollback_on_non_viewable', True))
+    tag_local = str(proj.tag or '').strip()
+    notices = []
+    notice_keys = set()
+
+    def _add_notice_once(item):
+        try:
+            key = str((item or {}).get('reason', '') or item)
+            if key not in notice_keys:
+                notices.append(item)
+                notice_keys.add(key)
+        except Exception:
+            notices.append(item)
+
+    vm_accessibility: Dict[str, bool] = {}
+    try:
+        for vm_cfg in (proj.vms or []):
+            if isinstance(vm_cfg, dict):
+                base_name = str(vm_cfg.get('name') or '').strip()
+                viewable = bool(vm_cfg.get('viewable_to_user'))
+            else:
+                base_name = str(getattr(vm_cfg, 'name', '') or '').strip()
+                viewable = bool(getattr(vm_cfg, 'viewable_to_user', False))
+            if base_name:
+                vm_accessibility[base_name] = viewable
+    except Exception:
+        vm_accessibility = {}
+
+    def _base_from_generated(gen_name: str, idx: int) -> str:
+        try:
+            suffix = f"{tag_local}{idx}"
+            if gen_name and suffix and gen_name.endswith(suffix):
+                return gen_name[:len(gen_name) - len(suffix)]
+        except Exception:
+            pass
+        return str(gen_name or '')
+
+    acl_index: Dict[tuple, Set[str]] = {}
+    acl_index_ok = False
+    try:
+        for entry in (client.list_acls() or []):
+            try:
+                ugid = str(entry.get('ugid') or '').strip()
+                path = str(entry.get('path') or '').strip()
+                roleid = str(entry.get('roleid') or '').strip()
+                if not ugid or not path or not roleid:
+                    continue
+                if not path.startswith('/'):
+                    path = f"/{path}"
+                acl_index.setdefault((ugid, path), set()).add(roleid)
+            except Exception:
+                continue
+        acl_index_ok = True
+    except Exception as e:
+        _add_notice_once({ 'reason': f'ACL audit unavailable: {e}' })
+
+    user_exists_cache: Dict[str, bool] = {}
+    password_check_cache: Dict[int, Dict[str, Any]] = {}
+    pool_exists_cache: Dict[str, Optional[bool]] = {}
+    pool_members_cache: Dict[str, Optional[Set[int]]] = {}
+    checked = []
+
+    for item in (mapped or []):
+        try:
+            idx = int(item.get('index') or 0)
+            vmid = int(item.get('vmid'))
+            node = str(item.get('node') or '')
+            gen_name = str(item.get('name') or '')
+        except Exception:
+            continue
+
+        cred = (proj.credentials or [])[idx - 1] if idx - 1 < len(proj.credentials or []) else None
+        uname = str((cred or {}).get('username') or '').strip()
+        upass = str((cred or {}).get('password') or '')
+        if not uname:
+            skipped.append({ 'index': idx, 'name': gen_name, 'reason': 'no credential username for instance' })
+            continue
+
+        userid = uname if '@' in uname else f"{uname}@pve"
+        poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname).split('@', 1)[0])
+        base_name = _base_from_generated(gen_name, idx)
+        is_accessible = vm_accessibility.get(base_name, False)
+        expected_access = 'user' if is_accessible else ('rollback' if rollback_for_non_viewable else 'none')
+        issues = []
+
+        try:
+            if userid not in user_exists_cache:
+                user_exists_cache[userid] = client.get_user(userid) is not None
+            user_exists = user_exists_cache[userid]
+            if not user_exists:
+                issues.append('user missing')
+        except Exception as e:
+            errors.append({ 'index': idx, 'name': gen_name, 'reason': f'user lookup failed: {e}' })
+            continue
+
+        password_verified = None
+        password_error = ''
+        if upass:
+            if idx not in password_check_cache:
+                try:
+                    verify_client = ProxmoxClient(base_url=base_url, username=userid, password=upass, verify=verify)
+                    verify_client.list_nodes()
+                    password_check_cache[idx] = { 'ok': True, 'error': '' }
+                except Exception as e:
+                    password_check_cache[idx] = { 'ok': False, 'error': str(e) }
+            password_verified = bool(password_check_cache[idx].get('ok'))
+            password_error = str(password_check_cache[idx].get('error') or '')
+            if password_verified is False:
+                issues.append('password login failed')
+        else:
+            issues.append('credential password missing')
+
+        pool_exists = None
+        pool_member = None
+        if poolid:
+            if poolid not in pool_exists_cache:
+                try:
+                    pool_exists_cache[poolid] = client.get_pool(poolid) is not None
+                except Exception as e:
+                    pool_exists_cache[poolid] = None
+                    _add_notice_once({ 'index': idx, 'reason': f'pool lookup failed for {poolid}: {e}' })
+            pool_exists = pool_exists_cache.get(poolid)
+            if pool_exists is False:
+                issues.append('pool missing')
+            if pool_exists:
+                if poolid not in pool_members_cache:
+                    try:
+                        vmids = set()
+                        for member in (client.list_pool_members(poolid) or []):
+                            try:
+                                if str(member.get('type') or '').lower() == 'qemu' and member.get('vmid') is not None:
+                                    vmids.add(int(member.get('vmid')))
+                            except Exception:
+                                continue
+                        pool_members_cache[poolid] = vmids
+                    except Exception as e:
+                        pool_members_cache[poolid] = None
+                        _add_notice_once({ 'index': idx, 'reason': f'pool member audit unavailable for {poolid}: {e}' })
+                member_set = pool_members_cache.get(poolid)
+                if member_set is not None:
+                    pool_member = int(vmid) in member_set
+                    if not pool_member:
+                        issues.append('vm missing from pool')
+
+        actual_roles = []
+        if acl_index_ok:
+            vm_path = f"/vms/{int(vmid)}"
+            actual_roles = sorted(acl_index.get((userid, vm_path), set()))
+            if expected_access == 'user':
+                if not _has_user_access_role(actual_roles):
+                    issues.append('missing user-access role')
+                if 'AcostaRollback' in actual_roles:
+                    issues.append('has rollback role unexpectedly')
+            elif expected_access == 'rollback':
+                if 'AcostaRollback' not in actual_roles:
+                    issues.append('missing rollback role')
+                if _has_user_access_role(actual_roles):
+                    issues.append('has user-access role unexpectedly')
+            else:
+                if _has_user_access_role(actual_roles) or 'AcostaRollback' in actual_roles:
+                    issues.append('has unexpected vm role')
+
+        checked.append({
+            'index': idx,
+            'name': gen_name,
+            'vmid': vmid,
+            'node': node,
+            'userid': userid,
+            'pool': poolid,
+            'user_exists': bool(user_exists),
+            'password_verified': password_verified,
+            'password_error': password_error,
+            'pool_exists': pool_exists,
+            'pool_member': pool_member,
+            'expected_access': expected_access,
+            'actual_roles': actual_roles,
+            'status': 'ok' if not issues else 'drift',
+            'reason': '; '.join(issues) if issues else 'in sync',
+        })
+
+    _end_job(pid)
+    return jsonify({ 'checked': checked, 'skipped': skipped, 'errors': errors, 'notices': notices })
+
+
+@api_bp.route("/projects/<pid>/instances/actions/users_creds_set", methods=["POST"])
+def instances_users_creds_set(pid: str):
+    """Explicitly sync Proxmox users, passwords, pool membership, and ACLs to the current credential list."""
+    _start_job(pid, 'users_creds_set')
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+    body = request.get_json(force=True) or {}
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+    targets = body.get('targets') or []
+    if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
+        return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "No targets provided"}), 400
+
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj, 'proxmox_api_token', '') or None, username=username, password=password, verify=verify)
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+
+    by_index = {}
+    for item in mapped:
+        by_index.setdefault(int(item['index']), []).append(item)
+    indices = sorted({ int((t or {}).get('index', 0)) for t in (targets or []) if (t or {}).get('index') })
+
+    existing_vms_by_name = {}
+    try:
+        for n in client.list_nodes() or []:
+            try:
+                node_name = n.get('node') or n.get('id') or n.get('name') or ''
+                if not node_name:
+                    continue
+                for q in client.list_qemu_vms(node_name) or []:
+                    try:
+                        nm = str(q.get('name') or '')
+                        if not nm:
+                            continue
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm })
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    created_users = []
+    updated_users = []
+    created_pools = []
+    added_members = []
+    notices = []
+    rollback_for_non_viewable = bool(getattr(proj, 'proxmox_assign_rollback_on_non_viewable', True))
+    notice_keys = set()
+
+    def _add_notice_once(item):
+        try:
+            key = str((item or {}).get('reason', '') or item)
+            if key not in notice_keys:
+                notices.append(item)
+                notice_keys.add(key)
+        except Exception:
+            notices.append(item)
+
+    tag_local = str(proj.tag or '').strip()
+
+    def _base_from_generated(gen_name: str, idx: int) -> str:
+        try:
+            suffix = f"{tag_local}{idx}"
+            if gen_name and gen_name.endswith(suffix):
+                return gen_name[:len(gen_name) - len(suffix)]
+        except Exception:
+            pass
+        return gen_name
+
+    def _is_in_scenario(base_name: str) -> bool:
+        try:
+            for vm_cfg in (proj.vms or []):
+                if isinstance(vm_cfg, dict):
+                    if str(vm_cfg.get('name') or '') == str(base_name or ''):
+                        return True
+                else:
+                    if str(getattr(vm_cfg, 'name', '') or '') == str(base_name or ''):
+                        return True
+        except Exception:
+            return False
+        return False
+
+    def _is_user_accessible(base_name: str) -> bool:
+        try:
+            for vm_cfg in (proj.vms or []):
+                if isinstance(vm_cfg, dict):
+                    if str(vm_cfg.get('name') or '') == str(base_name or ''):
+                        return bool(vm_cfg.get('viewable_to_user'))
+                else:
+                    if str(getattr(vm_cfg, 'name', '') or '') == str(base_name or ''):
+                        return bool(getattr(vm_cfg, 'viewable_to_user', False))
+        except Exception:
+            return False
+        return False
+
+    def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
+        return _vm_is_in_project_notes(client, proj, node_str, vmid_int)
+
+    for idx in indices:
+        mlist = by_index.get(idx, [])
+        if _is_cancelled(pid):
+            errors.append({ 'reason': 'cancelled' })
+            break
+        try:
+            cred = (proj.credentials or [])[idx - 1] if idx - 1 < len(proj.credentials or []) else None
+            uname = (cred or {}).get('username') or ''
+            upass = (cred or {}).get('password') or ''
+            if not uname:
+                errors.append({ 'index': idx, 'reason': 'no credential username for instance' })
+                continue
+
+            userid = f"{uname}@pve"
+            poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
+
+            existing_user = None
+            try:
+                existing_user = client.get_user(userid)
+            except Exception as e:
+                errors.append({ 'index': idx, 'reason': f'user lookup failed: {e}' })
+                continue
+
+            if existing_user is None:
+                if not upass:
+                    errors.append({ 'index': idx, 'reason': f'user {userid} is missing and credential password is empty' })
+                    continue
+                try:
+                    client.create_user(userid, password=upass, enable=True, comment=f"Synced from project credentials for instance {idx}")
+                    created_users.append({ 'index': idx, 'userid': userid })
+                except Exception as e:
+                    errors.append({ 'index': idx, 'reason': f'user create failed: {e}' })
+                    continue
+            else:
+                try:
+                    client.update_user(userid, password=upass or None, enable=True)
+                    updated_users.append({ 'index': idx, 'userid': userid })
+                except Exception as e:
+                    errors.append({ 'index': idx, 'reason': f'user update failed: {e}' })
+                    continue
+
+            if not poolid:
+                errors.append({ 'index': idx, 'reason': 'no pool id (credential username empty or invalid)' })
+                continue
+
+            try:
+                existing_pool = client.get_pool(poolid)
+                if existing_pool is None:
+                    client.create_pool(poolid, comment=f"Synced from project credentials for {userid}")
+                    created_pools.append({ 'index': idx, 'pool': poolid })
+            except Exception as e:
+                errors.append({ 'index': idx, 'reason': f'pool sync failed: {e}' })
+                continue
+
+            try:
+                _ensure_proxmox_role(client, 'AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
+            except Exception as e:
+                _add_notice_once({ 'index': idx, 'reason': f'pool power permissions sync failed for {userid}: {e}' })
+
+            for m in (mlist or []):
+                try:
+                    client.add_pool_member(poolid, int(m['vmid']))
+                    added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'] })
+                except Exception as e:
+                    msg = str(e)
+                    if ' 501' in msg or 'not implemented' in msg.lower():
+                        vm_node = None
+                        try:
+                            nodes = client.list_nodes()
+                            for n in nodes:
+                                try:
+                                    nn = n.get('node') or n.get('name') or ''
+                                    lst = client.list_qemu_vms(nn)
+                                    for ent in lst:
+                                        if int(ent.get('vmid')) == int(m['vmid']):
+                                            vm_node = nn
+                                            raise StopIteration
+                                except StopIteration:
+                                    break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            vm_node = None
+                        if vm_node:
+                            try:
+                                client.set_qemu_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
+                                added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'], 'via': 'vm-config' })
+                                _add_notice_once({ 'index': idx, 'reason': f'pool members endpoint unsupported; set VM {m.get("vmid")} pool via config' })
+                            except Exception as e2:
+                                notices.append({ 'index': idx, 'reason': f'pool members endpoint unsupported; VM-config fallback failed for VM {m.get("vmid")}: {e2}' })
+                        else:
+                            notices.append({ 'index': idx, 'reason': 'pool members endpoint unsupported; unable to locate VM node for VM-config fallback' })
+                    else:
+                        errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'add member failed: {e}' })
+
+            try:
+                applied = 0
+                unsupported = False
+                acl_targets = list(mlist or [])
+                try:
+                    existing_names_set = { str(m.get('name') or '') for m in acl_targets }
+                    for vm_cfg in (proj.vms or []):
+                        try:
+                            if isinstance(vm_cfg, dict):
+                                base_v = str(vm_cfg.get('name') or '')
+                            else:
+                                base_v = str(getattr(vm_cfg, 'name', '') or '')
+                            if not base_v:
+                                continue
+                            gen_name_full = f"{base_v}{tag_local}{idx}"
+                            if gen_name_full in existing_names_set:
+                                continue
+                            ent_list = existing_vms_by_name.get(gen_name_full.lower()) or []
+                            if not ent_list:
+                                continue
+                            ent = ent_list[0]
+                            if ent.get('vmid') is None or ent.get('node') is None:
+                                continue
+                            acl_targets.append({ 'index': idx, 'name': gen_name_full, 'vmid': ent.get('vmid'), 'node': ent.get('node') })
+                            existing_names_set.add(gen_name_full)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                for m in acl_targets:
+                    try:
+                        gen_name = str(m.get('name') or '')
+                        base_name = _base_from_generated(gen_name, idx)
+                        if not _is_in_scenario(base_name) or not _is_vm_in_project_notes(m.get('node'), m.get('vmid')):
+                            continue
+                        is_accessible = _is_user_accessible(base_name)
+                        try:
+                            _ensure_proxmox_role(client, 'AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                            _reconcile_vm_access_roles(
+                                client,
+                                userid,
+                                int(m['vmid']),
+                                accessible=is_accessible,
+                                rollback_enabled=rollback_for_non_viewable,
+                                current_roles=None,
+                            )
+                            applied += 1
+                        except Exception as e2:
+                            if '501' in str(e2) and 'not implemented' not in str(e2).lower():
+                                errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL permission issue (501) applying user {userid}: {e2}' })
+                            elif 'not implemented' in str(e2).lower():
+                                unsupported = True
+                            else:
+                                errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'per-VM ACL failed: {e2}' })
+                    except Exception as e_outer:
+                        errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL processing failed: {e_outer}' })
+
+                if applied:
+                    acl_mode = 'user-access/rollback' if rollback_for_non_viewable else 'user-access only'
+                    _add_notice_once({ 'index': idx, 'reason': f'synced credentials and ACLs on {applied} VM(s) ({acl_mode})' })
+                if unsupported and applied == 0:
+                    _add_notice_once({ 'index': idx, 'reason': 'ACL endpoints unsupported; skipped ACLs' })
+            except Exception as e:
+                errors.append({ 'index': idx, 'reason': f'ACL setup failed: {e}' })
+        except Exception as e:
+            errors.append({ 'index': idx, 'reason': f'users_creds_set failed: {e}' })
+
+    _end_job(pid)
+    return jsonify({
+        'created_users': created_users,
+        'updated_users': updated_users,
+        'created_pools': created_pools,
+        'added_members': added_members,
+        'skipped': skipped,
+        'errors': errors,
+        'notices': notices,
+    })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/users_delete", methods=["POST"])
@@ -7954,7 +8493,7 @@ def _is_valid_url(url: str) -> bool:
 def _is_valid_adaptor_name(name: str) -> bool:
     # Letters only, 1-8 chars
     try:
-        return bool(re.fullmatch(r"[A-Za-z]{1,8}", str(name or "")))
+        return bool(re.fullmatch(r"[A-Za-z0-9]{1,16}", str(name or "")))
     except Exception:
         return False
 
@@ -10980,7 +11519,7 @@ def update_vm(pid: str, name: str):
             bad = [a for a in adaptors if not _is_valid_adaptor_name(a)]
             if bad:
                 return jsonify({
-                    "error": "Invalid adaptor names: letters only, max 8 characters",
+                    "error": "Invalid adaptor names: letters and numbers only, max 16 characters",
                     "invalid": bad,
                 }), 400
     try:

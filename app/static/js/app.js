@@ -2771,45 +2771,6 @@ window.checkWizCsvFile = async function() {
 // ═══════════════════════════════════════════════════════════════
 // Wizard Step 4 — Interactive Network Topology Graph
 // ═══════════════════════════════════════════════════════════════
-function alphaSuffix(value, oneBased = true) {
-  let num = Number(value);
-  if (!Number.isFinite(num)) num = oneBased ? 1 : 0;
-  num = oneBased ? Math.max(1, Math.trunc(num)) - 1 : Math.max(0, Math.trunc(num));
-  let out = '';
-  while (true) {
-    const rem = num % 26;
-    out = String.fromCharCode(65 + rem) + out;
-    num = Math.floor(num / 26);
-    if (num === 0) break;
-    num -= 1;
-  }
-  return out;
-}
-
-function normalizeAdaptorLabel(value) {
-  const digitMap = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
-  try {
-    return String(value || '')
-      .replace(/[0-9]/g, (digit) => digitMap[Number(digit)] || '')
-      .replace(/[^A-Za-z]/g, '')
-      .slice(0, 8);
-  } catch {
-    return '';
-  }
-}
-
-function expectedAdaptorBridgeName(adaptorLabel, idx) {
-  try {
-    const base = normalizeAdaptorLabel(adaptorLabel);
-    const suffix = alphaSuffix(idx, true);
-    let name = base ? `${base}${suffix}` : `br${suffix}`;
-    if (name.length > 15) name = name.slice(0, 15);
-    return name;
-  } catch {
-    return `br${alphaSuffix(idx, true)}`;
-  }
-}
-
 (function() {
   // Palette of distinct colors for network adapters
   const ADAPTER_COLORS = [
@@ -2867,15 +2828,14 @@ function expectedAdaptorBridgeName(adaptorLabel, idx) {
   }
 
   function allocateAdapter() {
-    // Find the lowest free net letter
-    const usedNames = new Set(adapters.map(a => String(a.name || '')));
+    // Find the lowest free net number
+    const usedNums = new Set(
+      adapters.map(a => { const m = a.name.match(/^net(\d+)$/); return m ? parseInt(m[1]) : -1; })
+    );
     let n = 0;
-    let name = `net${alphaSuffix(n, false)}`;
-    while (usedNames.has(name)) {
-      n += 1;
-      name = `net${alphaSuffix(n, false)}`;
-    }
+    while (usedNums.has(n)) n++;
     adapterCounter = n + 1;
+    const name = 'net' + n;
     const color = ADAPTER_COLORS[n % ADAPTER_COLORS.length];
     const a = { name, color };
     adapters.push(a);
@@ -2887,10 +2847,12 @@ function expectedAdaptorBridgeName(adaptorLabel, idx) {
     const stillUsed = links.some(l => l.adapter === adapterName);
     if (!stillUsed) {
       adapters = adapters.filter(a => a.name !== adapterName);
-      // Reset counter to lowest free letter so next alloc reuses the gap
-      const usedNames = new Set(adapters.map(a => String(a.name || '')));
+      // Reset counter to lowest free number so next alloc reuses the gap
+      const usedNums = new Set(
+        adapters.map(a => { const m = a.name.match(/^net(\d+)$/); return m ? parseInt(m[1]) : -1; })
+      );
       let n = 0;
-      while (usedNames.has(`net${alphaSuffix(n, false)}`)) n++;
+      while (usedNums.has(n)) n++;
       adapterCounter = n;
     }
   }
@@ -4655,7 +4617,7 @@ async function autoSaveVm(pid, idx) {
   const startCommands = stepsToServerPayload(startSteps);
   const storedSteps = getStoredCommandsFromDom(pid, idx);
   const storedCommands = stepsToServerPayload(storedSteps);
-  const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => normalizeAdaptorLabel(val)).filter(Boolean);
+  const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)).filter(Boolean);
   if (userEl && userEl.value.trim() !== '') {
     vm_user = userEl.value.trim();
   }
@@ -6335,7 +6297,7 @@ async function addSelectedTemplates() {
   // We will batch sequentially to keep API simple
   const sanitizeAdaptor = (s) => {
     // Letters only, up to 8 chars per UI rules
-    try { return normalizeAdaptorLabel(s); } catch { return ''; }
+    try { return (String(s || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 16)); } catch { return ''; }
   };
   // collect a mapping from name->sanitized adaptors derived from bridges
   const adaptorByName = {};
@@ -6452,7 +6414,7 @@ function renderInstancesPreview(p) {
   for (let i = 1; i <= inst; i++) {
     const suffix = `${tag}${i}`;
     const names = vms.map(v => `${v.name}${suffix}`);
-    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors || v.internal_network_adapters || []).map(a => expectedAdaptorBridgeName(a, i))));
+    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors || v.internal_network_adapters || []).map(a => `${a}${suffix}`)));
     const st = statusMap.get(i) || {};
     const mgr = st.managers || {};
     const mgrBadges = managers.map(m => badgeForStatus(m, mgr[m])).join(' ');
@@ -6486,10 +6448,8 @@ function onListItemEdit(listId, inputEl) {
   // Live validation for adaptor names list
   try {
     if (String(listId).includes('-nets-list')) {
-      const normalized = normalizeAdaptorLabel(inputEl.value || '');
-      if (inputEl.value !== normalized) inputEl.value = normalized;
       const v = (inputEl.value || '').trim();
-      const valid = /^[A-Za-z]{0,8}$/.test(v);
+      const valid = /^[A-Za-z0-9]{0,16}$/.test(v); // allow empty/numeric while typing
       inputEl.classList.toggle('is-invalid', !valid);
       if (!valid) showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger');
     }
@@ -6528,9 +6488,8 @@ function onAdaptorInput(pid, idx, el) {
   try {
     const input = el || document.getElementById(`vm-${pid}-${idx}-nets-input`);
     const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
-    if (input) input.value = normalizeAdaptorLabel(input.value || '');
     const v = (input?.value || '').trim();
-    const ok = /^[A-Za-z]{1,8}$/.test(v);
+    const ok = /^[A-Za-z0-9]{1,16}$/.test(v);
     if (input) input.classList.toggle('is-invalid', !ok && v.length > 0);
     if (btn) btn.disabled = !ok;
   } catch { }
@@ -6554,12 +6513,11 @@ function addListItem(listId, inputId) {
   const list = document.getElementById(listId);
   const input = document.getElementById(inputId);
   if (!list || !input) return;
-  const val = normalizeAdaptorLabel((input.value || '').trim());
-  input.value = val;
+  const val = (input.value || '').trim();
   if (!val) return;
   // If this is a nets list, enforce letters-only up to 8
   if (String(listId).includes('-nets-list')) {
-    if (!/^[A-Za-z]{1,8}$/.test(val)) {
+    if (!/^[A-Za-z0-9]{1,16}$/.test(val)) {
       input.classList.add('is-invalid');
       try { showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger'); } catch { alert('Invalid adaptor name: letters only, up to 8 characters.'); }
       return;
