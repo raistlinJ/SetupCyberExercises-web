@@ -3,7 +3,7 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 from app import create_app
-from app.storage.projects import Project
+from app.storage.projects import Project, VMConfig
 
 
 class _StoreStub:
@@ -222,6 +222,51 @@ class UsersAccessSyncApiTests(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             mock_client.delete_acl_user_vm.assert_called_once_with('alice@pve', 101, roles='AcostaRollback', propagate=True)
             mock_client.set_acl_user_vm.assert_called_once_with('alice@pve', 101, roles='PVEUser', propagate=True)
+
+    def test_sync_uses_project_vm_accessibility_per_template(self):
+        self.project.proxmox_assign_rollback_on_non_viewable = True
+        self.project.vms = [
+            VMConfig(name='web', viewable_to_user=True),
+            VMConfig(name='db', viewable_to_user=False),
+        ]
+        mapped = [
+            {'index': 1, 'name': f"web{self.project.tag}1", 'vmid': 101, 'node': 'node1'},
+            {'index': 1, 'name': f"db{self.project.tag}1", 'vmid': 102, 'node': 'node1'},
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(self.project)))
+            stack.enter_context(patch('app.routes.api._resolve_targets_to_vm_info', return_value=(mapped, [], [])))
+            stack.enter_context(patch('app.routes.api._start_job'))
+            stack.enter_context(patch('app.routes.api._end_job'))
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            reconcile_mock = stack.enter_context(patch('app.routes.api._reconcile_vm_access_roles'))
+
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_user.return_value = {'userid': 'alice@pve'}
+            mock_client.list_acls.return_value = []
+            reconcile_mock.side_effect = [
+                {'granted': 'PVEUser', 'removed': [], 'current_roles': {'PVEUser'}},
+                {'granted': 'AcostaRollback', 'removed': [], 'current_roles': {'AcostaRollback'}},
+            ]
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/users_access_sync',
+                json={
+                    'templates': ['web', 'db'],
+                    'enable': True,
+                    'indices': [1],
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'verifySSL': False,
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(reconcile_mock.call_count, 2)
+            self.assertTrue(reconcile_mock.call_args_list[0].kwargs.get('accessible'))
+            self.assertFalse(reconcile_mock.call_args_list[1].kwargs.get('accessible'))
 
 
 if __name__ == '__main__':

@@ -156,6 +156,38 @@ def _safe_sleep(sec: float):
             time.sleep(sec)
     except Exception:
         pass
+
+
+def _alpha_suffix(value: Any, one_based: bool = True) -> str:
+    try:
+        num = int(value)
+    except Exception:
+        num = 1 if one_based else 0
+    if one_based:
+        num = max(1, num) - 1
+    else:
+        num = max(0, num)
+    chars: List[str] = []
+    while True:
+        num, rem = divmod(num, 26)
+        chars.append(chr(ord('A') + rem))
+        if num == 0:
+            break
+        num -= 1
+    return ''.join(reversed(chars))
+
+
+def _expected_bridge_name(adaptor_name: Any, idx: Any) -> str:
+    try:
+        base = re.sub(r"[^A-Za-z]", "", str(adaptor_name or ""))[:8]
+        suffix = _alpha_suffix(idx, one_based=True)
+        name = f"{base}{suffix}" if base else f"br{suffix}"
+        if len(name) > 15:
+            name = name[:15]
+        return name or f"br{suffix}"
+    except Exception:
+        suffix = _alpha_suffix(idx, one_based=True)
+        return f"br{suffix}"
 # ...existing code...
 AGEING_LOCK = threading.Lock()
 AGEING_APPLIED = {}  # key: node -> set of bridge names ensured in interfaces.new
@@ -1372,13 +1404,18 @@ def instances_refresh_vm(pid: str):
                 ks = str(k)
                 if not ks.startswith('net'):
                     continue
-                label = ''
-                if isinstance(v, str):
-                    parts = [p.strip() for p in v.split(',') if p]
-                    name = next((p.split('=',1)[1] for p in parts if p.startswith('name=')), '')
-                    bridge = next((p.split('=',1)[1] for p in parts if p.startswith('bridge=')), '')
-                    label = name or bridge or ''
-                nets.append(f"{ks}({label})" if label else ks)
+                try:
+                    raw = str(v or '')
+                    bridge_match = re.search(r'(?:^|,)bridge=([^,]+)', raw)
+                    bridge = bridge_match.group(1) if bridge_match else ''
+                    model = ''
+                    model_match = re.match(r'([^=]+)=', raw)
+                    if model_match:
+                        model = model_match.group(1)
+                    label = model or bridge or ''
+                    nets.append(f"{ks}({label})" if label else ks)
+                except Exception:
+                    nets.append(ks)
         except Exception:
             pass
         return nets
@@ -1390,7 +1427,6 @@ def instances_refresh_vm(pid: str):
         entry = current.get(i) or { 'index': i, 'created': False, 'managers': {} }
         mgrs = entry.get('managers') or {}
         names = expected[i]
-        # Pre-compute per-instance userid/poolid for access reporting
         userid = None
         poolid = None
         try:
@@ -1403,17 +1439,14 @@ def instances_refresh_vm(pid: str):
         except Exception:
             userid = None
             poolid = None
-        # Mark created if all expected VM names exist; partial -> pending
+
         count = 0
         found_details = []
         for spec in names:
-            # Match clones by their expected name; do NOT match by configured template VMID
             matched = None
-            spec_vmid = spec.get('vmid')
             spec_name = spec.get('name')
             matched = name_map.get(spec_name)
             canon_name = spec_name
-            # Fallback: case-insensitive match on VM name
             if not matched and spec_name:
                 lc = lower_name_to_canon.get(str(spec_name).lower())
                 if lc:
@@ -1426,25 +1459,23 @@ def instances_refresh_vm(pid: str):
                 nets = []
                 tmpl_id = None
                 tmpl_name = ''
+                cfg = {}
+                pool_val = ''
                 try:
                     if node and vmid is not None:
                         cfg = prefetched_vm_configs.get((str(node), int(vmid))) or {}
                         nets = _extract_nets(cfg)
                         pool_val = str(cfg.get('pool') or '').strip() if isinstance(cfg, dict) else ''
-                        # Try to detect clone template from disk config (best-effort)
                         try:
                             if cfg.get('template'):
                                 tmpl_id = vmid
                                 tmpl_name = str(name_map.get(canon_name, {}).get('name', ''))
                             else:
-                                # Detect base template from disk config. Note: these prefixes refer to DISK device keys
-                                # (virtio/scsi/ide/sata), not NIC models. NIC default model is handled elsewhere and set to e1000.
                                 for ck, cv in (cfg or {}).items():
                                     cks = str(ck)
                                     if not any(cks.startswith(p) for p in ('virtio', 'scsi', 'ide', 'sata')):
                                         continue
                                     if isinstance(cv, str) and 'base=' in cv:
-                                        # Look for base=vm-<id>-disk
                                         m = re.search(r"base=vm-(\d+)-disk", cv)
                                         if m:
                                             try:
@@ -1453,10 +1484,8 @@ def instances_refresh_vm(pid: str):
                                                 break
                                             except Exception:
                                                 pass
-                                # If we didn't detect from config (full clone), use configured expectation
                                 if tmpl_id is None and tmpl_name == '':
                                     try:
-                                        # Find spec for this detail
                                         if spec_name:
                                             for sp in names:
                                                 if sp.get('name') == spec_name:
@@ -1464,7 +1493,6 @@ def instances_refresh_vm(pid: str):
                                                         tmpl_id = int(sp['vmid'])
                                                         tmpl_name = id_map.get(tmpl_id, '') or ''
                                                     else:
-                                                        # Use configured base name (strip tag+index suffix from spec_name)
                                                         try:
                                                             base_tn = spec_name
                                                             suf = f"{tag_clean}{i}"
@@ -1472,7 +1500,7 @@ def instances_refresh_vm(pid: str):
                                                                 base_tn = base_tn[:len(base_tn)-len(suf)]
                                                             tmpl_name = base_tn or ''
                                                         except Exception:
-                                                            tmpl_name = (spec_name or '')
+                                                            tmpl_name = spec_name or ''
                                                     break
                                     except Exception:
                                         pass
@@ -1494,9 +1522,9 @@ def instances_refresh_vm(pid: str):
                     'lock': str(cfg.get('lock') or '').strip() if isinstance(cfg, dict) else '',
                     'description': str(cfg.get('description') or '').strip() if isinstance(cfg, dict) else '',
                     'pool': pool_val,
-                    # Effective access for the instance user (credential username)
                     'user_access': _effective_user_access(userid, int(vmid), poolid) if (userid and vmid is not None) else None,
                 })
+
         if count == len(names) and len(names) > 0:
             mgrs['vm'] = 'created'
             entry['created'] = True
@@ -1507,12 +1535,9 @@ def instances_refresh_vm(pid: str):
             mgrs['vm'] = 'missing'
             entry['created'] = False
         entry['managers'] = mgrs
-        # For preview, show names we expect (fall back to vmid if name absent)
-        entry['preview_vm_names'] = [ (sp.get('name') or f"#{sp.get('vmid')}") for sp in names ]
+        entry['preview_vm_names'] = [(sp.get('name') or f"#{sp.get('vmid')}") for sp in names]
         entry['vm_details'] = found_details
-        # Determine pools status and membership completeness for this instance based on credential username
         try:
-            # Reuse computed poolid above where possible
             if poolid is None:
                 creds = list(getattr(proj, 'credentials', []) or [])
                 urec = creds[i-1] if i-1 < len(creds) else None
@@ -1525,15 +1550,9 @@ def instances_refresh_vm(pid: str):
                     else:
                         pool_exists = bool(client.get_pool(poolid) is not None)
                     mgrs['pools'] = 'ready' if pool_exists else 'missing'
-                    # Compute membership details when pool exists
                     if pool_exists:
                         pool_vmids = pool_members_cache.get(poolid, set())
-                        
-                        # All configured VMs for this instance count toward expected pool membership
-                        names_viewable = list(names)
-                        total_expected = len(names_viewable)
-                        # Count expected VMs by resolved details instead of exact generated-name equality.
-                        # Proxmox may return canonical names with different casing than the configured expectation.
+                        total_expected = len(names)
                         expected_found_vmids: Set[int] = set()
                         for fd in found_details:
                             try:
@@ -1544,13 +1563,11 @@ def instances_refresh_vm(pid: str):
                         in_count = sum(1 for vm_vmid in expected_found_vmids if vm_vmid in pool_vmids)
                         mgrs['pools_member_total'] = total_expected
                         mgrs['pools_member_count'] = in_count
-                        # If nothing is expected, consider it satisfied (green)
                         if total_expected == 0:
                             mgrs['pools_member_state'] = 'all'
                         elif in_count == total_expected:
                             mgrs['pools_member_state'] = 'all'
                         else:
-                            # Pool exists but not all configured VMs are members yet
                             mgrs['pools_member_state'] = 'partial'
                 except Exception:
                     mgrs['pools'] = 'error'
@@ -1886,13 +1903,7 @@ def instances_create(pid: str):
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
         expected_bridges_for_vm = []
         for i, a in enumerate(adaptors):
-            try:
-                base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                bname = f"{base}{idx}" if base else f"br{idx}"
-                if len(bname) > 15:
-                    bname = bname[:15]
-            except Exception:
-                bname = f"br{idx}"
+            bname = _expected_bridge_name(a, idx)
             expected_bridges_for_vm.append(bname)
         post_errors = []  # will accumulate only pool/acl errors now
         # Optional post-clone snapshot (deferred to post-networking phase)
@@ -3211,13 +3222,7 @@ def instances_fix_ageing(pid: str):
                     cfg = v; break
             adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if cfg else []
             for a in adaptors:
-                try:
-                    base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                    bname = f"{base}{idx}" if base else f"br{idx}"
-                    if len(bname) > 15:
-                        bname = bname[:15]
-                except Exception:
-                    bname = f"br{idx}"
+                bname = _expected_bridge_name(a, idx)
                 expected.append(bname)
         except Exception:
             expected = []
@@ -3424,13 +3429,7 @@ def instances_delete(pid: str):
     bulk_bridge_deletions = {}
 
     def _record_bridge_for_cleanup(node: str, idx: int, adaptor_name: str, gen_name: str):
-        try:
-            base = re.sub(r"[^A-Za-z]", "", str(adaptor_name or ""))[:8]
-            bname = f"{base}{idx}" if base else f"br{idx}"
-            if len(bname) > 15:
-                bname = bname[:15]
-        except Exception:
-            bname = f"br{idx}"
+        bname = _expected_bridge_name(adaptor_name, idx)
         bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'legacy': False })
         # Legacy hashed bridge variant
         try:
@@ -3563,13 +3562,7 @@ def instances_delete(pid: str):
                     adaptors = []
                 bridges_expected = []
                 for a in adaptors:
-                    try:
-                        base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                        bname = f"{base}{idx}" if base else f"br{idx}"
-                        if len(bname) > 15:
-                            bname = bname[:15]
-                    except Exception:
-                        bname = f"br{idx}"
+                    bname = _expected_bridge_name(a, idx)
                     bridges_expected.append(bname)
                 lingering_nets = []
                 try:
@@ -4486,13 +4479,7 @@ def instances_nets_set(pid: str):
                 continue
             adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
             for a in adaptors:
-                try:
-                    base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                    bname = f"{base}{idx}" if base else f"br{idx}"
-                    if len(bname) > 15:
-                        bname = bname[:15]
-                except Exception:
-                    bname = f"br{idx}"
+                bname = _expected_bridge_name(a, idx)
                 if bname:
                     bridges_needed.setdefault(node, set()).add(bname)
         except Exception:
@@ -4554,13 +4541,7 @@ def instances_nets_set(pid: str):
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'no adaptors configured' })
         netspecs = []
         for a in adaptors:
-            try:
-                base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                bname = f"{base}{idx}" if base else f"br{idx}"
-                if len(bname) > 15:
-                    bname = bname[:15]
-            except Exception:
-                bname = f"br{idx}"
+            bname = _expected_bridge_name(a, idx)
             netspecs.append(f"e1000,bridge={bname}")
         try:
             thread_client = _make_thread_client()
@@ -5705,6 +5686,29 @@ def instances_users_access_sync(pid: str):
     if total_instances < 1:
         total_instances = 1
 
+    vm_accessibility = {}
+    try:
+        for vm_cfg in (proj.vms or []):
+            if isinstance(vm_cfg, dict):
+                base_name = str(vm_cfg.get('name') or '').strip()
+                viewable = bool(vm_cfg.get('viewable_to_user'))
+            else:
+                base_name = str(getattr(vm_cfg, 'name', '') or '').strip()
+                viewable = bool(getattr(vm_cfg, 'viewable_to_user', False))
+            if base_name:
+                vm_accessibility[base_name] = viewable
+    except Exception:
+        vm_accessibility = {}
+
+    def _base_from_generated(gen_name: str, idx: int) -> str:
+        try:
+            suffix = f"{tag_local}{idx}"
+            if gen_name and suffix and gen_name.endswith(suffix):
+                return gen_name[:len(gen_name) - len(suffix)]
+        except Exception:
+            pass
+        return str(gen_name or '')
+
     # If indices were provided, only sync those instance rows; otherwise default to all.
     indices_in = body.get('indices')
     indices: List[int] = []
@@ -5804,11 +5808,13 @@ def instances_users_access_sync(pid: str):
 
         vm_path = f"/vms/{int(vmid)}"
         current_roles = existing_roles.get((userid, vm_path), set()) if have_acl_index else None
+        base_name = _base_from_generated(name, idx)
+        accessible = vm_accessibility.get(base_name, enable)
 
         try:
             needs_change = True
             if current_roles is not None:
-                if enable:
+                if accessible:
                     needs_change = (not _has_user_access_role(current_roles)) or ('AcostaRollback' in current_roles)
                 else:
                     if rollback_for_non_viewable:
@@ -5822,7 +5828,7 @@ def instances_users_access_sync(pid: str):
                     client,
                     userid,
                     vmid,
-                    accessible=enable,
+                    accessible=accessible,
                     rollback_enabled=rollback_for_non_viewable,
                     current_roles=current_roles,
                 )
@@ -5837,7 +5843,7 @@ def instances_users_access_sync(pid: str):
                         'name': name,
                         'vmid': vmid,
                         'userid': userid,
-                        'action': 'grant' if enable else 'reconcile',
+                        'action': 'grant' if accessible else 'reconcile',
                         'role': result.get('granted'),
                         'roles_removed': result.get('removed') or [],
                     })
@@ -7948,7 +7954,7 @@ def _is_valid_url(url: str) -> bool:
 def _is_valid_adaptor_name(name: str) -> bool:
     # Letters only, 1-8 chars
     try:
-        return bool(re.fullmatch(r"[A-Za-z0-9]{1,16}", str(name or "")))
+        return bool(re.fullmatch(r"[A-Za-z]{1,8}", str(name or "")))
     except Exception:
         return False
 
@@ -10974,7 +10980,7 @@ def update_vm(pid: str, name: str):
             bad = [a for a in adaptors if not _is_valid_adaptor_name(a)]
             if bad:
                 return jsonify({
-                    "error": "Invalid adaptor names: letters and numbers only, max 16 characters",
+                    "error": "Invalid adaptor names: letters only, max 8 characters",
                     "invalid": bad,
                 }), 400
     try:

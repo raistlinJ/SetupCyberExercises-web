@@ -1349,11 +1349,22 @@ async function vmRefresh(opts) {
 function _vmExpectedBridgeName(adaptorLabel, idx) {
   try {
     const base = String(adaptorLabel || '').replace(/[^A-Za-z]/g, '').slice(0, 8);
-    let name = base ? `${base}${idx}` : `br${idx}`;
+    let n = Number(idx);
+    if (!Number.isFinite(n)) n = 1;
+    n = Math.max(1, Math.trunc(n)) - 1;
+    let suffix = '';
+    while (true) {
+      const rem = n % 26;
+      suffix = String.fromCharCode(65 + rem) + suffix;
+      n = Math.floor(n / 26);
+      if (n === 0) break;
+      n -= 1;
+    }
+    let name = base ? `${base}${suffix}` : `br${suffix}`;
     if (name.length > 15) name = name.slice(0, 15);
     return name;
   } catch {
-    return `br${idx}`;
+    return 'brA';
   }
 }
 
