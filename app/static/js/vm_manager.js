@@ -20,6 +20,8 @@ let ACTION_IN_FLIGHT = false;
 let CURRENT_ACTION = null;
 let ACTION_RUN_ID = 0;
 let FIX_CREDS_IN_PROGRESS = false;
+const VM_LIVE_REFRESHED_PIDS = new Set();
+let VM_LOAD_REQUEST_TOKEN = 0;
 
 function _coerceEnabled(value, def = true) {
   if (value === null || value === undefined) return def;
@@ -190,9 +192,85 @@ var http = (typeof window !== 'undefined' && typeof window.http === 'function')
     return res.text();
   });
 
+const VM_STATUS_PHASE_LABELS = Object.freeze({
+  inventory: 'Scanning',
+  access: 'Access',
+  summarizing: 'Summarizing',
+  refreshing: 'Refreshing',
+  refresh_vm: 'Refreshing',
+  cloning: 'Cloning',
+  networking: 'Networking',
+  snapshotting: 'Snapshotting',
+  starting: 'Starting',
+  suspending: 'Suspending',
+  unlocking: 'Unlocking',
+  powering_off: 'Powering Off',
+  deleting: 'Deleting',
+  restoring: 'Restoring',
+  applying: 'Applying',
+});
+
+function showVmInlineProgress(label, percent = 20, detail) {
+  try {
+    const prog = document.getElementById('vm-progress');
+    if (!prog) return;
+    prog.classList.remove('d-none');
+    prog.removeAttribute('aria-hidden');
+    const bar = document.getElementById('vm-progress-bar');
+    if (!bar) return;
+    const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+    const text = String(label || detail || (VM_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Working…'));
+    bar.textContent = text;
+    bar.style.width = `${pct}%`;
+    bar.setAttribute('aria-valuenow', String(pct));
+    if (detail || text) bar.title = String(detail || text);
+  } catch { }
+}
+
+function updateVmInlineProgress(percent, label, detail) {
+  showVmInlineProgress(label, percent, detail);
+}
+
+function hideVmInlineProgress() {
+  try {
+    const prog = document.getElementById('vm-progress');
+    if (prog) {
+      prog.classList.add('d-none');
+      prog.setAttribute('aria-hidden', 'true');
+    }
+  } catch { }
+}
+
+function deriveStatusProgressCounts(status) {
+  const step = Number(status?.step);
+  const total = Number(status?.total_steps);
+  if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0) return '';
+  return `${Math.max(0, Math.min(total, step))}/${total}`;
+}
+
+function deriveStatusPhaseLabel(status) {
+  const phase = String(status?.phase || '').trim().toLowerCase();
+  if (phase && VM_STATUS_PHASE_LABELS[phase]) return VM_STATUS_PHASE_LABELS[phase];
+  const action = String(status?.action || '').trim().toLowerCase();
+  return friendlyActionName(action || phase) || '';
+}
+
+function deriveStatusProgressLabel(status) {
+  if (!status) return '';
+  const phaseLabel = deriveStatusPhaseLabel(status);
+  const counts = deriveStatusProgressCounts(status);
+  const progress = Number(status?.progress);
+  if (phaseLabel && counts) return `${phaseLabel} ${counts}`;
+  if (counts) return counts;
+  if (phaseLabel && Number.isFinite(progress) && progress > 0) return `${phaseLabel} ${Math.round(progress)}%`;
+  return phaseLabel;
+}
+
 function deriveStatusDetailMessage(status) {
   if (!status) return '';
   const base = typeof status.message === 'string' ? status.message.trim() : '';
+  const counts = deriveStatusProgressCounts(status);
+  const phaseLabel = deriveStatusPhaseLabel(status);
   const detail = (status && status.detail) || {};
   const kind = typeof detail.kind === 'string' ? detail.kind.toLowerCase() : '';
   const vmLabel = detail.vm || status.current || '';
@@ -231,7 +309,10 @@ function deriveStatusDetailMessage(status) {
     if (vmLabel) return `${prefix} on ${vmLabel}`;
     return prefix;
   }
-  if (base) return base;
+  if (base) return counts && !base.includes(counts) ? `${base} (${counts})` : base;
+  if (phaseLabel && counts) return `${phaseLabel} ${counts}`;
+  if (counts && vmLabel) return `${vmLabel} (${counts})`;
+  if (counts) return counts;
   return '';
 }
 
@@ -257,11 +338,15 @@ function startVmActionStatusPolling(pid, options = {}) {
   const applyStatus = (status) => {
     if (!setProgress) return;
     const message = deriveStatusDetailMessage(status);
-    if (!message) return;
+    const label = deriveStatusProgressLabel(status);
+    if (!message && !label) return;
     seenActive = true;
     const prev = (typeof getActionProgressState === 'function') ? getActionProgressState() : null;
-    const pct = prev && typeof prev.percent === 'number' ? prev.percent : 60;
-    try { setProgress(pct, undefined, message); } catch { }
+    const nextPercent = Number(status?.progress);
+    const pct = Number.isFinite(nextPercent)
+      ? Math.max(0, Math.min(100, nextPercent))
+      : (prev && typeof prev.percent === 'number' ? prev.percent : 60);
+    try { setProgress(pct, label || undefined, message || label); } catch { }
   };
 
   const handleNoActive = () => {
@@ -329,6 +414,67 @@ function canonicalPidList(list) {
     out.push(pid);
   });
   return out;
+}
+
+function vmMarkLiveRefreshed(pid) {
+  const key = canonicalPid(pid);
+  if (key) VM_LIVE_REFRESHED_PIDS.add(key);
+}
+
+function vmClearLiveRefreshed(pid) {
+  const key = canonicalPid(pid);
+  if (key) VM_LIVE_REFRESHED_PIDS.delete(key);
+}
+
+function vmHasLiveRefresh(pid) {
+  return VM_LIVE_REFRESHED_PIDS.has(canonicalPid(pid));
+}
+
+function vmActionTargetPids(opts = {}) {
+  if (opts.targetsByPid && typeof opts.targetsByPid === 'object') {
+    if (opts.targetsByPid instanceof Map) {
+      return canonicalPidList(Array.from(opts.targetsByPid.keys()));
+    }
+    return canonicalPidList(Object.keys(opts.targetsByPid));
+  }
+  if ((vmIsMulti && vmIsMulti())) {
+    return canonicalPidList(listSelectedEntries().map(entry => entry.pid));
+  }
+  if (!PROJ || !PROJ.id) return [];
+  const selected = Array.isArray(opts.targets) && opts.targets.length
+    ? opts.targets.map(entry => ({ index: Number(entry?.index), name: String(entry?.name || '') })).filter(entry => Number.isFinite(entry.index) && entry.name)
+    : listSelectedEntriesForPid(PROJ.id);
+  return selected.length ? [canonicalPid(PROJ.id)] : [];
+}
+
+async function vmEnsureLiveStateBeforeAction(opts = {}) {
+  const targetPids = vmActionTargetPids(opts);
+  if (!targetPids.length) return 'continue';
+  try { await Promise.all(targetPids.map(pid => hydrateProxCredsFromPersisted(pid))); } catch { }
+  const stalePids = targetPids.filter(pid => !vmHasLiveRefresh(pid));
+  if (!stalePids.length) return 'continue';
+  const scope = stalePids.length === 1 ? 'this project' : `${stalePids.length} selected projects`;
+  const message = `Saved credentials are available, but the VM state for ${scope} may be stale because no refresh has occurred since this page was opened.\n\nChoose Refresh to load the latest VM state before running the action, or Continue to run the action with the current view.`;
+  let selection = 'cancel';
+  try {
+    if (typeof window.showConfirmModal === 'function') {
+      selection = await window.showConfirmModal('Refresh VM State?', message, {
+        confirmText: 'Refresh',
+        confirmClass: 'btn-primary',
+        noText: 'Continue',
+        noClass: 'btn-outline-secondary',
+        cancelText: 'Cancel'
+      });
+    } else {
+      selection = window.confirm(message) ? 'yes' : 'no';
+    }
+  } catch {
+    selection = window.confirm(message) ? 'yes' : 'no';
+  }
+  if (selection === 'cancel') return 'cancel';
+  if (selection !== 'yes') return 'continue';
+  try { await vmRefresh({ forceRefresh: true }); } catch { }
+  return 'refresh';
 }
 
 // Selected projects persistence (multi-view)
@@ -422,7 +568,10 @@ async function hydrateProxCredsFromPersisted(pid) {
 // Utility helpers for conn/meta
 function readProxMeta(pid) { try { return JSON.parse(sessionStorage.getItem(proxMetaKey(pid)) || '{}'); } catch { return {}; } }
 function writeProxMeta(pid, obj) { try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj || {})); } catch { } }
-function clearProxSession(pid) { try { sessionStorage.removeItem(proxCredKey(pid)); sessionStorage.removeItem(proxMetaKey(pid)); } catch { } }
+function clearProxSession(pid) {
+  try { sessionStorage.removeItem(proxCredKey(pid)); sessionStorage.removeItem(proxMetaKey(pid)); } catch { }
+  vmClearLiveRefreshed(pid);
+}
 
 // Normalize Proxmox URL to guarantee a scheme for consistent comparisons
 function normalizeUrl(s) { if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
@@ -531,24 +680,7 @@ async function vmLoadProject() {
   const pid = canonicalPid(inputEl ? inputEl.value : '');
   if (!pid) { alert('Enter a Project ID'); return; }
   try {
-    const data = await http('GET', '/api/projects');
-    const list = normalizeProjects(data.projects);
-    ALL_PROJECTS = list;
-    const proj = list.find(p => p.id === pid);
-    if (!proj) {
-      const infoMiss = document.getElementById('vm-info');
-      if (infoMiss) infoMiss.textContent = 'Project not found.';
-      PROJ = null;
-      renderVmTable(null);
-      return;
-    }
-    PROJ = proj;
-    const infoFound = document.getElementById('vm-info');
-    if (infoFound) infoFound.textContent = '';
-    try { vmUpdateProxmoxNavLinkForCurrent(); } catch { }
-    try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
-    renderVmTable(proj);
-    updateRefreshState();
+    await vmLoadProjectById(pid);
   } catch (e) {
     alert('Error loading projects: ' + e.message);
   }
@@ -557,17 +689,29 @@ async function vmLoadProject() {
 async function vmLoadProjectById(pid) {
   const id = canonicalPid(pid);
   if (!id) throw new Error('Missing project id');
+  const requestToken = ++VM_LOAD_REQUEST_TOKEN;
+  const selectionChanged = () => canonicalPid(getCurrentPid()) !== id;
   const data = await http('GET', '/api/projects');
+  if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   const list = normalizeProjects(data.projects);
   ALL_PROJECTS = list;
   const proj = list.find(p => p.id === id);
   const info = document.getElementById('vm-info');
-  if (!proj) { if (info) info.textContent = 'Project not found.'; PROJ = null; renderVmTable(null); return; }
+  if (!proj) {
+    if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
+    if (info) info.textContent = 'Project not found.';
+    PROJ = null;
+    renderVmTable(null);
+    return;
+  }
+  if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   PROJ = proj;
   if (info) info.textContent = '';
   try { vmUpdateProxmoxNavLinkForCurrent(); } catch { }
   try { await hydrateProxCredsFromPersisted(PROJ.id); } catch { }
+  if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
+  if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   renderVmTable(proj);
   updateRefreshState();
   enforceRefreshDisabledOnConnChange();
@@ -748,6 +892,14 @@ async function refreshVmView(opts) {
       return false;
     }
   })();
+  const showProgressDialog = (() => {
+    try {
+      if (typeof opts === 'boolean') return true;
+      return !(opts && opts.showProgressDialog === false);
+    } catch {
+      return true;
+    }
+  })();
   await ensureAllProjects();
   // Capture the active project IDs at the start to prevent race conditions
   const startPids = getActivePids();
@@ -755,13 +907,19 @@ async function refreshVmView(opts) {
   if (pids.length <= 1) { const id = pids[0]; if (!id) return; await vmLoadProjectById(id); return; }
   const byId = {}; (ALL_PROJECTS || []).forEach(p => { const key = canonicalPid(p.id); if (key) byId[key] = p; });
   const ok = []; const skipped = [];
-  for (const pid of pids) {
+  const eligibility = await Promise.all(pids.map(async (pid) => {
     const key = canonicalPid(pid);
-    const proj = byId[key]; if (!proj) continue;
+    const proj = byId[key];
+    if (!proj) return { pid: key, eligible: false };
     const tokenOk = !!(proj && typeof proj.proxmox_api_token === 'string' && proj.proxmox_api_token.trim());
     const sess = await hydrateProxCredsFromPersisted(pid);
     const sessOk = !!(sess.username && sess.password);
-    if (tokenOk || sessOk) ok.push(pid); else skipped.push(pid);
+    return { pid: key, eligible: !!(tokenOk || sessOk) };
+  }));
+  for (const item of eligibility) {
+    if (!item?.pid) continue;
+    if (item.eligible) ok.push(item.pid);
+    else skipped.push(item.pid);
   }
   const note = document.getElementById('vm-skipped-note');
   if (note) {
@@ -819,44 +977,108 @@ async function refreshVmView(opts) {
   }
   // Show progress bar and start timing
   const refreshStartTime = performance.now();
-  try {
-    const prog = document.getElementById('vm-progress');
-    if (prog) {
-      prog.classList.remove('d-none');
-      prog.removeAttribute('aria-hidden');
-      const bar = document.getElementById('vm-progress-bar');
-      if (bar) {
-        const label = VM_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Refreshing…';
-        bar.textContent = label;
-        bar.style.width = '100%';
-        bar.setAttribute('aria-valuenow', '100');
-      }
+  const setRefreshProg = (pct, text, detail) => {
+    try { updateVmInlineProgress(pct, text, detail); } catch { }
+    if (showProgressDialog) {
+      try { updateActionProgress(pct, text, detail); } catch { }
     }
-  } catch { }
+  };
+  try { showVmInlineProgress('Projects 0/0', 5, 'Preparing multi-project refresh…'); } catch { }
+  if (showProgressDialog) {
+    try { showActionProgress('VM Refresh', 'Preparing multi-project refresh…'); } catch { }
+  }
   const rows = [];
   try { const d = await http('GET', '/api/projects'); ALL_PROJECTS = normalizeProjects(d.projects) || ALL_PROJECTS; } catch { }
   const mapById = {}; (ALL_PROJECTS || []).forEach(p => { const key = canonicalPid(p.id); if (key) mapById[key] = p; });
-  for (const pid of ok) {
-    const key = canonicalPid(pid);
-    const p = mapById[key]; if (!p) continue;
-    await new Promise((resolve) => {
-      queueRemoteAction(`Refresh VMs for project ${p.name || pid}`, async () => {
-        try {
-          const sess = await hydrateProxCredsFromPersisted(pid);
-          const body = { username: sess.username || undefined, password: sess.password || undefined, baseUrl: p.proxmox_url || undefined, apiPort: p.proxmox_api_port || undefined, verifySSL: p.proxmox_verify_ssl !== false, forceRefresh: forceRefresh || undefined };
-          const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
-          const statuses = resp.instance_statuses || [];
-          const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
-          const hasAnyStatus = statuses.length > 0;
-          const inst = Number(p.instances || 0); const tag = String(p.tag || '').trim(); const vms = p.vms || []; const creds = p.credentials || [];
-          for (let i = 1; i <= inst; i++) {
-            const suffix = `${tag}${i}`; const cred = creds[i - 1] || {}; const uname = (cred.username ?? '').trim(); const pword = cred.password ?? ''; const st = statusMap.get(i) || {}; const details = Array.isArray(st.vm_details) ? st.vm_details : []; const detailMap = new Map(details.map(d => [String(d.name || ''), d]));
-            for (const v of vms) { const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; const d2 = detailMap.get(vmName) || null; const rowStatus = hasAnyStatus ? (d2 ? 'created' : 'missing') : 'n/a'; const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null; rows.push({ pid, project: p.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass }); }
+  const totalRefreshProjects = Math.max(ok.length, 1);
+  let refreshedProjects = 0;
+  const projectRowsByPid = new Map();
+  const runProjectRefresh = (pid, project) => new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const entry = queueRemoteAction(`Refresh VMs for project ${project.name || pid}`, async () => {
+      const projectRows = [];
+      try {
+        const sess = await hydrateProxCredsFromPersisted(pid);
+        const body = {
+          username: sess.username || undefined,
+          password: sess.password || undefined,
+          baseUrl: project.proxmox_url || undefined,
+          apiPort: project.proxmox_api_port || undefined,
+          verifySSL: project.proxmox_verify_ssl !== false,
+          forceRefresh: forceRefresh || undefined,
+        };
+        const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
+        vmMarkLiveRefreshed(pid);
+        const statuses = resp.instance_statuses || [];
+        const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
+        const hasAnyStatus = statuses.length > 0;
+        const inst = Number(project.instances || 0);
+        const tag = String(project.tag || '').trim();
+        const vms = project.vms || [];
+        const creds = project.credentials || [];
+        for (let i = 1; i <= inst; i++) {
+          const suffix = `${tag}${i}`;
+          const cred = creds[i - 1] || {};
+          const uname = (cred.username ?? '').trim();
+          const pword = cred.password ?? '';
+          const st = statusMap.get(i) || {};
+          const details = Array.isArray(st.vm_details) ? st.vm_details : [];
+          const detailMap = new Map(details.map(d => [String(d.name || ''), d]));
+          for (const v of vms) {
+            const baseName = String((v && v.name) || '');
+            const vmName = `${baseName}${suffix}`;
+            const d2 = detailMap.get(vmName) || null;
+            const rowStatus = hasAnyStatus ? (d2 ? 'created' : 'missing') : 'n/a';
+            const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null;
+            projectRows.push({ pid, project: project.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
           }
-        } catch (e) { try { (window.shell && shell.logWarn) ? shell.logWarn(`Refresh skipped for ${p?.name || pid}: ${e?.message || e}`) : console.warn('Refresh skipped', pid, e); } catch { } }
-        resolve();
-      });
+        }
+      } catch (e) {
+        try { (window.shell && shell.logWarn) ? shell.logWarn(`Refresh skipped for ${project?.name || pid}: ${e?.message || e}`) : console.warn('Refresh skipped', pid, e); } catch { }
+      }
+      finish({ pid, rows: projectRows });
+    }, {
+      projectId: pid,
+      exclusive: false,
+      lockProject: true,
+      allowDuplicate: true,
+      onCancel: () => finish({ pid, rows: [] }),
     });
+    if (!entry) finish({ pid, rows: [] });
+  });
+  const refreshQueue = ok.slice();
+  const refreshConcurrency = Math.min(4, Math.max(1, refreshQueue.length));
+  setRefreshProg(
+    Math.max(8, Math.min(90, Math.round((refreshedProjects / totalRefreshProjects) * 85))),
+    `Projects 0/${totalRefreshProjects}`,
+    `Refreshing up to ${refreshConcurrency} project(s) in parallel…`
+  );
+  const workers = Array.from({ length: refreshConcurrency }, () => (async () => {
+    for (;;) {
+      const pid = refreshQueue.shift();
+      if (!pid) return;
+      const key = canonicalPid(pid);
+      const p = mapById[key];
+      if (!p) continue;
+      const result = await runProjectRefresh(pid, p);
+      projectRowsByPid.set(pid, Array.isArray(result?.rows) ? result.rows : []);
+      refreshedProjects += 1;
+      setRefreshProg(
+        Math.max(10, Math.min(92, Math.round((refreshedProjects / totalRefreshProjects) * 90))),
+        `Projects ${refreshedProjects}/${totalRefreshProjects}`,
+        `Refreshed ${refreshedProjects}/${totalRefreshProjects} selected project(s)…`
+      );
+    }
+  })());
+  await Promise.all(workers);
+  for (const pid of ok) {
+    const projectRows = projectRowsByPid.get(pid);
+    if (Array.isArray(projectRows) && projectRows.length) rows.push(...projectRows);
   }
   // Also show config-only rows for skipped projects so the table isn't empty and Project column can be sorted/seen
   try {
@@ -876,6 +1098,7 @@ async function refreshVmView(opts) {
 
   if (sameSelection) {
     window.__MERGED_ROWS__ = rows;
+    setRefreshProg(95, 'Rendering…', `Rendering ${rows.length} VM row(s)…`);
     try {
       const projCount = new Set(rows.map(r => canonicalPid(r.pid))).size;
       const vmCount = rows.length;
@@ -897,7 +1120,13 @@ async function refreshVmView(opts) {
     }
   } catch { }
 
-  try { const prog = document.getElementById('vm-progress'); if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden', 'true'); } } catch { }
+  if (showProgressDialog) {
+    try { updateActionProgress(100, 'Done', `Refreshed ${refreshedProjects}/${totalRefreshProjects} project(s) in ${refreshDuration}ms`); } catch { }
+  }
+  try { hideVmInlineProgress(); } catch { }
+  if (showProgressDialog) {
+    try { hideActionProgress(); } catch { }
+  }
 }
 
 function renderMergedVmTable(rows) {
@@ -1275,31 +1504,36 @@ async function vmRefresh(opts) {
       return false;
     }
   })();
-  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) { try { await refreshVmView({ forceRefresh }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
+  const showProgressDialog = (() => {
+    try {
+      if (typeof opts === 'boolean') return true;
+      return !(opts && opts.showProgressDialog === false);
+    } catch {
+      return true;
+    }
+  })();
+  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) { try { await refreshVmView({ forceRefresh, showProgressDialog }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
   if (!PROJ) { alert('Load a project first.'); return; }
   const label = `Refresh VMs for project ${PROJ?.name || PROJ?.id || ''}`.trim();
   await runQueued(label, async () => {
     // Capture the project ID at the start to prevent race conditions when switching projects
     const refreshPid = PROJ.id;
+    const setProg = (pct, text, detail) => {
+      try { updateVmInlineProgress(pct, text, detail); } catch { }
+      if (showProgressDialog) {
+        try { updateActionProgress(pct, text, detail); } catch { }
+      }
+    };
+    let stopStatusPoll = null;
     try {
       try { shell.beginActionContext('VM Refresh'); } catch { }
       try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: starting…') : console.log('VM Refresh: starting…'); } catch { }
-      // Show progress bar
-      try {
-        const prog = document.getElementById('vm-progress');
-        if (prog) {
-          prog.classList.remove('d-none');
-          prog.removeAttribute('aria-hidden');
-          const bar = document.getElementById('vm-progress-bar');
-          if (bar) {
-            const label = VM_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Refreshing…';
-            bar.textContent = label;
-            bar.style.width = '100%';
-            bar.setAttribute('aria-valuenow', '100');
-          }
-        }
-      } catch { }
+      try { showVmInlineProgress('Preparing…', 5, 'Preparing VM refresh…'); } catch { }
+      if (showProgressDialog) {
+        try { showActionProgress('VM Refresh', 'Preparing VM refresh…'); } catch { }
+      }
       try { shell.step('Progress bar shown'); } catch { }
+      setProg(10, 'Preparing…', 'Loading saved Proxmox credentials…');
       const sess = await hydrateProxCredsFromPersisted(refreshPid);
       const body = {
         username: sess.username || undefined,
@@ -1310,14 +1544,20 @@ async function vmRefresh(opts) {
         forceRefresh: forceRefresh || undefined,
       };
       try { shell.step('Prepared refresh body'); } catch { }
+      setProg(15, 'Submitting…', 'Requesting live VM inventory from Proxmox…');
+      if (typeof startVmActionStatusPolling === 'function') {
+        try { stopStatusPoll = startVmActionStatusPolling(refreshPid, { setProgress: setProg, initialDelay: 200, interval: 900 }); } catch { }
+      }
       const resp = await http('POST', `/api/projects/${refreshPid}/instances/refresh/vm`, body);
       try { shell.step('HTTP response received'); } catch { }
+      vmMarkLiveRefreshed(refreshPid);
       // Only update if we're still viewing the same project
       if (PROJ && PROJ.id === refreshPid) {
         PROJ.instance_statuses = resp.instance_statuses || [];
         try {
           const total = Array.isArray(PROJ.instance_statuses) ? PROJ.instance_statuses.length : 0;
           (window.shell && shell.logInfo) ? shell.logInfo(`VM Refresh: received ${total} instance status entr${total === 1 ? 'y' : 'ies'}`) : console.log('VM Refresh entries:', total);
+          setProg(95, `Instances ${total}/${total || 1}`, `Loaded ${total} instance status entr${total === 1 ? 'y' : 'ies'}`);
         } catch { }
         try { shell.step('Statuses stored & logged'); } catch { }
         renderVmTable(PROJ);
@@ -1331,11 +1571,13 @@ async function vmRefresh(opts) {
       try { (window.shell && shell.logError) ? shell.logError('VM Refresh failed: ' + e.message) : console.error('VM Refresh failed:', e); } catch { }
       try { shell.endActionContext(false); } catch { }
     } finally {
-      // Hide progress bar
-      try {
-        const prog = document.getElementById('vm-progress');
-        if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden', 'true'); }
-      } catch { }
+      if (typeof stopStatusPoll === 'function') {
+        try { stopStatusPoll(); } catch { }
+      }
+      try { hideVmInlineProgress(); } catch { }
+      if (showProgressDialog) {
+        try { hideActionProgress(); } catch { }
+      }
     }
   }, {
     projectId: PROJ?.id,
@@ -2812,6 +3054,170 @@ function friendlyActionName(action) {
   return action.split('_').map(part => part ? part.charAt(0).toUpperCase() + part.slice(1) : '').join(' ').trim();
 }
 
+const VM_RETRY_VERIFY_ACTIONS = new Set(['create', 'delete', 'start', 'unlock', 'suspend', 'poweroff', 'snapshot', 'apply_scenario']);
+const VM_RETRY_MERGE_ARRAY_KEYS = [
+  'created', 'deleted', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off',
+  'snapshotted', 'restored', 'applied', 'ran', 'skipped', 'notices', 'infos',
+  'ambiguous', 'network_applied_nodes', 'network_apply_errors', 'created_users',
+  'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'updated_users', 'checked'
+];
+
+function getVmRetryRequestTargetName(proj, action, item) {
+  const index = Number(item?.index);
+  const rawName = String(item?.name || item?.resolved_name || '').trim();
+  if (!Number.isFinite(index) || !rawName) return '';
+  if (action === 'create' || action === 'delete') {
+    return deriveBaseVmName(proj, rawName, index);
+  }
+  return rawName;
+}
+
+function getVmRetryTargetKey(proj, action, item) {
+  const index = Number(item?.index);
+  const requestName = getVmRetryRequestTargetName(proj, action, item);
+  if (!Number.isFinite(index) || !requestName) return '';
+  return `${index}|${requestName}`;
+}
+
+function mergeVmRetryResponses(baseResp, retryResp, untouchedErrors) {
+  const merged = { ...(baseResp || {}), ...(retryResp || {}) };
+  VM_RETRY_MERGE_ARRAY_KEYS.forEach((key) => {
+    const before = Array.isArray(baseResp?.[key]) ? baseResp[key] : [];
+    const after = Array.isArray(retryResp?.[key]) ? retryResp[key] : [];
+    if (before.length || after.length) {
+      merged[key] = [...before, ...after];
+    }
+  });
+  merged.errors = [
+    ...(Array.isArray(untouchedErrors) ? untouchedErrors : []),
+    ...(Array.isArray(retryResp?.errors) ? retryResp.errors : []),
+  ];
+  if (!merged.outputs_zip && baseResp?.outputs_zip) {
+    merged.outputs_zip = baseResp.outputs_zip;
+  }
+  return merged;
+}
+
+async function maybeRetryVerifiedVmAction({ proj, action, resp, requestPath, requestBody, setProgress, contextLabel }) {
+  if (!VM_RETRY_VERIFY_ACTIONS.has(action)) {
+    return { resp: resp || {}, verifiedCount: 0 };
+  }
+
+  const errors = Array.isArray(resp?.errors) ? resp.errors : [];
+  const targetMap = new Map();
+  for (const err of errors) {
+    const index = Number(err?.index);
+    const rawName = String(err?.name || '').trim();
+    if (!Number.isFinite(index) || !rawName) continue;
+    const target = { index, name: getVmRetryRequestTargetName(proj, action, { index, name: rawName }) };
+    if (!target.name) continue;
+    const key = `${target.index}|${target.name}`;
+    if (!targetMap.has(key)) targetMap.set(key, target);
+  }
+  const failedTargets = Array.from(targetMap.values());
+  if (!failedTargets.length) {
+    return { resp: resp || {}, verifiedCount: 0 };
+  }
+
+  const friendly = friendlyActionName(action) || action;
+  const scopeSuffix = contextLabel ? ` in ${contextLabel}` : '';
+  const verifyBody = { ...(requestBody || {}), targets: failedTargets };
+  if (action === 'snapshot') {
+    const snapname = String(resp?.snapname || (Array.isArray(resp?.snapshotted) && resp.snapshotted[0]?.snapname) || '').trim();
+    if (!snapname) {
+      return {
+        resp: {
+          ...(resp || {}),
+          notices: [...(Array.isArray(resp?.notices) ? resp.notices : []), { reason: 'Retry verification skipped because the snapshot name was unavailable.' }],
+        },
+        verifiedCount: 0,
+      };
+    }
+    verifyBody.snapname = snapname;
+  }
+
+  if (typeof setProgress === 'function') {
+    try {
+      setProgress(45, 'Checking…', `Verifying failed ${friendly.toLowerCase()} results${scopeSuffix}…`);
+    } catch { }
+  }
+
+  let verifyResp;
+  try {
+    verifyResp = await http('POST', `${requestPath}/retry-check`, verifyBody);
+  } catch (e) {
+    return {
+      resp: {
+        ...(resp || {}),
+        notices: [...(Array.isArray(resp?.notices) ? resp.notices : []), { reason: `Retry verification failed: ${e?.message || e}` }],
+      },
+      verifiedCount: 0,
+    };
+  }
+
+  const completed = Array.isArray(verifyResp?.completed) ? verifyResp.completed : [];
+  const remaining = Array.isArray(verifyResp?.remaining) ? verifyResp.remaining : [];
+  const failedKeys = new Set(failedTargets.map(item => `${item.index}|${item.name}`));
+  const remainingKeys = new Set(remaining.map(item => getVmRetryTargetKey(proj, action, item)).filter(Boolean));
+  const untouchedErrors = errors.filter((err) => {
+    const key = getVmRetryTargetKey(proj, action, err);
+    return !(key && failedKeys.has(key));
+  });
+  const remainingOriginalErrors = errors.filter((err) => {
+    const key = getVmRetryTargetKey(proj, action, err);
+    return !!(key && remainingKeys.has(key));
+  });
+  const completedInfos = completed.map(item => ({
+    name: item?.resolved_name || item?.name || '',
+    reason: item?.reason || `${friendly} already completed after verification`,
+  }));
+  let nextResp = {
+    ...(resp || {}),
+    infos: [...(Array.isArray(resp?.infos) ? resp.infos : []), ...completedInfos],
+    errors: [...untouchedErrors, ...remainingOriginalErrors],
+  };
+
+  if (!remaining.length) {
+    return { resp: nextResp, verifiedCount: completed.length };
+  }
+
+  const verifiedNote = completed.length ? ` ${completed.length} already completed on verification.` : '';
+  const retry = window.confirm(`${friendly} failed on ${remaining.length} VM(s)${scopeSuffix}.${verifiedNote} Retry the remaining VM(s) now?`);
+  if (!retry) {
+    return { resp: nextResp, verifiedCount: completed.length };
+  }
+
+  if (typeof setProgress === 'function') {
+    try {
+      setProgress(55, 'Retrying…', `Retrying ${friendly.toLowerCase()} on ${remaining.length} VM(s)${scopeSuffix}…`);
+    } catch { }
+  }
+
+  const retryBody = { ...(requestBody || {}), targets: remaining.map(item => ({ index: Number(item?.index), name: String(item?.name || '') })) };
+  if (action === 'snapshot' && verifyBody.snapname) {
+    retryBody.snapname = verifyBody.snapname;
+  }
+
+  let retryResp;
+  try {
+    retryResp = await http('POST', requestPath, retryBody);
+  } catch (e) {
+    return {
+      resp: {
+        ...nextResp,
+        notices: [...(Array.isArray(nextResp?.notices) ? nextResp.notices : []), { reason: `Retry request failed: ${e?.message || e}` }],
+      },
+      verifiedCount: completed.length,
+    };
+  }
+
+  const baseForRetry = { ...nextResp, errors: untouchedErrors };
+  return {
+    resp: mergeVmRetryResponses(baseForRetry, retryResp, untouchedErrors),
+    verifiedCount: completed.length,
+  };
+}
+
 function getProjectSnapshot(pid) {
   const target = canonicalPid(pid);
   if (!target) return null;
@@ -4039,6 +4445,8 @@ function interpretStoredCommandSelection(value) {
 // Dispatch VM actions (queued wrapper)
 async function vmAction(action, opts) {
   const options = opts ? { ...opts } : {};
+  const liveStateDecision = await vmEnsureLiveStateBeforeAction(options);
+  if (liveStateDecision !== 'continue') return;
   if (action === 'users_creds_set') {
     const confirmed = window.confirm(buildCredsSetConfirmationMessage(options));
     if (!confirmed) return;
@@ -4091,17 +4499,13 @@ async function vmActionExec(action, opts = {}) {
     const prettyAction = friendlyActionName(action) || action;
     // Progress indicator helpers funnel into shared queue state
     const setAp = (pct, text, detail) => {
+      try { updateVmInlineProgress(pct, text, detail); } catch { }
       try { updateActionProgress(pct, text, detail); } catch { }
     };
     let topProg = null;
     try {
       topProg = document.getElementById('vm-progress');
-      if (topProg) {
-        topProg.classList.remove('d-none');
-        topProg.removeAttribute('aria-hidden');
-        const bar = document.getElementById('vm-progress-bar');
-        if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow', '100'); }
-      }
+      if (topProg) showVmInlineProgress('Preparing…', 5, 'Resolving templates…');
     } catch { }
     try { showActionProgress(`${prettyAction} in progress`, 'Preparing…'); } catch { }
     setAp(10, 'Preparing…', 'Resolving templates…');
@@ -4206,7 +4610,7 @@ async function vmActionExec(action, opts = {}) {
       try { hideActionProgress(); } catch { }
       try {
         const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-        Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
+        Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
       } catch { }
     }
     return;
@@ -4218,9 +4622,10 @@ async function vmActionExec(action, opts = {}) {
   const sess = readProxCreds(PROJ.id) || {};
   // Show top progress bar for any action
   let topProg = null;
-  try { topProg = document.getElementById('vm-progress'); if (topProg) { topProg.classList.remove('d-none'); topProg.removeAttribute('aria-hidden'); const bar = document.getElementById('vm-progress-bar'); if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow', '100'); } } } catch { }
+  try { topProg = document.getElementById('vm-progress'); if (topProg) showVmInlineProgress('Preparing…', 5, 'Gathering selection…'); } catch { }
   // Progress indicator helpers funnel into shared queue state
   const setAp = (pct, text, detail) => {
+    try { updateVmInlineProgress(pct, text, detail); } catch { }
     try { updateActionProgress(pct, text, detail); } catch { }
   };
   const prettyAction = friendlyActionName(action) || action;
@@ -4311,18 +4716,29 @@ async function vmActionExec(action, opts = {}) {
       let createdCount = 0;
       let skippedCount = 0;
       // Batch once to server (server orchestrates each target), handle ambiguous response by prompting
+      const retryBaseBody = {
+        username: sess.username || undefined,
+        password: sess.password || undefined,
+        baseUrl: PROJ.proxmox_url || undefined,
+        apiPort: PROJ.proxmox_api_port || undefined,
+        verifySSL: PROJ.proxmox_verify_ssl !== false,
+      };
       const makeRequest = async () => {
         try { shell.step('Submitting create batch'); } catch { }
-        const r = await http('POST', `/api/projects/${PROJ.id}/instances/actions/create`, {
-          username: sess.username || undefined,
-          password: sess.password || undefined,
-          baseUrl: PROJ.proxmox_url || undefined,
-          apiPort: PROJ.proxmox_api_port || undefined,
-          verifySSL: PROJ.proxmox_verify_ssl !== false,
-          targets,
-        });
-        try { shell.step('Create batch response received'); } catch { }
-        return r;
+        const requestPromise = http('POST', `/api/projects/${PROJ.id}/instances/actions/create`, { ...retryBaseBody, targets });
+        let stopStatusPoll = null;
+        if (typeof startVmActionStatusPolling === 'function') {
+          try { stopStatusPoll = startVmActionStatusPolling(PROJ.id, { setProgress: setProg, initialDelay: 200 }); } catch { }
+        }
+        try {
+          const r = await requestPromise;
+          try { shell.step('Create batch response received'); } catch { }
+          return r;
+        } finally {
+          if (typeof stopStatusPoll === 'function') {
+            try { stopStatusPoll(); } catch { }
+          }
+        }
       };
       // Preflight: resolve ALL ambiguities before cloning begins (loop until none remain)
       try {
@@ -4406,10 +4822,23 @@ async function vmActionExec(action, opts = {}) {
         // Unexpected error: surface and abort create handler
         throw e;
       }
-      setProg(100, 'Done', `Created ${createdCount}/${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+      const retryOutcome = await maybeRetryVerifiedVmAction({
+        proj: PROJ,
+        action,
+        resp: lastResp || {},
+        requestPath: `/api/projects/${PROJ.id}/instances/actions/create`,
+        requestBody: retryBaseBody,
+        setProgress: setProg,
+      });
+      lastResp = retryOutcome.resp;
+      createdCount = Array.isArray(lastResp?.created) ? lastResp.created.length : 0;
+      skippedCount = Array.isArray(lastResp?.skipped) ? lastResp.skipped.length : skippedCount;
+      const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
+      const verifiedSuffix = verifiedCount ? `, verified ${verifiedCount}` : '';
+      setProg(100, 'Done', `Created ${createdCount + verifiedCount}/${total}${verifiedSuffix}${skippedCount ? ', skipped ' + skippedCount : ''}`);
       try { showActionSummary('Create', lastResp || {}); } catch { }
       try { emitActionLogs('Create', lastResp || {}); } catch { }
-      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Create: ${createdCount} VM(s)`) : console.log('Create done'); } catch { }
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Create: ${createdCount + verifiedCount} VM(s)`) : console.log('Create done'); } catch { }
       try { shell.endActionContext(true); } catch { }
       return;
     }
@@ -4512,50 +4941,18 @@ async function vmActionExec(action, opts = {}) {
         }
       }
       try { shell.step('Action response'); } catch { }
-      // Special handling: if snapshot failed for some VMs, ask user if they want to retry just those
-      if (action === 'snapshot') {
-        try {
-          const errs = Array.isArray(resp.errors) ? resp.errors : [];
-          const failed = errs
-            .filter(e => String(e?.reason || '').toLowerCase().includes('snapshot failed'))
-            .map(e => ({ index: Number(e?.index), name: String(e?.name || '') }))
-            .filter(t => Number.isFinite(t.index) && t.name);
-          // Deduplicate by index|name
-          const seen = new Set();
-          const failedUnique = failed.filter(t => { const k = `${t.index}|${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
-          if (failedUnique.length > 0) {
-            // Inform and ask
-            const retry = window.confirm(`Snapshots failed on ${failedUnique.length} VM(s). The node/storage may have been busy. Try again now?`);
-            if (retry) {
-              // Keep modal visible and update progress
-              setProg(55, 'Retrying…', `Retrying snapshots on ${failedUnique.length} VM(s)…`);
-              const resp2 = await http('POST', path, {
-                username: sess.username || undefined,
-                password: sess.password || undefined,
-                baseUrl: PROJ.proxmox_url || undefined,
-                apiPort: PROJ.proxmox_api_port || undefined,
-                verifySSL: PROJ.proxmox_verify_ssl !== false,
-                targets: failedUnique,
-              });
-              // Merge results: add successes, keep only remaining errors
-              const succ2 = Array.isArray(resp2.snapshotted) ? resp2.snapshotted : [];
-              const succKeys = new Set(succ2.map(i => `${Number(i?.index)}|${String(i?.name || '')}`));
-              const origErrors = Array.isArray(resp.errors) ? resp.errors : [];
-              const filteredErrors = origErrors.filter(e => {
-                const key = `${Number(e?.index)}|${String(e?.name || '')}`;
-                const isSnapFail = String(e?.reason || '').toLowerCase().includes('snapshot failed');
-                return !(isSnapFail && succKeys.has(key));
-              });
-              resp = {
-                ...resp,
-                snapshotted: [...(resp.snapshotted || []), ...succ2],
-                skipped: [...(resp.skipped || []), ...(resp2.skipped || [])],
-                errors: [...filteredErrors, ...(resp2.errors || [])],
-              };
-            }
-          }
-        } catch { }
-      }
+      const retryBody = { ...payload };
+      delete retryBody.targets;
+      const retryOutcome = await maybeRetryVerifiedVmAction({
+        proj: PROJ,
+        action,
+        resp,
+        requestPath: path,
+        requestBody: retryBody,
+        setProgress: setProg,
+      });
+      resp = retryOutcome.resp;
+      const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
       // Determine counts based on action response keys
       const keyMap = { start: 'started', unlock: 'unlocked', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', apply_scenario: 'applied' };
       const k = keyMap[action];
@@ -4566,19 +4963,21 @@ async function vmActionExec(action, opts = {}) {
         const skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
         const startedCount = doneArr.length;
         const resumedCount = resp.resumed.length;
-        setProg(100, 'Done', `Started ${startedCount}, resumed ${resumedCount} / ${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+        const verifiedSuffix = verifiedCount ? `, verified ${verifiedCount}` : '';
+        setProg(100, 'Done', `Started ${startedCount}, resumed ${resumedCount}${verifiedSuffix} / ${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
         try { showActionSummary('Start', resp || {}); } catch { }
         try { emitActionLogs('Start', resp || {}); } catch { }
-        try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Start/Resume: ${startedCount + resumedCount} VM(s)`) : console.log('Start done'); } catch { }
+        try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Start/Resume: ${startedCount + resumedCount + verifiedCount} VM(s)`) : console.log('Start done'); } catch { }
         try { shell.endActionContext(true); } catch { }
         return;
       }
       const skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
       const total = targets.length;
-      setProg(100, 'Done', `${pastTense} ${doneArr.length}/${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+      const verifiedSuffix = verifiedCount ? `, verified ${verifiedCount}` : '';
+      setProg(100, 'Done', `${pastTense} ${doneArr.length + verifiedCount}/${total}${verifiedSuffix}${skippedCount ? ', skipped ' + skippedCount : ''}`);
       try { showActionSummary(action.charAt(0).toUpperCase() + action.slice(1), resp || {}); } catch { }
       try { emitActionLogs(action.charAt(0).toUpperCase() + action.slice(1), resp || {}); } catch { }
-      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`${action}: ${doneArr.length} VM(s)`) : console.log(action, 'done'); } catch { }
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`${action}: ${doneArr.length + verifiedCount} VM(s)`) : console.log(action, 'done'); } catch { }
       try { shell.endActionContext(true); } catch { }
       return;
     }
@@ -4629,21 +5028,36 @@ async function vmActionExec(action, opts = {}) {
       }
       setProg(25, 'Deleting…', `Deleting ${targets.length} VM(s)…`);
       try { shell.step('Submitting delete'); } catch { }
-      const resp = await http('POST', `/api/projects/${PROJ.id}/instances/actions/delete`, {
+      const retryBaseBody = {
         username: sess.username || undefined,
         password: sess.password || undefined,
         baseUrl: PROJ.proxmox_url || undefined,
         apiPort: PROJ.proxmox_api_port || undefined,
         verifySSL: PROJ.proxmox_verify_ssl !== false,
+      };
+      let resp = await http('POST', `/api/projects/${PROJ.id}/instances/actions/delete`, {
+        ...retryBaseBody,
+        verifyCleanup: false,
         targets,
       });
       try { shell.step('Delete response'); } catch { }
+      const retryOutcome = await maybeRetryVerifiedVmAction({
+        proj: PROJ,
+        action,
+        resp,
+        requestPath: `/api/projects/${PROJ.id}/instances/actions/delete`,
+        requestBody: retryBaseBody,
+        setProgress: setProg,
+      });
+      resp = retryOutcome.resp;
       deletedCount = Array.isArray(resp.deleted) ? resp.deleted.length : 0;
       skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
-      setProg(100, 'Done', `Deleted ${deletedCount}/${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+      const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
+      const verifiedSuffix = verifiedCount ? `, verified ${verifiedCount}` : '';
+      setProg(100, 'Done', `Deleted ${deletedCount + verifiedCount}/${total}${verifiedSuffix}${skippedCount ? ', skipped ' + skippedCount : ''}`);
       try { showActionSummary('Delete', resp || {}); } catch { }
       try { emitActionLogs('Delete', resp || {}); } catch { }
-      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Delete: ${deletedCount} VM(s)`) : console.log('Delete done'); } catch { }
+      try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Delete: ${deletedCount + verifiedCount} VM(s)`) : console.log('Delete done'); } catch { }
       try { shell.endActionContext(true); } catch { }
       return;
     }
@@ -4671,7 +5085,7 @@ async function vmActionExec(action, opts = {}) {
     // Always refresh after any action (even on failure) but do not block UI while pending
     try {
       const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-      Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
+      Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
     } catch { }
   }
 }
@@ -4706,12 +5120,26 @@ async function vmActionMulti(action, opts) {
     return ` — ${cmds.length} cmds`;
   })();
   const label = `Multi ${labelName}${commandSuffix} (${selCount || 0} item${(selCount || 0) === 1 ? '' : 's'})`;
-  await runQueued(label, async () => { await vmActionMultiExec(action, options); });
+        const runCreateRequest = async () => {
+          const requestPromise = makeReq('/instances/actions/create', { ...baseBody, targets: t });
+          let stopStatusPoll = null;
+          if (typeof startVmActionStatusPolling === 'function') {
+            try { stopStatusPoll = startVmActionStatusPolling(pid, { setProgress: setAp, initialDelay: 200 }); } catch { }
+          }
+          try {
+            return await requestPromise;
+          } finally {
+            if (typeof stopStatusPoll === 'function') {
+              try { stopStatusPoll(); } catch { }
+            }
+          }
+        };
+        const resp = await runCreateRequest();
 }
 
 // Original implementation moved to vmActionMultiExec
 async function vmActionMultiExec(action, opts = {}) {
-  try { shell.beginActionContext(`Multi ${friendlyActionName(action) || action}`); } catch { }
+          const resp2 = await runCreateRequest();
   const selected = (() => {
     if (opts.targetsByPid && typeof opts.targetsByPid === 'object') {
       const out = [];
@@ -4745,7 +5173,10 @@ async function vmActionMultiExec(action, opts = {}) {
   }
   // Progress indicator routed through shared helpers
   const friendly = friendlyActionName(action) || action;
-  const setAp = (pct, text, detail) => { try { updateActionProgress(pct, text, detail); } catch { } };
+  const setAp = (pct, text, detail) => {
+    try { updateVmInlineProgress(pct, text, detail); } catch { }
+    try { updateActionProgress(pct, text, detail); } catch { }
+  };
   try {
     showActionProgress(`Multi ${friendly}`, 'Preparing selections…');
     setAp(10, 'Preparing…', 'Collecting project selections…');
@@ -4782,7 +5213,7 @@ async function vmActionMultiExec(action, opts = {}) {
   const totalProjects = pids.length;
   let doneProjects = 0;
   const topProg = document.getElementById('vm-progress');
-  try { if (topProg) { topProg.classList.remove('d-none'); topProg.removeAttribute('aria-hidden'); const bar = document.getElementById('vm-progress-bar'); if (bar) { bar.textContent = 'Working…'; bar.style.width = '100%'; bar.setAttribute('aria-valuenow', '100'); } } } catch { }
+  try { if (topProg) showVmInlineProgress('Preparing…', 5, 'Collecting project selections…'); } catch { }
   try { (window.shell && shell.logInfo) ? shell.logInfo(`Multi action ${friendlyActionName(action) || action} across ${totalProjects} project(s)`) : console.log('Multi action', action); } catch { }
   // Fetch latest projects list to ensure data
   try { const d = await http('GET', '/api/projects'); ALL_PROJECTS = d.projects || ALL_PROJECTS; } catch { }
@@ -4908,7 +5339,7 @@ async function vmActionMultiExec(action, opts = {}) {
     try { hideActionProgress(); } catch { }
     try {
       const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-      Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
+      Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
     } catch { }
     return;
   }
@@ -5059,17 +5490,17 @@ async function vmActionMultiExec(action, opts = {}) {
           PROJ = prev;
         } catch { }
         setAp(Math.max(35, pct), 'Cloning…', `Cloning in ${projName}…`);
-        const resp = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
+        const createPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/create`;
+        let resp = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
         // Retry once if ambiguous reported
         const amb = Array.isArray(resp.ambiguous) ? resp.ambiguous : [];
         if (amb.length) {
           try { const prev = PROJ; PROJ = proj; const group = new Map(); for (const entry of amb) { const baseName = String(entry?.name || ''); const list = Array.isArray(entry?.candidates) ? entry.candidates : []; if (!group.has(baseName)) group.set(baseName, new Map()); const seen = group.get(baseName); for (const c of list) { const vmid = (c && (c.vmid ?? c.id)); if (vmid === undefined || vmid === null || vmid === '') continue; const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || ''; const k = `${vmid}@@${node}`; if (!seen.has(k)) seen.set(k, { vmid, node }); } } for (const [baseName, map] of group.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values())); } PROJ = prev; } catch { }
-          const resp2 = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
-          // Prefer second
-          ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp2[k], projName));
-        } else {
-          ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp[k], projName));
+          resp = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
         }
+        const createRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: createPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
+        resp = createRetryOutcome.resp;
+        ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'infos', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear') {
@@ -5095,8 +5526,11 @@ async function vmActionMultiExec(action, opts = {}) {
       }
       if (action === 'apply_scenario') {
         setAp(Math.max(20, pct), 'Working…', `Applying Scenario Name in ${projName}…`);
-        const resp = await makeReq(`/instances/actions/apply_scenario`, { ...baseBody, targets });
-        ['applied', 'skipped', 'errors'].forEach(k => addArr(k, resp[k], projName));
+        let resp = await makeReq(`/instances/actions/apply_scenario`, { ...baseBody, targets });
+        const scenarioPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/apply_scenario`;
+        const scenarioRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: scenarioPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
+        resp = scenarioRetryOutcome.resp;
+        ['applied', 'skipped', 'errors', 'infos'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
@@ -5125,38 +5559,21 @@ async function vmActionMultiExec(action, opts = {}) {
         if (!agg.outputs_zip && resp?.outputs_zip) {
           agg.outputs_zip = resp.outputs_zip;
         }
-        if (action === 'snapshot') {
-          try {
-            const errs = Array.isArray(resp.errors) ? resp.errors : [];
-            const failed = errs.filter(e => String(e?.reason || '').toLowerCase().includes('snapshot failed')).map(e => ({ index: Number(e?.index), name: String(e?.name || '') })).filter(t => Number.isFinite(t.index) && t.name);
-            const seen = new Set(); const failedUnique = failed.filter(t => { const k = `${t.index}|${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
-            if (failedUnique.length > 0) {
-              const retry = window.confirm(`Snapshots failed on ${failedUnique.length} VM(s) in ${projName}. Try again now?`);
-              if (retry) {
-                const resp2 = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets: failedUnique });
-                // Merge
-                const succ2 = Array.isArray(resp2.snapshotted) ? resp2.snapshotted : [];
-                const succKeys = new Set(succ2.map(i => `${Number(i?.index)}|${String(i?.name || '')}`));
-                const origErrors = Array.isArray(resp.errors) ? resp.errors : [];
-                const filteredErrors = origErrors.filter(e => {
-                  const key = `${Number(e?.index)}|${String(e?.name || '')}`;
-                  const isSnapFail = String(e?.reason || '').toLowerCase().includes('snapshot failed');
-                  return !(isSnapFail && succKeys.has(key));
-                });
-                resp = { ...resp, snapshotted: [...(resp.snapshotted || []), ...succ2], skipped: [...(resp.skipped || []), ...(resp2.skipped || [])], errors: [...filteredErrors, ...(resp2.errors || [])] };
-              }
-            }
-          } catch { }
-        }
-        ['started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'snapshotted', 'restored', 'skipped', 'errors', 'notices', 'ran'].forEach(k => addArr(k, resp[k], projName));
+        const actionPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/${action}`;
+        const actionRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: actionPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
+        resp = actionRetryOutcome.resp;
+        ['started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'snapshotted', 'restored', 'skipped', 'errors', 'notices', 'infos', 'ran'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'delete') {
         let t = targets.map(toBase);
         if (t.length === 0) continue;
         setAp(Math.max(20, pct), 'Deleting…', `Deleting in ${projName}…`);
-        const resp = await makeReq('/instances/actions/delete', { ...baseBody, targets: t });
-        ['deleted', 'skipped', 'errors', 'notices'].forEach(k => addArr(k, resp[k], projName));
+        let resp = await makeReq('/instances/actions/delete', { ...baseBody, verifyCleanup: false, targets: t });
+        const deletePath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/delete`;
+        const deleteRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: deletePath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
+        resp = deleteRetryOutcome.resp;
+        ['deleted', 'skipped', 'errors', 'notices', 'infos'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       alert('Action not implemented yet: ' + action);
@@ -5199,7 +5616,7 @@ async function vmActionMultiExec(action, opts = {}) {
   try { hideActionProgress(); } catch { }
   try {
     const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-    Promise.resolve().then(() => vmRefresh({ forceRefresh })).catch(() => { });
+    Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
   } catch { }
 }
 

@@ -570,7 +570,12 @@
       if (defVm) defVm.checked = !!s.defaultVmExpanded;
       if (defMat) defMat.checked = !!s.defaultMatExpanded;
       // Apply current selection
-      const apply = async (pid) => { if (!pid) return; try { await vmLoadProjectById(pid); } catch { } };
+      const apply = async (pid) => {
+        if (!pid) return;
+        const input = document.getElementById('vm-proj-id');
+        if (input) input.value = pid;
+        try { await vmLoadProjectById(pid); } catch { }
+      };
       document.addEventListener('project-selected', (e) => apply(e.detail));
       apply(shell.getCurrentProjectId());
       // Wire Import Options modal
@@ -590,19 +595,6 @@
   </script>
   </div>
   <!-- Snapshot/Restore modal removed: snapshot auto-named, restore uses latest -->
-  <script>
-    document.addEventListener('DOMContentLoaded', async () => {
-      await shell.initShell('vm');
-      const apply = async (pid) => {
-        if (!pid) return;
-        const input = document.getElementById('vm-proj-id');
-        if (input) input.value = pid;
-        try { await vmLoadProjectById(pid); } catch { }
-      };
-      document.addEventListener('project-selected', (e) => apply(e.detail));
-      apply(shell.getCurrentProjectId());
-    });
-  </script>
   <script>
     // Banner user dropdown wiring
     document.addEventListener('DOMContentLoaded', async () => {

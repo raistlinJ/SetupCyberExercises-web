@@ -191,7 +191,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <p class="small text-muted">Enter an Admin/Teacher API token for each project missing credentials. Projects without a configured CTFd URL must be fixed in the CTFd Manager or project settings.</p>
+        <p class="small text-muted">Enter the same CTFd connection settings used in CTFd Manager for each project. Use an Admin/Teacher API token for challenge stats and set SSL verification to match the project configuration.</p>
         <div id="ctfdLoginList" class="vstack gap-3"></div>
         <div class="form-check mb-2 mt-2">
           <input class="form-check-input" type="checkbox" id="chals-save-creds">
@@ -200,8 +200,9 @@
         <small class="text-muted">If unchecked, tokens are session-only (sessionStorage + ephemeral cookie for popups). If checked, they are saved on the server for your user and each project (encrypted at rest).</small>
       </div>
       <div class="modal-footer">
+        <div id="ctfdLoginFeedback" class="me-auto small"></div>
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-        <button id="ctfdLoginSave" type="button" class="btn btn-primary">Save Tokens</button>
+        <button id="ctfdLoginSave" type="button" class="btn btn-primary">Save & Validate</button>
       </div>
     </div>
   </div>

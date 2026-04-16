@@ -166,6 +166,27 @@ class ProjectSecretsApiTests(unittest.TestCase):
             got2 = resp3.get_json() or {}
             self.assertEqual(got2.get('ctfd', {}).get('token'), '')
 
+    def test_anonymous_mode_can_read_existing_project_secret_owner(self):
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=self.store))
+            stack.enter_context(patch('app.routes.api._acting_username', return_value='setupadmin'))
+
+            save_resp = self.client.patch(
+                f'/api/projects/{self.project.id}/secrets',
+                json={'ctfd': {'token': 'ctfdtoken-owner'}},
+            )
+            self.assertEqual(save_resp.status_code, 200)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=self.store))
+            stack.enter_context(patch('app.routes.api._acting_username', return_value='__anonymous__'))
+
+            resp = self.client.get(f'/api/projects/{self.project.id}/secrets')
+            self.assertEqual(resp.status_code, 200)
+            body = resp.get_json() or {}
+            self.assertEqual(body.get('ctfd', {}).get('token'), 'ctfdtoken-owner')
+            self.assertTrue(body.get('ctfd', {}).get('saved'))
+
 
 if __name__ == '__main__':
     unittest.main()

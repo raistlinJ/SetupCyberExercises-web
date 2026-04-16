@@ -494,7 +494,7 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-user-speak-template-add',
     templateListId: 'settings-audio-ctfd-user-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-user-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
+    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{first_team}}, {{team_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
     defaultSpeak: true,
     defaultSpeakTemplate: '{{audio}} {{leader}} is now in first place{{project_clause}}.',
@@ -514,12 +514,12 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-team-speak-template-add',
     templateListId: 'settings-audio-ctfd-team-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-team-speak-help',
-    placeholderHint: '{{audio}}, {{team_first}}, {{second_team}}, {{third_team}}, {{project}}, {{project_clause}}',
+    placeholderHint: '{{audio}}, {{leader}}, {{first_team}}, {{second_team}}, {{third_team}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} {{team_first}} is now in first place{{project_clause}}.',
+    defaultSpeakTemplate: '{{audio}} {{leader}} is now in first place{{project_clause}}.',
     legacyDefaultSpeakBefore: '',
-    legacyDefaultSpeakAfter: 'Team {{team_first}} is now in first place{{project_clause}}.'
+    legacyDefaultSpeakAfter: '{{leader}} is now in first place{{project_clause}}.'
   },
   ctfdFirstScore: {
     inputId: 'settings-audio-ctfd-score',
@@ -534,7 +534,7 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-score-speak-template-add',
     templateListId: 'settings-audio-ctfd-score-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-score-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{team_first}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{points}}, {{points_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
+    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{first_team}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{points}}, {{points_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
     defaultSpeak: true,
     defaultSpeakTemplate: '{{audio}} First score{{project_clause}} goes to {{leader}}{{team_clause}}{{challenge_clause}}{{points_clause}}.',
@@ -645,12 +645,12 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-cat-team-speak-template-add',
     templateListId: 'settings-audio-ctfd-cat-team-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-cat-team-speak-help',
-    placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{team_first}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
+    placeholderHint: '{{audio}}, {{leader}}, {{category}}, {{category_clause}}, {{first_team}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} {{team_first}} is first to solve a {{category}} challenge{{project_clause}}.',
+    defaultSpeakTemplate: '{{audio}} {{leader}} is first to solve a {{category}} challenge{{project_clause}}.',
     legacyDefaultSpeakBefore: '',
-    legacyDefaultSpeakAfter: '{{team_first}} is first to solve a {{category}} challenge{{project_clause}}.'
+    legacyDefaultSpeakAfter: '{{leader}} is first to solve a {{category}} challenge{{project_clause}}.'
   }
 };
 const SETTINGS_AUDIO_DEFAULTS = Object.fromEntries(Object.entries(SETTINGS_AUDIO_FIELDS).map(([key, cfg]) => [key, cfg.defaultEnabled !== undefined ? !!cfg.defaultEnabled : true]));
@@ -659,7 +659,7 @@ window.SETTINGS_AUDIO_FIELDS_META = SETTINGS_AUDIO_FIELDS;
 const SETTINGS_AUDIO_PREVIEW_DEFAULT_CONTEXT = {
   leader: 'Alex Jordan',
   user_first: 'Alex Jordan',
-  team_first: 'Team Eclipse',
+  first_team: 'Team Eclipse',
   team_clause: ' from Team Eclipse',
   project: 'Cyber Shield',
   project_clause: ' in Cyber Shield',
@@ -681,7 +681,7 @@ const SETTINGS_AUDIO_PREVIEW_CONTEXT = {
   ctfdFirstTeam: { leader: 'Team Eclipse' },
   ctfdPeriodic: { interval_minutes: '30' },
   ctfdFirstCategoryUser: { category: 'Web Exploitation', leader: 'Alex Jordan' },
-  ctfdFirstCategoryTeam: { category: 'Reverse Engineering', team_first: 'Team Aurora' },
+  ctfdFirstCategoryTeam: { category: 'Reverse Engineering', leader: 'Team Aurora' },
   ctfdCountdownStop: { reason: 'challenges_hidden', reason_clause: ' while challenges are hidden' }
 };
 function settingsModalPreviewContext(key) {
@@ -2816,6 +2816,55 @@ window.checkWizCsvFile = async function() {
     return n;
   }
 
+  function adapterSuffixFromOrdinal(value) {
+    let n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return 'A';
+    let out = '';
+    do {
+      out = String.fromCharCode(65 + (n % 26)) + out;
+      n = Math.floor(n / 26) - 1;
+    } while (n >= 0);
+    return out;
+  }
+
+  function adapterOrdinalFromSuffix(value) {
+    const suffix = String(value || '').trim().toUpperCase();
+    if (!/^[A-Z]+$/.test(suffix)) return -1;
+    let out = 0;
+    for (let i = 0; i < suffix.length; i += 1) {
+      out = (out * 26) + (suffix.charCodeAt(i) - 64);
+    }
+    return out - 1;
+  }
+
+  function getAdapterOrdinal(adapter) {
+    const direct = Number(adapter && adapter.ordinal);
+    if (Number.isFinite(direct) && direct >= 0) return direct;
+    const suffixOrdinal = adapterOrdinalFromSuffix(adapter && adapter.suffix);
+    if (suffixOrdinal >= 0) return suffixOrdinal;
+    const numericMatch = String(adapter && adapter.name || '').match(/(\d+)$/);
+    if (numericMatch) {
+      const numeric = Number(numericMatch[1]);
+      if (Number.isFinite(numeric) && numeric >= 0) return numeric;
+    }
+    const alphaMatch = String(adapter && adapter.name || '').match(/([A-Z]+)$/);
+    if (alphaMatch) return adapterOrdinalFromSuffix(alphaMatch[1]);
+    return -1;
+  }
+
+  function getAdapterSuffix(adapter) {
+    const explicit = String(adapter && adapter.suffix || '').trim().toUpperCase();
+    if (/^[A-Z]+$/.test(explicit)) return explicit;
+    const ordinal = getAdapterOrdinal(adapter);
+    return ordinal >= 0 ? adapterSuffixFromOrdinal(ordinal) : '';
+  }
+
+  function getWizardAdapterBase() {
+    const input = document.getElementById('wiz-adapter-base');
+    const sanitized = String(input && input.value || 'net').replace(/[^A-Za-z]/g, '').trim();
+    return sanitized || 'net';
+  }
+
   // Returns the point on a VM's rect edge in the direction toward (tx,ty)
   function rectEdgePoint(cx, cy, tx, ty) {
     const dx = tx - cx, dy = ty - cy;
@@ -2828,16 +2877,15 @@ window.checkWizCsvFile = async function() {
   }
 
   function allocateAdapter() {
-    // Find the lowest free net number
-    const usedNums = new Set(
-      adapters.map(a => { const m = a.name.match(/^net(\d+)$/); return m ? parseInt(m[1]) : -1; })
-    );
+    // Find the lowest free adapter suffix.
+    const usedNums = new Set(adapters.map(a => getAdapterOrdinal(a)).filter(n => n >= 0));
     let n = 0;
     while (usedNums.has(n)) n++;
     adapterCounter = n + 1;
-    const name = 'net' + n;
+    const suffix = adapterSuffixFromOrdinal(n);
+    const name = getWizardAdapterBase() + suffix;
     const color = ADAPTER_COLORS[n % ADAPTER_COLORS.length];
-    const a = { name, color };
+    const a = { name, color, suffix, ordinal: n };
     adapters.push(a);
     return a;
   }
@@ -2847,10 +2895,8 @@ window.checkWizCsvFile = async function() {
     const stillUsed = links.some(l => l.adapter === adapterName);
     if (!stillUsed) {
       adapters = adapters.filter(a => a.name !== adapterName);
-      // Reset counter to lowest free number so next alloc reuses the gap
-      const usedNums = new Set(
-        adapters.map(a => { const m = a.name.match(/^net(\d+)$/); return m ? parseInt(m[1]) : -1; })
-      );
+      // Reset counter to lowest free suffix so next alloc reuses the gap.
+      const usedNums = new Set(adapters.map(a => getAdapterOrdinal(a)).filter(n => n >= 0));
       let n = 0;
       while (usedNums.has(n)) n++;
       adapterCounter = n;
@@ -3269,20 +3315,18 @@ window.checkWizCsvFile = async function() {
   window.wizNetGraph = { init, saveState, restore };
   window.wizVmSettingsClear = () => { selectedNode = null; updateSettingsPanel(); renderNodes(); };
 
-  // Rename all adapter basenames (e.g. "net" → "vmbr"), preserving their numeric suffix.
-  // Only renames adapters whose current name matches /^[a-zA-Z]+\d+$/ pattern.
+  // Rename all adapter basenames (e.g. "net" -> "lab"), preserving their alphabetic suffix.
   window.wizRenameAdapterBase = function(newBase) {
-    newBase = (newBase || '').trim();
+    newBase = String(newBase || '').replace(/[^A-Za-z]/g, '').trim();
     if (!newBase) return;
-    // Detect the current base from the first adapter
     const baseInp = document.getElementById('wiz-adapter-base');
     adapters.forEach(a => {
-      const m = a.name.match(/^([a-zA-Z][a-zA-Z0-9_-]*)(\d+)$/);
-      if (!m) return;
-      const num = m[2];
+      const suffix = getAdapterSuffix(a);
+      if (!suffix) return;
       const oldName = a.name;
-      const newName = newBase + num;
+      const newName = newBase + suffix;
       a.name = newName;
+      a.suffix = suffix;
       links.forEach(l => { if (l.adapter === oldName) l.adapter = newName; });
     });
     if (baseInp) baseInp.value = newBase;
@@ -4617,7 +4661,7 @@ async function autoSaveVm(pid, idx) {
   const startCommands = stepsToServerPayload(startSteps);
   const storedSteps = getStoredCommandsFromDom(pid, idx);
   const storedCommands = stepsToServerPayload(storedSteps);
-  const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)).filter(Boolean);
+  const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z]/g, '').slice(0, 8)).filter(Boolean);
   if (userEl && userEl.value.trim() !== '') {
     vm_user = userEl.value.trim();
   }
@@ -6297,7 +6341,7 @@ async function addSelectedTemplates() {
   // We will batch sequentially to keep API simple
   const sanitizeAdaptor = (s) => {
     // Letters only, up to 8 chars per UI rules
-    try { return (String(s || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 16)); } catch { return ''; }
+    try { return (String(s || '').replace(/[^A-Za-z]/g, '').slice(0, 8)); } catch { return ''; }
   };
   // collect a mapping from name->sanitized adaptors derived from bridges
   const adaptorByName = {};
@@ -6449,7 +6493,7 @@ function onListItemEdit(listId, inputEl) {
   try {
     if (String(listId).includes('-nets-list')) {
       const v = (inputEl.value || '').trim();
-      const valid = /^[A-Za-z0-9]{0,16}$/.test(v); // allow empty/numeric while typing
+      const valid = /^[A-Za-z]{0,8}$/.test(v);
       inputEl.classList.toggle('is-invalid', !valid);
       if (!valid) showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger');
     }
@@ -6489,7 +6533,7 @@ function onAdaptorInput(pid, idx, el) {
     const input = el || document.getElementById(`vm-${pid}-${idx}-nets-input`);
     const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
     const v = (input?.value || '').trim();
-    const ok = /^[A-Za-z0-9]{1,16}$/.test(v);
+    const ok = /^[A-Za-z]{1,8}$/.test(v);
     if (input) input.classList.toggle('is-invalid', !ok && v.length > 0);
     if (btn) btn.disabled = !ok;
   } catch { }
@@ -6517,7 +6561,7 @@ function addListItem(listId, inputId) {
   if (!val) return;
   // If this is a nets list, enforce letters-only up to 8
   if (String(listId).includes('-nets-list')) {
-    if (!/^[A-Za-z0-9]{1,16}$/.test(val)) {
+    if (!/^[A-Za-z]{1,8}$/.test(val)) {
       input.classList.add('is-invalid');
       try { showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger'); } catch { alert('Invalid adaptor name: letters only, up to 8 characters.'); }
       return;

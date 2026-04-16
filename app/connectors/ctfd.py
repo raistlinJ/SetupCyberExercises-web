@@ -737,27 +737,132 @@ class CTFdClient:
             pass
         return []
 
+    def list_scoreboard(self) -> List[Dict[str, Any]]:
+        """Return scoreboard rows from /api/v1/scoreboard."""
+        try:
+            r = self._request('GET', '/api/v1/scoreboard')
+            j = self._safe_json(r)
+            arr = j.get('data') if isinstance(j, dict) else None
+            return arr if isinstance(arr, list) else []
+        except Exception:
+            return []
+
     # --- Users API ---
-    def list_users(self, page: int = 1, per_page: int = 100) -> Dict[str, Any]:
-        resp = self._request('GET', '/api/v1/users', params={"page": page, "per_page": per_page})
+    def _list_payload_items(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        data = payload.get('data')
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        results = payload.get('results')
+        if isinstance(results, list):
+            return [item for item in results if isinstance(item, dict)]
+        return []
+
+    def _list_payload_pages(self, payload: Dict[str, Any], fallback_page: int) -> int:
+        if not isinstance(payload, dict):
+            return fallback_page
+        try:
+            meta = payload.get('meta') or {}
+            pagination = meta.get('pagination') if isinstance(meta, dict) else {}
+            pages = pagination.get('pages') if isinstance(pagination, dict) else None
+            if pages is not None:
+                return max(int(pages), fallback_page)
+        except Exception:
+            pass
+        return fallback_page
+
+    def list_users(self, page: int = 1, per_page: int = 100, *, q: str = "", field: str = "", view_admin: bool = False) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "page": max(1, int(page or 1)),
+            "per_page": min(100, max(1, int(per_page or 100))),
+        }
+        if q:
+            params["q"] = q
+        if field:
+            params["field"] = field
+        if view_admin:
+            params["view"] = "admin"
+        resp = self._request('GET', '/api/v1/users', params=params)
         return self._safe_json(resp)
 
-    def find_user_id_by_name(self, name: str) -> Optional[int]:
-        # Try search param first; fallback to scanning pages
-        resp = self._request('GET', '/api/v1/users', params={"search": name, "per_page": 100})
-        if resp.status_code < 400:
-            data = self._safe_json(resp)
-            for u in data.get("data", []):
-                if (u.get("name") or "").strip().lower() == name.strip().lower():
-                    return u.get("id")
-        # fallback: scan first few pages
-        for page in range(1, 6):
-            data = self.list_users(page=page, per_page=200)
-            for u in data.get("data", []):
-                if (u.get("name") or "").strip().lower() == name.strip().lower():
-                    return u.get("id")
-            if not data.get("meta") or page >= int(data["meta"].get("pagination", {}).get("pages", page)):
+    def list_all_users(self, per_page: int = 100, *, view_admin: bool = True) -> List[Dict[str, Any]]:
+        page = 1
+        total_pages = 1
+        out: List[Dict[str, Any]] = []
+        while page <= total_pages:
+            payload = self.list_users(page=page, per_page=per_page, view_admin=view_admin)
+            out.extend(self._list_payload_items(payload))
+            next_total = self._list_payload_pages(payload, page)
+            if next_total <= page:
                 break
+            total_pages = next_total
+            page += 1
+        return out
+
+    def find_user_id_by_name(self, name: str) -> Optional[int]:
+        wanted = name.strip().lower()
+        if not wanted:
+            return None
+
+        def _match_user_id(payload: Dict[str, Any]) -> Optional[int]:
+            for user in self._list_payload_items(payload):
+                current = str(user.get('name') or user.get('username') or '').strip().lower()
+                email = str(user.get('email') or '').strip().lower()
+                if current != wanted and email != wanted:
+                    continue
+                value = user.get('id')
+                try:
+                    return int(value)
+                except Exception:
+                    try:
+                        return int(str(value))
+                    except Exception:
+                        continue
+            return None
+
+        # CTFd 3.8 expects q/field and admin listings may require view=admin.
+        search_variants = [
+            {"q": name, "field": "name", "view_admin": True},
+            {"q": name, "field": "name", "view_admin": False},
+        ]
+        if '@' in wanted:
+            search_variants.extend([
+                {"q": name, "field": "email", "view_admin": True},
+                {"q": name, "field": "email", "view_admin": False},
+            ])
+        search_variants.extend([
+            {"q": name, "view_admin": True},
+            {"q": name, "view_admin": False},
+        ])
+        for params in search_variants:
+            try:
+                data = self.list_users(page=1, per_page=100, **params)
+            except Exception:
+                continue
+            matched = _match_user_id(data)
+            if matched is not None:
+                return matched
+
+        # Fallback: scan all available pages instead of only the first few.
+        page = 1
+        total_pages = 1
+        while page <= total_pages:
+            try:
+                data = self.list_users(page=page, per_page=100, view_admin=True)
+            except Exception:
+                if page == 1:
+                    data = self.list_users(page=page, per_page=100)
+                else:
+                    break
+            matched = _match_user_id(data)
+            if matched is not None:
+                return matched
+            next_total = self._list_payload_pages(data, page)
+            if next_total <= page:
+                break
+            total_pages = next_total
+            page += 1
         return None
 
     def create_user(self, name: str, email: str, password: str) -> Dict[str, Any]:

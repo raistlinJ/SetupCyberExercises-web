@@ -58,6 +58,31 @@ class UserSecretsStore:
                     out[k] = v
             return out
 
+    def find_project_owner(self, project_id: str) -> Optional[str]:
+        pid = (project_id or "").strip()
+        if not pid:
+            return None
+        with self._lock:
+            data = self._load()
+            users = data.get("users") or {}
+            if not isinstance(users, dict):
+                return None
+            for username, rec in users.items():
+                if not isinstance(rec, dict):
+                    continue
+                projects = rec.get("projects") if isinstance(rec, dict) else None
+                if not isinstance(projects, dict):
+                    continue
+                entry = projects.get(pid) or {}
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("proxmox_username_enc") or entry.get("proxmox_password_enc") or entry.get("ctfd_token_enc"):
+                    try:
+                        return str(username or '').strip() or None
+                    except Exception:
+                        return None
+        return None
+
     def upsert_enc(
         self,
         username: str,

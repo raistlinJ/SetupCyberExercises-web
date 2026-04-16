@@ -642,6 +642,70 @@ const REMOTE_QUEUE_HANDLERS = new Map();
 const REMOTE_QUEUE_BACKLOG = new Map();
 let REMOTE_QUEUE_RESTORING = false;
 
+function _remoteQueue_savedId(value){
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function _remoteQueue_normalizeSavedEntry(saved, fallbackStatus){
+  if (!saved || typeof saved !== 'object') return null;
+  const id = _remoteQueue_savedId(saved.id) || (++REMOTE_ACTION_SEQ);
+  REMOTE_ACTION_SEQ = Math.max(REMOTE_ACTION_SEQ, id);
+  const token = saved.token || (saved.persist && saved.persist.token) || `task-${id}`;
+  const createdAt = Number(saved.createdAt);
+  const startedAt = Number(saved.startedAt);
+  const persist = saved.persist && saved.persist.key ? {
+    key: String(saved.persist.key),
+    data: _remoteQueue_clone(saved.persist.data),
+    token,
+  } : null;
+  return {
+    id,
+    token,
+    label: saved.label != null ? String(saved.label) : 'Action',
+    projectId: saved.projectId != null ? String(saved.projectId) : '',
+    dedupeKey: saved.dedupeKey != null ? String(saved.dedupeKey) : null,
+    persist,
+    createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+    startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : null,
+    status: (saved.status || fallbackStatus) === 'active' ? 'active' : 'queued',
+    exclusive: saved.exclusive !== false,
+    lockProject: saved.lockProject !== false,
+    dedupeWhileActive: !!saved.dedupeWhileActive,
+    cancelRequested: !!saved.cancelRequested,
+  };
+}
+
+function _remoteQueue_backlogEntries(){
+  const items = [];
+  REMOTE_QUEUE_BACKLOG.forEach(list => {
+    if (!Array.isArray(list)) return;
+    list.forEach(item => {
+      if (item) items.push(item);
+    });
+  });
+  items.sort((a, b) => (a && a.createdAt ? a.createdAt : 0) - (b && b.createdAt ? b.createdAt : 0));
+  return items;
+}
+
+function _remoteQueue_removeBacklogEntry(target){
+  const token = typeof target === 'string'
+    ? target
+    : (target && target.token ? String(target.token) : '');
+  if (!token) return false;
+  let removed = false;
+  REMOTE_QUEUE_BACKLOG.forEach((list, key) => {
+    if (!Array.isArray(list) || !list.length) return;
+    const next = list.filter(item => !(item && String(item.token || '') === token));
+    if (next.length !== list.length) {
+      removed = true;
+      if (next.length) REMOTE_QUEUE_BACKLOG.set(key, next);
+      else REMOTE_QUEUE_BACKLOG.delete(key);
+    }
+  });
+  return removed;
+}
+
 function _remoteQueue_storage(){
   try { return window.sessionStorage; } catch { return null; }
 }
@@ -653,18 +717,23 @@ function _remoteQueue_clone(data){
 
 function _remoteQueue_serializeTask(entry, status){
   if (!entry) return null;
-  const persist = entry.persist && entry.persist.key ? { key: entry.persist.key, data: entry.persist.data, token: entry.persist.token || entry.persistToken } : null;
+  const persist = entry.persist && entry.persist.key ? { key: entry.persist.key, data: entry.persist.data, token: entry.persist.token || entry.persistToken || entry.token } : null;
+  const token = entry.persistToken || entry.token || (persist && persist.token) || `task-${entry.id}`;
+  const startedAt = Number(entry.startedAt);
   return {
-    token: entry.persistToken || (persist && persist.token) || `task-${entry.id}`,
+    id: _remoteQueue_savedId(entry.id),
+    token,
     label: entry.label,
     projectId: entry.projectId || '',
     dedupeKey: entry.key || null,
     persist,
     createdAt: entry.createdAt || Date.now(),
+    startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : null,
     status: status || 'queued',
     exclusive: entry.exclusive !== false,
     lockProject: entry.lockProject !== false,
     dedupeWhileActive: !!entry.dedupeWhileActive,
+    cancelRequested: !!entry.cancelRequested,
   };
 }
 
@@ -673,8 +742,13 @@ function _remoteQueue_saveState(){
   const store = _remoteQueue_storage();
   if (!store) return;
   try {
-    const active = REMOTE_ACTIVE_ENTRIES.map(it => _remoteQueue_serializeTask(it, 'active')).filter(Boolean);
-    const items = REMOTE_ACTION_QUEUE.map(it => _remoteQueue_serializeTask(it, 'queued')).filter(Boolean);
+    const backlog = _remoteQueue_backlogEntries();
+    const active = REMOTE_ACTIVE_ENTRIES.map(it => _remoteQueue_serializeTask(it, 'active'))
+      .concat(backlog.filter(it => it && it.status === 'active').map(it => _remoteQueue_serializeTask(it, 'active')))
+      .filter(Boolean);
+    const items = REMOTE_ACTION_QUEUE.map(it => _remoteQueue_serializeTask(it, 'queued'))
+      .concat(backlog.filter(it => it && it.status !== 'active').map(it => _remoteQueue_serializeTask(it, 'queued')))
+      .filter(Boolean);
     const completed = REMOTE_COMPLETED_ITEMS.map(item => ({ ...item }));
     if (!active.length && !items.length && !completed.length) {
       store.removeItem(REMOTE_QUEUE_STORE_KEY);
@@ -686,35 +760,43 @@ function _remoteQueue_saveState(){
 }
 
 function _remoteQueue_scheduleRestoredEntry(saved){
-  if (!saved || !saved.persist || !saved.persist.key) return;
-  const key = saved.persist.key;
+  const normalizedSaved = _remoteQueue_normalizeSavedEntry(saved);
+  if (!normalizedSaved || !normalizedSaved.persist || !normalizedSaved.persist.key) return;
+  const key = normalizedSaved.persist.key;
   const builder = REMOTE_QUEUE_HANDLERS.get(key);
   if (!builder) {
     const back = REMOTE_QUEUE_BACKLOG.get(key) || [];
-    back.push(saved);
+    const idx = back.findIndex(item => item && item.token === normalizedSaved.token);
+    if (idx !== -1) back[idx] = normalizedSaved;
+    else back.push(normalizedSaved);
     REMOTE_QUEUE_BACKLOG.set(key, back);
+    _remoteQueue_saveState();
+    _remoteQueue_emit();
     return;
   }
   try {
-    const fn = builder(saved.persist.data, saved) || null;
+    const fn = builder(normalizedSaved.persist.data, normalizedSaved) || null;
     if (typeof fn !== 'function') {
       try { logWarn ? logWarn(`[QUEUE] Persist handler for ${key} returned no function, skipping restore.`) : console.warn('Queue restore skipped for', key); } catch {}
       return;
     }
     REMOTE_QUEUE_RESTORING = true;
     const restoreOptions = {
-      projectId: saved.projectId,
+      id: normalizedSaved.id,
+      projectId: normalizedSaved.projectId,
+      createdAt: normalizedSaved.createdAt,
       allowDuplicate: true,
-      dedupeKey: saved.dedupeKey,
-      persist: saved.persist,
-      persistToken: saved.token,
+      dedupeKey: normalizedSaved.dedupeKey,
+      persist: normalizedSaved.persist,
+      persistToken: normalizedSaved.token,
     };
-  if (saved.exclusive !== undefined) restoreOptions.exclusive = !!saved.exclusive;
-  if (saved.lockProject !== undefined) restoreOptions.lockProject = !!saved.lockProject;
-  if (saved.dedupeWhileActive !== undefined) restoreOptions.dedupeWhileActive = !!saved.dedupeWhileActive;
-    queueRemoteAction(saved.label || 'Action', fn, restoreOptions);
+  if (normalizedSaved.exclusive !== undefined) restoreOptions.exclusive = !!normalizedSaved.exclusive;
+  if (normalizedSaved.lockProject !== undefined) restoreOptions.lockProject = !!normalizedSaved.lockProject;
+  if (normalizedSaved.dedupeWhileActive !== undefined) restoreOptions.dedupeWhileActive = !!normalizedSaved.dedupeWhileActive;
+    const task = queueRemoteAction(normalizedSaved.label || 'Action', fn, restoreOptions);
+    if (task) _remoteQueue_removeBacklogEntry(normalizedSaved);
   } catch (err) {
-    try { logError ? logError(`[QUEUE] Failed to restore ${saved.label || saved.persist.key}: ${err?.message || err}`) : console.error('Queue restore failed', err); } catch {}
+    try { logError ? logError(`[QUEUE] Failed to restore ${normalizedSaved.label || normalizedSaved.persist.key}: ${err?.message || err}`) : console.error('Queue restore failed', err); } catch {}
   } finally {
     REMOTE_QUEUE_RESTORING = false;
     _remoteQueue_saveState();
@@ -729,10 +811,14 @@ function _remoteQueue_restoreFromStorage(){
   if (!raw) return;
   let data;
   try { data = JSON.parse(raw); } catch { return; }
+  REMOTE_ACTION_SEQ = Math.max(REMOTE_ACTION_SEQ, _remoteQueue_savedId(data && data.seq));
   const pending = [];
-  if (Array.isArray(data.active)) pending.push(...data.active);
-  else if (data.active) pending.push(data.active);
-  if (Array.isArray(data.items)) pending.push(...data.items);
+  if (Array.isArray(data.active)) pending.push(...data.active.map(item => _remoteQueue_normalizeSavedEntry(item, 'active')).filter(Boolean));
+  else if (data.active) {
+    const activeItem = _remoteQueue_normalizeSavedEntry(data.active, 'active');
+    if (activeItem) pending.push(activeItem);
+  }
+  if (Array.isArray(data.items)) pending.push(...data.items.map(item => _remoteQueue_normalizeSavedEntry(item, 'queued')).filter(Boolean));
   pending.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   pending.forEach(item => _remoteQueue_scheduleRestoredEntry(item));
   try {
@@ -740,11 +826,13 @@ function _remoteQueue_restoreFromStorage(){
     if (Array.isArray(data.completed)) {
       data.completed.forEach(entry => {
         if (!entry) return;
+        const entryId = _remoteQueue_savedId(entry.id);
         const finished = Number(entry.finishedAt);
         const started = Number(entry.startedAt);
         const duration = Number(entry.durationMs);
+        if (entryId) REMOTE_ACTION_SEQ = Math.max(REMOTE_ACTION_SEQ, entryId);
         REMOTE_COMPLETED_ITEMS.push({
-          id: Number(entry.id) || 0,
+          id: entryId,
           label: entry.label != null ? String(entry.label) : '',
           projectId: entry.projectId != null ? String(entry.projectId) : '',
           status: entry.status ? String(entry.status) : 'success',
@@ -904,8 +992,12 @@ function queueRemoteAction(label, fn, options) {
   const exclusive = opts.exclusive !== false;
   const lockProject = opts.lockProject !== undefined ? !!opts.lockProject : exclusive;
   const dedupeWhileActive = !!opts.dedupeWhileActive;
+  const restoredId = _remoteQueue_savedId(opts.id);
+  const taskId = restoredId || (++REMOTE_ACTION_SEQ);
+  if (restoredId) REMOTE_ACTION_SEQ = Math.max(REMOTE_ACTION_SEQ, restoredId);
+  const createdAt = Number(opts.createdAt);
   const task = {
-    id: ++REMOTE_ACTION_SEQ,
+    id: taskId,
     label: entryLabel,
     fn: typeof fn === 'function' ? fn : async ()=>{},
     key: dedupeKey,
@@ -914,7 +1006,7 @@ function queueRemoteAction(label, fn, options) {
     cancelRequested: false,
     persist: persistOpt && persistOpt.key ? { key: persistOpt.key, data: persistOpt.data, token: persistToken } : null,
     persistToken,
-    createdAt: Date.now(),
+    createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
     exclusive,
     lockProject,
     dedupeWhileActive,
@@ -967,6 +1059,19 @@ function cancelRemoteAction(id) {
       try { logWarn ? logWarn(`[QUEUE] Cancelled queued action: ${entry.label}`) : console.warn('Queue cancelled:', entry.label); } catch {}
       return true;
     }
+  }
+  for (const [key, list] of REMOTE_QUEUE_BACKLOG.entries()) {
+    if (!Array.isArray(list) || !list.length) continue;
+    const idx = list.findIndex(entry => entry && Number(entry.id) === targetId);
+    if (idx === -1) continue;
+    const [entry] = list.splice(idx, 1);
+    if (list.length) REMOTE_QUEUE_BACKLOG.set(key, list);
+    else REMOTE_QUEUE_BACKLOG.delete(key);
+    _remoteQueue_log();
+    _remoteQueue_emit();
+    _remoteQueue_saveState();
+    try { logWarn ? logWarn(`[QUEUE] Cancelled restoring action: ${entry && entry.label ? entry.label : 'Action'}`) : console.warn('Queue cancelled:', entry && entry.label ? entry.label : 'Action'); } catch {}
+    return true;
   }
   // Active entry (best-effort flag)
   for (const entry of REMOTE_ACTIVE_ENTRIES) {
@@ -1094,6 +1199,7 @@ function _remoteQueue_emit(){
 
 function getRemoteQueueState(){
   try {
+    const restoredEntries = _remoteQueue_backlogEntries();
     const activeItems = REMOTE_ACTIVE_ENTRIES.map(it => it ? ({
       id: it.id,
       label: it.label,
@@ -1103,20 +1209,44 @@ function getRemoteQueueState(){
       startedAt: it.startedAt || null,
       exclusive: it.exclusive !== false,
       lockProject: it.lockProject !== false,
-    }) : null).filter(Boolean);
+      restoring: false,
+    }) : null).filter(Boolean)
+      .concat(restoredEntries.filter(it => it && it.status === 'active').map(it => ({
+        id: it.id,
+        label: it.label,
+        projectId: it.projectId,
+        cancelRequested: !!it.cancelRequested,
+        createdAt: it.createdAt,
+        startedAt: it.startedAt || null,
+        exclusive: it.exclusive !== false,
+        lockProject: it.lockProject !== false,
+        restoring: true,
+      })));
+    const queuedItems = REMOTE_ACTION_QUEUE.map(it => it ? ({
+      id: it.id,
+      label: it.label,
+      projectId: it.projectId,
+      blocked: !!(it.lockProject !== false && it.projectId && REMOTE_PROJECT_LOCKS.has(it.projectId)),
+      createdAt: it.createdAt,
+      exclusive: it.exclusive !== false,
+      lockProject: it.lockProject !== false,
+      restoring: false,
+    }) : null).filter(Boolean)
+      .concat(restoredEntries.filter(it => it && it.status !== 'active').map(it => ({
+        id: it.id,
+        label: it.label,
+        projectId: it.projectId,
+        blocked: false,
+        createdAt: it.createdAt,
+        exclusive: it.exclusive !== false,
+        lockProject: it.lockProject !== false,
+        restoring: true,
+      })));
     return {
       active: activeItems.length > 0,
       current: activeItems.length ? activeItems[0] : null,
       activeItems,
-      items: REMOTE_ACTION_QUEUE.map(it => it ? ({
-        id: it.id,
-        label: it.label,
-        projectId: it.projectId,
-        blocked: !!(it.lockProject !== false && it.projectId && REMOTE_PROJECT_LOCKS.has(it.projectId)),
-        createdAt: it.createdAt,
-        exclusive: it.exclusive !== false,
-        lockProject: it.lockProject !== false,
-      }) : null).filter(Boolean),
+      items: queuedItems,
       completed: REMOTE_COMPLETED_ITEMS.map(item => ({
         id: item.id,
         label: item.label,
@@ -1707,6 +1837,7 @@ const ConsoleDock = (() => {
                 const startedLabel = formatStampLabel(entry.startedAt, 'Started');
                 const queuedMeta = queuedLabel ? `<div class="queue-meta text-muted">${escapeHtml(queuedLabel)}</div>` : '';
                 const startedMeta = startedLabel ? `<div class="queue-meta text-muted">${escapeHtml(startedLabel)}</div>` : '';
+                const restoringNote = entry.restoring ? '<div class="queue-meta text-muted">Restoring after page reload...</div>' : '';
                 const cancelNote = entry.cancelRequested ? '<div class="queue-meta text-warning">Cancel requested…</div>' : '';
                 const disableCancel = entry.cancelRequested ? 'disabled' : '';
                 const isPrimary = idx === 0;
@@ -1723,6 +1854,7 @@ const ConsoleDock = (() => {
                   + `${modeMeta}`
                   + `${queuedMeta}`
                   + `${startedMeta}`
+                  + `${restoringNote}`
                   + `${progressMeta}`
                   + `${progressHint}`
                   + `${cancelNote}`
@@ -1744,12 +1876,14 @@ const ConsoleDock = (() => {
                 const queuedMeta = queuedLabel ? `<span class="queue-meta text-muted">${escapeHtml(queuedLabel)}</span>` : '';
                 const blocked = item.blocked ? ' queue-item-blocked' : '';
                 const blockedNote = item.blocked ? '<span class="queue-blocked text-warning ms-2">Waiting on project</span>' : '';
+                const restoringNote = item.restoring ? '<span class="queue-meta text-muted ms-2">Restoring after page reload</span>' : '';
                 return `<li class="queue-item${blocked}">`
                   + `<span class="queue-index">${idx+1}</span>`
                   + `<span class="queue-label">${escapeHtml(item.label)}</span>`
                   + `${proj}`
                   + `${queuedMeta}`
                   + `${blockedNote}`
+                  + `${restoringNote}`
                   + `<button type="button" class="btn btn-sm btn-outline-danger ms-auto" data-act="q-cancel" data-id="${item.id}">Cancel</button>`
                   + `</li>`;
               }).join('')

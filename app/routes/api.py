@@ -262,6 +262,335 @@ def _pool_workers_for(proj: Optional[Project], item_count: int, hard_cap: int = 
     return max(1, workers)
 
 
+_BRIDGE_OWNER_COMMENT_PREFIX = 'SCE-BRIDGE'
+
+
+def _adaptor_numeric_suffix_letters(value: Any) -> str:
+    try:
+        num = int(value)
+    except Exception:
+        return ''
+    if num < 0:
+        return ''
+    out = ''
+    while True:
+        out = chr(65 + (num % 26)) + out
+        num = (num // 26) - 1
+        if num < 0:
+            break
+    return out
+
+
+def _normalize_bridge_adaptor_name(adaptor_name: Any) -> str:
+    try:
+        raw = str(adaptor_name or '').strip()
+        if not raw:
+            return ''
+        base = re.sub(r"[^A-Za-z]", "", raw)
+        suffix = ''
+        digit_match = re.search(r"(\d+)$", raw)
+        if digit_match:
+            suffix = _adaptor_numeric_suffix_letters(digit_match.group(1))
+        if suffix:
+            allowed_base = max(0, 8 - len(suffix))
+            return f"{base[:allowed_base]}{suffix}" or suffix[:8]
+        return base[:8]
+    except Exception:
+        return ''
+
+
+def _bridge_iface_name(idx: Any, adaptor_name: Any) -> str:
+    try:
+        index = int(idx)
+    except Exception:
+        index = 0
+    base = _normalize_bridge_adaptor_name(adaptor_name)
+    name = f"{base}{index}" if base else f"br{index}"
+    if len(name) > 15:
+        name = name[:15]
+    return name or f"br{index}"
+
+
+def _bridge_legacy_iface_name(tag: str, idx: Any, adaptor_name: Any) -> str:
+    try:
+        index = int(idx)
+    except Exception:
+        index = 0
+    base_old = f"{adaptor_name}|{tag}|{index}"
+    h = int(hashlib.sha1(base_old.encode('utf-8')).hexdigest()[:6], 16)
+    num = 100 + (h % 8899)
+    return f"vmbr{num}"
+
+
+def _bridge_owner_comment(pid: str, idx: Any, adaptor_name: Any, source: str = '') -> str:
+    parts = [
+        _BRIDGE_OWNER_COMMENT_PREFIX,
+        f"pid={str(pid or '').strip()}",
+        f"idx={int(idx) if str(idx).strip() else 0}",
+        f"adaptor={_normalize_bridge_adaptor_name(adaptor_name) or 'na'}",
+    ]
+    if source:
+        parts.append(f"source={str(source).strip()}")
+    return ' '.join(parts)
+
+
+def _bridge_owner_comment_for_iface(pid: str, idx: Any, iface_name: Any, source: str = '') -> str:
+    try:
+        iface = str(iface_name or '').strip()
+    except Exception:
+        iface = ''
+    adaptor = re.sub(r"\d+$", "", iface)
+    return _bridge_owner_comment(pid, idx, adaptor or iface, source)
+
+
+def _parse_bridge_owner_comment(comment: Any) -> Dict[str, str]:
+    try:
+        raw = str(comment or '').strip()
+    except Exception:
+        raw = ''
+    if not raw.startswith(_BRIDGE_OWNER_COMMENT_PREFIX):
+        return {}
+    parts = raw.split()
+    out: Dict[str, str] = {}
+    for token in parts[1:]:
+        if '=' not in token:
+            continue
+        key, value = token.split('=', 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _build_bridge_project_snapshot(proj: Project, tag: str) -> Dict[str, Any]:
+    vms = []
+    for vm in list(getattr(proj, 'vms', []) or []):
+        try:
+            name = str(getattr(vm, 'name', '') or '').strip()
+        except Exception:
+            name = ''
+        if not name:
+            continue
+        adaptors = []
+        for adaptor in list(getattr(vm, 'internal_network_adaptors', []) or []):
+            normalized = _normalize_bridge_adaptor_name(adaptor)
+            if normalized:
+                adaptors.append(normalized)
+        vms.append({ 'name': name, 'adaptors': adaptors })
+    return {
+        'id': str(getattr(proj, 'id', '') or ''),
+        'name': str(getattr(proj, 'name', '') or ''),
+        'tag': str(tag or ''),
+        'vms': vms,
+    }
+
+
+def _project_has_bridge_consumer_on_node(project_snapshot: Dict[str, Any], node: str, idx: Any, adaptor_name: Any, live_name_map: Dict[str, Dict[str, Any]]) -> bool:
+    adaptor_key = _normalize_bridge_adaptor_name(adaptor_name)
+    if not adaptor_key:
+        return False
+    try:
+        index = int(idx)
+    except Exception:
+        return False
+    tag = str((project_snapshot or {}).get('tag') or '')
+    for vm in list((project_snapshot or {}).get('vms') or []):
+        if adaptor_key not in list((vm or {}).get('adaptors') or []):
+            continue
+        gen_name = f"{str((vm or {}).get('name') or '')}{tag}{index}"
+        info = live_name_map.get(gen_name.lower()) or {}
+        if str(info.get('node') or '') == str(node or ''):
+            return True
+    return False
+
+
+def _append_unique_reason(items: List[Dict[str, Any]], item: Dict[str, Any]):
+    reason = str((item or {}).get('reason') or '')
+    node = str((item or {}).get('node') or '')
+    name = str((item or {}).get('name') or '')
+    for existing in items:
+        if str(existing.get('reason') or '') == reason and str(existing.get('node') or '') == node and str(existing.get('name') or '') == name:
+            return
+    items.append(item)
+
+
+def _scan_bridges_in_use(node: str, candidate_bridges: List[str], client: ProxmoxClient) -> Set[str]:
+    wanted = {str(b or '').strip() for b in (candidate_bridges or []) if str(b or '').strip()}
+    in_use: Set[str] = set()
+    if not wanted:
+        return in_use
+    try:
+        for ent in client.list_qemu_vms(node) or []:
+            try:
+                r_vmid = ent.get('vmid')
+                if r_vmid is None:
+                    continue
+                cfg_other = client.get_qemu_config(node=node, vmid=int(r_vmid)) or {}
+                for key, value in (cfg_other or {}).items():
+                    if not str(key).startswith('net') or not isinstance(value, str):
+                        continue
+                    parts = [p.strip() for p in value.split(',') if p]
+                    bridge = next((p.split('=', 1)[1] for p in parts if p.startswith('bridge=')), '')
+                    if bridge in wanted:
+                        in_use.add(bridge)
+                if in_use >= wanted:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        return in_use
+    return in_use
+
+
+def _execute_delete_bridge_cleanup(project_snapshot: Dict[str, Any], client: ProxmoxClient, bulk_bridge_deletions: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    notices: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    network_applied_nodes: List[str] = []
+    network_apply_errors: List[Dict[str, Any]] = []
+    bridges_to_reload: Set[str] = set()
+    project_id = str((project_snapshot or {}).get('id') or '')
+
+    for node, items in (bulk_bridge_deletions or {}).items():
+        try:
+            iface_meta: Dict[str, Dict[str, Any]] = {}
+            try:
+                for net in client.list_network(node) or []:
+                    iface = str((net or {}).get('iface') or '')
+                    if iface:
+                        iface_meta[iface] = net
+            except Exception:
+                iface_meta = {}
+
+            live_name_map: Dict[str, Dict[str, Any]] = {}
+            try:
+                for ent in client.list_qemu_vms(node) or []:
+                    name = str((ent or {}).get('name') or '')
+                    if name:
+                        live_name_map[name.lower()] = {
+                            'node': node,
+                            'vmid': int(ent.get('vmid')) if ent.get('vmid') is not None else None,
+                        }
+            except Exception:
+                live_name_map = {}
+
+            unknown_entries: List[Dict[str, Any]] = []
+            seen_bridge: Set[str] = set()
+            for entry in list(items or []):
+                bridge = str((entry or {}).get('bridge') or '')
+                if not bridge or bridge in seen_bridge:
+                    continue
+                seen_bridge.add(bridge)
+                idx = int((entry or {}).get('index') or 0)
+                gen_name = str((entry or {}).get('name') or '')
+                adaptor = str((entry or {}).get('adaptor') or '')
+
+                if idx > 0 and adaptor and _project_has_bridge_consumer_on_node(project_snapshot, node, idx, adaptor, live_name_map):
+                    _append_unique_reason(notices, { 'index': idx, 'name': gen_name, 'node': node, 'reason': f'bridge retained (project consumer remains) {bridge}' })
+                    continue
+
+                net_entry = iface_meta.get(bridge)
+                if not net_entry:
+                    _append_unique_reason(notices, { 'index': idx, 'name': gen_name, 'node': node, 'reason': f'bridge delete skipped for {bridge}: does not exist' })
+                    continue
+
+                owner = _parse_bridge_owner_comment((net_entry or {}).get('comments') or (net_entry or {}).get('comment'))
+                if owner:
+                    owner_matches = (
+                        owner.get('pid') == project_id
+                        and owner.get('idx') == str(idx)
+                        and owner.get('adaptor') == _normalize_bridge_adaptor_name(adaptor)
+                    )
+                    if not owner_matches:
+                        owner_desc = f"pid={owner.get('pid') or '?'} idx={owner.get('idx') or '?'} adaptor={owner.get('adaptor') or '?'}"
+                        _append_unique_reason(notices, { 'index': idx, 'name': gen_name, 'node': node, 'reason': f'bridge retained (foreign owner {owner_desc}) {bridge}' })
+                        continue
+                    try:
+                        client.delete_bridge(node=node, iface=bridge)
+                        bridges_to_reload.add(node)
+                    except Exception as e:
+                        msg = str(e).lower()
+                        warn = ('not exist' in msg) or ('no such' in msg) or ('not found' in msg) or (' 404' in msg)
+                        item = { 'index': idx, 'name': gen_name, 'node': node, 'reason': f'bridge delete skipped for {bridge}: does not exist' if warn else f'bridge delete failed for {bridge}: {e}' }
+                        if warn:
+                            _append_unique_reason(notices, item)
+                        else:
+                            errors.append(item)
+                    continue
+
+                unknown_entries.append(entry)
+
+            if unknown_entries:
+                bridges_in_use = _scan_bridges_in_use(node, [str((entry or {}).get('bridge') or '') for entry in unknown_entries], client)
+                for entry in unknown_entries:
+                    bridge = str((entry or {}).get('bridge') or '')
+                    idx = int((entry or {}).get('index') or 0)
+                    gen_name = str((entry or {}).get('name') or '')
+                    if bridge in bridges_in_use:
+                        _append_unique_reason(notices, { 'index': idx, 'name': gen_name, 'node': node, 'reason': f'bridge retained (in use) {bridge}' })
+                        continue
+                    try:
+                        client.delete_bridge(node=node, iface=bridge)
+                        bridges_to_reload.add(node)
+                    except Exception as e:
+                        msg = str(e).lower()
+                        warn = ('not exist' in msg) or ('no such' in msg) or ('not found' in msg) or (' 404' in msg)
+                        item = { 'index': idx, 'name': gen_name, 'node': node, 'reason': f'bridge delete skipped for {bridge}: does not exist' if warn else f'bridge delete failed for {bridge}: {e}' }
+                        if warn:
+                            _append_unique_reason(notices, item)
+                        else:
+                            errors.append(item)
+        except Exception as e:
+            errors.append({ 'node': node, 'reason': f'bulk bridge cleanup failed: {e}' })
+
+    for node in bridges_to_reload:
+        try:
+            client.reload_network(node)
+            network_applied_nodes.append(node)
+        except Exception as e:
+            network_apply_errors.append({ 'node': node, 'reason': f'network reload failed: {e}' })
+
+    return {
+        'notices': notices,
+        'errors': errors,
+        'network_applied_nodes': network_applied_nodes,
+        'network_apply_errors': network_apply_errors,
+    }
+
+
+def _schedule_delete_bridge_cleanup(project_snapshot: Dict[str, Any], client_kwargs: Dict[str, Any], bulk_bridge_deletions: Dict[str, List[Dict[str, Any]]]) -> bool:
+    cleanup_plan = {
+        str(node): [dict(entry or {}) for entry in list(items or [])]
+        for node, items in (bulk_bridge_deletions or {}).items()
+        if items
+    }
+    if not cleanup_plan:
+        return False
+
+    def _worker():
+        try:
+            client = ProxmoxClient(**client_kwargs)
+            result = _execute_delete_bridge_cleanup(project_snapshot, client, cleanup_plan)
+            try:
+                LOG.info(
+                    "Deferred delete bridge cleanup finished for %s: nodes=%s reloads=%s notices=%s errors=%s",
+                    project_snapshot.get('id') or '?',
+                    len(cleanup_plan),
+                    len(result.get('network_applied_nodes') or []),
+                    len(result.get('notices') or []),
+                    len(result.get('errors') or []) + len(result.get('network_apply_errors') or []),
+                )
+            except Exception:
+                pass
+        except Exception:
+            LOG.exception("Deferred delete bridge cleanup failed for %s", project_snapshot.get('id') or '?')
+
+    worker = threading.Thread(
+        target=_worker,
+        name=f"sce-delete-cleanup-{project_snapshot.get('id') or 'unknown'}",
+        daemon=True,
+    )
+    worker.start()
+    return True
+
+
 def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_prefixes: Optional[tuple[str, ...]] = None) -> int:
     """Embed audio clips into the provided ZipFile, returning number of clips written.
 
@@ -358,6 +687,70 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_p
 _VM_CONFIG_CACHE = {}  # {f"{node}:{vmid}": (timestamp, config_dict)}
 _POOL_CACHE = {}  # {poolid: (timestamp, set_of_vmids)}
 _CACHE_TTL_SECONDS = 60  # Cache VM configs for 60 seconds
+_CTFD_CATEGORY_FIRSTS_CACHE = {}  # {cache_key: (timestamp_utc, payload_dict)}
+_CTFD_CATEGORY_FIRSTS_TTL_SECONDS = 30
+
+
+def _prune_ctfd_category_firsts_cache(now: Optional[datetime] = None) -> None:
+    try:
+        current = now or datetime.now(timezone.utc)
+        expired = []
+        for key, value in list(_CTFD_CATEGORY_FIRSTS_CACHE.items()):
+            try:
+                cached_time, _payload = value
+            except Exception:
+                expired.append(key)
+                continue
+            if current - cached_time >= timedelta(seconds=_CTFD_CATEGORY_FIRSTS_TTL_SECONDS):
+                expired.append(key)
+        for key in expired:
+            _CTFD_CATEGORY_FIRSTS_CACHE.pop(key, None)
+    except Exception:
+        return
+
+
+def _make_ctfd_category_firsts_cache_key(pid: str, client: CTFdClient, body: Dict[str, Any]) -> str:
+    try:
+        auth_token = str((body or {}).get('token') or '').strip()
+    except Exception:
+        auth_token = ''
+    try:
+        auth_user = str((body or {}).get('username') or '').strip().lower()
+    except Exception:
+        auth_user = ''
+    auth_kind = 'token' if auth_token else ('user' if auth_user else 'anon')
+    auth_marker = auth_token or auth_user
+    auth_hash = hashlib.sha256(auth_marker.encode('utf-8')).hexdigest()[:16] if auth_marker else 'anon'
+    try:
+        base_url = str(getattr(client, 'base_url', '') or '').rstrip('/').lower()
+    except Exception:
+        base_url = ''
+    verify_ssl = '1' if getattr(client, 'verify_ssl', True) else '0'
+    return f"{str(pid or '').strip()}|{base_url}|{verify_ssl}|{auth_kind}:{auth_hash}"
+
+
+def _get_cached_ctfd_category_firsts(cache_key: str):
+    try:
+        now = datetime.now(timezone.utc)
+        cached = _CTFD_CATEGORY_FIRSTS_CACHE.get(str(cache_key or ''))
+        if not cached:
+            return None
+        cached_time, payload = cached
+        if now - cached_time >= timedelta(seconds=_CTFD_CATEGORY_FIRSTS_TTL_SECONDS):
+            _CTFD_CATEGORY_FIRSTS_CACHE.pop(str(cache_key or ''), None)
+            return None
+        return copy.deepcopy(payload)
+    except Exception:
+        return None
+
+
+def _set_cached_ctfd_category_firsts(cache_key: str, payload: Dict[str, Any]) -> None:
+    try:
+        now = datetime.now(timezone.utc)
+        _prune_ctfd_category_firsts_cache(now)
+        _CTFD_CATEGORY_FIRSTS_CACHE[str(cache_key or '')] = (now, copy.deepcopy(payload))
+    except Exception:
+        return
 
 
 def _invalidate_vm_config_cache_entries(entries: "Iterable[tuple[str, int]]") -> None:
@@ -869,11 +1262,82 @@ def _job_emit_command_status(
     }
     _update_job_detail(pid, phase=phase, current=label, step=step, message=message, detail=detail)
 
+
+def _job_emit_batch_progress(
+    pid: str,
+    phase: str,
+    verb: str,
+    completed: Any,
+    total: Any,
+    *,
+    entry: Any = None,
+    current: Optional[str] = None,
+    progress_start: int = 10,
+    progress_end: int = 95,
+    message: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+):
+    try:
+        total_i = max(int(total or 0), 0)
+    except Exception:
+        total_i = 0
+    try:
+        done_i = max(int(completed or 0), 0)
+    except Exception:
+        done_i = 0
+    if total_i > 0:
+        done_i = min(done_i, total_i)
+
+    label = str(current or _format_vm_label(entry) or '').strip()
+    if total_i > 0:
+        fraction = done_i / max(total_i, 1)
+        progress = int(round(progress_start + fraction * max(progress_end - progress_start, 0)))
+    else:
+        progress = progress_end if done_i > 0 else progress_start
+
+    detail_payload: Dict[str, Any] = {
+        'kind': 'batch',
+        'vm': label,
+        'completed': done_i,
+        'total': total_i,
+        'verb': verb,
+    }
+    if isinstance(detail, dict):
+        detail_payload.update(detail)
+
+    if not message:
+        if label and total_i > 0:
+            message = f'{verb} {label}… {done_i}/{total_i} complete'
+        elif total_i > 0:
+            message = f'{verb}… {done_i}/{total_i} complete'
+        elif label:
+            message = f'{verb} {label}…'
+        else:
+            message = verb
+
+    _update_job_detail(
+        pid,
+        phase=phase,
+        current=label,
+        step=done_i,
+        total_steps=total_i,
+        progress=progress,
+        message=message,
+        detail=detail_payload,
+    )
+
 # --- Simple in-process job tracking helpers (re-added after cleanup) ---
 # Several endpoints call _start_job/_end_job and allow cancellation via a shared
 def _secure_route(required_roles=None, api_key=True):
     from functools import wraps
     required_roles = {str(r).lower() for r in (required_roles or [])}
+
+    def _auth_error_response(payload, status_code, *, auth_failure=False):
+        response = jsonify(payload)
+        response.status_code = status_code
+        if auth_failure:
+            response.headers['X-DeployForge-Auth-Failure'] = '1'
+        return response
 
     def deco(func):
         @wraps(func)
@@ -887,11 +1351,11 @@ def _secure_route(required_roles=None, api_key=True):
             if app and app.config.get('AUTH_ENABLE'):
                 current_user = getattr(app, 'current_user', lambda: None)() if hasattr(app, 'current_user') else None
                 if not current_user:
-                    return jsonify({'error': 'authentication required'}), 401
+                    return _auth_error_response({'error': 'authentication required'}, 401, auth_failure=True)
                 if required_roles:
                     have_roles = {str(r).lower() for r in current_user.get('roles', [])}
                     if not (have_roles & required_roles):
-                        return jsonify({'error': 'forbidden'}), 403
+                        return _auth_error_response({'error': 'forbidden'}, 403, auth_failure=True)
 
             # API key enforcement layer (if enabled)
             if api_key:
@@ -902,7 +1366,7 @@ def _secure_route(required_roles=None, api_key=True):
                 if key:
                     supplied = request.headers.get('X-API-Key') or request.args.get('api_key')
                     if supplied != key:
-                        return jsonify({'error': 'invalid or missing API key'}), 401
+                        return _auth_error_response({'error': 'invalid or missing API key'}, 401)
 
             return func(*args, **kwargs)
 
@@ -1132,6 +1596,8 @@ def instances_refresh_vm(pid: str):
         pass
     if not base_url or (not token and not (username and password)):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+    _start_job(pid, 'refresh_vm')
+    _update_job_detail(pid, phase='inventory', progress=5, message='Connecting to Proxmox…')
     instances = int(proj.instances or 0)
     tag = str(proj.tag or '')
     tag_clean = tag.strip()
@@ -1160,6 +1626,8 @@ def instances_refresh_vm(pid: str):
     try:
         t_start = time.time()
         nodes = client.list_nodes()
+        total_nodes = max(len(nodes), 1)
+        _update_job_detail(pid, phase='inventory', step=0, total_steps=total_nodes, progress=10, message=f'Scanning Proxmox nodes… 0/{total_nodes} complete')
         
         # Build maps of name -> details, vmid -> name, and lowercase-name -> canonical name
         name_map = {}
@@ -1181,11 +1649,26 @@ def instances_refresh_vm(pid: str):
                 return (node, [], e)
         
         # Execute node fetching in parallel (typically 2-4 nodes, but can be more)
+        processed_nodes = 0
         with ThreadPoolExecutor(max_workers=min(len(nodes), 8)) as executor:
             futures = [executor.submit(_fetch_node_vms, n) for n in nodes]
             
             for future in as_completed(futures):
                 node, qemus, error = future.result()
+                processed_nodes += 1
+                try:
+                    _update_job_detail(
+                        pid,
+                        phase='inventory',
+                        current=str(node or ''),
+                        step=processed_nodes,
+                        total_steps=total_nodes,
+                        progress=int(round(10 + (processed_nodes / max(total_nodes, 1)) * 45)),
+                        message=f'Scanned node {node or "(unknown)"}; {processed_nodes}/{total_nodes} complete',
+                        detail={ 'kind': 'batch', 'vm': str(node or ''), 'completed': processed_nodes, 'total': total_nodes, 'verb': 'Scanning' },
+                    )
+                except Exception:
+                    pass
                 if error:
                     logging.warning(f"Could not list VMs on node {node}: {error}")
                     continue
@@ -1211,11 +1694,14 @@ def instances_refresh_vm(pid: str):
         t_fetch = time.time()
         logging.info(f"VM refresh: node fetching took {(t_fetch-t_start)*1000:.0f}ms for {len(nodes)} nodes")
     except Exception as e:
+        _update_job_detail(pid, phase='error', progress=100, message=f'VM refresh failed: {e}')
+        _end_job(pid, status='error')
         return jsonify({"error": f"Proxmox: {e}"}), 502
 
     # Pools list (single call) to avoid per-instance pool existence checks.
     pool_ids = None
     try:
+        _update_job_detail(pid, phase='access', progress=60, message='Checking pools and access controls…')
         pool_ids = { str((p or {}).get('poolid') or '') for p in (client.list_pools() or []) }
         pool_ids = { p for p in pool_ids if p }
     except Exception:
@@ -1387,6 +1873,11 @@ def instances_refresh_vm(pid: str):
     current = { int((e or {}).get('index', 0)): e for e in (proj.instance_statuses or []) }
     out = []
     for i in range(1, instances + 1):
+        try:
+            pct = int(round(70 + (i / max(instances or 1, 1)) * 25)) if instances > 0 else 95
+            _update_job_detail(pid, phase='summarizing', current=f'Instance {i}', step=i, total_steps=max(instances, 1), progress=min(pct, 95), message=f'Compiling instance {i}/{max(instances, 1)}…')
+        except Exception:
+            pass
         entry = current.get(i) or { 'index': i, 'created': False, 'managers': {} }
         mgrs = entry.get('managers') or {}
         names = expected[i]
@@ -1563,6 +2054,8 @@ def instances_refresh_vm(pid: str):
     # Log total refresh time for performance monitoring
     t_end = time.time()
     logging.info(f"VM refresh for project {pid} completed in {(t_end-t_start)*1000:.0f}ms")
+    _update_job_detail(pid, phase='done', step=max(instances, 1), total_steps=max(instances, 1), progress=100, message=f'Refresh completed: {len(out)} instance status entr{"y" if len(out) == 1 else "ies"}')
+    _end_job(pid)
     
     return jsonify({ 'instance_statuses': out })
 
@@ -1609,7 +2102,65 @@ def instances_create(pid: str):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
+    normalized_targets = []
+    total_targets = len(targets)
+    for pos, target in enumerate(targets, start=1):
+        if isinstance(target, dict):
+            item = dict(target)
+        else:
+            item = { 'name': str(target or '') }
+        item['_ordinal'] = pos
+        item['_total'] = total_targets
+        normalized_targets.append(item)
+    targets = normalized_targets
     global_linked = bool(getattr(proj, 'proxmox_use_linked_clones', True))
+
+    def _target_progress_meta(item: Any, name: Any = None) -> Tuple[str, Optional[int], int, str]:
+        try:
+            current_name = str(name if name is not None else ((item or {}).get('name') or '')).strip()
+        except Exception:
+            current_name = ''
+        ordinal = None
+        try:
+            raw_ordinal = (item or {}).get('_ordinal')
+            if raw_ordinal is not None and raw_ordinal != '':
+                ordinal = int(raw_ordinal)
+        except Exception:
+            ordinal = None
+        total = total_targets
+        if ordinal is not None and total > 0 and current_name:
+            label = f"{current_name} ({ordinal}/{total})"
+        elif current_name:
+            label = current_name
+        elif ordinal is not None and total > 0:
+            label = f"VM ({ordinal}/{total})"
+        else:
+            label = 'VM'
+        return current_name or 'VM', ordinal, total, label
+
+    def _clone_progress(ordinal: Optional[int], fraction: float = 0.0) -> int:
+        if total_targets <= 0:
+            return 0
+        if ordinal is None:
+            ordinal = 1
+        base = max(0.0, (float(ordinal) - 1.0) + max(0.0, fraction))
+        return int(min(60, max(0, (base / max(total_targets, 1)) * 60)))
+
+    def _network_progress(ordinal: Optional[int], fraction: float = 0.0) -> int:
+        if total_targets <= 0:
+            return 60
+        if ordinal is None:
+            ordinal = 1
+        base = max(0.0, (float(ordinal) - 1.0) + max(0.0, fraction))
+        return int(min(90, max(60, 60 + (base / max(total_targets, 1)) * 30)))
+
+    def _snapshot_progress(ordinal: Optional[int], total_snapshots: int, completed: int = 0) -> int:
+        if total_snapshots <= 0:
+            return 90
+        if ordinal is None:
+            ordinal = completed + 1
+        base = max(float(completed), float(ordinal) - 1.0)
+        return int(min(99, max(90, 90 + (base / max(total_snapshots, 1)) * 9)))
 
     # Build expected names map for validation and adaptor suffixing
     tag = str(proj.tag or '')
@@ -1782,6 +2333,7 @@ def instances_create(pid: str):
         node = src['node']
         src_vmid = src['vmid']
         newname = f"{base_name}{tag_clean}{idx}"
+        current_name, ordinal, total, progress_label = _target_progress_meta(t, newname)
         try:
             if newname and newname.lower() in existing_names_lc:
                 return ('skip', { 'index': idx, 'name': newname }, None)
@@ -1820,9 +2372,9 @@ def instances_create(pid: str):
                 pass
         src_is_effective_template = raw_template_flag or snapshots_present or linked_like_disk
         if use_linked and not src_is_effective_template:
-            # Defer downgrade until after first failed attempt (allow Proxmox to decide). Keep flag for attempt.
+            # Allow Proxmox to make the final decision, but never downgrade to a full clone silently.
             try:
-                debug_msgs.append(f"linked-clone heuristic: source lacks template indicators (vmid={src_vmid}); will attempt linked; may fallback if Proxmox rejects")
+                debug_msgs.append(f"linked-clone heuristic: source lacks template indicators (vmid={src_vmid}); will attempt linked only and return an error if Proxmox rejects it")
             except Exception:
                 pass
         storage_vol = getattr(cfg, 'storage_volume', None) or getattr(proj, 'proxmox_storage_volume', None)
@@ -1833,6 +2385,18 @@ def instances_create(pid: str):
         vmid_attempts = attempts
         newid = None
         fallback_full_used = False
+        try:
+            _update_job_detail(
+                pid,
+                phase='cloning',
+                current=current_name,
+                step=max((ordinal or 1) - 1, 0),
+                total_steps=total_targets,
+                progress=_clone_progress(ordinal),
+                message=f'Creating VM {progress_label}: cloning template…',
+            )
+        except Exception:
+            pass
         for _ in range(6):
             if _is_cancelled(pid):
                 return ('error', None, { 'index': idx, 'name': newname, 'reason': 'cancelled' })
@@ -1848,26 +2412,20 @@ def instances_create(pid: str):
                 break
             except Exception as e1:
                 if use_linked:
-                    # Record the failure of linked attempt
+                    # Linked clone was explicitly requested; do not silently retry as a full clone.
                     try:
                         debug_msgs.append(f"linked clone attempt failed for {newname} vmid_candidate={candidate}: {e1}")
                     except Exception:
                         pass
-                    try:
-                        upid = do_clone_with_id(candidate, full_clone=True)
-                        client._wait_task(node, upid, timeout=timeout_sec)
-                        newid = candidate
-                        fallback_full_used = True
-                        try:
-                            debug_msgs.append(f"fallback: performed full clone instead of linked for {newname} vmid={candidate}")
-                        except Exception:
-                            pass
-                        break
-                    except Exception as e2:
-                        msg = f"{e1} | {e2}".lower()
-                        if ('already exist' in msg) or ('config' in msg and 'exists' in msg) or ('conflict' in msg):
-                            continue
-                        return ('error', None, { 'index': idx, 'name': newname, 'reason': f'clone failed: linked clone failed: {e1}; full clone failed: {e2}', 'vmid_attempts': attempts })
+                    msg = str(e1).lower()
+                    if ('already exist' in msg) or ('config' in msg and 'exists' in msg) or ('conflict' in msg):
+                        continue
+                    return ('error', None, {
+                        'index': idx,
+                        'name': newname,
+                        'reason': f'linked clone failed: {e1}. Full clone fallback is disabled when linked clone is selected.',
+                        'vmid_attempts': attempts,
+                    })
                 else:
                     msg = str(e1).lower()
                     if ('already exist' in msg) or ('config' in msg and 'exists' in msg) or ('conflict' in msg):
@@ -1886,14 +2444,20 @@ def instances_create(pid: str):
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
         expected_bridges_for_vm = []
         for i, a in enumerate(adaptors):
-            try:
-                base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                bname = f"{base}{idx}" if base else f"br{idx}"
-                if len(bname) > 15:
-                    bname = bname[:15]
-            except Exception:
-                bname = f"br{idx}"
+            bname = _bridge_iface_name(idx, a)
             expected_bridges_for_vm.append(bname)
+        try:
+            _update_job_detail(
+                pid,
+                phase='cloning',
+                current=current_name,
+                step=max((ordinal or 1) - 1, 0),
+                total_steps=total_targets,
+                progress=_clone_progress(ordinal, 0.7),
+                message=f'Finalizing VM {progress_label}: notes, pools, and access…',
+            )
+        except Exception:
+            pass
         post_errors = []  # will accumulate only pool/acl errors now
         # Optional post-clone snapshot (deferred to post-networking phase)
         try:
@@ -2118,10 +2682,10 @@ def instances_create(pid: str):
             post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool/acl assignment failed: {e}' })
         # Finalize
         if post_errors:
-            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap) }
+            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal }
             payload.update(assignment_info)
             return ('post', payload, post_errors)
-        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap) }
+        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal }
         payload.update(assignment_info)
         return ('ok', payload, None)
 
@@ -2250,7 +2814,15 @@ def instances_create(pid: str):
                     try:
                         done = len(results) + len(skipped) + len(errors)
                         pct = int(min(60, (done / max(len(targets), 1)) * 60))
-                        _update_job_detail(pid, step=done, progress=pct, current=str(t.get('name') or ''), message=f'Cloned {done}/{len(targets)}')
+                        current_name, ordinal, total, progress_label = _target_progress_meta(t)
+                        _update_job_detail(
+                            pid,
+                            phase='cloning',
+                            step=done,
+                            progress=pct,
+                            current=current_name,
+                            message=f'Cloned {progress_label}; {done}/{len(targets)} complete',
+                        )
                     except Exception:
                         pass
 
@@ -2258,15 +2830,24 @@ def instances_create(pid: str):
     try:
         # 1) Aggregate required bridges per node
         bridges_needed = {}
-        _update_job_detail(pid, phase='networking', message='Analyzing required bridges…')
+        bridge_consumers = {}
+        _update_job_detail(pid, phase='networking', message='Analyzing required network adaptors…')
         for r in results:
             try:
                 node = r.get('node')
                 if not node:
                     continue
-                for b in (r.get('expected_bridges') or []):
+                expected_bridges = list(r.get('expected_bridges') or [])
+                for bridge_pos, b in enumerate(expected_bridges, start=1):
                     if b:
                         bridges_needed.setdefault(node, set()).add(b)
+                        bridge_consumers.setdefault(node, {}).setdefault(b, []).append({
+                            'name': r.get('name') or '',
+                            'index': r.get('index'),
+                            '_ordinal': r.get('_ordinal'),
+                            'bridge_pos': bridge_pos,
+                            'bridge_total': len(expected_bridges),
+                        })
             except Exception:
                 continue
         # 2) For each node, create missing bridges
@@ -2285,10 +2866,31 @@ def instances_create(pid: str):
             except Exception:
                 pass
             for b in sorted(needed):
+                consumer = ((bridge_consumers.get(node) or {}).get(b) or [{}])[0]
+                vm_name, ordinal, total, progress_label = _target_progress_meta(consumer, consumer.get('name') or b)
+                bridge_pos = int(consumer.get('bridge_pos') or 1)
+                bridge_total = int(consumer.get('bridge_total') or 1)
                 if b in existing:
+                    try:
+                        _update_job_detail(
+                            pid,
+                            phase='networking',
+                            current=vm_name,
+                            progress=_network_progress(ordinal, 0.2),
+                            message=f'Adaptor ready for {progress_label}: bridge {b} {bridge_pos}/{bridge_total}',
+                        )
+                    except Exception:
+                        pass
                     continue
                 try:
-                    client.create_bridge(node=node, iface=b, autostart=True, ports=None, comments=f"Auto-created (post-clone batch)")
+                    _update_job_detail(
+                        pid,
+                        phase='networking',
+                        current=vm_name,
+                        progress=_network_progress(ordinal, 0.1),
+                        message=f'Creating adaptor for {progress_label}: bridge {b} {bridge_pos}/{bridge_total}…',
+                    )
+                    client.create_bridge(node=node, iface=b, autostart=True, ports=None, comments=_bridge_owner_comment_for_iface(pid, consumer.get('index') or 0, b, 'post-clone'))
                     created_bridges.add((node, b))
                     bridges_to_reload.add(node)
                 except Exception as e:
@@ -2458,10 +3060,18 @@ def instances_create(pid: str):
                 node = r.get('node')
                 if vmid is None or not node:
                     continue
-                _update_job_detail(pid, phase='networking', current=r.get('name'), message=f'Assigning NICs for {r.get("name") or vmid}…')
+                vm_name, ordinal, total, progress_label = _target_progress_meta(r, r.get('name') or str(vmid))
                 expected = list(r.get('expected_bridges') or [])
                 if not expected:
                     continue
+                for bridge_pos, bridge_name in enumerate(expected, start=1):
+                    _update_job_detail(
+                        pid,
+                        phase='networking',
+                        current=vm_name,
+                        progress=_network_progress(ordinal, bridge_pos / max(len(expected), 1)),
+                        message=f'Assigning adaptor for {progress_label}: bridge {bridge_name} {bridge_pos}/{len(expected)}…',
+                    )
                 netspecs = [f"e1000,bridge={b}" for b in expected]
                 try:
                     existing_cfg = client.get_qemu_config(node=node, vmid=vmid)
@@ -2492,6 +3102,14 @@ def instances_create(pid: str):
             snapshot_workers = _pool_workers_for(proj, len(snapshot_tasks))
             def _do_post_snap(item):
                 try:
+                    vm_name, ordinal, total, progress_label = _target_progress_meta(item, item.get('name') or str(item.get('vmid') or 'VM'))
+                    _update_job_detail(
+                        pid,
+                        phase='snapshotting',
+                        current=vm_name,
+                        progress=_snapshot_progress(ordinal, len(snapshot_tasks)),
+                        message=f'Creating snapshot for {progress_label}…',
+                    )
                     # Timeout matching the original logic (900s)
                     supid = client.snapshot_qemu(node=item['node'], vmid=item['vmid'], snapname='post-clone', description='Auto snapshot after clone')
                     client._wait_task(item['node'], supid, timeout=900)
@@ -2501,8 +3119,28 @@ def instances_create(pid: str):
 
             with ThreadPoolExecutor(max_workers=snapshot_workers) as pool:
                 snap_futs = {pool.submit(_do_post_snap, t): t for t in snapshot_tasks}
+                snapshot_done = 0
                 for fut in as_completed(snap_futs):
                     res = fut.result()
+                    snapshot_done += 1
+                    try:
+                        item = snap_futs[fut]
+                        vm_name, ordinal, total, progress_label = _target_progress_meta(item, item.get('name') or str(item.get('vmid') or 'VM'))
+                        _update_job_detail(
+                            pid,
+                            phase='snapshotting',
+                            current=vm_name,
+                            step=snapshot_done,
+                            total_steps=len(snapshot_tasks),
+                            progress=_snapshot_progress(ordinal, len(snapshot_tasks), completed=snapshot_done),
+                            message=(
+                                f'Snapshot created for {progress_label}; {snapshot_done}/{len(snapshot_tasks)} complete'
+                                if not res else
+                                f'Snapshot failed for {progress_label}; {snapshot_done}/{len(snapshot_tasks)} complete'
+                            ),
+                        )
+                    except Exception:
+                        pass
                     if res:
                         # Log error but don't fail the whole job
                         try:
@@ -3314,6 +3952,7 @@ def instances_delete(pid: str):
         body = {}
     username = body.get('username') or None
     password = body.get('password') or None
+    verify_cleanup = bool(body.get('verifyCleanup')) if ('verifyCleanup' in body) else True
     base_url = body.get('baseUrl') or proj.proxmox_url
     verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
     body_port = body.get('apiPort')
@@ -3422,21 +4061,12 @@ def instances_delete(pid: str):
     bulk_bridge_deletions = {}
 
     def _record_bridge_for_cleanup(node: str, idx: int, adaptor_name: str, gen_name: str):
-        try:
-            base = re.sub(r"[^A-Za-z]", "", str(adaptor_name or ""))[:8]
-            bname = f"{base}{idx}" if base else f"br{idx}"
-            if len(bname) > 15:
-                bname = bname[:15]
-        except Exception:
-            bname = f"br{idx}"
-        bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'legacy': False })
+        bname = _bridge_iface_name(idx, adaptor_name)
+        bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'adaptor': _normalize_bridge_adaptor_name(adaptor_name), 'legacy': False })
         # Legacy hashed bridge variant
         try:
-            base_old = f"{adaptor_name}|{tag}|{idx}"
-            h = int(hashlib.sha1(base_old.encode('utf-8')).hexdigest()[:6], 16)
-            num = 100 + (h % 8899)
-            old_bname = f"vmbr{num}"
-            bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': old_bname, 'index': idx, 'name': gen_name, 'legacy': True })
+            old_bname = _bridge_legacy_iface_name(tag, idx, adaptor_name)
+            bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': old_bname, 'index': idx, 'name': gen_name, 'adaptor': _normalize_bridge_adaptor_name(adaptor_name), 'legacy': True })
         except Exception:
             pass
 
@@ -3456,6 +4086,9 @@ def instances_delete(pid: str):
         return ({ 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node })
 
     pool_workers = _pool_workers_for(proj, len(tasks))
+    total_tasks = len(tasks)
+    if total_tasks > 0:
+        _job_emit_batch_progress(pid, 'deleting', 'Deleting', 0, total_tasks, message=f'Deleting VM(s)… 0/{total_tasks} complete')
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_delete, t): t for t in tasks }
         for fut in as_completed(future_map):
@@ -3468,162 +4101,143 @@ def instances_delete(pid: str):
                     errors.append({ 'reason': 'cancelled' })
                 else:
                     errors.append({ 'index': t['index'], 'name': t['gen_name'], 'reason': f'delete failed: {e}' })
+            finally:
+                if total_tasks > 0:
+                    done = len(deleted) + len(errors)
+                    _job_emit_batch_progress(pid, 'deleting', 'Deleting', done, total_tasks, current=str(t.get('gen_name') or ''), message=f'Delete processed for {t.get("gen_name") or "VM"}; {done}/{total_tasks} complete')
+    project_snapshot = _build_bridge_project_snapshot(proj, tag)
+    deferred_cleanup = { 'scheduled': False, 'nodes': [], 'bridge_count': 0 }
+    if bulk_bridge_deletions:
+        unique_cleanup_bridges = {
+            (str(node), str((entry or {}).get('bridge') or ''))
+            for node, items in bulk_bridge_deletions.items()
+            for entry in (items or [])
+            if str((entry or {}).get('bridge') or '')
+        }
+        deferred_cleanup = {
+            'scheduled': False,
+            'nodes': sorted(str(node) for node in bulk_bridge_deletions.keys()),
+            'bridge_count': len(unique_cleanup_bridges),
+        }
 
-    # After all deletions, enumerate remaining bridges in use to avoid removing active ones, then process bulk deletions per node
-    for node, items in bulk_bridge_deletions.items():
+    if verify_cleanup:
+        cleanup_result = _execute_delete_bridge_cleanup(project_snapshot, client, bulk_bridge_deletions)
+        notices.extend(list(cleanup_result.get('notices') or []))
+        errors.extend(list(cleanup_result.get('errors') or []))
+        network_applied_nodes.extend(list(cleanup_result.get('network_applied_nodes') or []))
+        network_apply_errors.extend(list(cleanup_result.get('network_apply_errors') or []))
+    elif bulk_bridge_deletions:
+        client_kwargs = {
+            'base_url': base_url,
+            'token': getattr(proj, 'proxmox_api_token', '') or None,
+            'username': username,
+            'password': password,
+            'verify': verify,
+        }
+        deferred_cleanup['scheduled'] = _schedule_delete_bridge_cleanup(project_snapshot, client_kwargs, bulk_bridge_deletions)
+        if deferred_cleanup['scheduled']:
+            _append_unique_reason(notices, { 'reason': f"bridge cleanup scheduled in background for {len(deferred_cleanup['nodes'])} node(s)" })
+
+    # Optional deep post-delete verification. This can be expensive on nodes with many VMs/storages,
+    # so callers can opt out when they only need the delete result and bridge cleanup.
+    verify_result = {
+        'skipped': not verify_cleanup,
+        'issues': [],
+        'summary': { 'nets_left': 0, 'disks_left': 0, 'snaps_left': 0 },
+    }
+    if verify_cleanup:
         try:
-            # Determine bridges still referenced by any remaining VM on this node
-            bridges_in_use = set()
-            try:
-                vms_remaining = client.list_qemu_vms(node) or []
-                for ent in vms_remaining:
-                    try:
-                        r_vmid = ent.get('vmid')
-                        if r_vmid is None:
-                            continue
-                        cfg_other = client.get_qemu_config(node=node, vmid=int(r_vmid)) or {}
-                        for k,v in (cfg_other or {}).items():
-                            ks = str(k)
-                            if not ks.startswith('net'):
-                                continue
-                            if isinstance(v, str):
-                                parts = [p.strip() for p in v.split(',') if p]
-                                b = next((p.split('=',1)[1] for p in parts if p.startswith('bridge=')), '')
-                                if b:
-                                    bridges_in_use.add(b)
-                    except Exception:
-                        continue
-            except Exception:
-                bridges_in_use = set()
-            # Deduplicate bridge intents per node
-            seen_bridge = set()
-            for entry in items:
-                bname = entry['bridge']
-                if bname in seen_bridge:
-                    continue
-                seen_bridge.add(bname)
-                if bname in bridges_in_use:
-                    note = { 'index': entry['index'], 'name': entry['name'], 'reason': f'bridge retained (in use) {bname}' }
-                    if not any(str(n.get('reason','')) == str(note['reason']) for n in notices):
-                        notices.append(note)
-                    continue
+            # Build a quick map of remaining VMs on nodes to check lingering NIC config by name
+            remaining = {}
+            for n in nodes:
                 try:
-                    client.delete_bridge(node=node, iface=bname)
-                    bridges_to_reload.add(node)
-                except Exception as e:
-                    msg = str(e).lower()
-                    warn = ('not exist' in msg) or ('no such' in msg) or ('not found' in msg) or (' 404' in msg)
-                    item = { 'index': entry['index'], 'name': entry['name'], 'reason': f'bridge delete skipped for {bname}: does not exist' if warn else f'bridge delete failed for {bname}: {e}' }
-                    if warn:
-                        if not any(str(n.get('reason','')) == str(item['reason']) for n in notices):
-                            notices.append(item)
-                    else:
-                        errors.append(item)
-        except Exception as e:
-            errors.append({ 'node': node, 'reason': f'bulk bridge cleanup failed: {e}' })
-
-    # Reload networking on nodes where we changed bridges (bulk)
-    for node in bridges_to_reload:
-        try:
-            client.reload_network(node)
-            network_applied_nodes.append(node)
-        except Exception as e:
-            network_apply_errors.append({ 'node': node, 'reason': f'network reload failed: {e}' })
-
-    # Post-delete verification: ensure NICs, unreferenced disks, and snapshots are removed
-    verify = { 'issues': [], 'summary': { 'nets_left': 0, 'disks_left': 0, 'snaps_left': 0 } }
-    try:
-        # Build a quick map of remaining VMs on nodes to check lingering NIC config by name
-        remaining = {}
-        for n in nodes:
-            try:
-                node = n.get('node') or n.get('id') or ''
-                if not node: continue
-                for q in client.list_qemu_vms(node):
-                    nm = str(q.get('name') or '')
-                    if nm:
-                        remaining[nm.lower()] = { 'node': node, 'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None }
-            except Exception:
-                continue
-        for d in deleted:
-            idx = d.get('index'); name = str(d.get('name') or '')
-            node = d.get('node'); vmid = d.get('vmid')
-            # 1) NICs: VM is gone, but we also removed bridges earlier; nothing in VM config remains. We still check bridges missing from node list to be safe.
-            try:
-                # Verify bridges no longer exist for this index based on configured adaptors
-                adaptors = []
-                try:
-                    cfg = cfg_map.get(name[:-len(f"{tag}{idx}")]) if name.endswith(f"{tag}{idx}") else None
-                    if not cfg:
-                        cfg = cfg_map_lc.get((name[:-len(f"{tag}{idx}")]).lower()) if name.endswith(f"{tag}{idx}") else None
-                    adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if cfg else []
+                    node = n.get('node') or n.get('id') or ''
+                    if not node: continue
+                    for q in client.list_qemu_vms(node):
+                        nm = str(q.get('name') or '')
+                        if nm:
+                            remaining[nm.lower()] = { 'node': node, 'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None }
                 except Exception:
-                    adaptors = []
-                bridges_expected = []
-                for a in adaptors:
-                    try:
-                        base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                        bname = f"{base}{idx}" if base else f"br{idx}"
-                        if len(bname) > 15:
-                            bname = bname[:15]
-                    except Exception:
-                        bname = f"br{idx}"
-                    bridges_expected.append(bname)
-                lingering_nets = []
+                    continue
+            for d in deleted:
+                idx = d.get('index'); name = str(d.get('name') or '')
+                node = d.get('node'); vmid = d.get('vmid')
+                # 1) NICs: VM is gone, but we also removed bridges earlier; nothing in VM config remains. We still check bridges missing from node list to be safe.
                 try:
-                    nets = client.list_network(node)
-                    have = set([str(n.get('iface') or '') for n in nets])
-                    for b in bridges_expected:
-                        if b and b in have:
-                            lingering_nets.append(b)
+                    # Verify bridges no longer exist for this index based on configured adaptors
+                    adaptors = []
+                    try:
+                        cfg = cfg_map.get(name[:-len(f"{tag}{idx}")]) if name.endswith(f"{tag}{idx}") else None
+                        if not cfg:
+                            cfg = cfg_map_lc.get((name[:-len(f"{tag}{idx}")]).lower()) if name.endswith(f"{tag}{idx}") else None
+                        adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if cfg else []
+                    except Exception:
+                        adaptors = []
+                    bridges_expected = []
+                    for a in adaptors:
+                        try:
+                            base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
+                            bname = f"{base}{idx}" if base else f"br{idx}"
+                            if len(bname) > 15:
+                                bname = bname[:15]
+                        except Exception:
+                            bname = f"br{idx}"
+                        bridges_expected.append(bname)
+                    lingering_nets = []
+                    try:
+                        nets = client.list_network(node)
+                        have = set([str(n.get('iface') or '') for n in nets])
+                        for b in bridges_expected:
+                            if b and b in have:
+                                lingering_nets.append(b)
+                    except Exception:
+                        pass
+                    if lingering_nets:
+                        verify_result['issues'].append({ 'index': idx, 'name': name, 'node': node, 'vmid': vmid, 'nets_left': lingering_nets })
+                        verify_result['summary']['nets_left'] += 1
                 except Exception:
                     pass
-                if lingering_nets:
-                    verify['issues'].append({ 'index': idx, 'name': name, 'node': node, 'vmid': vmid, 'nets_left': lingering_nets })
-                    verify['summary']['nets_left'] += 1
-            except Exception:
-                pass
-            # 2) Orphan disks and snapshots: query storages for this node filtered by this vmid
-            try:
-                disks = []
-                snaps = []
+                # 2) Orphan disks and snapshots: query storages for this node filtered by this vmid
                 try:
-                    stores = client.list_node_storages(node)
-                except Exception:
-                    stores = []
-                for st in stores:
-                    sn = str(st.get('storage') or st.get('name') or '')
-                    if not sn:
-                        continue
+                    disks = []
+                    snaps = []
                     try:
-                        cont = client.list_storage_content(node, sn, vmid=vmid)
+                        stores = client.list_node_storages(node)
                     except Exception:
-                        cont = []
-                    for it in cont:
-                        try:
-                            ctype = str(it.get('content') or '')
-                            volid = it.get('volid')
-                        except Exception:
+                        stores = []
+                    for st in stores:
+                        sn = str(st.get('storage') or st.get('name') or '')
+                        if not sn:
                             continue
-                        # Treat base images and disk volumes
-                        if ctype in ('images', 'rootdir', 'iso', 'snippets'):
-                            if str(it.get('vmid') or it.get('vmid_str') or vmid) == str(vmid):
-                                if ctype == 'images':
-                                    disks.append(volid or it)
-                        if ctype == 'backup':
-                            if str(it.get('vmid') or '') == str(vmid):
-                                snaps.append(volid or it)
-                if disks or snaps:
-                    verify['issues'].append({ 'index': idx, 'name': name, 'node': node, 'vmid': vmid, 'disks_left': disks, 'snaps_left': snaps })
-                    verify['summary']['disks_left'] += 1 if disks else 0
-                    verify['summary']['snaps_left'] += 1 if snaps else 0
-            except Exception:
-                pass
-    except Exception:
-        pass
+                        try:
+                            cont = client.list_storage_content(node, sn, vmid=vmid)
+                        except Exception:
+                            cont = []
+                        for it in cont:
+                            try:
+                                ctype = str(it.get('content') or '')
+                                volid = it.get('volid')
+                            except Exception:
+                                continue
+                            # Treat base images and disk volumes
+                            if ctype in ('images', 'rootdir', 'iso', 'snippets'):
+                                if str(it.get('vmid') or it.get('vmid_str') or vmid) == str(vmid):
+                                    if ctype == 'images':
+                                        disks.append(volid or it)
+                            if ctype == 'backup':
+                                if str(it.get('vmid') or '') == str(vmid):
+                                    snaps.append(volid or it)
+                    if disks or snaps:
+                        verify_result['issues'].append({ 'index': idx, 'name': name, 'node': node, 'vmid': vmid, 'disks_left': disks, 'snaps_left': snaps })
+                        verify_result['summary']['disks_left'] += 1 if disks else 0
+                        verify_result['summary']['snaps_left'] += 1 if snaps else 0
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     _end_job(pid)
-    return jsonify({ 'deleted': deleted, 'skipped': skipped, 'errors': errors, 'notices': notices, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors, 'verify': verify })
+    return jsonify({ 'deleted': deleted, 'skipped': skipped, 'errors': errors, 'notices': notices, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors, 'verify': verify_result, 'deferred_cleanup': deferred_cleanup })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/purge_leftovers", methods=["POST"])
@@ -3719,16 +4333,8 @@ def instances_purge_leftovers(pid: str):
     return jsonify({ 'removed_bridges': removed_bridges, 'removed_volumes': removed_volumes, 'errors': errs, 'skipped': skip, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors })
 
 
-def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: list):
-    """Map incoming targets (index, name base or generated) to actual VM info (node, vmid, gen_name).
-    Returns (mapped_list, skipped_list, errors_list)
-    """
-    tag = str(proj.tag or '').strip()
-    vms_cfg = proj.vms or []
-    cfg_map = { getattr(v, 'name', ''): v for v in vms_cfg }
-    cfg_map_lc = { str(getattr(v, 'name', '')).lower(): v for v in vms_cfg }
-    # Build map of current VMs (parallel per-node fetch for speed)
-    name_to_info = {}
+def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str, Any]], Optional[str]]:
+    name_to_info: Dict[str, Dict[str, Any]] = {}
     try:
         nodes = client.list_nodes() or []
 
@@ -3738,7 +4344,6 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
             if not node:
                 return (None, [], None)
             try:
-                # Session objects are not thread-safe; create a new client per worker.
                 thread_client = ProxmoxClient(
                     base_url=client.base_url,
                     token=client.token,
@@ -3756,9 +4361,7 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
             futures = [pool.submit(_fetch_node_vms, n) for n in nodes]
             for fut in as_completed(futures):
                 node, qemus, err = fut.result()
-                if err:
-                    continue
-                if not node:
+                if err or not node:
                     continue
                 for q in qemus:
                     nm = str((q or {}).get('name') or '')
@@ -3768,48 +4371,272 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
                         'node': node,
                         'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None,
                         'name': nm,
-                        'status': (q.get('status') or q.get('qmpstatus') or '').lower(),
+                        'status': str(q.get('status') or q.get('qmpstatus') or '').lower(),
+                        'power_status': str(q.get('status') or '').lower(),
+                        'qmp_status': str(q.get('qmpstatus') or '').lower(),
                     }
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return [], [], [{ 'reason': f'failed to list nodes: {e}' }]
+        return {}, f'failed to list nodes: {e}'
+    return name_to_info, None
+
+
+def _normalize_project_target(proj: Project, target: Any) -> Optional[Dict[str, Any]]:
+    try:
+        idx = int((target or {}).get('index'))
+        incoming = str((target or {}).get('name') or '').strip()
+    except Exception:
+        return None
+    if not incoming:
+        return None
+
+    tag = str(getattr(proj, 'tag', '') or '').strip()
+    suffix = f"{tag}{idx}"
+    base_name = incoming
+    if suffix and base_name.endswith(suffix):
+        base_name = base_name[:len(base_name) - len(suffix)]
+
+    known_config = False
+    try:
+        cfg_map = { str(getattr(v, 'name', '') or ''): v for v in (getattr(proj, 'vms', []) or []) }
+        cfg_map_lc = { str(getattr(v, 'name', '') or '').lower(): v for v in (getattr(proj, 'vms', []) or []) }
+        cfg = cfg_map.get(base_name) or cfg_map_lc.get(base_name.lower())
+        if not cfg:
+            for vm in (getattr(proj, 'vms', []) or []):
+                candidate = str(getattr(vm, 'name', '') or '')
+                if candidate and suffix and f"{candidate}{suffix}" == incoming:
+                    cfg = vm
+                    base_name = candidate
+                    break
+        if cfg:
+            known_config = True
+            base_name = str(getattr(cfg, 'name', '') or base_name)
+    except Exception:
+        known_config = False
+
+    generated_name = f"{base_name}{suffix}" if base_name else incoming
+    return {
+        'index': idx,
+        'input_name': incoming,
+        'base_name': base_name,
+        'generated_name': generated_name,
+        'known_config': known_config,
+    }
+
+
+def _retry_check_item(
+    normalized_target: Dict[str, Any],
+    *,
+    retry_name: Optional[str] = None,
+    resolved_name: Optional[str] = None,
+    info: Optional[Dict[str, Any]] = None,
+    reason: Optional[str] = None,
+    snapname: Optional[str] = None,
+) -> Dict[str, Any]:
+    item: Dict[str, Any] = {
+        'index': int(normalized_target.get('index') or 0),
+        'name': str(retry_name or normalized_target.get('input_name') or normalized_target.get('generated_name') or ''),
+    }
+    resolved = str(resolved_name or '').strip()
+    if resolved and resolved != item['name']:
+        item['resolved_name'] = resolved
+    if info:
+        if info.get('node'):
+            item['node'] = info.get('node')
+        if info.get('vmid') is not None:
+            item['vmid'] = info.get('vmid')
+    if reason:
+        item['reason'] = reason
+    if snapname:
+        item['snapname'] = snapname
+    return item
+
+
+def _vm_retry_state_matches(action: str, info: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+    power_state = str((info or {}).get('power_status') or (info or {}).get('status') or '').strip().lower()
+    qmp_state = str((info or {}).get('qmp_status') or '').strip().lower()
+    lock_state = str((cfg or {}).get('lock') or '').strip()
+    current_state = power_state or qmp_state or 'unknown'
+
+    if action == 'start':
+        matched = power_state in ('running', 'starting', 'rebooting') or qmp_state in ('running', 'prelaunch')
+        return matched, ('vm is already running' if matched else f'current state is {current_state}')
+    if action == 'suspend':
+        matched = power_state in ('paused', 'suspended') or qmp_state in ('paused', 'suspended')
+        return matched, ('vm is already suspended' if matched else f'current state is {current_state}')
+    if action == 'poweroff':
+        matched = power_state in ('stopped', 'down', 'shutoff', 'off', 'halted', 'stopping', 'shutdown') or qmp_state in ('stopped', 'shutdown')
+        return matched, ('vm is already stopped' if matched else f'current state is {current_state}')
+    if action == 'unlock':
+        matched = not lock_state
+        return matched, ('vm is already unlocked' if matched else f'lock is still {lock_state}')
+    return False, f'unhandled retry verification action: {action}'
+
+
+def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: list):
+    """Map incoming targets (index, name base or generated) to actual VM info (node, vmid, gen_name).
+    Returns (mapped_list, skipped_list, errors_list)
+    """
+    name_to_info, list_err = _list_cluster_vms_by_name(client)
+    if list_err:
+        return [], [], [{ 'reason': list_err }]
     mapped = []
     skipped = []
     errors = []
     for t in targets:
-        try:
-            idx = int(t.get('index'))
-            incoming = str(t.get('name') or '')
-        except Exception:
+        normalized = _normalize_project_target(proj, t)
+        if not normalized:
             errors.append({ 'name': t, 'reason': 'invalid target' })
             continue
-        base_name = incoming
-        try:
-            suf = f"{tag}{idx}"
-            if base_name.endswith(suf):
-                base_name = base_name[:len(base_name)-len(suf)]
-        except Exception:
-            pass
-        cfg = cfg_map.get(base_name) or cfg_map_lc.get(base_name.lower())
-        if not cfg:
-            for v in vms_cfg:
-                b = getattr(v, 'name', '') or ''
-                if b and (b + f"{tag}{idx}") == incoming:
-                    cfg = v
-                    base_name = b
-                    break
-        if not cfg:
+        idx = int(normalized['index'])
+        base_name = str(normalized.get('base_name') or '')
+        gen_name = str(normalized.get('generated_name') or '')
+        if not normalized.get('known_config'):
             errors.append({ 'index': idx, 'name': base_name, 'reason': 'unknown base name' })
             continue
-        gen_name = f"{base_name}{tag}{idx}"
         info = name_to_info.get(gen_name.lower())
         if not info or info.get('vmid') is None:
             skipped.append({ 'index': idx, 'name': gen_name, 'reason': 'not found' })
             continue
         # Append each resolved VM info to the mapped list (fix: ensure inside loop)
-        mapped.append({ 'index': idx, 'name': gen_name, 'node': info['node'], 'vmid': info['vmid'], 'status': info.get('status','') })
+        mapped.append({
+            'index': idx,
+            'name': gen_name,
+            'node': info['node'],
+            'vmid': info['vmid'],
+            'status': info.get('status', ''),
+            'power_status': info.get('power_status', ''),
+            'qmp_status': info.get('qmp_status', ''),
+        })
     return mapped, skipped, errors
+
+
+@api_bp.route("/projects/<pid>/instances/actions/<action>/retry-check", methods=["POST"])
+def instances_action_retry_check(pid: str, action: str):
+    supported = {'create', 'delete', 'start', 'unlock', 'suspend', 'poweroff', 'snapshot', 'apply_scenario'}
+    if action not in supported:
+        return jsonify({"error": "Retry verification is not supported for this action"}), 400
+
+    s = _store()
+    proj = s.get(pid)
+    if not proj:
+        return jsonify({"error": "Project not found"}), 404
+
+    try:
+        body = request.get_json(force=True) or {}
+    except Exception:
+        body = {}
+
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
+    body_port = body.get('apiPort')
+    try:
+        if body_port is not None:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+    except Exception:
+        pass
+
+    targets = body.get('targets') or []
+    snapname = str(body.get('snapname') or '').strip()
+    if action == 'snapshot' and not snapname:
+        return jsonify({"error": "Missing snapshot name for retry verification"}), 400
+    if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
+        return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "No targets provided"}), 400
+
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj, 'proxmox_api_token', '') or None, username=username, password=password, verify=verify)
+    name_to_info, list_err = _list_cluster_vms_by_name(client)
+    if list_err:
+        return jsonify({"error": list_err}), 502
+
+    completed: List[Dict[str, Any]] = []
+    remaining: List[Dict[str, Any]] = []
+
+    for target in targets:
+        normalized = _normalize_project_target(proj, target)
+        if not normalized:
+            remaining.append({ 'name': str(target or ''), 'reason': 'invalid target' })
+            continue
+
+        base_name = str(normalized.get('base_name') or '')
+        generated_name = str(normalized.get('generated_name') or '')
+        retry_name = base_name if action in ('create', 'delete') else generated_name
+
+        if not normalized.get('known_config'):
+            remaining.append(_retry_check_item(normalized, retry_name=retry_name or normalized.get('input_name'), resolved_name=generated_name, reason='unknown base name'))
+            continue
+
+        info = name_to_info.get(generated_name.lower())
+
+        if action == 'create':
+            if info and info.get('vmid') is not None:
+                completed.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason='VM already exists'))
+            else:
+                remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=generated_name, reason='VM not present after verification'))
+            continue
+
+        if action == 'delete':
+            if not info or info.get('vmid') is None:
+                completed.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=generated_name, reason='VM is already absent'))
+            else:
+                remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason='VM still exists'))
+            continue
+
+        if not info or info.get('vmid') is None:
+            remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=generated_name, reason='VM not found during verification'))
+            continue
+
+        if action == 'snapshot':
+            try:
+                snaps = client.list_snapshots_qemu(node=info['node'], vmid=int(info['vmid'])) or []
+            except Exception as e:
+                remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason=f'snapshot check failed: {e}', snapname=snapname))
+                continue
+            matched = any(str((snap or {}).get('name') or '') == snapname for snap in snaps)
+            if matched:
+                completed.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason=f'snapshot {snapname} already exists', snapname=snapname))
+            else:
+                remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason=f'snapshot {snapname} not found', snapname=snapname))
+            continue
+
+        cfg = None
+        if action in ('unlock', 'apply_scenario'):
+            try:
+                cfg = client.get_qemu_config(node=info['node'], vmid=int(info['vmid'])) or {}
+            except Exception as e:
+                remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason=f'config check failed: {e}'))
+                continue
+
+        if action == 'apply_scenario':
+            if _vm_description_matches_project(proj, (cfg or {}).get('description')):
+                completed.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason='Scenario notes already match this project'))
+            else:
+                remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason='Scenario notes are not present yet'))
+            continue
+
+        matched, reason = _vm_retry_state_matches(action, info, cfg)
+        if matched:
+            completed.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason=reason))
+        else:
+            remaining.append(_retry_check_item(normalized, retry_name=retry_name, resolved_name=str(info.get('name') or generated_name), info=info, reason=reason))
+
+    return jsonify({ 'completed': completed, 'remaining': remaining, 'snapname': snapname or None })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/start", methods=["POST"])
@@ -3855,6 +4682,9 @@ def instances_start(pid: str):
     started = []
     resumed = []
     pool_workers = _pool_workers_for(proj, len(mapped))
+    total_mapped = len(mapped)
+    if total_mapped > 0:
+        _job_emit_batch_progress(pid, 'starting', 'Starting', 0, total_mapped, message=f'Starting VM(s)… 0/{total_mapped} complete')
     # Run in parallel with a reasonable pool size
     def do_start(m):
         if _is_cancelled(pid):
@@ -3883,6 +4713,10 @@ def instances_start(pid: str):
                     errors.append({ 'reason': 'cancelled' })
                 else:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'start failed: {e}' })
+            finally:
+                if total_mapped > 0:
+                    done = len(started) + len(resumed) + len(errors)
+                    _job_emit_batch_progress(pid, 'starting', 'Starting', done, total_mapped, current=str(m.get('name') or ''), message=f'Start processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'started': started, 'resumed': resumed, 'skipped': skipped, 'errors': errors })
 
@@ -3935,6 +4769,9 @@ def instances_apply_scenario(pid: str):
     
     pool_workers = _pool_workers_for(proj, len(mapped))
     delay = float(getattr(proj, 'proxmox_update_delay_seconds', 0.5))
+    total_mapped = len(mapped)
+    if total_mapped > 0:
+        _job_emit_batch_progress(pid, 'applying', 'Applying Scenario', 0, total_mapped, message=f'Applying scenario notes… 0/{total_mapped} complete')
     
     # Map configurations by name for easy lookup
     cfg_map = {}
@@ -4016,6 +4853,10 @@ def instances_apply_scenario(pid: str):
                     errors.append({ 'reason': 'cancelled' })
                 else:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'apply scenario failed: {e}' })
+            finally:
+                if total_mapped > 0:
+                    done = len(applied) + len(errors)
+                    _job_emit_batch_progress(pid, 'applying', 'Applying Scenario', done, total_mapped, current=str(m.get('name') or ''), message=f'Applied scenario step for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'applied': applied, 'skipped': skipped, 'errors': errors })
 
@@ -4059,6 +4900,9 @@ def instances_suspend(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     suspended = []
     pool_workers = _pool_workers_for(proj, len(mapped))
+    total_mapped = len(mapped)
+    if total_mapped > 0:
+        _job_emit_batch_progress(pid, 'suspending', 'Suspending', 0, total_mapped, message=f'Suspending VM(s)… 0/{total_mapped} complete')
     def do_suspend(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
@@ -4077,6 +4921,10 @@ def instances_suspend(pid: str):
                     errors.append({ 'reason': 'cancelled' })
                 else:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'suspend failed: {e}' })
+            finally:
+                if total_mapped > 0:
+                    done = len(suspended) + len(errors)
+                    _job_emit_batch_progress(pid, 'suspending', 'Suspending', done, total_mapped, current=str(m.get('name') or ''), message=f'Suspend processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'suspended': suspended, 'skipped': skipped, 'errors': errors })
 
@@ -4120,6 +4968,9 @@ def instances_unlock(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     unlocked = []
     pool_workers = _pool_workers_for(proj, len(mapped))
+    total_mapped = len(mapped)
+    if total_mapped > 0:
+        _job_emit_batch_progress(pid, 'unlocking', 'Unlocking', 0, total_mapped, message=f'Unlocking VM(s)… 0/{total_mapped} complete')
 
     def do_unlock(m):
         if _is_cancelled(pid):
@@ -4139,6 +4990,10 @@ def instances_unlock(pid: str):
                     errors.append({ 'reason': 'cancelled' })
                 else:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'unlock failed: {e}' })
+            finally:
+                if total_mapped > 0:
+                    done = len(unlocked) + len(errors)
+                    _job_emit_batch_progress(pid, 'unlocking', 'Unlocking', done, total_mapped, current=str(m.get('name') or ''), message=f'Unlock processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'unlocked': unlocked, 'skipped': skipped, 'errors': errors })
 
@@ -4182,6 +5037,9 @@ def instances_poweroff(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     powered_off = []
     pool_workers = _pool_workers_for(proj, len(mapped))
+    total_mapped = len(mapped)
+    if total_mapped > 0:
+        _job_emit_batch_progress(pid, 'powering_off', 'Powering Off', 0, total_mapped, message=f'Powering off VM(s)… 0/{total_mapped} complete')
     def do_poweroff(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
@@ -4200,6 +5058,10 @@ def instances_poweroff(pid: str):
                     errors.append({ 'reason': 'cancelled' })
                 else:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'power off failed: {e}' })
+            finally:
+                if total_mapped > 0:
+                    done = len(powered_off) + len(errors)
+                    _job_emit_batch_progress(pid, 'powering_off', 'Powering Off', done, total_mapped, current=str(m.get('name') or ''), message=f'Power-off processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'powered_off': powered_off, 'skipped': skipped, 'errors': errors })
 
@@ -4247,6 +5109,9 @@ def instances_snapshot(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     snapshotted = []
     delay = float(getattr(proj, 'proxmox_snapshot_delay_seconds', 5.0))
+    total_mapped = len(mapped)
+    if total_mapped > 0:
+        _job_emit_batch_progress(pid, 'snapshotting', 'Snapshotting', 0, total_mapped, message=f'Creating snapshots… 0/{total_mapped} complete')
     # Execute snapshots sequentially with delay throttle to avoid overloading storage
     for i, m in enumerate(mapped):
         if _is_cancelled(pid):
@@ -4258,6 +5123,10 @@ def instances_snapshot(pid: str):
             snapshotted.append({ 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'], 'snapname': snapname })
         except Exception as e:
             errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'snapshot failed: {e}' })
+        finally:
+            if total_mapped > 0:
+                done = len(snapshotted) + sum(1 for err in errors if err.get('name'))
+                _job_emit_batch_progress(pid, 'snapshotting', 'Snapshotting', done, total_mapped, current=str(m.get('name') or ''), message=f'Snapshot processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
         # Sleep between snapshots if more remain
         if i < len(mapped)-1 and delay and delay > 0:
             try:
@@ -4265,7 +5134,7 @@ def instances_snapshot(pid: str):
             except Exception:
                 pass
     _end_job(pid)
-    return jsonify({ 'snapshotted': snapshotted, 'skipped': skipped, 'errors': errors })
+    return jsonify({ 'snapshotted': snapshotted, 'skipped': skipped, 'errors': errors, 'snapname': snapname })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/restore", methods=["POST"])
@@ -4309,6 +5178,9 @@ def instances_restore(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     restored = []
     notice = 'Restoring the latest snapshot on each VM (most recent by timestamp).'
+    total_mapped = len(mapped)
+    if total_mapped > 0:
+        _job_emit_batch_progress(pid, 'restoring', 'Restoring', 0, total_mapped, message=f'Restoring snapshots… 0/{total_mapped} complete')
     def do_restore(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
@@ -4338,6 +5210,10 @@ def instances_restore(pid: str):
                     errors.append({ 'reason': 'cancelled' })
                 else:
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'restore failed: {e}' })
+            finally:
+                if total_mapped > 0:
+                    done = len(restored) + sum(1 for item in skipped if item.get('name')) + len(errors)
+                    _job_emit_batch_progress(pid, 'restoring', 'Restoring', done, total_mapped, current=str(m.get('name') or ''), message=f'Restore processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'restored': restored, 'skipped': skipped, 'errors': errors, 'notice': notice })
 
@@ -4468,6 +5344,7 @@ def instances_nets_set(pid: str):
 
     # 1) Pre-create missing bridges per node (batch), so VM netX specs can reference them.
     bridges_needed: Dict[str, Set[str]] = {}
+    bridge_owners: Dict[str, Dict[str, int]] = {}
     for m in mapped:
         try:
             idx = int(m.get('index') or 0)
@@ -4484,15 +5361,10 @@ def instances_nets_set(pid: str):
                 continue
             adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
             for a in adaptors:
-                try:
-                    base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                    bname = f"{base}{idx}" if base else f"br{idx}"
-                    if len(bname) > 15:
-                        bname = bname[:15]
-                except Exception:
-                    bname = f"br{idx}"
+                bname = _bridge_iface_name(idx, a)
                 if bname:
                     bridges_needed.setdefault(node, set()).add(bname)
+                    bridge_owners.setdefault(node, {}).setdefault(bname, idx)
         except Exception:
             continue
 
@@ -4511,7 +5383,8 @@ def instances_nets_set(pid: str):
             if b in existing:
                 continue
             try:
-                client.create_bridge(node=node, iface=b, autostart=True, ports=None, comments="Auto-created (nets_set batch)")
+                owner_idx = (bridge_owners.get(node) or {}).get(b, 0)
+                client.create_bridge(node=node, iface=b, autostart=True, ports=None, comments=_bridge_owner_comment_for_iface(pid, owner_idx, b, 'nets_set'))
                 bridges_to_reload.add(node)
                 notices.append({ 'node': node, 'reason': f'bridge created: {b}' })
             except Exception as e:
@@ -4552,13 +5425,7 @@ def instances_nets_set(pid: str):
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'no adaptors configured' })
         netspecs = []
         for a in adaptors:
-            try:
-                base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                bname = f"{base}{idx}" if base else f"br{idx}"
-                if len(bname) > 15:
-                    bname = bname[:15]
-            except Exception:
-                bname = f"br{idx}"
+            bname = _bridge_iface_name(idx, a)
             netspecs.append(f"e1000,bridge={bname}")
         try:
             thread_client = _make_thread_client()
@@ -7576,6 +8443,25 @@ def _migrate_project_level_secrets_if_any(pid: str, username: str) -> None:
         return
 
 
+def _effective_secrets_username(ss: UserSecretsStore, username: str, project_id: str) -> str:
+    user = str(username or '').strip() or '__anonymous__'
+    if user != '__anonymous__':
+        return user
+    try:
+        existing = ss.get_enc(user, project_id) or {}
+        if existing:
+            return user
+    except Exception:
+        pass
+    try:
+        owner = ss.find_project_owner(project_id)
+        if owner:
+            return owner
+    except Exception:
+        pass
+    return user
+
+
 def _is_remote_mode() -> bool:
     try:
         return _runtime_store().get_run_mode() == 'remote'
@@ -8174,9 +9060,189 @@ def ctfd_users_check(pid: str):
         _finalize(best_team, 'team')
         return result
 
+    user_obj_cache: Dict[int, Dict[str, Any]] = {}
+    user_solves_cache: Dict[int, List[Dict[str, Any]]] = {}
+    team_obj_cache: Dict[int, Dict[str, Any]] = {}
+    team_members_cache: Dict[int, List[Dict[str, Any]]] = {}
+    team_solves_cache: Dict[int, List[Dict[str, Any]]] = {}
+    scoreboard_cache: Dict[str, Optional[Dict[int, Dict[str, Any]]]] = {
+        'users': None,
+        'teams': None,
+        'members': None,
+    }
+
+    def _coerce_int(value):
+        try:
+            if value is None or value == '':
+                return None
+            return int(value)
+        except Exception:
+            try:
+                return int(str(value))
+            except Exception:
+                return None
+
+    def _extract_rank(obj):
+        if not isinstance(obj, dict):
+            return None
+        try:
+            for key in ('place', 'pos', 'rank', 'score_rank', 'overall_place'):
+                val = obj.get(key)
+                if isinstance(val, (int, float, str)) and str(val).strip():
+                    return int(val) if str(val).isdigit() else str(val)
+        except Exception:
+            pass
+        return None
+
+    def _extract_points(obj):
+        if not isinstance(obj, dict):
+            return None
+        try:
+            for key in ('score', 'points', 'value', 'overall_score', 'sum'):
+                val = obj.get(key)
+                if val is None:
+                    continue
+                try:
+                    return float(val)
+                except Exception:
+                    try:
+                        return float(int(str(val)))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return None
+
+    def _cached_scoreboard_maps():
+        users = scoreboard_cache.get('users')
+        teams = scoreboard_cache.get('teams')
+        members = scoreboard_cache.get('members')
+        if users is not None and teams is not None and members is not None:
+            return users, teams, members
+
+        user_rows: Dict[int, Dict[str, Any]] = {}
+        team_rows: Dict[int, Dict[str, Any]] = {}
+        member_rows: Dict[int, Dict[str, Any]] = {}
+        list_scoreboard = getattr(client, 'list_scoreboard', None)
+        try:
+            rows = list_scoreboard() if callable(list_scoreboard) else []
+        except Exception:
+            rows = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                account_id = _coerce_int(row.get('account_id') if row.get('account_id') is not None else row.get('id'))
+                row_members = row.get('members')
+                if isinstance(row_members, list):
+                    if account_id is not None:
+                        team_rows[account_id] = row
+                    for member in row_members:
+                        if not isinstance(member, dict):
+                            continue
+                        member_id = _coerce_int(member.get('id') if member.get('id') is not None else member.get('user_id'))
+                        if member_id is None or member_id in member_rows:
+                            continue
+                        member_rows[member_id] = {
+                            **member,
+                            'team_id': account_id,
+                        }
+                elif account_id is not None:
+                    user_rows[account_id] = row
+        scoreboard_cache['users'] = user_rows
+        scoreboard_cache['teams'] = team_rows
+        scoreboard_cache['members'] = member_rows
+        return user_rows, team_rows, member_rows
+
+    def _cached_user_obj(user_id):
+        try:
+            uid_i = int(user_id)
+        except Exception:
+            return {}
+        if uid_i not in user_obj_cache:
+            try:
+                user_obj_cache[uid_i] = client.get_user(uid_i) or {}
+            except Exception:
+                user_obj_cache[uid_i] = {}
+        return user_obj_cache.get(uid_i) or {}
+
+    def _cached_user_solves(user_id):
+        try:
+            uid_i = int(user_id)
+        except Exception:
+            return []
+        if uid_i not in user_solves_cache:
+            try:
+                solves = client.list_user_solves(uid_i)
+                user_solves_cache[uid_i] = solves if isinstance(solves, list) else []
+            except Exception:
+                user_solves_cache[uid_i] = []
+        return user_solves_cache.get(uid_i) or []
+
+    def _cached_team_obj(team_id):
+        try:
+            tid_i = int(team_id)
+        except Exception:
+            return {}
+        if tid_i not in team_obj_cache:
+            try:
+                team_obj_cache[tid_i] = client.get_team(tid_i) or {}
+            except Exception:
+                team_obj_cache[tid_i] = {}
+        return team_obj_cache.get(tid_i) or {}
+
+    def _cached_team_members(team_id):
+        try:
+            tid_i = int(team_id)
+        except Exception:
+            return []
+        if tid_i not in team_members_cache:
+            try:
+                members = client.list_team_members(tid_i)
+                team_members_cache[tid_i] = members if isinstance(members, list) else []
+            except Exception:
+                team_members_cache[tid_i] = []
+        return team_members_cache.get(tid_i) or []
+
+    def _cached_team_solves(team_id):
+        try:
+            tid_i = int(team_id)
+        except Exception:
+            return []
+        if tid_i not in team_solves_cache:
+            try:
+                solves = client.list_team_solves(tid_i)
+                team_solves_cache[tid_i] = solves if isinstance(solves, list) else []
+            except Exception:
+                team_solves_cache[tid_i] = []
+        return team_solves_cache.get(tid_i) or []
+
+    bulk_user_matches = {}
+    def _index_bulk_users(users):
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            name_key = str(user.get('name') or user.get('username') or '').strip().lower()
+            email_key = str(user.get('email') or '').strip().lower()
+            if name_key and name_key not in bulk_user_matches:
+                bulk_user_matches[name_key] = user
+            if email_key and email_key not in bulk_user_matches:
+                bulk_user_matches[email_key] = user
+
+    if hasattr(client, 'list_all_users'):
+        try:
+            _index_bulk_users(client.list_all_users(view_admin=True) or [])
+        except Exception:
+            try:
+                _index_bulk_users(client.list_all_users(view_admin=False) or [])
+            except Exception:
+                bulk_user_matches = {}
+
     out = []
     for uname in targets:
         exists = False
+        uid = None
+        tid = None
         user_rank = None
         team_name = None
         team_rank = None
@@ -8189,46 +9255,37 @@ def ctfd_users_check(pid: str):
         team_last_solve_time = None
         team_last_solve_challenge = None
         try:
-            uid = client.find_user_id_by_name(uname)
-            exists = bool(uid)
+            expected_email = f"{uname}@example.com".strip().lower() if uname else ''
+            bulk_user = bulk_user_matches.get(str(uname or '').strip().lower()) or (bulk_user_matches.get(expected_email) if expected_email else None)
+            if isinstance(bulk_user, dict):
+                try:
+                    raw_uid = bulk_user.get('id')
+                    if raw_uid is not None and raw_uid != '':
+                        uid = int(raw_uid)
+                except Exception:
+                    uid = None
+                exists = bool(uid is not None or bulk_user.get('name') or bulk_user.get('username') or bulk_user.get('email'))
+            bulk_exists = bool(exists)
+            if uid is None:
+                uid = client.find_user_id_by_name(uname)
+            exists = bool(uid is not None or bulk_exists)
             if uid:
                 # Try to enrich with rank/team info
-                try:
-                    uobj = client.get_user(int(uid))
-                except Exception:
-                    uobj = {}
-                # User rank usually available as 'place' or 'score' rank depending on CTFd config; try common keys
-                try:
-                    for k in ('place', 'rank', 'score_rank', 'overall_place'):
-                        val = uobj.get(k)
-                        if isinstance(val, (int, float, str)) and str(val).strip():
-                            user_rank = int(val) if str(val).isdigit() else str(val)
-                            break
-                except Exception:
-                    pass
-                # User points/score
-                try:
-                    for pk in ('score', 'points', 'value', 'overall_score', 'sum'):
-                        pv = uobj.get(pk)
-                        if pv is None:
-                            continue
-                        # Accept numeric or numeric-like strings
-                        try:
-                            fv = float(pv)
-                            user_points = fv
-                            break
-                        except Exception:
-                            try:
-                                iv = int(str(pv))
-                                user_points = float(iv)
-                                break
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                uobj = _cached_user_obj(uid)
+                user_rank = _extract_rank(uobj)
+                user_points = _extract_points(uobj)
+                if user_rank is None or user_points is None:
+                    scoreboard_users, _, scoreboard_members = _cached_scoreboard_maps()
+                    scoreboard_user = scoreboard_users.get(uid) or {}
+                    if user_rank is None:
+                        user_rank = _extract_rank(scoreboard_user)
+                    if user_points is None:
+                        user_points = _extract_points(scoreboard_user)
+                    if user_points is None:
+                        user_points = _extract_points(scoreboard_members.get(uid) or {})
                 # User last solve info
                 try:
-                    solves = client.list_user_solves(int(uid))
+                    solves = _cached_user_solves(uid)
                     # Pick most recent by date field
                     if isinstance(solves, list) and solves:
                         def _ts(s):
@@ -8278,12 +9335,11 @@ def ctfd_users_check(pid: str):
                                 pass
                             if tid is not None:
                                 break
+                    if tid is None:
+                        _, _, scoreboard_members = _cached_scoreboard_maps()
+                        tid = _coerce_int((scoreboard_members.get(uid) or {}).get('team_id'))
                     if tid is not None:
-                        tobj = {}
-                        try:
-                            tobj = client.get_team(int(tid))
-                        except Exception:
-                            tobj = {}
+                        tobj = _cached_team_obj(tid)
                         # Determine a team display name and rank from common keys
                         try:
                             for nk in ('name','team','display_name','title'):
@@ -8293,33 +9349,26 @@ def ctfd_users_check(pid: str):
                                     break
                         except Exception:
                             pass
-                        try:
-                            for rk in ('place','rank','score_rank','overall_place'):
-                                rv = tobj.get(rk)
-                                if isinstance(rv, (int, float, str)) and str(rv).strip():
-                                    team_rank = int(rv) if str(rv).isdigit() else str(rv)
-                                    break
-                        except Exception:
-                            pass
-                        # Team points/score
-                        try:
-                            for pk in ('score', 'points', 'value', 'overall_score', 'sum'):
-                                pv = tobj.get(pk)
-                                if pv is None:
-                                    continue
+                        team_rank = _extract_rank(tobj)
+                        team_points = _extract_points(tobj)
+                        if not team_name or team_rank is None or team_points is None or user_points is None:
+                            _, scoreboard_teams, scoreboard_members = _cached_scoreboard_maps()
+                            scoreboard_team = scoreboard_teams.get(tid) or {}
+                            if not team_name:
                                 try:
-                                    fv = float(pv)
-                                    team_points = fv
-                                    break
+                                    for nk in ('name','team','display_name','title'):
+                                        tv = scoreboard_team.get(nk)
+                                        if isinstance(tv, str) and tv.strip():
+                                            team_name = tv.strip()
+                                            break
                                 except Exception:
-                                    try:
-                                        iv = int(str(pv))
-                                        team_points = float(iv)
-                                        break
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
+                                    pass
+                            if team_rank is None:
+                                team_rank = _extract_rank(scoreboard_team)
+                            if team_points is None:
+                                team_points = _extract_points(scoreboard_team)
+                            if user_points is None:
+                                user_points = _extract_points(scoreboard_members.get(uid) or {})
                         # Team captain and size
                         try:
                             # Captain often under 'captain_id' or 'captain'
@@ -8333,7 +9382,7 @@ def ctfd_users_check(pid: str):
                                     if cap_id is not None:
                                         break
                             # Resolve captain name from members or user endpoint
-                            members = client.list_team_members(int(tid))
+                            members = _cached_team_members(tid)
                             team_size = len(members) if isinstance(members, list) else None
                             if cap_id is not None:
                                 # First try from members array
@@ -8359,7 +9408,7 @@ def ctfd_users_check(pid: str):
                                     pass
                                 if not team_captain:
                                     try:
-                                        ucap = client.get_user(int(cap_id))
+                                        ucap = _cached_user_obj(cap_id)
                                         for nk in ('name','username','display_name'):
                                             nv = ucap.get(nk)
                                             if isinstance(nv, str) and nv.strip():
@@ -8371,7 +9420,7 @@ def ctfd_users_check(pid: str):
                             pass
                         # Team last solve
                         try:
-                            tsolves = client.list_team_solves(int(tid))
+                            tsolves = _cached_team_solves(tid)
                             if isinstance(tsolves, list) and tsolves:
                                 def _tts(s):
                                     try:
@@ -8428,15 +9477,19 @@ def ctfd_users_check(pid: str):
         })
     category_payload = None
     if not only:
-        try:
-            category_payload = _build_category_firsts()
-        except Exception as exc:
-            category_payload = {
-                'user': [],
-                'team': [],
-                'errors': [f'category_firsts: {exc}'],
-                'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-            }
+        cache_key = _make_ctfd_category_firsts_cache_key(pid, client, body)
+        category_payload = _get_cached_ctfd_category_firsts(cache_key)
+        if category_payload is None:
+            try:
+                category_payload = _build_category_firsts()
+                _set_cached_ctfd_category_firsts(cache_key, category_payload)
+            except Exception as exc:
+                category_payload = {
+                    'user': [],
+                    'team': [],
+                    'errors': [f'category_firsts: {exc}'],
+                    'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+                }
     response_payload = {
         'users': out,
         'using_token': bool(client.token),
@@ -8493,7 +9546,7 @@ def _is_valid_url(url: str) -> bool:
 def _is_valid_adaptor_name(name: str) -> bool:
     # Letters only, 1-8 chars
     try:
-        return bool(re.fullmatch(r"[A-Za-z0-9]{1,16}", str(name or "")))
+        return bool(re.fullmatch(r"[A-Za-z]{1,8}", str(name or "")))
     except Exception:
         return False
 
@@ -8770,7 +9823,8 @@ def get_project_secrets(pid: str):
     username = _acting_username()
     _migrate_project_level_secrets_if_any(pid, username)
     ss = _user_secrets_store()
-    enc = ss.get_enc(username, pid) or {}
+    secrets_username = _effective_secrets_username(ss, username, pid)
+    enc = ss.get_enc(secrets_username, pid) or {}
     sk = current_app.config.get('SECRET_KEY')
     prox_user = _dec_secret(sk, enc.get('proxmox_username_enc') or '')
     prox_pass = _dec_secret(sk, enc.get('proxmox_password_enc') or '')
@@ -8822,7 +9876,8 @@ def update_project_secrets(pid: str):
 
     sk = current_app.config.get('SECRET_KEY')
     ss = _user_secrets_store()
-    existing = ss.get_enc(username, pid) or {}
+    secrets_username = _effective_secrets_username(ss, username, pid)
+    existing = ss.get_enc(secrets_username, pid) or {}
     changed = False
 
     if prox_user_in is not None or prox_pass_in is not None:
@@ -8831,10 +9886,10 @@ def update_project_secrets(pid: str):
         new_user = cur_user if prox_user_in is None else str(prox_user_in or '').strip()
         new_pass = cur_pass if prox_pass_in is None else str(prox_pass_in or '')
         if not new_user and not new_pass:
-            ss.upsert_enc(username, pid, proxmox_username_enc='', proxmox_password_enc='')
+            ss.upsert_enc(secrets_username, pid, proxmox_username_enc='', proxmox_password_enc='')
         else:
             ss.upsert_enc(
-                username,
+                secrets_username,
                 pid,
                 proxmox_username_enc=_enc_secret(sk, new_user),
                 proxmox_password_enc=_enc_secret(sk, new_pass),
@@ -8843,7 +9898,7 @@ def update_project_secrets(pid: str):
 
     if ctfd_token_in is not None:
         token = str(ctfd_token_in or '').strip()
-        ss.upsert_enc(username, pid, ctfd_token_enc=_enc_secret(sk, token) if token else '')
+        ss.upsert_enc(secrets_username, pid, ctfd_token_enc=_enc_secret(sk, token) if token else '')
         changed = True
 
     # Keep project record in sync: ensure project-level fields are cleared so secrets aren't shared.
@@ -8856,7 +9911,7 @@ def update_project_secrets(pid: str):
     except Exception:
         pass
 
-    enc = ss.get_enc(username, pid) or {}
+    enc = ss.get_enc(secrets_username, pid) or {}
     prox_user = _dec_secret(sk, enc.get('proxmox_username_enc') or '')
     prox_pass = _dec_secret(sk, enc.get('proxmox_password_enc') or '')
     ctfd_token = _dec_secret(sk, enc.get('ctfd_token_enc') or '')
@@ -8881,7 +9936,7 @@ def create_project():
     "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
         "guacamole_url", "guacamole_port",
         "keycloak_url", "keycloak_port", "keycloak_nodename",
-        "challenge_url", "challenge_port",
+        "challenge_url", "challenge_port", "challenge_verify_ssl",
         "instances", "tag", "vnc_start_port", "credentials",
         # Advanced Proxmox
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
@@ -8937,7 +9992,7 @@ def update_project(pid: str):
     "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
         "guacamole_url", "guacamole_port",
         "keycloak_url", "keycloak_port", "keycloak_nodename",
-        "challenge_url", "challenge_port",
+        "challenge_url", "challenge_port", "challenge_verify_ssl",
         "instances", "tag", "vnc_start_port", "credentials", "vms",
         # Advanced Proxmox
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
@@ -9636,7 +10691,7 @@ def import_project():
                     "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
                     "guacamole_url", "guacamole_port",
                     "keycloak_url", "keycloak_port", "keycloak_nodename",
-                    "challenge_url", "challenge_port",
+                    "challenge_url", "challenge_port", "challenge_verify_ssl",
                     "instances", "tag", "vnc_start_port", "credentials",
                     "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
                     "proxmox_qmrestore_path", "proxmox_storage_volume",
@@ -9952,7 +11007,7 @@ def import_project_start():
                                 "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
                                 "guacamole_url", "guacamole_url",
                                 "keycloak_url", "keycloak_port", "keycloak_nodename",
-                                "challenge_url", "challenge_port",
+                                "challenge_url", "challenge_port", "challenge_verify_ssl",
                                 "instances", "tag", "vnc_start_port", "credentials",
                                 "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
                                 "proxmox_qmrestore_path", "proxmox_storage_volume",
@@ -10062,7 +11117,7 @@ def import_project_start():
                             "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
                             "guacamole_url", "guacamole_port",
                             "keycloak_url", "keycloak_port", "keycloak_nodename",
-                            "challenge_url", "challenge_port",
+                            "challenge_url", "challenge_port", "challenge_verify_ssl",
                             "instances", "tag", "vnc_start_port", "credentials",
                             "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
                             "proxmox_qmrestore_path", "proxmox_storage_volume",
@@ -11519,7 +12574,7 @@ def update_vm(pid: str, name: str):
             bad = [a for a in adaptors if not _is_valid_adaptor_name(a)]
             if bad:
                 return jsonify({
-                    "error": "Invalid adaptor names: letters and numbers only, max 16 characters",
+                    "error": "Invalid adaptor names: letters only, max 8 characters",
                     "invalid": bad,
                 }), 400
     try:

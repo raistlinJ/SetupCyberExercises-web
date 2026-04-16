@@ -71,7 +71,7 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertEqual(len(updated), 1)
 
             # Missing bridge should be created, and networking reloaded once per node after the batch.
-            prox.create_bridge.assert_called_with(node='node1', iface='dmz1', autostart=True, ports=None, comments='Auto-created (nets_set batch)')
+            prox.create_bridge.assert_called_with(node='node1', iface='dmz1', autostart=True, ports=None, comments='SCE-BRIDGE pid=proj-nets idx=1 adaptor=dmz source=nets_set')
             prox.reload_network.assert_called_once_with('node1')
 
             # net0 already matches (model + bridge); net1 corrected and net2 deleted.

@@ -15,8 +15,9 @@ let CTFD_LAST_VISIBLE_INDICES = []; // visible indices in current filter (for se
 // Multi mode: composite selection pid:index
 let CTFD_SELECTED_KEYS = new Set(); // strings "pid:index"
 let CTFD_LAST_VISIBLE_KEYS = []; // visible keys for select-all in merged view
+const CTFD_LIVE_REFRESHED_PIDS = new Set();
 // Existence cache: username -> boolean (exists on CTFd)
-// Map username -> metadata: { exists, user_rank, team_name, team_rank }
+// Map username or pid::username -> metadata: { exists, user_rank, team_name, team_rank }
 let CTFD_USER_META = {};
 // Sort mode toggles for headers
 let CTFD_USER_SORT_MODE = 'name'; // 'name' | 'rank'
@@ -588,7 +589,7 @@ function ctfdNotifyTemplateVarsForEvent(eventKey) {
     Object.keys(CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS).forEach(push);
   } catch { }
 
-  const re = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
+  const re = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
   sources.forEach(text => {
     const raw = String(text || '');
     let m;
@@ -613,7 +614,7 @@ const CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS = {
   project_clause: 'Convenience text like “ in <project>”.',
   leader: 'Main competitor name for the event (user or team).',
   user_first: 'User name (when available).',
-  team_first: 'Team name (when available).',
+  first_team: 'Leaderboard #1 team name (when available).',
   team_clause: 'Convenience text like “ from team <team>”.',
 
   second_team: 'Leaderboard #2 team name (when available).',
@@ -645,7 +646,7 @@ const CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS = {
 
 // Template Variable Autocomplete
 // ================================
-// Shows a dropdown with template variable suggestions when the user types {{
+// Shows a dropdown with template variable suggestions when the user types /* {{
 
 let CTFD_AUTOCOMPLETE_ACTIVE_INPUT = null;
 let CTFD_AUTOCOMPLETE_DROPDOWN = null;
@@ -828,11 +829,11 @@ function ctfdHandleAutocompleteInput(e) {
   const cursorPos = input.selectionStart || value.length;
   const beforeCursor = value.substring(0, cursorPos);
 
-  // Check if we're inside an unclosed {{ pattern
+  // Check if we're inside an unclosed /* {{ pattern
   const lastOpenBrace = beforeCursor.lastIndexOf('{{');
-  const lastCloseBrace = beforeCursor.lastIndexOf('}}');
+  const lastCloseBrace = beforeCursor.lastIndexOf('}} */');
 
-  // There's an open {{ after the last closing }}
+  // There's an open /* {{ after the last closing }} */
   if (lastOpenBrace > lastCloseBrace) {
     const partial = beforeCursor.substring(lastOpenBrace + 2);
     // Only show if no special characters except underscore (valid variable chars)
@@ -969,14 +970,20 @@ function ctfdNotifySampleNewTemplateFor(eventKey) {
   const key = String(eventKey || '').trim();
   // Samples should only use placeholders that exist in the Template Variables modal.
   if (key === 'ctfdFirstUser') return '{{audio}} New #1 user: {{user_first}} ({{points}} points).';
-  if (key === 'ctfdFirstTeam') return '{{audio}} New #1 team: {{team_first}} ({{points}} points).';
+  if (key === 'ctfdFirstTeam') return '{{audio}} New #1 team: {{leader}} ({{points}} points).';
   if (key === 'ctfdFirstScore') return '{{audio}} First solve recorded: {{leader}} ({{points}} points).';
   if (key === 'ctfdFirstCategoryUser') return '{{audio}} First solve in {{category}} by {{user_first}}.';
-  if (key === 'ctfdFirstCategoryTeam') return '{{audio}} First solve in {{category}} by {{team_first}}.';
+  if (key === 'ctfdFirstCategoryTeam') return '{{audio}} First solve in {{category}} by {{leader}}.';
   if (key === 'ctfdCountdown') return '{{audio}} Countdown started{{project_clause}}.';
   if (key === 'ctfdCountdownStop') return '{{audio}} Countdown cancelled{{project_clause}}.';
   if (key === 'ctfdPeriodic') return '{{audio}} Periodic update{{project_clause}}. Next check in {{interval_minutes}} minutes.';
   return '{{audio}} Event update.';
+}
+
+function ctfdNormalizeNotifyTemplateText(value) {
+  return String(value || '')
+    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\s*\*\/\s*\}/g, '{{$1}}')
+    .trim();
 }
 
 function ctfdNotifyNormalizeTemplateItemsForUi(source) {
@@ -986,24 +993,24 @@ function ctfdNotifyNormalizeTemplateItemsForUi(source) {
     entry.speakTemplates.forEach(t => {
       if (t === null || t === undefined) return;
       if (typeof t === 'string') {
-        const str = String(t).trim();
+        const str = ctfdNormalizeNotifyTemplateText(t);
         if (str) out.push({ text: str, soundKey: '' });
         return;
       }
       if (t && typeof t === 'object') {
         const raw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : (t.template !== undefined ? t.template : '')));
-        const str = String(raw || '').trim();
+        const str = ctfdNormalizeNotifyTemplateText(raw);
         if (!str) return;
         const soundKey = typeof t.soundKey === 'string' ? String(t.soundKey || '').trim() : '';
         out.push({ text: str, soundKey });
         return;
       }
-      const str = String(t).trim();
+      const str = ctfdNormalizeNotifyTemplateText(t);
       if (str) out.push({ text: str, soundKey: '' });
     });
   }
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
-    const legacyTpl = String(entry.speakTemplate).trim();
+    const legacyTpl = ctfdNormalizeNotifyTemplateText(entry.speakTemplate);
     if (legacyTpl) out.push({ text: legacyTpl, soundKey: '' });
   }
   return out;
@@ -1020,7 +1027,7 @@ function ctfdNotifyTemplateItemHtml(tplItem, rowSoundKey, audioStore, clipOption
   const obj = (tplItem && typeof tplItem === 'object') ? tplItem : { text: tplItem };
   const text = obj.text !== undefined ? String(obj.text || '') : '';
   const itemSoundKey = typeof obj.soundKey === 'string' ? String(obj.soundKey || '').trim() : '';
-  const hasAudioToken = /{{\s*audio\s*}}/i.test(text);
+  const hasAudioToken = /\{\{\s*audio\s*\}\}/i.test(text);
   const effectiveSoundKey = itemSoundKey;
   const tokenTitle = hasAudioToken ? ctfdNotifyAudioTokenTitle(audioStore, effectiveSoundKey) : '';
   const options = (typeof clipOptionsHtml === 'string' && clipOptionsHtml) ? clipOptionsHtml : '<option value="">Default</option>';
@@ -1256,7 +1263,7 @@ async function ctfdSaveNotifyConfig() {
         tplSoundKey = sel ? String(sel.value || '').trim() : '';
       }
 
-      const hasAudioToken = /{{\s*audio\s*}}/i.test(text);
+      const hasAudioToken = /\{\{\s*audio\s*\}\}/i.test(text);
       if (hasAudioToken && tplSoundKey) templates.push({ text, enabled: true, soundKey: tplSoundKey });
       else templates.push(text);
     });
@@ -1745,13 +1752,13 @@ function ctfdGetAudioEntry(key) {
     entry.speakTemplates.forEach(t => {
       if (t === null || t === undefined) return;
       if (typeof t === 'string') {
-        const str = String(t).trim();
+        const str = ctfdNormalizeNotifyTemplateText(t);
         if (str) templates.push({ text: str, enabled: true });
         return;
       }
       if (t && typeof t === 'object') {
         const textRaw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : ''));
-        const str = String(textRaw || '').trim();
+        const str = ctfdNormalizeNotifyTemplateText(textRaw);
         if (!str) return;
         const enabled = t.enabled === undefined ? true : !!t.enabled;
         const soundKey = typeof t.soundKey === 'string' ? String(t.soundKey || '').trim() : '';
@@ -1760,7 +1767,7 @@ function ctfdGetAudioEntry(key) {
     });
   }
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
-    const legacyTpl = String(entry.speakTemplate).trim();
+    const legacyTpl = ctfdNormalizeNotifyTemplateText(entry.speakTemplate);
     if (legacyTpl) templates.push({ text: legacyTpl, enabled: true });
   }
   if (!templates.length && defaultTemplate) templates.push({ text: defaultTemplate, enabled: true });
@@ -1961,7 +1968,7 @@ function ctfdCompileSpeechTemplate(template, context) {
     fallbackTargets: []
   };
   if (!raw) return result;
-  const regex = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
+  const regex = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
   let cursor = 0;
   const pushText = (value) => {
     if (!value) return;
@@ -2453,7 +2460,7 @@ async function ctfdSpeakForEvent(key, payload, delaySeconds, opts) {
   const templateSoundKey = selection && typeof selection.soundKey === 'string' ? selection.soundKey.trim() : '';
 
   // Mirror Preview behavior:
-  // - When no clip is selected (no soundKey) OR audio is disabled, treat {{audio}} as a no-op.
+  // - When no clip is selected (no soundKey) OR audio is disabled, treat /* {{audio}} */ as a no-op.
   // - If the template ends up audio-only, speak the fallback label instead of staying silent.
   let hasSelectedClip = false;
   try {
@@ -2475,7 +2482,7 @@ async function ctfdSpeakForEvent(key, payload, delaySeconds, opts) {
 
   const forceSpeak = !!ctfdShouldSpeak(key);
 
-  // If this template has a per-template audio selection, use it for {{audio}} segments.
+  // If this template has a per-template audio selection, use it for /* {{audio}} */ segments.
   const baseOpts = (opts && typeof opts === 'object') ? opts : {};
   const baseOnAudio = typeof baseOpts.onAudioRequest === 'function' ? baseOpts.onAudioRequest : null;
   const onAudioRequest = templateSoundKey
@@ -2551,7 +2558,7 @@ function ctfdSpeechContextProject(projectId) {
   return {
     project,
     project_clause: project ? ` in ${project}` : '',
-    team_first: trimmed[0] || '',
+    first_team: trimmed[0] || '',
     second_team: trimmed[1] || '',
     third_team: trimmed[2] || ''
   };
@@ -2587,11 +2594,13 @@ function ctfdSpeechContextSamplePreview(projectId) {
         ctx.user_first = summary.firstUser;
         ctx.leader = summary.firstUser;
         const teamRaw = summary.firstTeam ? String(summary.firstTeam).trim() : '';
+        const teamName = ctfdSpeechTrimTeamName(teamRaw);
         if (teamRaw && teamRaw !== summary.firstUser) {
-          ctx.team_clause = ` from team ${ctfdSpeechTrimTeamName(teamRaw)}`;
+          ctx.team_clause = ` from team ${teamName}`;
         }
       } else if (summary.firstTeam) {
-        ctx.leader = ctfdSpeechTrimTeamName(summary.firstTeam);
+        const teamName = ctfdSpeechTrimTeamName(summary.firstTeam);
+        ctx.leader = teamName;
       }
       const pts = Number(summary.firstPoints);
       if (Number.isFinite(pts) && pts > 0) {
@@ -2649,11 +2658,9 @@ function ctfdSpeechContextCategoryFirst(projectId, kind, info) {
     const leader = info && info.user ? String(info.user).trim() : '';
     base.leader = leader;
     base.user_first = leader;
-    base.team_first = teamName;
     base.team_clause = teamNameRaw ? ` from team ${teamName}` : '';
   } else {
     base.leader = teamName;
-    base.team_first = teamName;
     base.team_clause = '';
   }
   return base;
@@ -2700,7 +2707,7 @@ function ctfdAnnounceFirstCategorySolve(projectId, kind, info) {
     const teamClause = context.team_clause || '';
     fallback = `${actor} is first to solve a ${categoryLabel} challenge${projectClause}${challengeSegment}${teamClause}.`;
   } else {
-    const team = context.team_first || 'A team';
+    const team = context.leader || 'A team';
     fallback = `${team} is first to solve a ${categoryLabel} challenge${projectClause}${challengeSegment}.`;
   }
   const audioKey = kind === 'user' ? 'ctfdFirstCategoryUser' : 'ctfdFirstCategoryTeam';
@@ -2714,7 +2721,7 @@ function ctfdAnnounceFirstCategorySolve(projectId, kind, info) {
       const actor = context.leader || 'A competitor';
       shell.logSuccess(`[CTFd] ${actor} solved the first ${categoryLabel} challenge${suffix}.`);
     } else {
-      const team = context.team_first || 'A team';
+      const team = context.leader || 'A team';
       shell.logSuccess(`[CTFd] ${team} solved the first ${categoryLabel} challenge${suffix}.`);
     }
   } catch { }
@@ -2750,7 +2757,7 @@ function ctfdSpeechContextFirstPlace(projectId, kind, name) {
   const nameRaw = typeof name === 'string' ? name.trim() : '';
   if (kind === 'team') {
     const teamName = ctfdSpeechTrimTeamName(nameRaw);
-    ctx.team_first = teamName;
+    ctx.first_team = teamName;
     ctx.user_first = '';
     ctx.team_clause = '';
     ctx.leader = teamName;
@@ -2760,7 +2767,6 @@ function ctfdSpeechContextFirstPlace(projectId, kind, name) {
     const info = nameRaw && meta ? meta[nameRaw] : null;
     const teamRaw = info && info.team_name ? String(info.team_name).trim() : '';
     const teamName = ctfdSpeechTrimTeamName(teamRaw);
-    ctx.team_first = teamName;
     ctx.team_clause = teamRaw && teamRaw !== nameRaw ? ` from team ${teamName}` : '';
   }
 
@@ -3196,6 +3202,53 @@ function ctfdHideProgress() {
   } catch { }
 }
 
+function ctfdGetActionProgressState() {
+  try {
+    if (typeof getActionProgressState === 'function') return getActionProgressState();
+  } catch { }
+  try {
+    if (window && typeof window.getActionProgressState === 'function') return window.getActionProgressState();
+  } catch { }
+  return null;
+}
+
+function ctfdSyncProgress(text, percent = 100, active = true, opts) {
+  const options = opts || {};
+  const label = text || (CTFD_AUTO_REFRESH_ACTIVE ? 'Auto-refresh in progress…' : 'Working…');
+  const detail = options.detail || label;
+  const barText = options.barText || label;
+  const title = options.title || 'CTFd Progress';
+  const showDialog = !!options.showDialog;
+  try { ctfdSetProgress(label, percent, active); } catch { }
+  try {
+    const progressState = ctfdGetActionProgressState();
+    const dialogActive = !!progressState?.active;
+    if (!showDialog && !dialogActive) return;
+    if (showDialog && !dialogActive) showActionProgress(title, detail);
+    updateActionProgress(percent, barText, detail);
+  } catch { }
+}
+
+function ctfdHideSyncedProgress(opts) {
+  const options = opts || {};
+  try { ctfdHideProgress(); } catch { }
+  if (!options.hideDialog) return;
+  try {
+    const progressState = ctfdGetActionProgressState();
+    if (!progressState?.active) return;
+    const label = options.barText || 'Done';
+    const detail = options.detail || label;
+    updateActionProgress(100, label, detail);
+    hideActionProgress();
+  } catch { }
+}
+
+function ctfdCountProjectUserTargets(proj, only) {
+  if (Array.isArray(only) && only.length > 0) return only.length;
+  const creds = Array.isArray(proj?.credentials) ? proj.credentials : [];
+  return creds.reduce((count, cred) => count + (String(cred?.username || '').trim() ? 1 : 0), 0);
+}
+
 function sortIconCtfd(key) { if (CTFD_SORT.key !== key) return ''; const cls = CTFD_SORT.dir === 'asc' ? 'bi-caret-up-fill' : 'bi-caret-down-fill'; return ' <i class="bi ' + cls + '"></i>'; }
 function ariaSortCtfd(key) { if (CTFD_SORT.key !== key) return 'none'; return CTFD_SORT.dir === 'asc' ? 'ascending' : 'descending'; }
 
@@ -3363,7 +3416,6 @@ function ctfdSpeechContextFirstScore(projectId, summary) {
   const leader = userName || teamName;
   ctx.leader = leader;
   ctx.user_first = userName;
-  ctx.team_first = teamName;
   if (userName && teamNameRaw && userName !== teamNameRaw) {
     ctx.team_clause = ` from team ${teamName}`;
   } else if (!userName && teamNameRaw) {
@@ -3599,13 +3651,59 @@ function ctfdSeedFirstPlaceHistory(projectId, meta) {
 }
 
 function ctfdApplyUserMeta(projectId, meta) {
-  const data = meta && typeof meta === 'object' ? meta : {};
+  const source = meta && typeof meta === 'object' ? meta : {};
   const pid = String(projectId || '').trim();
+  const data = {};
+  Object.entries(source).forEach(([key, value]) => {
+    const name = String(key || '').trim();
+    if (!name) return;
+    data[name] = value;
+    if (pid && pid !== 'multi' && !name.includes('::')) data[ctfdMetaKey(pid, name)] = value;
+  });
   if (pid && pid !== 'multi') {
-    ctfdDetectFirstPlaceChange(pid, data);
-    ctfdDetectFirstScore(pid, data);
+    const projectData = {};
+    Object.entries(source).forEach(([key, value]) => {
+      const name = String(key || '').trim();
+      if (!name) return;
+      if (!name.includes('::')) {
+        projectData[name] = value;
+        return;
+      }
+      const parts = name.split('::');
+      if (parts.length === 2 && parts[0] === pid && parts[1]) projectData[parts[1]] = value;
+    });
+    ctfdDetectFirstPlaceChange(pid, projectData);
+    ctfdDetectFirstScore(pid, projectData);
   }
   CTFD_USER_META = data;
+}
+
+function ctfdMetaKey(projectId, username) {
+  const pid = String(projectId || '').trim();
+  const uname = String(username || '').trim();
+  if (!uname) return '';
+  return pid ? `${pid}::${uname}` : uname;
+}
+
+function ctfdMetaLookup(projectId, username) {
+  const uname = String(username || '').trim();
+  if (!uname) return null;
+  const composite = ctfdMetaKey(projectId, uname);
+  if (composite && Object.prototype.hasOwnProperty.call(CTFD_USER_META, composite)) return CTFD_USER_META[composite] || null;
+  if (Object.prototype.hasOwnProperty.call(CTFD_USER_META, uname)) return CTFD_USER_META[uname] || null;
+  return null;
+}
+
+function ctfdMetaKnown(projectId, username) {
+  const uname = String(username || '').trim();
+  if (!uname) return false;
+  const composite = ctfdMetaKey(projectId, uname);
+  return !!((composite && Object.prototype.hasOwnProperty.call(CTFD_USER_META, composite)) || Object.prototype.hasOwnProperty.call(CTFD_USER_META, uname));
+}
+
+function ctfdRowMeta(row) {
+  const pid = row?.pid || row?._proj?.id || PROJ?.id || '';
+  return ctfdMetaLookup(pid, row?.uname || '');
 }
 
 function ctfdUnlockAudioContext() {
@@ -3690,7 +3788,7 @@ function renderCtfdTable(proj) {
 
   // Filter across all visible columns by building a searchable record per row
   const filterIndex = rows.map(r => {
-    const meta = (r.uname && CTFD_USER_META[r.uname]) ? CTFD_USER_META[r.uname] : null;
+    const meta = ctfdRowMeta(r);
     return {
       index: r.index,
       user: r.uname,
@@ -3720,7 +3818,7 @@ function renderCtfdTable(proj) {
     // Helper: check if the row is missing data for the active sort key
     const isMissingForKey = (row) => {
       try {
-        const m = (row.uname && CTFD_USER_META[row.uname]) ? CTFD_USER_META[row.uname] : null;
+        const m = ctfdRowMeta(row);
         if (k === 'cred') {
           if (CTFD_USER_SORT_MODE === 'rank') return !isFinite(rankNumber(m && m.user_rank));
           return !(row.uname && row.uname.trim());
@@ -3740,7 +3838,7 @@ function renderCtfdTable(proj) {
     // Always push rows missing the ACTIVE sort field to the end (toggle removed)
     const isMissingActive = (row) => {
       try {
-        const m = (row.uname && CTFD_USER_META[row.uname]) ? CTFD_USER_META[row.uname] : null;
+        const m = ctfdRowMeta(row);
         if (k === 'cred') {
           if (CTFD_USER_SORT_MODE === 'rank') return !isFinite(rankNumber(m && m.user_rank));
           return !(row.uname && row.uname.trim());
@@ -3773,8 +3871,8 @@ function renderCtfdTable(proj) {
     }
     if (k === 'cred') {
       if (CTFD_USER_SORT_MODE === 'rank') {
-        const ma = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
-        const mb = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
+        const ma = ctfdRowMeta(a);
+        const mb = ctfdRowMeta(b);
         va = rankNumber(ma && ma.user_rank);
         vb = rankNumber(mb && mb.user_rank);
         if (va === vb) { va = (a.uname || '').toLowerCase(); vb = (b.uname || '').toLowerCase(); }
@@ -3783,8 +3881,8 @@ function renderCtfdTable(proj) {
       }
     }
     else if (k === 'team') {
-      const ma = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
-      const mb = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
+      const ma = ctfdRowMeta(a);
+      const mb = ctfdRowMeta(b);
       if (CTFD_TEAM_SORT_MODE === 'rank') {
         va = rankNumber(ma && ma.team_rank);
         vb = rankNumber(mb && mb.team_rank);
@@ -3798,26 +3896,26 @@ function renderCtfdTable(proj) {
       }
     }
     else if (k === 'user_points') {
-      const ma = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
-      const mb = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
+      const ma = ctfdRowMeta(a);
+      const mb = ctfdRowMeta(b);
       va = Number(ma && ma.user_points);
       vb = Number(mb && mb.user_points);
     }
     else if (k === 'team_points') {
-      const ma = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
-      const mb = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
+      const ma = ctfdRowMeta(a);
+      const mb = ctfdRowMeta(b);
       va = Number(ma && ma.team_points);
       vb = Number(mb && mb.team_points);
     }
     else if (k === 'user_last') {
-      const ma = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
-      const mb = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
+      const ma = ctfdRowMeta(a);
+      const mb = ctfdRowMeta(b);
       va = ageSeconds(ma && ma.user_last_solve_time);
       vb = ageSeconds(mb && mb.user_last_solve_time);
     }
     else if (k === 'team_last') {
-      const ma = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
-      const mb = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
+      const ma = ctfdRowMeta(a);
+      const mb = ctfdRowMeta(b);
       va = ageSeconds(ma && ma.team_last_solve_time);
       vb = ageSeconds(mb && mb.team_last_solve_time);
     }
@@ -3864,7 +3962,7 @@ function renderCtfdTable(proj) {
     for (const r of filtered) {
       const idx = r.index;
       const masked = r.pword ? '•'.repeat(Math.min(String(r.pword).length, 12)) : 'n/a';
-      const meta = (r.uname && CTFD_USER_META[r.uname]) ? CTFD_USER_META[r.uname] : null;
+      const meta = ctfdRowMeta(r);
       const urank = (meta && meta.user_rank != null && meta.user_rank !== '') ? ` <span class="text-muted">(#${escHtml(String(meta.user_rank))})</span>` : '';
       const baseUrl = (PROJ?.challenge_url || '').replace(/\/$/, '');
       const uAttrs = '';
@@ -3877,7 +3975,7 @@ function renderCtfdTable(proj) {
       // Existence icon next to credentials
       let existIcon = '';
       if (r.uname) {
-        const val = Object.prototype.hasOwnProperty.call(CTFD_USER_META, r.uname) ? !!CTFD_USER_META[r.uname]?.exists : null;
+        const val = ctfdMetaKnown(PROJ?.id, r.uname) ? !!meta?.exists : null;
         if (val === true) existIcon = ' <i class="bi bi-person-check-fill text-success ms-2" title="CTFd user exists"></i>';
         else if (val === false) existIcon = ' <i class="bi bi-person-x-fill text-secondary ms-2" title="CTFd user not found"></i>';
         else existIcon = ' <i class="bi bi-person text-muted ms-2" title="CTFd user status unknown"></i>';
@@ -4009,9 +4107,9 @@ function ctfdRenderTableMerged() {
       rows.push({ pid: String(proj.id), _proj: proj, index: i, uname, pword, key: `${proj.id}:${i}` });
     }
   });
-  // Build filter index with meta from CTFD_USER_META per username (global map is OK across projects)
+  // Build filter index with per-project metadata keys to avoid cross-project username collisions.
   const filterIndex = rows.map(r => {
-    const meta = (r.uname && CTFD_USER_META[r.uname]) ? CTFD_USER_META[r.uname] : null;
+    const meta = ctfdRowMeta(r);
     return {
       key: r.key,
       pid: r.pid,
@@ -4032,8 +4130,8 @@ function ctfdRenderTableMerged() {
     const dir = CTFD_SORT.dir === 'desc' ? -1 : 1;
     const k = CTFD_SORT.key;
     const numPresent = (v) => { if (v === null || v === undefined) return false; const s = String(v); if (s.trim() === '') return false; const n = Number(s); return Number.isFinite(n); };
-    const metaA = (a.uname && CTFD_USER_META[a.uname]) ? CTFD_USER_META[a.uname] : null;
-    const metaB = (b.uname && CTFD_USER_META[b.uname]) ? CTFD_USER_META[b.uname] : null;
+    const metaA = ctfdRowMeta(a);
+    const metaB = ctfdRowMeta(b);
     // Always place rows missing the active sort field at the end
     const missing = (row, meta) => {
       if (k === 'cred') { if (CTFD_USER_SORT_MODE === 'rank') return !isFinite(rankNumber(meta && meta.user_rank)); return !(row.uname && row.uname.trim()); }
@@ -4092,7 +4190,7 @@ function ctfdRenderTableMerged() {
     html += `<tr><td colspan="${colCount}" class="text-center text-muted">No rows</td></tr>`;
   } else {
     for (const r of filtered) {
-      const meta = (r.uname && CTFD_USER_META[r.uname]) ? CTFD_USER_META[r.uname] : null;
+      const meta = ctfdRowMeta(r);
       const masked = r.pword ? '•'.repeat(Math.min(String(r.pword).length, 12)) : 'n/a';
       const urank = (meta && meta.user_rank != null && meta.user_rank !== '') ? ` <span class="text-muted">(#${escHtml(String(meta.user_rank))})</span>` : '';
       const baseUrl = (r._proj?.challenge_url || '').replace(/\/$/, '');
@@ -4104,7 +4202,7 @@ function ctfdRenderTableMerged() {
         : 'n/a';
       let existIcon = '';
       if (r.uname) {
-        const val = Object.prototype.hasOwnProperty.call(CTFD_USER_META, r.uname) ? !!CTFD_USER_META[r.uname]?.exists : null;
+        const val = ctfdMetaKnown(r.pid, r.uname) ? !!meta?.exists : null;
         if (val === true) existIcon = ' <i class="bi bi-person-check-fill text-success ms-2" title="CTFd user exists"></i>';
         else if (val === false) existIcon = ' <i class="bi bi-person-x-fill text-secondary ms-2" title="CTFd user not found"></i>';
         else existIcon = ' <i class="bi bi-person text-muted ms-2" title="CTFd user status unknown"></i>';
@@ -4185,6 +4283,63 @@ function ctfdRenderTableMerged() {
 }
 
 // Lightweight: load project configuration only (no CTFd calls, no progress modal)
+function ctfdProjectVerifySSL(project) {
+  return project && project.challenge_verify_ssl === false ? false : true;
+}
+
+function ctfdCurrentVerifySSL(project) {
+  const verifyEl = document.getElementById('ctfd-verify-ssl');
+  const target = project || PROJ || null;
+  const targetId = target && target.id ? String(target.id) : '';
+  try {
+    if (verifyEl && targetId && String(verifyEl.dataset.projectId || '') === targetId) {
+      return !!verifyEl.checked;
+    }
+  } catch { }
+  return ctfdProjectVerifySSL(target);
+}
+
+function ctfdApplyVerifySSL(projectId, verifySSL) {
+  const pid = String(projectId || '').trim();
+  const value = !!verifySSL;
+  try {
+    if (PROJ && String(PROJ.id) === pid) PROJ.challenge_verify_ssl = value;
+  } catch { }
+  try {
+    const proj = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === pid);
+    if (proj) proj.challenge_verify_ssl = value;
+  } catch { }
+  try {
+    const verifyEl = document.getElementById('ctfd-verify-ssl');
+    if (verifyEl && PROJ && String(PROJ.id) === pid) {
+      verifyEl.checked = value;
+      verifyEl.dataset.projectId = pid;
+    }
+  } catch { }
+}
+
+async function ctfdPersistVerifySSL(projectId, verifySSL) {
+  const pid = String(projectId || '').trim();
+  if (!pid) return;
+  const value = !!verifySSL;
+  ctfdApplyVerifySSL(pid, value);
+  try {
+    await http('PATCH', `/api/projects/${pid}`, { challenge_verify_ssl: value });
+  } catch (e) {
+    try { shell.logWarn(`CTFd SSL verify setting save failed: ${e?.message || e}`); } catch { }
+  }
+}
+
+function wireCtfdVerifySsl() {
+  const verifyEl = document.getElementById('ctfd-verify-ssl');
+  if (!verifyEl || verifyEl._toolhubBound) return;
+  verifyEl.addEventListener('change', () => {
+    if (!PROJ || !PROJ.id) return;
+    void ctfdPersistVerifySSL(PROJ.id, !!verifyEl.checked);
+  });
+  verifyEl._toolhubBound = true;
+}
+
 async function ctfdLoadProjectConfig(pid) {
   try {
     const id = String(pid || '').trim(); if (!id) return;
@@ -4203,6 +4358,7 @@ async function ctfdLoadProjectConfig(pid) {
     }
     if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
     PROJ = proj;
+    ctfdApplyVerifySSL(PROJ.id, ctfdProjectVerifySSL(PROJ));
     try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
@@ -4263,17 +4419,24 @@ function ctfdSort(key) {
   renderCtfdTable(PROJ);
 }
 
-async function ctfdLoadProjectById(pid) {
+async function ctfdLoadProjectById(pid, opts) {
   // Prevent any implicit auto-refresh on initial page load
   if (!CTFD_ALLOW_LOAD) { try { shell.logDebug('CTFd: load blocked until user action'); } catch { } return; }
+  const options = opts || {};
   const id = String(pid || '').trim();
   if (!id) return;
   const loadToken = ++CTFD_LOAD_REQUEST_COUNTER;
   CTFD_LOAD_ACTIVE_TOKEN = loadToken;
+  const showProgressDialog = !!options.showProgressDialog;
+  const setProgress = (text, percent, active = true, detail) => ctfdSyncProgress(text, percent, active, {
+    showDialog: showProgressDialog,
+    title: 'CTFd Refresh',
+    detail: detail || text,
+  });
   // If multiple projects are selected, run the multi refresh path
   try {
     if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
-      return await ctfdRefreshMulti({ loadToken, basePid: id });
+      return await ctfdRefreshMulti({ loadToken, basePid: id, showProgressDialog });
     }
   } catch { }
   const info = document.getElementById('ctfd-info');
@@ -4293,14 +4456,13 @@ async function ctfdLoadProjectById(pid) {
       abortLogged = true;
     }
     if (selectionMoved && !newerLoad) {
-      try { ctfdHideProgress(); } catch { }
+      try { ctfdHideSyncedProgress({ hideDialog: showProgressDialog }); } catch { }
       updateCtfdControlsEnabled();
     }
     aborted = true;
     return true;
   };
-  // Use inline progress bar instead of modal
-  try { ctfdSetProgress(`Step 1/${totalSteps}: Loading project…`, 10, true); } catch { }
+  setProgress(`Step 1/${totalSteps}: Loading project…`, 10, true, `Loading CTFd configuration for ${id}…`);
   if (abortIfStale()) return;
   try {
     const data = await http('GET', '/api/projects');
@@ -4340,7 +4502,7 @@ async function ctfdLoadProjectById(pid) {
       const reg = document.getElementById('ctfd-filter-regex'); if (reg) reg.checked = CTFD_FILTER_IS_REGEX;
     } catch { }
     if (abortIfStale()) return;
-    ctfdSetProgress(`Step 2/${totalSteps}: Rendering table…`, 50, true);
+    setProgress(`Step 2/${totalSteps}: Rendering table…`, 50, true, `Rendering the CTFd table for ${PROJ?.name || id}…`);
     // Load column visibility and reflect Columns dropdown
     try {
       CTFD_COLS = readCtfdCols(PROJ.id);
@@ -4349,7 +4511,7 @@ async function ctfdLoadProjectById(pid) {
     } catch { }
     renderCtfdTable(PROJ);
     try { ctfdCacheSnapshot('single'); } catch { }
-    ctfdSetProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true);
+    setProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true, `Initializing table controls for ${PROJ?.name || id}…`);
     if (abortIfStale()) return;
     try {
       if (window.bootstrap) {
@@ -4367,29 +4529,28 @@ async function ctfdLoadProjectById(pid) {
     const hasValidatedAuth = !!(sess?.validated && (sess.token || (sess.username && sess.password)));
     if (!hasValidatedAuth) {
       try { shell?.logInfo?.(`CTFd: skipping state refresh for ${PROJ.name || PROJ.id}; credentials not validated.`); } catch { }
-      try { ctfdSetProgress('CTFd credentials not validated. Showing configuration only.', 95, false); } catch { }
-      try { ctfdHideProgress(); } catch { }
+      setProgress('CTFd credentials not validated. Showing configuration only.', 95, false, `CTFd credentials for ${PROJ?.name || id} are not validated. Showing configuration only.`);
+      try { ctfdHideSyncedProgress({ hideDialog: showProgressDialog }); } catch { }
       updateCtfdControlsEnabled();
       return;
     }
     const baseUrl = (PROJ.challenge_url || '').trim();
     const port = Number(PROJ.challenge_port || 443);
-    const verifyEl = document.getElementById('ctfd-verify-ssl');
-    const verifySSL = verifyEl ? !!verifyEl.checked : true;
+    const verifySSL = ctfdCurrentVerifySSL(PROJ);
     const payloadBase = { baseUrl, port, token: sess.token || '', verifySSL };
-    const metaMap = { ...(CTFD_USER_META || {}) };
+    const metaMap = {};
     // Optimization: perform a single bulk users_check (omit 'only') instead of one request per username.
     // Fallback: if bulk fails, revert to legacy per-username loop to preserve functionality.
     let bulkSucceeded = false;
     if (total === 0) {
-      ctfdSetProgress(`Step 3/${totalSteps}: No users to check`, 85, false);
+      setProgress(`Step 3/${totalSteps}: No users to check`, 85, false, `No configured CTFd users were found for ${PROJ?.name || id}.`);
     } else {
-      ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, 72, true);
+      setProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, 72, true, `Checking CTFd users for ${PROJ?.name || id} with a bulk request…`);
       let animPct = 72;
       animTimer = setInterval(() => {
         try {
           animPct = Math.min(animPct + 2, 88);
-          ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, animPct, true);
+          setProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, animPct, true, `Checking CTFd users for ${PROJ?.name || id} with a bulk request…`);
         } catch { }
       }, 500);
       try {
@@ -4424,7 +4585,7 @@ async function ctfdLoadProjectById(pid) {
           };
         });
         bulkSucceeded = true;
-        ctfdSetProgress(`Step 3/${totalSteps}: Users loaded (${list.length})`, 90, false);
+        setProgress(`Step 3/${totalSteps}: Users loaded (${list.length})`, 90, false, `Loaded ${list.length} CTFd user state entr${list.length === 1 ? 'y' : 'ies'} for ${PROJ?.name || id}.`);
       } catch (bulkErr) {
         try { console.warn('CTFd users bulk check failed; falling back to per-user mode:', bulkErr); } catch { }
         if (animTimer) { try { clearInterval(animTimer); } catch { } animTimer = null; }
@@ -4435,7 +4596,7 @@ async function ctfdLoadProjectById(pid) {
         let done = 0;
         const baseStart = 70, baseEnd = 90;
         const computePercent = () => { if (total <= 0) return baseEnd; const frac = Math.min(1, Math.max(0, done / total)); return Math.floor(baseStart + frac * (baseEnd - baseStart)); };
-        ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (0/${total})…`, computePercent(), true);
+        setProgress(`Step 3/${totalSteps}: Checking CTFd users (0/${total})…`, computePercent(), true, `Checking CTFd users for ${PROJ?.name || id}: 0/${total} complete…`);
         for (const name of usernames) {
           if (abortIfStale()) return;
           try {
@@ -4470,7 +4631,7 @@ async function ctfdLoadProjectById(pid) {
             });
           } catch (e) { /* continue */ }
           done += 1;
-          ctfdSetProgress(`Step 3/${totalSteps}: Checking CTFd users (${done}/${total})…`, computePercent(), true);
+          setProgress(`Step 3/${totalSteps}: Checking CTFd users (${done}/${total})…`, computePercent(), true, `Checking CTFd users for ${PROJ?.name || id}: ${done}/${total} complete…`);
         }
       }
     }
@@ -4480,10 +4641,11 @@ async function ctfdLoadProjectById(pid) {
       ctfdHandleCategoryFirsts(PROJ?.id, categoryPayload);
     }
     if (abortIfStale()) return;
-    ctfdSetProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false);
+    setProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false, `Applying refreshed CTFd user state to ${PROJ?.name || id}…`);
     renderCtfdTable(PROJ);
-    ctfdSetProgress('Done', 100, false);
+    setProgress('Done', 100, false, `Refresh complete for ${PROJ?.name || id}.`);
     if (abortIfStale()) return;
+    ctfdMarkLiveRefreshed(PROJ?.id || id);
     try { await ctfdLoadSettings(); } catch { }
   } catch (e) {
     if (!aborted) {
@@ -4492,7 +4654,7 @@ async function ctfdLoadProjectById(pid) {
   } finally {
     if (animTimer) { try { clearInterval(animTimer); } catch { } }
     if (!aborted && loadToken === CTFD_LOAD_ACTIVE_TOKEN) {
-      try { ctfdHideProgress(); } catch { }
+      try { ctfdHideSyncedProgress({ hideDialog: showProgressDialog }); } catch { }
       try { ctfdReschedulePeriodicForProject(PROJ?.id); } catch { }
     }
     updateCtfdControlsEnabled();
@@ -4524,13 +4686,21 @@ async function ctfdRefreshMulti(opts) {
   const loadToken = options.loadToken || ++CTFD_LOAD_REQUEST_COUNTER;
   if (!options.loadToken) CTFD_LOAD_ACTIVE_TOKEN = loadToken;
   const basePid = String(options.basePid || ctfdCurrentPid() || '').trim();
+  const showProgressDialog = !!options.showProgressDialog;
+  const total = pids.length;
+  const setProgress = (text, percent, active = true, detail) => ctfdSyncProgress(text, percent, active, {
+    showDialog: showProgressDialog,
+    title: 'CTFd Refresh',
+    detail: detail || text,
+  });
+  const refreshedPids = [];
   let aborted = false;
   const abortIfStale = () => {
     const newerLoad = loadToken !== CTFD_LOAD_ACTIVE_TOKEN;
     const selectionMoved = basePid ? ctfdSelectionChanged(basePid) : false;
     if (!newerLoad && !selectionMoved) return false;
     if (selectionMoved && !newerLoad) {
-      try { ctfdHideProgress(); } catch { }
+      try { ctfdHideSyncedProgress({ hideDialog: showProgressDialog }); } catch { }
       updateCtfdControlsEnabled();
     }
     aborted = true;
@@ -4538,7 +4708,7 @@ async function ctfdRefreshMulti(opts) {
   };
   ctfdClearPeriodicTimer();
   if (abortIfStale()) return;
-  try { ctfdSetProgress('Preparing multi-project refresh…', 10, true); } catch { }
+  setProgress(`Projects 0/${total}`, 10, true, `Preparing a CTFd refresh for ${total} selected project${total === 1 ? '' : 's'}…`);
   if (abortIfStale()) return;
   // Preflight credentials
   const pf = await ctfdPreflightPids(pids);
@@ -4560,27 +4730,35 @@ async function ctfdRefreshMulti(opts) {
         } catch { openCtfdLoginModal(); }
       }
     } catch { }
-    try { ctfdHideProgress(); } catch { }
+    try { ctfdHideSyncedProgress({ hideDialog: showProgressDialog }); } catch { }
     return;
   }
   if (abortIfStale()) return;
   // Clear any previous indicator
   try { ctfdRenderSkippedIndicator([], ''); } catch { }
-  const metaMap = { ...(CTFD_USER_META || {}) };
+  const metaMap = {};
   const failures = [];
-  let done = 0; const total = pids.length;
+  let done = 0;
   for (const pid of pids) {
     if (abortIfStale()) return;
     try {
       const proj = (CTFD_ALL_PROJECTS || []).find(p => String(p.id) === String(pid)); if (!proj) { failures.push(pid); continue; }
       const sess = readCtfdCreds(String(pid)) || {};
       const baseUrl = (proj.challenge_url || '').trim(); const port = Number(proj.challenge_port || 443);
-      ctfdSetProgress(`Checking CTFd users for ${proj.name}…`, Math.min(90, 20 + Math.floor((done / Math.max(1, total)) * 70)), true);
+      const verifySSL = ctfdProjectVerifySSL(proj);
+      const currentIndex = done + 1;
+      setProgress(
+        `Projects ${currentIndex}/${total}: ${proj.name || pid}`,
+        Math.min(90, 20 + Math.floor((done / Math.max(1, total)) * 70)),
+        true,
+        `Checking CTFd users for ${proj.name || pid} (${currentIndex}/${total})…`
+      );
       let resp;
       await runQueued(`CTFd multi-check users for ${proj.name || pid}`, async () => {
-        resp = await http('POST', `/api/projects/${pid}/ctfd/users_check`, { baseUrl, port, token: sess.token || '', verifySSL: true });
+        resp = await http('POST', `/api/projects/${pid}/ctfd/users_check`, { baseUrl, port, token: sess.token || '', verifySSL });
       }, { projectId: pid });
       if (abortIfStale()) return;
+      refreshedPids.push(String(pid));
       const list = Array.isArray(resp?.users) ? resp.users : [];
       if (resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
         ctfdHandleCategoryFirsts(pid, resp.category_firsts || {});
@@ -4606,7 +4784,7 @@ async function ctfdRefreshMulti(opts) {
           team_last_solve_challenge: (u?.team_last_solve_challenge ?? null),
         };
         projectMeta[uname] = entry;
-        metaMap[uname] = entry;
+        metaMap[ctfdMetaKey(pid, uname)] = entry;
       });
       ctfdDetectFirstPlaceChange(String(pid), projectMeta);
       ctfdDetectFirstScore(String(pid), projectMeta);
@@ -4616,11 +4794,12 @@ async function ctfdRefreshMulti(opts) {
   if (abortIfStale()) return;
   ctfdApplyUserMeta('multi', metaMap);
   if (abortIfStale()) return;
-  ctfdSetProgress('Applying updates…', 95, false);
+  setProgress(`Projects ${done}/${total}`, 95, false, `Applying refreshed CTFd data across ${done} project${done === 1 ? '' : 's'}…`);
   ctfdRenderTableMerged();
   try { ctfdCacheSnapshot('multi'); } catch { }
-  ctfdSetProgress('Done', 100, false);
+  setProgress(`Projects ${done}/${total}`, 100, false, `Refresh complete for ${refreshedPids.length}/${total} selected project${total === 1 ? '' : 's'}.`);
   if (abortIfStale()) return;
+  ctfdUniquePids(refreshedPids).forEach(pid => ctfdMarkLiveRefreshed(pid));
   // Minimal indicator via console for now; can add UI alert similar to Challenges page in a follow-up
   try {
     if (failures.length) {
@@ -4631,7 +4810,7 @@ async function ctfdRefreshMulti(opts) {
     }
   } catch { }
   if (!aborted && loadToken === CTFD_LOAD_ACTIVE_TOKEN) {
-    try { ctfdHideProgress(); } catch { }
+    try { ctfdHideSyncedProgress({ hideDialog: showProgressDialog }); } catch { }
   }
   // Refresh settings toggles for the currently focused project (if any & validated)
   if (!aborted) {
@@ -4726,7 +4905,7 @@ async function ctfdRefresh() {
       return;
     }
     await hydrateCtfdCredsFromPersisted(target);
-    await ctfdLoadProjectById(target);
+    await ctfdLoadProjectById(target, { showProgressDialog: true });
   } catch (e) { console.error('CTFd refresh failed', e); }
 }
 // Ensure the Refresh button is a user action that enables loading
@@ -4806,6 +4985,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
   wireCtfdFilter();
   wireCtfdLogin();
+  wireCtfdVerifySsl();
   wireCtfdCols();
   try { ctfdWireNotifyConfig(); } catch { }
   try { ctfdWireNotifyTemplateVarsModal(); } catch { }
@@ -4992,8 +5172,7 @@ async function ctfdLoadSettings() {
   if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) return;
   const baseUrl = (PROJ.challenge_url || '').trim();
   const port = Number(PROJ.challenge_port || 443);
-  const verifyEl = document.getElementById('ctfd-verify-ssl');
-  const verifySSL = verifyEl ? !!verifyEl.checked : true;
+  const verifySSL = ctfdCurrentVerifySSL(PROJ);
   const payload = { baseUrl, port, token: sess.token || '', verifySSL };
   try {
     let res;
@@ -5022,12 +5201,13 @@ async function ctfdLoadSettings() {
 
 async function ctfdUpdateSettings(updates) {
   if (!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id) || {};
+  const liveStateDecision = await ctfdEnsureLiveStateBeforeAction([PROJ.id]);
+  if (liveStateDecision !== 'continue') return;
+  const sess = await hydrateCtfdCredsFromPersisted(PROJ.id);
   if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) return;
   const baseUrl = (PROJ.challenge_url || '').trim();
   const port = Number(PROJ.challenge_port || 443);
-  const verifyEl = document.getElementById('ctfd-verify-ssl');
-  const verifySSL = verifyEl ? !!verifyEl.checked : true;
+  const verifySSL = ctfdCurrentVerifySSL(PROJ);
   const payload = { baseUrl, port, token: sess.token || '', verifySSL, ...updates };
   const statusEl = document.getElementById('ctfd-settings-status');
   const tgls = [document.getElementById('ctfd-toggle-chals'), document.getElementById('ctfd-toggle-scoreboard'), document.getElementById('ctfd-toggle-paused')];
@@ -5159,7 +5339,28 @@ function confirmCtfdDownload() {
 
 // --- CTFd session creds management ---
 function ctfdCredKey(pid) { return `toolhub.session.ctfd.${pid}`; }
-function readCtfdCreds(pid) { try { return JSON.parse(sessionStorage.getItem(ctfdCredKey(pid)) || '{}'); } catch { return {}; } }
+function readCtfdCreds(pid) {
+  try {
+    const key = ctfdCredKey(pid);
+    let fromCookie = null;
+    try {
+      const match = document.cookie.match(new RegExp('(?:^|; )' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+      if (match) fromCookie = JSON.parse(decodeURIComponent(match[1] || ''));
+    } catch { fromCookie = null; }
+    let fromSession = {};
+    try { fromSession = JSON.parse(sessionStorage.getItem(key) || '{}'); } catch { fromSession = {}; }
+    const merged = {
+      username: String(fromSession?.username || fromCookie?.username || '').trim(),
+      password: String(fromSession?.password || fromCookie?.password || ''),
+      token: String(fromCookie?.token || fromSession?.token || '').trim(),
+      validated: !!((fromCookie && fromCookie.validated !== undefined) ? fromCookie.validated : fromSession?.validated),
+    };
+    if (merged.token || merged.username || merged.password) {
+      try { sessionStorage.setItem(key, JSON.stringify(merged)); } catch { }
+    }
+    return merged;
+  } catch { return {}; }
+}
 function readPersistedCtfdToken(pid) {
   try {
     const credsApi = window.CREDS;
@@ -5211,6 +5412,66 @@ function deleteCtfdCreds(pid) {
     // Expire cookie immediately
     document.cookie = `${name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax${secure}`;
   } catch { }
+  ctfdClearLiveRefresh(pid);
+}
+function ctfdNormalizePid(pid) { return String(pid || '').trim(); }
+function ctfdUniquePids(list) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(list) ? list : [list]).forEach(item => {
+    const pid = ctfdNormalizePid(item);
+    if (!pid || seen.has(pid)) return;
+    seen.add(pid);
+    out.push(pid);
+  });
+  return out;
+}
+function ctfdMarkLiveRefreshed(pid) {
+  const key = ctfdNormalizePid(pid);
+  if (key) CTFD_LIVE_REFRESHED_PIDS.add(key);
+}
+function ctfdClearLiveRefresh(pid) {
+  const key = ctfdNormalizePid(pid);
+  if (key) CTFD_LIVE_REFRESHED_PIDS.delete(key);
+}
+function ctfdHasLiveRefresh(pid) {
+  return CTFD_LIVE_REFRESHED_PIDS.has(ctfdNormalizePid(pid));
+}
+async function ctfdEnsureLiveStateBeforeAction(targetPids) {
+  const pids = ctfdUniquePids(targetPids);
+  if (!pids.length) return 'continue';
+  try { await Promise.all(pids.map(pid => hydrateCtfdCredsFromPersisted(pid))); } catch { }
+  const stalePids = pids.filter(pid => !ctfdHasLiveRefresh(pid));
+  if (!stalePids.length) return 'continue';
+  const scope = stalePids.length === 1 ? 'this project' : `${stalePids.length} selected projects`;
+  const message = `Saved credentials are available, but the CTFd state for ${scope} may be stale because no refresh has occurred since this page was opened.\n\nChoose Refresh to load the latest CTFd state before running the action, or Continue to run the action with the current view.`;
+  let selection = 'cancel';
+  try {
+    if (typeof window.showConfirmModal === 'function') {
+      selection = await window.showConfirmModal('Refresh CTFd State?', message, {
+        confirmText: 'Refresh',
+        confirmClass: 'btn-primary',
+        noText: 'Continue',
+        noClass: 'btn-outline-secondary',
+        cancelText: 'Cancel'
+      });
+    } else {
+      selection = window.confirm(message) ? 'yes' : 'no';
+    }
+  } catch {
+    selection = window.confirm(message) ? 'yes' : 'no';
+  }
+  if (selection === 'cancel') return 'cancel';
+  if (selection !== 'yes') return 'continue';
+  CTFD_ALLOW_LOAD = true;
+  try {
+    if ((Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) || stalePids.length > 1) {
+      await ctfdRefreshMulti({ suppressLoginModal: true, showProgressDialog: true });
+    } else {
+      await ctfdLoadProjectById(stalePids[0] || pids[0] || ctfdCurrentPid(), { showProgressDialog: true });
+    }
+  } catch { }
+  return 'refresh';
 }
 function normalizeUrl(s) { if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
 function updateCtfdControlsEnabled() {
@@ -5306,21 +5567,32 @@ async function ctfdStats(kind) {
   }
   const baseUrl = (PROJ.challenge_url || '').trim();
   const port = Number(PROJ.challenge_port || 443);
-  const verifyEl = document.getElementById('ctfd-verify-ssl');
-  const verifySSL = verifyEl ? !!verifyEl.checked : true;
+  const verifySSL = ctfdCurrentVerifySSL(PROJ);
+  const projectLabel = PROJ?.name || PROJ?.id || 'project';
   try {
     shell.beginActionContext('CTFd Stats');
-    showActionProgress('CTFd Stats', 'Fetching…');
-    updateActionProgress(25, 'Submitting…');
+    showActionProgress('CTFd Stats', `Preparing a stats request for ${projectLabel}…`);
+    updateActionProgress(20, 'Request 0/1', `Preparing a stats request for ${projectLabel}…`);
     if (kind === 'challenges') {
       let res;
       await runQueued(`CTFd stats challenges`, async () => {
-        res = await http('POST', `/api/ctfd/challenges`, { baseUrl, token: sess.token || '' });
+        res = await http('POST', `/api/projects/${PROJ.id}/ctfd/challenges/list`, {
+          baseUrl,
+          port,
+          token: sess.token || '',
+          verifySSL,
+        });
       }, { projectId: PROJ?.id });
-      updateActionProgress(80, 'Processing…');
+      updateActionProgress(85, 'Request 1/1', `Loaded the challenge list for ${projectLabel}.`);
       const items = Array.isArray(res?.challenges) ? res.challenges : [];
-      const rows = items.map(c => `<tr><td>${escHtml(String(c?.id ?? ''))}</td><td>${escHtml(String(c?.name ?? ''))}</td><td>${escHtml(String(c?.category ?? ''))}</td><td>${escHtml(String(c?.value ?? ''))}</td></tr>`).join('');
-      const table = `<div class="table-responsive"><table class="table table-sm"><thead><tr><th>ID</th><th>Name</th><th>Category</th><th>Value</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="text-muted">No challenges</td></tr>'}</tbody></table></div>`;
+      const rows = items.map(c => {
+        const state = String(c?.state || '').trim();
+        const hidden = c?.hidden === true;
+        const visible = state ? (state.toLowerCase() === 'visible') : (hidden ? false : null);
+        const visibleLabel = visible === true ? 'Visible' : (visible === false ? 'Hidden' : 'Unknown');
+        return `<tr><td>${escHtml(String(c?.id ?? ''))}</td><td>${escHtml(String(c?.name ?? ''))}</td><td>${escHtml(String(c?.category ?? ''))}</td><td>${escHtml(String(c?.value ?? ''))}</td><td>${escHtml(visibleLabel)}</td></tr>`;
+      }).join('');
+      const table = `<div class="table-responsive"><table class="table table-sm"><thead><tr><th>ID</th><th>Name</th><th>Category</th><th>Value</th><th>Visible</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="text-muted">No challenges</td></tr>'}</tbody></table></div>`;
       showActionSummary('CTFd Challenges', `<div class="mb-2">Total: <strong>${items.length}</strong></div>${table}`);
       shell.endActionContext(true);
     } else if (kind === 'user') {
@@ -5328,13 +5600,13 @@ async function ctfdStats(kind) {
       await runQueued(`CTFd stats user for ${PROJ?.name || PROJ?.id || ''}`, async () => {
         res = await http('POST', `/api/projects/${PROJ.id}/ctfd/login`, { baseUrl, port, token: sess.token || '', verifySSL });
       }, { projectId: PROJ?.id });
-      updateActionProgress(80, 'Processing…');
+      updateActionProgress(85, 'Request 1/1', `Loaded the authenticated CTFd user for ${projectLabel}.`);
       const me = res?.me || {};
       const pre = `<pre class="small bg-light p-2 border rounded" style="max-height:300px;overflow:auto;">${escHtml(JSON.stringify(me, null, 2))}</pre>`;
       showActionSummary('CTFd Current User', pre);
       shell.endActionContext(true);
     } else {
-      updateActionProgress(100, 'Unknown stat');
+      updateActionProgress(100, 'Request 1/1', 'The requested CTFd stat is not supported.');
       showActionSummary('CTFd Stats', '<div class="text-muted">Unknown option.</div>');
       shell.endActionContext(false);
     }
@@ -5396,7 +5668,7 @@ async function saveCtfdCredsFromModal() {
     const url = document.getElementById('ctfd-url')?.value.trim();
     const port = Number(document.getElementById('ctfd-port')?.value || 443);
     const token = document.getElementById('ctfd-token')?.value.trim() || '';
-    const verify = !!document.getElementById('ctfd-verify-ssl')?.checked;
+    const verify = ctfdCurrentVerifySSL(PROJ);
     const fb = document.getElementById('ctfd-login-feedback');
     if (PROJ) {
       setCtfdLoginBusy(true);
@@ -5405,7 +5677,9 @@ async function saveCtfdCredsFromModal() {
       const patch = {};
       if (norm && norm !== (PROJ.challenge_url || '')) patch['challenge_url'] = norm;
       if (port && port !== Number(PROJ.challenge_port || 0)) patch['challenge_port'] = port;
+      if (verify !== ctfdProjectVerifySSL(PROJ)) patch['challenge_verify_ssl'] = verify;
       if (Object.keys(patch).length) { await http('PATCH', `/api/projects/${PROJ.id}`, patch); }
+      ctfdApplyVerifySSL(PROJ.id, verify);
       // Save token in session storage (not yet validated)
       writeCtfdCreds(PROJ.id, { username: '', password: '', token, validated: false });
       try {
@@ -5598,8 +5872,9 @@ function openCtfdLoginMultiForPids(pids) {
               // Optimistically write creds then validate
               writeCtfdCreds(String(pid), { username: '', password: '', token: obj.token || '', validated: false });
               let res;
+              const verifySSL = ctfdProjectVerifySSL(proj);
               await runQueued(`CTFd multi-login for project ${pid}`, async () => {
-                res = await http('POST', `/api/projects/${pid}/ctfd/login`, { baseUrl: normUrl, port: Number(obj.port || 443), token: obj.token || '', verifySSL: true });
+                res = await http('POST', `/api/projects/${pid}/ctfd/login`, { baseUrl: normUrl, port: Number(obj.port || 443), token: obj.token || '', verifySSL });
               }, { projectId: pid });
               if (res && res.ok) {
                 writeCtfdCreds(String(pid), { username: '', password: '', token: obj.token || '', validated: true });
@@ -5658,14 +5933,15 @@ async function ctfdAction(kind) {
     }
   } catch { }
   if (!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id) || {};
+  const liveStateDecision = await ctfdEnsureLiveStateBeforeAction([PROJ.id]);
+  if (liveStateDecision !== 'continue') return;
+  const sess = await hydrateCtfdCredsFromPersisted(PROJ.id);
   if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) {
     return alert('Please set a CTFd API token first.');
   }
   const baseUrl = (PROJ.challenge_url || '').trim();
   const port = Number(PROJ.challenge_port || 443);
-  const verifyEl = document.getElementById('ctfd-verify-ssl');
-  const verifySSL = verifyEl ? !!verifyEl.checked : true;
+  const verifySSL = ctfdCurrentVerifySSL(PROJ);
   // If any credentials are selected, build an 'only' list of usernames for those instance indices
   let only = undefined;
   try {
@@ -5678,6 +5954,10 @@ async function ctfdAction(kind) {
     }
   } catch { }
   const payload = { baseUrl, port, token: sess.token, verifySSL, ...(only ? { only } : {}) };
+  const projectLabel = PROJ?.name || PROJ?.id || 'project';
+  const targetCount = ctfdCountProjectUserTargets(PROJ, only);
+  const targetScope = Array.isArray(only) && only.length > 0 ? 'selected' : 'configured';
+  const userCountLabel = `Users 0/${targetCount}`;
   // Disable relevant controls during action
   const usersBtn = document.getElementById('act-ctf-users');
   const refreshBtn = document.getElementById('btn-ctfd-refresh');
@@ -5693,10 +5973,17 @@ async function ctfdAction(kind) {
     else if (kind === 'users_delete') title = 'CTFd Users Delete';
     else if (kind === 'upload') title = 'CTFd Upload';
     else title = 'CTFd Action';
+    const initialDetail = kind === 'users_create'
+      ? `Creating ${targetCount} ${targetScope} user account${targetCount === 1 ? '' : 's'} in ${projectLabel}…`
+      : (kind === 'users_delete'
+        ? `Deleting ${targetCount} ${targetScope} user account${targetCount === 1 ? '' : 's'} from ${projectLabel}…`
+        : (kind === 'upload'
+          ? `Select a CTFd export file to upload to ${projectLabel}.`
+          : `Starting a CTFd action for ${projectLabel}…`));
     shell.beginActionContext(title);
     // Progress modal start
-    showActionProgress(title, kind === 'users_create' ? 'Creating users…' : (kind === 'users_delete' ? 'Deleting users…' : 'Working…'));
-    updateActionProgress(10, 'Submitting…');
+    showActionProgress(title, initialDetail);
+    updateActionProgress(10, (kind === 'users_create' || kind === 'users_delete') ? userCountLabel : 'Request 0/1', initialDetail);
     if (kind === 'users_create') {
       let res;
       await runQueued(`CTFd create users for ${PROJ?.name || PROJ?.id || ''}`, async () => {
@@ -5722,10 +6009,12 @@ async function ctfdAction(kind) {
         });
       } catch { }
       shell.logSuccess(`CTFd users create: created=${res.created} updated=${res.updated}`);
-      updateActionProgress(80, 'Processing results…');
+      updateActionProgress(80, `Users ${targetCount}/${targetCount}`, `Received create results for ${projectLabel}. Refreshing CTFd user state…`);
       try { showActionSummary('CTFd Users Create', buildCtfdResultsSummary('create', res)); } catch { }
       // Refresh existence and table
+      updateActionProgress(90, `Users ${targetCount}/${targetCount}`, `Refreshing CTFd user state for ${projectLabel}…`);
       try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch { }
+      updateActionProgress(95, `Users ${targetCount}/${targetCount}`, `Updated the CTFd view for ${projectLabel}.`);
       shell.endActionContext(true);
     } else if (kind === 'users_delete') {
       let res;
@@ -5751,9 +6040,11 @@ async function ctfdAction(kind) {
         });
       } catch { }
       shell.logSuccess(`CTFd users delete: deleted=${res.deleted}`);
-      updateActionProgress(80, 'Processing results…');
+      updateActionProgress(80, `Users ${targetCount}/${targetCount}`, `Received delete results for ${projectLabel}. Refreshing CTFd user state…`);
       try { showActionSummary('CTFd Users Delete', buildCtfdResultsSummary('delete', res)); } catch { }
+      updateActionProgress(90, `Users ${targetCount}/${targetCount}`, `Refreshing CTFd user state for ${projectLabel}…`);
       try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch { }
+      updateActionProgress(95, `Users ${targetCount}/${targetCount}`, `Updated the CTFd view for ${projectLabel}.`);
       shell.endActionContext(true);
     } else if (kind === 'upload') {
       // Prompt for a previously exported CTFd file (zip)
@@ -5768,8 +6059,7 @@ async function ctfdAction(kind) {
       });
       document.body.removeChild(picker);
       if (!file) { shell.endActionContext(false); return; }
-      showActionProgress('CTFd Upload', 'Uploading export…');
-      updateActionProgress(30, 'Preparing…');
+      updateActionProgress(30, 'File 0/1', `Uploading ${file.name} to ${projectLabel}…`);
       const fd = new FormData();
       fd.append('file', file);
       fd.append('baseUrl', baseUrl);
@@ -5785,7 +6075,7 @@ async function ctfdAction(kind) {
         if (!resp.ok || json?.error) {
           throw new Error(json?.error || `Upload failed (${resp.status})`);
         }
-        updateActionProgress(80, 'Processing results…');
+        updateActionProgress(85, 'File 1/1', `Uploaded ${file.name} to ${projectLabel}.`);
         const body = `<div>Uploaded: <strong>${file.name}</strong></div>`;
         showActionSummary('CTFd Upload', body);
         shell.endActionContext(true);
@@ -5795,7 +6085,7 @@ async function ctfdAction(kind) {
       }
     } else if (kind === 'download') {
       showActionProgress('CTFd', 'Working…');
-      updateActionProgress(100, 'Not implemented');
+      updateActionProgress(100, 'Request 1/1', `Download is not implemented yet for ${projectLabel}.`);
       try { showActionSummary('CTFd', '<div class="text-muted">Download not implemented yet.</div>'); } catch { }
       shell.endActionContext(false);
     }
@@ -5820,6 +6110,8 @@ async function ctfdActionMulti(kind) {
   const pids = Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS.slice() : [];
   if (!pids.length) return;
   await ctfdEnsureProjects();
+  const liveStateDecision = await ctfdEnsureLiveStateBeforeAction(pids);
+  if (liveStateDecision !== 'continue') return;
   const pf = await ctfdPreflightPids(pids);
   // Determine targets (valid projects)
   const invalidSet = new Set([...(pf.invalid || []), ...(pf.missing || [])]);
@@ -5841,14 +6133,12 @@ async function ctfdActionMulti(kind) {
   else if (kind === 'users_delete') title = 'CTFd Users Delete (Multi)';
   else title = 'CTFd Action (Multi)';
   try { shell.beginActionContext(title); } catch { }
-  showActionProgress(title, 'Working across projects…');
+  showActionProgress(title, `Preparing ${targets.length} selected project${targets.length === 1 ? '' : 's'}…`);
   // Disable some buttons while running
   const usersBtn = document.getElementById('act-ctf-users');
   const refreshBtn = document.getElementById('btn-ctfd-refresh');
   const loginBtn = document.getElementById('btn-ctfd-login');
   try { if (usersBtn) usersBtn.disabled = true; if (refreshBtn) refreshBtn.disabled = true; if (loginBtn) loginBtn.disabled = true; } catch { }
-  const verifyEl = document.getElementById('ctfd-verify-ssl');
-  const verifySSL = verifyEl ? !!verifyEl.checked : true;
   const byId = {}; (CTFD_ALL_PROJECTS || []).forEach(p => byId[String(p.id)] = p);
   // Build per-project 'only' maps from composite selection (if any)
   const selMap = new Map();
@@ -5865,56 +6155,74 @@ async function ctfdActionMulti(kind) {
   }
   const summaries = [];
   let i = 0; const total = targets.length;
-  for (const pid of targets) {
-    i += 1;
-    const proj = byId[String(pid)];
-    if (!proj) continue;
-    const sess = readCtfdCreds(String(pid)) || {};
-    const baseUrl = (proj.challenge_url || '').trim();
-    const port = Number(proj.challenge_port || 443);
-    // Compute only list if selection provided
-    let payload = { baseUrl, port, token: sess.token || '', verifySSL };
-    try {
-      const idxSet = selMap.get(String(pid));
-      if (idxSet && idxSet.size > 0) {
-        const creds = Array.isArray(proj.credentials) ? proj.credentials : [];
-        const names = [];
-        idxSet.forEach(iIdx => { const c = creds[iIdx - 1]; if (c && c.username) names.push(String(c.username)); });
-        if (names.length > 0) payload = { ...payload, only: names };
-      }
-    } catch { }
-    updateActionProgress(Math.floor((i - 1) / Math.max(1, total) * 100), `Processing ${proj.name}…`);
-    try {
-      let res;
-      if (kind === 'users_create') {
-        await runQueued(`CTFd multi-create users for ${proj.name || pid}`, async () => {
-          res = await http('POST', `/api/projects/${pid}/ctfd/users_create`, payload);
-        }, { projectId: pid });
-      } else if (kind === 'users_delete') {
-        await runQueued(`CTFd multi-delete users for ${proj.name || pid}`, async () => {
-          res = await http('POST', `/api/projects/${pid}/ctfd/users_delete`, payload);
-        }, { projectId: pid });
-      } else {
-        // Unsupported in multi-mode for now
-        res = { ok: false, error: 'Unsupported action in multi mode' };
-      }
-      const good = !!(res && res.ok !== false);
-      const sum = buildCtfdResultsSummary(kind === 'users_delete' ? 'delete' : (kind === 'users_create' ? 'create' : 'other'), res || {});
-      summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name || String(pid))}</h6>${sum}</div>`);
+  const actionVerb = kind === 'users_delete' ? 'Deleting' : 'Creating';
+  try {
+    updateActionProgress(5, `Projects 0/${total}`, `${actionVerb} users across ${total} selected project${total === 1 ? '' : 's'}…`);
+    for (const pid of targets) {
+      i += 1;
+      const proj = byId[String(pid)];
+      if (!proj) continue;
+      const sess = await hydrateCtfdCredsFromPersisted(String(pid));
+      const baseUrl = (proj.challenge_url || '').trim();
+      const port = Number(proj.challenge_port || 443);
+      const verifySSL = ctfdProjectVerifySSL(proj);
+      // Compute only list if selection provided
+      let payload = { baseUrl, port, token: sess.token || '', verifySSL };
       try {
-        if (!good && res?.error) shell.logError(`CTFd ${kind} (${proj.name}): ${res.error}`);
+        const idxSet = selMap.get(String(pid));
+        if (idxSet && idxSet.size > 0) {
+          const creds = Array.isArray(proj.credentials) ? proj.credentials : [];
+          const names = [];
+          idxSet.forEach(iIdx => { const c = creds[iIdx - 1]; if (c && c.username) names.push(String(c.username)); });
+          if (names.length > 0) payload = { ...payload, only: names };
+        }
       } catch { }
-    } catch (e) {
-      summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name || String(pid))}</h6><div class="text-danger">${escHtml(e?.message || e)}</div></div>`);
+      const targetCount = ctfdCountProjectUserTargets(proj, payload.only);
+      updateActionProgress(
+        Math.floor(10 + ((i - 1) / Math.max(1, total)) * 70),
+        `Projects ${i}/${total}`,
+        `${actionVerb} ${targetCount} user${targetCount === 1 ? '' : 's'} in ${proj.name || pid} (${i}/${total})…`
+      );
+      try {
+        let res;
+        if (kind === 'users_create') {
+          await runQueued(`CTFd multi-create users for ${proj.name || pid}`, async () => {
+            res = await http('POST', `/api/projects/${pid}/ctfd/users_create`, payload);
+          }, { projectId: pid });
+        } else if (kind === 'users_delete') {
+          await runQueued(`CTFd multi-delete users for ${proj.name || pid}`, async () => {
+            res = await http('POST', `/api/projects/${pid}/ctfd/users_delete`, payload);
+          }, { projectId: pid });
+        } else {
+          // Unsupported in multi-mode for now
+          res = { ok: false, error: 'Unsupported action in multi mode' };
+        }
+        const good = !!(res && res.ok !== false);
+        const sum = buildCtfdResultsSummary(kind === 'users_delete' ? 'delete' : (kind === 'users_create' ? 'create' : 'other'), res || {});
+        summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name || String(pid))}</h6>${sum}</div>`);
+        try {
+          if (!good && res?.error) shell.logError(`CTFd ${kind} (${proj.name}): ${res.error}`);
+        } catch { }
+      } catch (e) {
+        summaries.push(`<div class="mb-3"><h6 class="mb-1">${escHtml(proj.name || String(pid))}</h6><div class="text-danger">${escHtml(e?.message || e)}</div></div>`);
+      }
+      updateActionProgress(
+        Math.floor(10 + (i / Math.max(1, total)) * 70),
+        `Projects ${i}/${total}`,
+        `Finished ${actionVerb.toLowerCase()} users for ${proj.name || pid} (${i}/${total}).`
+      );
     }
-    updateActionProgress(Math.floor(i / Math.max(1, total) * 90), `Processed ${i}/${total} projects…`);
+    updateActionProgress(90, `Projects ${total}/${total}`, `Refreshing the CTFd view across ${total} selected project${total === 1 ? '' : 's'}…`);
+    try { CTFD_ALLOW_LOAD = true; await ctfdRefreshMulti(); } catch { }
+    updateActionProgress(100, `Projects ${total}/${total}`, `Completed ${actionVerb.toLowerCase()} users across ${total} selected project${total === 1 ? '' : 's'}.`);
+    try { showActionSummary(title, summaries.join('') || '<div class="text-muted">No details.</div>'); shell.endActionContext(true); } catch { }
+  } catch (e) {
+    try { showActionSummary(title, `<div class="text-danger">${escHtml(e?.message || e)}</div>`); } catch { }
+    try { shell.endActionContext(false); } catch { }
+  } finally {
+    try { hideActionProgress(); } catch { }
+    try { if (usersBtn) usersBtn.disabled = false; if (refreshBtn) refreshBtn.disabled = false; if (loginBtn) loginBtn.disabled = false; } catch { }
   }
-  updateActionProgress(95, 'Refreshing view…');
-  try { CTFD_ALLOW_LOAD = true; await ctfdRefreshMulti(); } catch { }
-  updateActionProgress(100, 'Done');
-  try { showActionSummary(title, summaries.join('') || '<div class="text-muted">No details.</div>'); shell.endActionContext(true); } catch { }
-  // Re-enable controls
-  try { if (usersBtn) usersBtn.disabled = false; if (refreshBtn) refreshBtn.disabled = false; if (loginBtn) loginBtn.disabled = false; } catch { }
 }
 
 function buildCtfdResultsSummary(kind, res) {
@@ -5951,8 +6259,7 @@ async function ctfdCheckExistence() {
   if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) { CTFD_USER_EXISTS = {}; return; }
   const baseUrl = (PROJ.challenge_url || '').trim();
   const port = Number(PROJ.challenge_port || 443);
-  const verifyEl = document.getElementById('ctfd-verify-ssl');
-  const verifySSL = verifyEl ? !!verifyEl.checked : true;
+  const verifySSL = ctfdCurrentVerifySSL(PROJ);
   const payload = { baseUrl, port, token: sess.token, verifySSL };
   const resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, payload);
   // Print detailed CTFd request/response logs to console

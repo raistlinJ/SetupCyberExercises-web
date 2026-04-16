@@ -299,10 +299,52 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/js/ctfd_manager.js"></script>
 <script>
+  let ctfdChallengesPopupRef = null;
+  let ctfdChallengesPopupUrl = '';
+  let ctfdChallengesPopupOpenedAt = 0;
+
+  function openCtfdChallengesPopup(pid) {
+    const url = new URL('/static/ctfd_challenges.html', window.location.origin);
+    url.searchParams.set('id', pid);
+    const nextUrl = url.toString();
+    const popupName = `ctfd_challenges_${pid}`;
+    const features = 'width=1100,height=750';
+    const popupOpen = !!(ctfdChallengesPopupRef && !ctfdChallengesPopupRef.closed);
+
+    if (popupOpen && ctfdChallengesPopupUrl === nextUrl) {
+      try { ctfdChallengesPopupRef.focus(); } catch { }
+      return;
+    }
+
+    if (popupOpen) {
+      try {
+        ctfdChallengesPopupRef.location.replace(nextUrl);
+        ctfdChallengesPopupUrl = nextUrl;
+        ctfdChallengesPopupRef.focus();
+        return;
+      } catch {
+        ctfdChallengesPopupRef = null;
+      }
+    }
+
+    const now = Date.now();
+    if (ctfdChallengesPopupUrl === nextUrl && (now - ctfdChallengesPopupOpenedAt) < 500) {
+      return;
+    }
+
+    ctfdChallengesPopupOpenedAt = now;
+    const popup = window.open(nextUrl, popupName, features);
+    if (popup) {
+      ctfdChallengesPopupRef = popup;
+      ctfdChallengesPopupUrl = nextUrl;
+      try { popup.focus(); } catch { }
+    }
+  }
+
   // Open Challenges popup for the currently selected project
   document.addEventListener('DOMContentLoaded', () => {
     const link = document.getElementById('open-challenges-popup');
-    if (link) {
+    if (link && !link._toolhubBound) {
       link.addEventListener('click', (e) => {
         e.preventDefault();
         try {
@@ -312,14 +354,12 @@
             alert('Please select a project first.');
             return;
           }
-          const url = new URL('/static/ctfd_challenges.html', window.location.origin);
-          url.searchParams.set('id', pid);
-          const features = 'popup=yes,width=1100,height=750,noopener,noreferrer';
-          window.open(url.toString(), 'ctfd_challenges_'+pid, features);
+          openCtfdChallengesPopup(pid);
         } catch (err) {
           console.error('Failed to open Challenges popup', err);
         }
       });
+      link._toolhubBound = true;
     }
   });
 </script>

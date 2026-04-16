@@ -205,29 +205,113 @@
 
   function readCtfdCreds(pid){
     try {
-      // Prefer same-origin cookie (works reliably in popup)
       const key = `toolhub.session.ctfd.${pid}`;
+      // Prefer same-origin cookie so auth stays in sync with the manager page and other popups.
+      let fromCookie = null;
       try {
         const m = document.cookie.match(new RegExp('(?:^|; )'+key.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'=([^;]*)'));
-        if (m) {
-          const fromCookie = JSON.parse(decodeURIComponent(m[1]||''));
-          if (fromCookie && (fromCookie.token || fromCookie.username)) return fromCookie;
-        }
-      } catch {}
+        if (m) fromCookie = JSON.parse(decodeURIComponent(m[1]||''));
+      } catch { fromCookie = null; }
       // Next, local sessionStorage
       let obj = {};
       try { obj = JSON.parse(sessionStorage.getItem(key)||'{}'); } catch { obj = {}; }
-      if (obj && (obj.token || obj.username)) return obj;
       // Fallback to opener's sessionStorage when opened as popup
+      let fromOpener = null;
       if (window.opener && window.opener.sessionStorage) {
         try {
           const raw = window.opener.sessionStorage.getItem(key) || '{}';
-          const fromOpener = JSON.parse(raw);
-          if (fromOpener && (fromOpener.token || fromOpener.username)) return fromOpener;
-        } catch {}
+          fromOpener = JSON.parse(raw);
+        } catch { fromOpener = null; }
       }
-      return obj || {};
+      const merged = {
+        username: String(obj?.username || fromCookie?.username || fromOpener?.username || '').trim(),
+        password: String(obj?.password || fromCookie?.password || fromOpener?.password || ''),
+        token: String(fromCookie?.token || obj?.token || fromOpener?.token || '').trim(),
+        validated: !!((fromCookie && fromCookie.validated !== undefined) ? fromCookie.validated : (obj?.validated !== undefined ? obj.validated : fromOpener?.validated)),
+      };
+      if (merged.token || merged.username || merged.password) {
+        try { sessionStorage.setItem(key, JSON.stringify(merged)); } catch {}
+      }
+      return merged;
     } catch { return {}; }
+  }
+
+  function writeCtfdCreds(pid, obj){
+    try {
+      const key = `toolhub.session.ctfd.${pid}`;
+      const payload = {
+        username: String(obj?.username || '').trim(),
+        password: String(obj?.password || ''),
+        token: String(obj?.token || '').trim(),
+        validated: !!obj?.validated,
+      };
+      try { sessionStorage.setItem(key, JSON.stringify(payload)); } catch {}
+      try {
+        const secure = (location.protocol === 'https:') ? '; Secure' : '';
+        document.cookie = `${key}=${encodeURIComponent(JSON.stringify({ token: payload.token, validated: payload.validated }))}; Path=/; SameSite=Lax${secure}`;
+      } catch {}
+      try {
+        if (window.opener && window.opener.sessionStorage) {
+          window.opener.sessionStorage.setItem(key, JSON.stringify(payload));
+        }
+      } catch {}
+    } catch {}
+  }
+
+  function readPersistedCtfdToken(pid){
+    try {
+      return String(window.CREDS?.readPersistCtfdToken?.(String(pid || '')) || '').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  async function hydrateCtfdCredsFromPersisted(pid, options){
+    const opts = options || {};
+    const projectId = String(pid || '').trim();
+    if (!projectId) return readCtfdCreds(projectId);
+    let sess = readCtfdCreds(projectId) || {};
+    if (sess?.token) return sess;
+    try {
+      if (!opts.skipFetch) await window.CREDS?.fetchProjectSecrets?.(projectId);
+    } catch {}
+    const token = readPersistedCtfdToken(projectId);
+    if (!token) return sess;
+    sess = { ...sess, token, validated: true };
+    writeCtfdCreds(projectId, sess);
+    return sess;
+  }
+
+  function ctfdProjectVerifySSL(project){
+    return project && project.challenge_verify_ssl === false ? false : true;
+  }
+
+  async function readErrorText(res){
+    if (!res) return 'Request failed';
+    try {
+      const body = await res.json();
+      const msg = body?.error || body?.message;
+      if (msg) return String(msg);
+    } catch {}
+    try {
+      const text = await res.text();
+      if (text) return String(text);
+    } catch {}
+    try { return `Request failed (${res.status})`; } catch {}
+    return 'Request failed';
+  }
+
+  function updateProjectCache(pid, patch){
+    const projectId = String(pid || '');
+    const next = patch && typeof patch === 'object' ? patch : {};
+    if (!projectId || !Object.keys(next).length) return;
+    try {
+      if (projectInfo && String(projectInfo.id) === projectId) Object.assign(projectInfo, next);
+    } catch {}
+    try {
+      const idx = (PROJECTS || []).findIndex(p => String(p?.id) === projectId);
+      if (idx >= 0) Object.assign(PROJECTS[idx], next);
+    } catch {}
   }
 
   async function loadProject(pid){
@@ -245,11 +329,11 @@
   async function getCreds(pidOverride){
     const pid = pidOverride || getFixedPid();
     const proj = await loadProject(pid);
-    const sess = readCtfdCreds(pid) || {};
+    const sess = await hydrateCtfdCredsFromPersisted(pid);
     const url = (proj && proj.challenge_url) ? String(proj.challenge_url).trim() : '';
     const port = (proj && proj.challenge_port) ? Number(proj.challenge_port) : 443;
     const token = sess.token || '';
-    const verify = true; // keep SSL verify on
+    const verify = ctfdProjectVerifySSL(proj);
     return { url, port, token, verify };
   }
 
@@ -306,6 +390,7 @@
       const el = document.getElementById('ctfdLoginModal');
       const list = document.getElementById('ctfdLoginList');
       const saveBtn = document.getElementById('ctfdLoginSave');
+      const feedback = document.getElementById('ctfdLoginFeedback');
       if (!el || !list || !saveBtn || !window.bootstrap) return;
       const byId = {}; (PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
       const entries = (pids||[]).map(pid => ({ pid: String(pid), name: byId[String(pid)]?.name || String(pid) }));
@@ -319,16 +404,33 @@
                 <div class="small text-muted">Project ID: ${escapeHtml(m.pid)}</div>
               </div>
             </div>
-            <div class="input-group input-group-sm">
-              <span class="input-group-text">API Token</span>
-              <div class="input-group">
-                <input type="password" class="form-control ctfd-token-input" data-pid="${m.pid}" placeholder="ctfd_…" value="">
-                <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" title="Show">&#x1F576;&#xFE0E;</button>
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label">CTFd URL</label>
+                <input class="form-control" data-pid="${m.pid}" data-field="url" value="${escapeHtml(byId[String(m.pid)]?.challenge_url || '')}" placeholder="https://ctfd.example.com">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">Port</label>
+                <input type="number" class="form-control" data-pid="${m.pid}" data-field="port" value="${Number(byId[String(m.pid)]?.challenge_port || 443)}" placeholder="443">
+              </div>
+              <div class="col-md-3 d-flex align-items-end">
+                <div class="form-check mb-2">
+                  <input class="form-check-input" type="checkbox" data-pid="${m.pid}" data-field="verify" ${ctfdProjectVerifySSL(byId[String(m.pid)]) ? 'checked' : ''}>
+                  <label class="form-check-label">Verify SSL</label>
+                </div>
+              </div>
+              <div class="col-md-12">
+                <label class="form-label">API Token</label>
+                <div class="input-group">
+                  <input type="password" class="form-control ctfd-token-input" data-pid="${m.pid}" data-field="token" placeholder="ctfd_..." value="${escapeHtml((readCtfdCreds(String(m.pid)) || {}).token || readPersistedCtfdToken(String(m.pid)) || '')}">
+                  <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" title="Show">&#x1F576;&#xFE0E;</button>
+                </div>
               </div>
             </div>
           </div>
         </div>
       `).join('');
+      if (feedback) { feedback.textContent = ''; feedback.className = 'me-auto small'; }
       const m = bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el);
       m.show();
       // After showing, fetch server secrets to prefill empty token inputs
@@ -648,21 +750,26 @@
       const byId = {}; (PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
       const missing = []; // missing token
       const invalid = []; // missing challenge_url/port
+      const needsSetup = new Map();
       for (const pid of pids){
         const creds = await getCreds(pid);
         const proj = byId[String(pid)] || (await loadProject(pid)) || { id: pid };
         const name = proj?.name || String(pid);
-        if (!creds.url) invalid.push(name);
-        if (!creds.token) missing.push({ pid: String(pid), name });
+        if (!creds.url) {
+          invalid.push(name);
+          needsSetup.set(String(pid), { pid: String(pid), name });
+        }
+        if (!creds.token) {
+          missing.push({ pid: String(pid), name });
+          needsSetup.set(String(pid), { pid: String(pid), name });
+        }
       }
       if (missing.length || invalid.length){
         if (invalid.length) {
-          const msg = `Cannot ${actionLabel||'proceed'} — projects without CTFd URL: ${invalid.join(', ')}. Fix in CTFd Manager/settings, then retry.`;
-          showToast(msg, 'danger');
+          const msg = `Cannot ${actionLabel||'proceed'} — projects with incomplete CTFd connection settings: ${invalid.join(', ')}.`;
+          showToast(msg, 'warning');
         }
-        if (missing.length) {
-          try { openCtfdLoginForPids(missing.map(x=>x.pid)); } catch {}
-        }
+        try { openCtfdLoginForPids(Array.from(needsSetup.values()).map(x => x.pid)); } catch {}
         return false;
       }
       return true;
@@ -967,22 +1074,78 @@
       saveBtn._toolhubBound = true;
       saveBtn.addEventListener('click', async () => {
         try {
-          const inputs = Array.from(document.querySelectorAll('#ctfdLoginList .ctfd-token-input[data-pid]'));
+          const feedback = document.getElementById('ctfdLoginFeedback');
+          const inputs = Array.from(document.querySelectorAll('#ctfdLoginList [data-pid][data-field]'));
           const persist = !!document.getElementById('chals-save-creds')?.checked;
-          for (const inp of inputs) {
-            const pid = String(inp.getAttribute('data-pid'));
-            const token = String(inp.value || '').trim();
-            if (!pid) continue;
-            if (!token) continue;
-            const key = `toolhub.session.ctfd.${pid}`;
-            try { sessionStorage.setItem(key, JSON.stringify({ token })); } catch {}
-            try { document.cookie = `${key}=${encodeURIComponent(JSON.stringify({ token }))}; path=/; SameSite=Lax`; } catch {}
+          const entries = new Map();
+          inputs.forEach(inp => {
+            const pid = String(inp.getAttribute('data-pid') || '');
+            const field = String(inp.getAttribute('data-field') || '');
+            if (!pid || !field) return;
+            if (!entries.has(pid)) entries.set(pid, { url: '', port: 443, token: '', verify: true });
+            const obj = entries.get(pid);
+            if (field === 'verify') obj.verify = !!inp.checked;
+            else if (field === 'port') obj.port = Number(inp.value || 443);
+            else obj[field] = String(inp.value || '').trim();
+          });
+          let okCount = 0;
+          let failCount = 0;
+          if (feedback) { feedback.textContent = 'Validating…'; feedback.className = 'me-auto small text-muted'; }
+          for (const [pid, entry] of entries.entries()) {
+            const normUrl = normalizeUrl(entry.url || '');
+            const port = Number(entry.port || 443) || 443;
+            const token = String(entry.token || '').trim();
+            const verify = !!entry.verify;
+            const proj = (PROJECTS || []).find(p => String(p?.id) === String(pid)) || await loadProject(pid);
+            if (!normUrl || !token) { failCount += 1; continue; }
+            const patch = {};
+            if (proj) {
+              if (normUrl !== String(proj.challenge_url || '').trim()) patch.challenge_url = normUrl;
+              if (port !== Number(proj.challenge_port || 443)) patch.challenge_port = port;
+              if (verify !== ctfdProjectVerifySSL(proj)) patch.challenge_verify_ssl = verify;
+            } else {
+              patch.challenge_url = normUrl;
+              patch.challenge_port = port;
+              patch.challenge_verify_ssl = verify;
+            }
             try {
-              if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
-                await CREDS.setPersistCtfdToken(String(pid), token, persist);
+              if (Object.keys(patch).length) {
+                await http('PATCH', `/api/projects/${encodeURIComponent(pid)}`, patch);
+                updateProjectCache(pid, patch);
               }
-            } catch {}
+              writeCtfdCreds(pid, { username: '', password: '', token, validated: false });
+              let res = null;
+              await runQueued(`CTFd login for project ${pid}`, async () => {
+                res = await fetch(`/api/projects/${encodeURIComponent(pid)}/ctfd/login`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ baseUrl: normUrl, port, token, verifySSL: verify }),
+                });
+              }, { projectId: pid });
+              if (!res || !res.ok) throw new Error(await readErrorText(res));
+              const body = await res.json().catch(() => ({}));
+              if (!body || body.ok !== true) throw new Error(String(body?.error || body?.message || 'Login failed'));
+              writeCtfdCreds(pid, { username: '', password: '', token, validated: true });
+              try {
+                if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
+                  await CREDS.setPersistCtfdToken(String(pid), token, persist);
+                }
+              } catch {}
+              okCount += 1;
+            } catch {
+              failCount += 1;
+            }
           }
+          if (feedback) {
+            if (failCount === 0) {
+              feedback.textContent = `Saved ${okCount} connection${okCount === 1 ? '' : 's'}.`;
+              feedback.className = 'me-auto small text-success';
+            } else {
+              feedback.textContent = `Saved ${okCount}, ${failCount} failed. Check URL, token, or SSL settings.`;
+              feedback.className = 'me-auto small text-warning';
+            }
+          }
+          if (failCount > 0) return;
           const modal = (window.bootstrap && (bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el))) || null;
           if (modal) modal.hide();
           setTimeout(() => {

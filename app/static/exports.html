@@ -70,7 +70,7 @@
 
 <!-- Action Progress Modal (used by queue/progress helpers) -->
 <div class="modal fade" id="actionProgressModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog" aria-label="Action progress">
+  <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
         <h5 id="action-progress-title" class="modal-title">Working…</h5>
@@ -122,8 +122,49 @@
   }
   function escHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
   function fmtSize(n){ try{ n=Number(n||0); if(n<1024) return n+' B'; if(n<1024*1024) return (n/1024).toFixed(1)+' KB'; if(n<1024*1024*1024) return (n/1024/1024).toFixed(1)+' MB'; return (n/1024/1024/1024).toFixed(2)+' GB'; }catch{ return String(n);} }
-  async function renderExportsPage(){ await shell.initShell('exports'); const pid=shell.getCurrentProjectId(); const host=document.getElementById('exports-host'); if(!pid){ host.innerHTML='<div class="text-muted">Select a project from the left.</div>'; return;} host.innerHTML='<div class="text-muted">Loading exports…</div>'; try{ const data=await fetchExports(pid); const items=Array.isArray(data?.exports)?data.exports:[]; if(!items.length){ host.innerHTML='<div class="text-muted">No exports yet. Use Configuration → Export to create one.</div>'; return;} host.innerHTML=items.map(e=>`<div class=\"d-flex align-items-center justify-content-between border rounded p-2 mb-2\"><div class=\"small\"><div><strong>${escHtml(e.timestamp||'')}</strong></div><div class=\"text-muted\">${escHtml([e.include_vms?'VMs':'', e.include_creds?'Creds':''].filter(Boolean).join(' + ') || '—')}</div><div><code>${escHtml(e.local_path || e.remote_path || '')}</code> ${e.exists===false?'<span class=\"badge text-bg-warning ms-1\">Missing</span>':''}</div><div class=\"text-muted\">${fmtSize(e.size||0)}</div></div><div class=\"d-flex gap-2\"><a class=\"btn btn-sm btn-outline-primary ${e.local_path?'':'disabled'}\" data-remote-disable=\"export\" data-remote-tooltip=\"Export is disabled when app is running in remote mode.\" ${e.local_path?`href=\"/api/projects/${encodeURIComponent(pid)}/exports/${encodeURIComponent(e.id)}/download\"`:''} ${e.local_path?'':'aria-disabled=\"true\"'}>Download</a><button class=\"btn btn-sm btn-outline-secondary\" data-remote-disable=\"export\" data-remote-tooltip=\"Export is disabled when app is running in remote mode.\" data-act=\"copy\" data-path=\"${escHtml(e.local_path||e.remote_path||'')}\">Copy Path</button><button class=\"btn btn-sm btn-outline-secondary\" data-remote-disable=\"export\" data-remote-tooltip=\"Export is disabled when app is running in remote mode.\" data-act=\"open\" data-id=\"${escHtml(e.id)}\" ${e.local_path?'':'disabled'}>Open Folder</button><button class=\"btn btn-sm btn-outline-danger\" data-remote-disable=\"export\" data-remote-tooltip=\"Export is disabled when app is running in remote mode.\" data-act=\"delete\" data-id=\"${escHtml(e.id)}\">Delete</button></div></div>`).join(''); try { if(window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(host); } catch {} host.querySelectorAll('[data-act="copy"]').forEach(btn=>btn.addEventListener('click', async()=>{ const path=btn.getAttribute('data-path')||''; try{ await navigator.clipboard.writeText(path);}catch{} if(window.shell&&shell.logSuccess) shell.logSuccess('Path copied to clipboard.'); })); host.querySelectorAll('[data-act="open"]').forEach(btn=>btn.addEventListener('click', async()=>{ const id=btn.getAttribute('data-id'); try{ const res=await fetch(`/api/projects/${encodeURIComponent(shell.getCurrentProjectId())}/exports/${encodeURIComponent(id)}/reveal`, {method:'POST'}); if(!res.ok){ const msg=await readErrorText(res); if(res.status===403) warnUser(msg); } }catch{} })); host.querySelectorAll('[data-act="delete"]').forEach(btn=>btn.addEventListener('click', async()=>{ const id=btn.getAttribute('data-id'); if(!confirm('Delete this export?')) return; try{ const res=await fetch(`/api/projects/${encodeURIComponent(shell.getCurrentProjectId())}/exports/${encodeURIComponent(id)}`, {method:'DELETE'}); if(!res.ok){ const msg=await readErrorText(res); if(res.status===403) warnUser(msg); throw new Error(msg); } await renderExportsPage(); } catch(e){ alert('Delete failed: '+(e?.message||e)); } })); }catch(e){ host.innerHTML=`<div class=\"text-danger\">Failed to load: ${e?.message||e}</div>`; } }
-  document.addEventListener('DOMContentLoaded', renderExportsPage);
+  let EXPORTS_RENDER_TOKEN = 0;
+  let EXPORTS_SHELL_READY = false;
+
+  async function ensureExportsShell(){
+    if(EXPORTS_SHELL_READY) return;
+    await shell.initShell('exports');
+    EXPORTS_SHELL_READY = true;
+  }
+
+  async function renderExportsPage(){
+    const pid = shell.getCurrentProjectId();
+    const host = document.getElementById('exports-host');
+    const token = ++EXPORTS_RENDER_TOKEN;
+    if(!host) return;
+    if(!pid){
+      host.innerHTML = '<div class="text-muted">Select a project from the left.</div>';
+      return;
+    }
+    host.innerHTML = '<div class="text-muted">Loading exports…</div>';
+    try{
+      const data = await fetchExports(pid);
+      if(token !== EXPORTS_RENDER_TOKEN || String(shell.getCurrentProjectId() || '') !== String(pid || '')) return;
+      const items = Array.isArray(data?.exports) ? data.exports : [];
+      if(!items.length){
+        host.innerHTML = '<div class="text-muted">No exports yet. Use Configuration → Export to create one.</div>';
+        return;
+      }
+      host.innerHTML = items.map(e=>`<div class="d-flex align-items-center justify-content-between border rounded p-2 mb-2"><div class="small"><div><strong>${escHtml(e.timestamp||'')}</strong></div><div class="text-muted">${escHtml([e.include_vms?'VMs':'', e.include_creds?'Creds':''].filter(Boolean).join(' + ') || '—')}</div><div><code>${escHtml(e.local_path || e.remote_path || '')}</code> ${e.exists===false?'<span class="badge text-bg-warning ms-1">Missing</span>':''}</div><div class="text-muted">${fmtSize(e.size||0)}</div></div><div class="d-flex gap-2"><a class="btn btn-sm btn-outline-primary ${e.local_path?'':'disabled'}" data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode." ${e.local_path?`href="/api/projects/${encodeURIComponent(pid)}/exports/${encodeURIComponent(e.id)}/download"`:''} ${e.local_path?'':'aria-disabled="true"'}>Download</a><button class="btn btn-sm btn-outline-secondary" data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode." data-act="copy" data-path="${escHtml(e.local_path||e.remote_path||'')}">Copy Path</button><button class="btn btn-sm btn-outline-secondary" data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode." data-act="open" data-id="${escHtml(e.id)}" ${e.local_path?'':'disabled'}>Open Folder</button><button class="btn btn-sm btn-outline-danger" data-remote-disable="export" data-remote-tooltip="Export is disabled when app is running in remote mode." data-act="delete" data-id="${escHtml(e.id)}">Delete</button></div></div>`).join('');
+      try { if(window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(host); } catch {}
+      host.querySelectorAll('[data-act="copy"]').forEach(btn=>btn.addEventListener('click', async()=>{ const path=btn.getAttribute('data-path')||''; try{ await navigator.clipboard.writeText(path);}catch{} if(window.shell&&shell.logSuccess) shell.logSuccess('Path copied to clipboard.'); }));
+      host.querySelectorAll('[data-act="open"]').forEach(btn=>btn.addEventListener('click', async()=>{ const id=btn.getAttribute('data-id'); try{ const res=await fetch(`/api/projects/${encodeURIComponent(shell.getCurrentProjectId())}/exports/${encodeURIComponent(id)}/reveal`, {method:'POST'}); if(!res.ok){ const msg=await readErrorText(res); if(res.status===403) warnUser(msg); } }catch{} }));
+      host.querySelectorAll('[data-act="delete"]').forEach(btn=>btn.addEventListener('click', async()=>{ const id=btn.getAttribute('data-id'); if(!confirm('Delete this export?')) return; try{ const res=await fetch(`/api/projects/${encodeURIComponent(shell.getCurrentProjectId())}/exports/${encodeURIComponent(id)}`, {method:'DELETE'}); if(!res.ok){ const msg=await readErrorText(res); if(res.status===403) warnUser(msg); throw new Error(msg); } await renderExportsPage(); } catch(e){ alert('Delete failed: '+(e?.message||e)); } }));
+    }catch(e){
+      if(token !== EXPORTS_RENDER_TOKEN || String(shell.getCurrentProjectId() || '') !== String(pid || '')) return;
+      host.innerHTML = `<div class="text-danger">Failed to load: ${e?.message||e}</div>`;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', async()=>{
+    await ensureExportsShell();
+    document.addEventListener('project-selected', ()=>{ renderExportsPage(); });
+    renderExportsPage();
+  });
   document.addEventListener('DOMContentLoaded', async()=>{ try{ const d=await AUTH.me(); const u=d?.user; const el=document.getElementById('banner-username'); if(el) el.textContent=u?u.username:'anonymous'; const lo=document.getElementById('banner-logout'); if(lo) lo.addEventListener('click', async()=>{ await AUTH.logout(); location.href='/'; }); }catch{} });
   document.addEventListener('auth-changed', e=>{ const u=e.detail?.user; const el=document.getElementById('banner-username'); if(el) el.textContent=u?u.username:'anonymous'; });
 </script>

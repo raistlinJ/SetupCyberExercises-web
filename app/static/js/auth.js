@@ -79,7 +79,17 @@ window.AUTH = (function(){
     const res = await originalFetch.apply(this, args);
     try {
       if (res && (res.status === 401 || res.status === 403)) {
-        if (window.AUTH && typeof AUTH.redirectToLogin === 'function' && typeof AUTH.isLoginPage === 'function' && !AUTH.isLoginPage()) {
+        const authFailure = (() => {
+          try {
+            const marker = res.headers && typeof res.headers.get === 'function'
+              ? res.headers.get('X-DeployForge-Auth-Failure')
+              : '';
+            return String(marker || '').trim() === '1';
+          } catch {
+            return false;
+          }
+        })();
+        if (authFailure && window.AUTH && typeof AUTH.redirectToLogin === 'function' && typeof AUTH.isLoginPage === 'function' && !AUTH.isLoginPage()) {
           AUTH.redirectToLogin();
         }
       }

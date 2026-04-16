@@ -2,8 +2,10 @@ import io
 import json
 import os
 import tempfile
+from unittest.mock import patch
 import unittest
 import zipfile
+from app.routes import api as api_module
 
 from app import create_app
 
@@ -28,6 +30,40 @@ class RuntimeModeApiTests(unittest.TestCase):
             os.environ.pop('AUTH_ENABLE', None)
         except Exception:
             pass
+
+    def test_secure_route_marks_session_auth_failures_with_header(self):
+        os.environ['AUTH_ENABLE'] = '1'
+        app = create_app()
+        app.config['TESTING'] = True
+        app.config['DATA_DIR'] = self.tmp.name
+
+        @app.get('/__secure_test')
+        @api_module._secure_route()
+        def _secure_test():
+            return {'ok': True}
+
+        client = app.test_client()
+        resp = client.get('/__secure_test')
+
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.headers.get('X-DeployForge-Auth-Failure'), '1')
+
+    def test_secure_route_does_not_mark_api_key_failures_as_session_auth(self):
+        app = create_app()
+        app.config['TESTING'] = True
+        app.config['DATA_DIR'] = self.tmp.name
+        app.config['API_KEY'] = 'expected-key'
+
+        @app.get('/__secure_api_key_test')
+        @api_module._secure_route()
+        def _secure_api_key_test():
+            return {'ok': True}
+
+        client = app.test_client()
+        resp = client.get('/__secure_api_key_test')
+
+        self.assertEqual(resp.status_code, 401)
+        self.assertIsNone(resp.headers.get('X-DeployForge-Auth-Failure'))
 
     def _make_zip(self) -> io.BytesIO:
         buf = io.BytesIO()
