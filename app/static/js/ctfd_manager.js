@@ -4499,6 +4499,8 @@ async function ctfdLoadProjectById(pid, opts) {
   const options = opts || {};
   const id = String(pid || '').trim();
   if (!id) return;
+  const tableHost = document.getElementById('ctfd-table');
+  const keepExistingTableVisible = !!(PROJ && String(PROJ.id || '') === id && tableHost && tableHost.querySelector('table'));
   const loadToken = ++CTFD_LOAD_REQUEST_COUNTER;
   CTFD_LOAD_ACTIVE_TOKEN = loadToken;
   const showProgressDialog = !!options.showProgressDialog;
@@ -4583,8 +4585,10 @@ async function ctfdLoadProjectById(pid, opts) {
       const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'];
       ids.forEach(cid => { const el = document.getElementById(`ctfd-col-${cid}`); if (el) el.checked = !!CTFD_COLS[cid]; });
     } catch { }
-    renderCtfdTable(PROJ);
-    try { ctfdCacheSnapshot('single'); } catch { }
+    if (!keepExistingTableVisible) {
+      renderCtfdTable(PROJ);
+      try { ctfdCacheSnapshot('single'); } catch { }
+    }
     setProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true, `Initializing table controls for ${PROJ?.name || id}…`);
     if (abortIfStale()) return;
     try {
@@ -4718,6 +4722,7 @@ async function ctfdLoadProjectById(pid, opts) {
     if (abortIfStale()) return;
     setProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false, `Applying refreshed CTFd user state to ${PROJ?.name || id}…`);
     renderCtfdTable(PROJ);
+    try { ctfdCacheSnapshot('single'); } catch { }
     setProgress('Done', 100, false, `Refresh complete for ${PROJ?.name || id}.`);
     if (abortIfStale()) return;
     ctfdMarkLiveRefreshed(PROJ?.id || id);

@@ -897,6 +897,20 @@ function projectAudioIsLoaded(pid) {
   if (!id) return false;
   return PROJECT_AUDIO_LOADED.has(id);
 }
+function dispatchProjectAudioUpdated(pid, audio) {
+  const id = projectAudioCacheKey(pid);
+  if (!id) return cloneSettingsAudio(audio || {});
+  const detailAudio = cloneSettingsAudio(audio || PROJECT_AUDIO_CACHE[id] || {});
+  try { document.dispatchEvent(new CustomEvent('project-audio-updated', { detail: { pid: id, audio: detailAudio } })); } catch { }
+  return detailAudio;
+}
+async function refreshProjectAudioCache(pid, options) {
+  const id = projectAudioCacheKey(pid);
+  if (!id) return {};
+  const opts = options && typeof options === 'object' ? options : {};
+  const audio = await loadProjectAudio(id, { force: true, silent: opts.silent !== false });
+  return dispatchProjectAudioUpdated(id, audio);
+}
 async function saveProjectAudio(pid, audio) {
   const id = projectAudioCacheKey(pid);
   if (!id) throw new Error('Project id required to save audio');
@@ -906,9 +920,7 @@ async function saveProjectAudio(pid, audio) {
   const sanitized = cloneSettingsAudio(normalized);
   PROJECT_AUDIO_CACHE[id] = sanitized;
   PROJECT_AUDIO_LOADED.add(id);
-  const detailAudio = cloneSettingsAudio(sanitized);
-  try { document.dispatchEvent(new CustomEvent('project-audio-updated', { detail: { pid: id, audio: detailAudio } })); } catch { }
-  return detailAudio;
+  return dispatchProjectAudioUpdated(id, sanitized);
 }
 window.loadProjectAudio = loadProjectAudio;
 window.saveProjectAudio = saveProjectAudio;
@@ -1427,6 +1439,9 @@ async function mediaManagerUploadFilesBatch(files) {
         failed += 1;
       }
     }
+    if (!legacyMode && uploaded > 0) {
+      try { await refreshProjectAudioCache(pid, { silent: true }); } catch { }
+    }
   } finally {
     try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress({ text: 'Done', percent: 100, barText: 'Done' }); } catch { }
     try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
@@ -1562,6 +1577,9 @@ async function mediaManagerUploadFile(file) {
     if (duplicated) {
       try { if (typeof window.showToast === 'function') window.showToast(`Already uploaded: ${file.name || 'Audio'}`, 'info'); } catch { }
     } else {
+      if (!(res && res.legacy)) {
+        try { await refreshProjectAudioCache(pid, { silent: true }); } catch { }
+      }
       try { if (typeof window.showToast === 'function') window.showToast(`Uploaded: ${file.name || 'Audio'}`, 'success'); } catch { }
     }
   } finally {
@@ -1578,8 +1596,10 @@ async function mediaManagerDeleteItem(mediaKey) {
   if (!pid) return;
   const key = String(mediaKey || '');
   if (!audioIsMediaKey(key)) return;
+  let deleted = false;
   try {
     await http('DELETE', `/api/projects/${encodeURIComponent(pid)}/audio_entry?key=${encodeURIComponent(key)}`);
+    deleted = true;
   } catch (err) {
     // Backward compatible fallback: some deployments may not yet have the
     // single-entry delete endpoint. If we got a 404, fall back to the legacy
@@ -1602,13 +1622,9 @@ async function mediaManagerDeleteItem(mediaKey) {
     });
     await saveProjectAudio(pid, audioStore);
   }
-
-  try {
-    const id = projectAudioCacheKey(pid);
-    if (id && PROJECT_AUDIO_CACHE[id] && typeof PROJECT_AUDIO_CACHE[id] === 'object') {
-      delete PROJECT_AUDIO_CACHE[id][key];
-    }
-  } catch { }
+  if (deleted) {
+    try { await refreshProjectAudioCache(pid, { silent: true }); } catch { }
+  }
 }
 
 async function mediaManagerRefreshList(options) {
@@ -2982,30 +2998,27 @@ window.checkWizCsvFile = async function() {
           document.removeEventListener('mousedown', oc);
         }
       });
-    }, 80);
+    }, 0);
   }
 
   function showLinkPopover(linkObj, svgMx, svgMy) {
     dismissPopover();
-    // Disable SVG pointer events so they don't bleed through into the popover
     if (svgEl) svgEl.style.pointerEvents = 'none';
     const svgRect = svgEl.getBoundingClientRect();
     const px = svgRect.left + svgMx;
-    const py = svgRect.top  + svgMy;
+    const py = svgRect.top + svgMy;
     const div = document.createElement('div');
     div.style.cssText = `position:fixed;z-index:9999;background:var(--bs-body-bg,#fff);
       border:1px solid var(--bs-border-color,#dee2e6);border-radius:10px;
       box-shadow:0 6px 20px rgba(0,0,0,0.2);padding:14px 16px;min-width:240px;font-size:1rem;`;
     div.style.left = Math.min(px + 12, window.innerWidth - 230) + 'px';
-    div.style.top  = (py - 10) + 'px';
+    div.style.top = (py - 10) + 'px';
     div.innerHTML = `
       <div class="mb-2 fw-semibold small d-flex align-items-center gap-2">
         <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${linkObj.color};"></span>
         Adapter: <code>${linkObj.adapter}</code>
       </div>
       <button class="btn btn-sm btn-danger w-100" id="wiz-pop-del" type="button"><i class="bi bi-trash me-1"></i>Delete</button>`;
-    document.body.appendChild(div);
-    activePopover = div;
     div.querySelector('#wiz-pop-del').addEventListener('click', () => {
       const deletedName = linkObj.adapter;
       links = links.filter(x => x.id !== linkObj.id);
