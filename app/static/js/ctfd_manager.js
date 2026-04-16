@@ -5699,6 +5699,7 @@ async function openCtfdLoginModal() {
     const url = document.getElementById('ctfd-url');
     const port = document.getElementById('ctfd-port');
     const tokenEl = document.getElementById('ctfd-token');
+    const saveBox = document.getElementById('ctfd-save-creds');
     const fb = document.getElementById('ctfd-login-feedback');
     // Ensure fields reflect current project's Configuration values even if we haven't fully loaded CTFd data yet
     try {
@@ -5711,26 +5712,19 @@ async function openCtfdLoginModal() {
     if (PROJ) { if (url) url.value = PROJ.challenge_url || ''; if (port) port.value = PROJ.challenge_port ?? 443; }
     const sess = PROJ ? readCtfdCreds(PROJ.id) : {};
     if (tokenEl) tokenEl.value = sess.token || '';
-    // Load project-saved token if session empty
+    // Reflect persisted save state even when the session token already prefills the field.
     try {
-      if (PROJ && tokenEl && !tokenEl.value) {
+      if (PROJ) {
         try {
           if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
             await CREDS.fetchProjectSecrets(PROJ.id);
           }
         } catch { }
 
-        let persisted = '';
-        try {
-          if (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') {
-            persisted = CREDS.readPersistCtfdToken(PROJ.id) || '';
-          }
-        } catch { }
-        if (persisted) {
+        const persisted = readPersistedCtfdToken(PROJ.id);
+        if (saveBox) saveBox.checked = !!persisted;
+        if (tokenEl && !tokenEl.value && persisted) {
           tokenEl.value = persisted;
-          const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = true;
-        } else {
-          const chk = document.getElementById('ctfd-save-creds'); if (chk) chk.checked = false;
         }
       }
     } catch { }
