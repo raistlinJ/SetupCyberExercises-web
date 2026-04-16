@@ -612,10 +612,13 @@ const CTFD_NOTIFY_TEMPLATE_VAR_DESCRIPTIONS = {
   audio: 'Insert the selected audio clip here (no-op if no clip is selected).',
   project: 'Project name/label.',
   project_clause: 'Convenience text like “ in <project>”.',
-  leader: 'Main competitor name for the event (user or team).',
-  user_first: 'User name (when available).',
+  user_first: 'Leaderboard #1 user name (when available).',
+  user_second: 'Leaderboard #2 user name (when available).',
+  user_third: 'Leaderboard #3 user name (when available).',
   first_team: 'Leaderboard #1 team name (when available).',
-  team_clause: 'Convenience text like “ from team <team>”.',
+  event_user: 'User name for the current event, when available.',
+  event_team: 'Team name for the current event, when available.',
+  team_clause: 'Convenience text like “ from team <event team>”.',
 
   second_team: 'Leaderboard #2 team name (when available).',
   third_team: 'Leaderboard #3 team name (when available).',
@@ -970,47 +973,59 @@ function ctfdNotifySampleNewTemplateFor(eventKey) {
   const key = String(eventKey || '').trim();
   // Samples should only use placeholders that exist in the Template Variables modal.
   if (key === 'ctfdFirstUser') return '{{audio}} New #1 user: {{user_first}} ({{points}} points).';
-  if (key === 'ctfdFirstTeam') return '{{audio}} New #1 team: {{leader}} ({{points}} points).';
-  if (key === 'ctfdFirstScore') return '{{audio}} First solve recorded: {{leader}} ({{points}} points).';
-  if (key === 'ctfdFirstCategoryUser') return '{{audio}} First solve in {{category}} by {{user_first}}.';
-  if (key === 'ctfdFirstCategoryTeam') return '{{audio}} First solve in {{category}} by {{leader}}.';
+  if (key === 'ctfdFirstTeam') return '{{audio}} New #1 team: {{first_team}} ({{points}} points).';
+  if (key === 'ctfdFirstScore') return '{{audio}} First solve recorded: {{event_user}}{{event_team}}{{team_clause}} ({{points}} points).';
+  if (key === 'ctfdFirstCategoryUser') return '{{audio}} First solve in {{category}} by {{event_user}}.';
+  if (key === 'ctfdFirstCategoryTeam') return '{{audio}} First solve in {{category}} by {{event_team}}.';
   if (key === 'ctfdCountdown') return '{{audio}} Countdown started{{project_clause}}.';
   if (key === 'ctfdCountdownStop') return '{{audio}} Countdown cancelled{{project_clause}}.';
   if (key === 'ctfdPeriodic') return '{{audio}} Periodic update{{project_clause}}. Next check in {{interval_minutes}} minutes.';
   return '{{audio}} Event update.';
 }
 
-function ctfdNormalizeNotifyTemplateText(value) {
-  return String(value || '')
-    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\s*\*\/\s*\}/g, '{{$1}}')
-    .trim();
+function ctfdNormalizeNotifyTemplateText(value, eventKey) {
+  let text = String(value || '')
+    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\s*\*\/\s*\}/g, '{{$1}}');
+  const key = String(eventKey || '').trim();
+  if (key === 'ctfdFirstUser') {
+    text = text.replace(/\{\{\s*leader\s*\}\}/g, '{{user_first}}');
+  } else if (key === 'ctfdFirstTeam') {
+    text = text.replace(/\{\{\s*leader\s*\}\}/g, '{{first_team}}');
+  } else if (key === 'ctfdFirstScore') {
+    text = text.replace(/\{\{\s*leader\s*\}\}/g, '{{event_user}}{{event_team}}');
+  } else if (key === 'ctfdFirstCategoryUser') {
+    text = text.replace(/\{\{\s*leader\s*\}\}/g, '{{event_user}}');
+  } else if (key === 'ctfdFirstCategoryTeam') {
+    text = text.replace(/\{\{\s*leader\s*\}\}/g, '{{event_team}}');
+  }
+  return text.trim();
 }
 
-function ctfdNotifyNormalizeTemplateItemsForUi(source) {
+function ctfdNotifyNormalizeTemplateItemsForUi(source, eventKey) {
   const out = [];
   const entry = source && typeof source === 'object' ? source : {};
   if (Array.isArray(entry.speakTemplates)) {
     entry.speakTemplates.forEach(t => {
       if (t === null || t === undefined) return;
       if (typeof t === 'string') {
-        const str = ctfdNormalizeNotifyTemplateText(t);
+        const str = ctfdNormalizeNotifyTemplateText(t, eventKey);
         if (str) out.push({ text: str, soundKey: '' });
         return;
       }
       if (t && typeof t === 'object') {
         const raw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : (t.template !== undefined ? t.template : '')));
-        const str = ctfdNormalizeNotifyTemplateText(raw);
+        const str = ctfdNormalizeNotifyTemplateText(raw, eventKey);
         if (!str) return;
         const soundKey = typeof t.soundKey === 'string' ? String(t.soundKey || '').trim() : '';
         out.push({ text: str, soundKey });
         return;
       }
-      const str = ctfdNormalizeNotifyTemplateText(t);
+      const str = ctfdNormalizeNotifyTemplateText(t, eventKey);
       if (str) out.push({ text: str, soundKey: '' });
     });
   }
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
-    const legacyTpl = ctfdNormalizeNotifyTemplateText(entry.speakTemplate);
+    const legacyTpl = ctfdNormalizeNotifyTemplateText(entry.speakTemplate, eventKey);
     if (legacyTpl) out.push({ text: legacyTpl, soundKey: '' });
   }
   return out;
@@ -1119,7 +1134,7 @@ async function ctfdRenderNotifyConfig(options) {
       intervalSecondsValue = Number.isFinite(derived) ? String(Math.max(1, Math.round(derived))) : '';
     }
     const defaultTemplate = ctfdNotifyDefaultSpeakTemplateFor(eventKey);
-    const templates = ctfdNotifyNormalizeTemplateItemsForUi(source);
+    const templates = ctfdNotifyNormalizeTemplateItemsForUi(source, eventKey);
     const sampleTpl = ctfdNotifySampleNewTemplateFor(eventKey);
     const label = ctfdNotifyLabelFor(eventKey);
     const when = ctfdNotifyWhenDescriptionFor(eventKey);
@@ -1752,13 +1767,13 @@ function ctfdGetAudioEntry(key) {
     entry.speakTemplates.forEach(t => {
       if (t === null || t === undefined) return;
       if (typeof t === 'string') {
-        const str = ctfdNormalizeNotifyTemplateText(t);
+        const str = ctfdNormalizeNotifyTemplateText(t, key);
         if (str) templates.push({ text: str, enabled: true });
         return;
       }
       if (t && typeof t === 'object') {
         const textRaw = (t.text !== undefined ? t.text : (t.tpl !== undefined ? t.tpl : ''));
-        const str = ctfdNormalizeNotifyTemplateText(textRaw);
+        const str = ctfdNormalizeNotifyTemplateText(textRaw, key);
         if (!str) return;
         const enabled = t.enabled === undefined ? true : !!t.enabled;
         const soundKey = typeof t.soundKey === 'string' ? String(t.soundKey || '').trim() : '';
@@ -1767,7 +1782,7 @@ function ctfdGetAudioEntry(key) {
     });
   }
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
-    const legacyTpl = ctfdNormalizeNotifyTemplateText(entry.speakTemplate);
+    const legacyTpl = ctfdNormalizeNotifyTemplateText(entry.speakTemplate, key);
     if (legacyTpl) templates.push({ text: legacyTpl, enabled: true });
   }
   if (!templates.length && defaultTemplate) templates.push({ text: defaultTemplate, enabled: true });
@@ -1922,6 +1937,55 @@ function ctfdSpeechTrimTeamName(name) {
   const raw = typeof name === 'string' ? name.trim() : String(name || '').trim();
   if (!raw) return '';
   return raw.length > CTFD_SPEECH_TEAM_NAME_MAX ? raw.slice(0, CTFD_SPEECH_TEAM_NAME_MAX) : raw;
+}
+function ctfdMetaDisplayUserName(info, fallback) {
+  try {
+    const preferred = info && (info.username ?? info.user_name ?? info.account_name ?? info.name);
+    const value = preferred != null ? String(preferred).trim() : '';
+    if (value) return value;
+  } catch { }
+  const fallbackValue = String(fallback || '').trim();
+  if (!fallbackValue) return '';
+  const parts = fallbackValue.split('::');
+  return (parts.length === 2 && parts[1]) ? parts[1] : fallbackValue;
+}
+function ctfdProjectMetaEntries(projectId, source) {
+  const pid = String(projectId || '').trim();
+  const meta = source && typeof source === 'object' ? source : {};
+  const out = {};
+  Object.entries(meta).forEach(([rawKey, value]) => {
+    const key = String(rawKey || '').trim();
+    if (!key) return;
+    if (!key.includes('::')) {
+      out[key] = value;
+      return;
+    }
+    if (!pid) return;
+    const parts = key.split('::');
+    if (parts.length === 2 && parts[0] === pid && parts[1]) out[parts[1]] = value;
+  });
+  return out;
+}
+function ctfdUserLeaderboardSnapshot(projectId) {
+  try {
+    const meta = ctfdProjectMetaEntries(projectId, CTFD_USER_META);
+    const bestByUser = new Map();
+    Object.entries(meta).forEach(([fallbackName, info]) => {
+      if (!info || info.exists === false) return;
+      const userName = ctfdMetaDisplayUserName(info, fallbackName);
+      if (!userName) return;
+      const rankVal = info.user_rank !== undefined ? info.user_rank : info.rank;
+      const rank = rankNumber(rankVal);
+      if (!Number.isFinite(rank) || rank <= 0) return;
+      const existing = bestByUser.get(userName);
+      if (!existing || rank < existing.rank) bestByUser.set(userName, { userName, rank });
+    });
+    const ordered = Array.from(bestByUser.values()).sort((a, b) => {
+      if (a.rank !== b.rank) return a.rank - b.rank;
+      return a.userName.localeCompare(b.userName);
+    });
+    return ordered.slice(0, 3).map(entry => entry.userName || '');
+  } catch { return ['', '', '']; }
 }
 function ctfdDataUrlToBuffer(dataUrl) {
   try {
@@ -2553,14 +2617,21 @@ async function ctfdPlayCountdownStopForChallenges() {
 }
 function ctfdSpeechContextProject(projectId) {
   const project = ctfdProjectLabel(projectId);
-  const leaderboard = ctfdLeaderboardSnapshot();
+  const users = ctfdUserLeaderboardSnapshot(projectId);
+  const leaderboard = ctfdLeaderboardSnapshot(projectId);
   const trimmed = leaderboard.map(name => ctfdSpeechTrimTeamName(name));
   return {
     project,
     project_clause: project ? ` in ${project}` : '',
+    user_first: users[0] || '',
+    user_second: users[1] || '',
+    user_third: users[2] || '',
     first_team: trimmed[0] || '',
     second_team: trimmed[1] || '',
-    third_team: trimmed[2] || ''
+    third_team: trimmed[2] || '',
+    event_user: '',
+    event_team: '',
+    team_clause: ''
   };
 }
 // Build a comprehensive context for sample previews using ALL available live data.
@@ -2587,12 +2658,13 @@ function ctfdSpeechContextSamplePreview(projectId) {
 
   // Derive first-place user/team and points from CTFD_USER_META.
   try {
-    const meta = CTFD_USER_META && typeof CTFD_USER_META === 'object' ? CTFD_USER_META : {};
+    const meta = ctfdProjectMetaEntries(projectId, CTFD_USER_META);
     const summary = ctfdSummarizeScore(meta);
     if (summary && summary.hasScore) {
       if (summary.firstUser) {
-        ctx.user_first = summary.firstUser;
-        ctx.leader = summary.firstUser;
+        if (!ctx.user_first) ctx.user_first = summary.firstUser;
+        ctx.event_user = summary.firstUser;
+        ctx.event_team = '';
         const teamRaw = summary.firstTeam ? String(summary.firstTeam).trim() : '';
         const teamName = ctfdSpeechTrimTeamName(teamRaw);
         if (teamRaw && teamRaw !== summary.firstUser) {
@@ -2600,7 +2672,9 @@ function ctfdSpeechContextSamplePreview(projectId) {
         }
       } else if (summary.firstTeam) {
         const teamName = ctfdSpeechTrimTeamName(summary.firstTeam);
-        ctx.leader = teamName;
+        ctx.event_user = '';
+        ctx.event_team = teamName;
+        if (!ctx.first_team) ctx.first_team = teamName;
       }
       const pts = Number(summary.firstPoints);
       if (Number.isFinite(pts) && pts > 0) {
@@ -2655,12 +2729,13 @@ function ctfdSpeechContextCategoryFirst(projectId, kind, info) {
   const teamNameRaw = info && info.team ? String(info.team).trim() : '';
   const teamName = ctfdSpeechTrimTeamName(teamNameRaw);
   if (kind === 'user') {
-    const leader = info && info.user ? String(info.user).trim() : '';
-    base.leader = leader;
-    base.user_first = leader;
+    const userName = info && info.user ? String(info.user).trim() : '';
+    base.event_user = userName;
+    base.event_team = '';
     base.team_clause = teamNameRaw ? ` from team ${teamName}` : '';
   } else {
-    base.leader = teamName;
+    base.event_user = '';
+    base.event_team = teamName;
     base.team_clause = '';
   }
   return base;
@@ -2703,11 +2778,11 @@ function ctfdAnnounceFirstCategorySolve(projectId, kind, info) {
   const projectClause = context.project_clause || '';
   let fallback;
   if (kind === 'user') {
-    const actor = context.leader || 'A competitor';
+    const actor = context.event_user || 'A competitor';
     const teamClause = context.team_clause || '';
     fallback = `${actor} is first to solve a ${categoryLabel} challenge${projectClause}${challengeSegment}${teamClause}.`;
   } else {
-    const team = context.leader || 'A team';
+    const team = context.event_team || 'A team';
     fallback = `${team} is first to solve a ${categoryLabel} challenge${projectClause}${challengeSegment}.`;
   }
   const audioKey = kind === 'user' ? 'ctfdFirstCategoryUser' : 'ctfdFirstCategoryTeam';
@@ -2718,17 +2793,17 @@ function ctfdAnnounceFirstCategorySolve(projectId, kind, info) {
     const label = ctfdProjectLabel(pid);
     const suffix = label ? ` — ${label}` : '';
     if (kind === 'user') {
-      const actor = context.leader || 'A competitor';
+      const actor = context.event_user || 'A competitor';
       shell.logSuccess(`[CTFd] ${actor} solved the first ${categoryLabel} challenge${suffix}.`);
     } else {
-      const team = context.leader || 'A team';
+      const team = context.event_team || 'A team';
       shell.logSuccess(`[CTFd] ${team} solved the first ${categoryLabel} challenge${suffix}.`);
     }
   } catch { }
 }
-function ctfdLeaderboardSnapshot() {
+function ctfdLeaderboardSnapshot(projectId) {
   try {
-    const meta = CTFD_USER_META && typeof CTFD_USER_META === 'object' ? CTFD_USER_META : {};
+    const meta = ctfdProjectMetaEntries(projectId, CTFD_USER_META);
     const bestByTeam = new Map();
     Object.values(meta).forEach(info => {
       if (!info) return;
@@ -2753,19 +2828,19 @@ function ctfdLeaderboardSnapshot() {
 function ctfdSpeechContextFirstPlace(projectId, kind, name) {
   const base = ctfdSpeechContextProject(projectId);
   const ctx = { ...base };
-  const meta = CTFD_USER_META && typeof CTFD_USER_META === 'object' ? CTFD_USER_META : {};
   const nameRaw = typeof name === 'string' ? name.trim() : '';
   if (kind === 'team') {
     const teamName = ctfdSpeechTrimTeamName(nameRaw);
     ctx.first_team = teamName;
-    ctx.user_first = '';
+    ctx.event_user = '';
+    ctx.event_team = teamName;
     ctx.team_clause = '';
-    ctx.leader = teamName;
   } else {
     ctx.user_first = nameRaw;
-    ctx.leader = nameRaw;
-    const info = nameRaw && meta ? meta[nameRaw] : null;
-    const teamRaw = info && info.team_name ? String(info.team_name).trim() : '';
+    ctx.event_user = nameRaw;
+    ctx.event_team = '';
+    const info = nameRaw ? ctfdMetaLookup(projectId, nameRaw) : null;
+    const teamRaw = info && (info.team_name || info.team) ? String(info.team_name || info.team).trim() : '';
     const teamName = ctfdSpeechTrimTeamName(teamRaw);
     ctx.team_clause = teamRaw && teamRaw !== nameRaw ? ` from team ${teamName}` : '';
   }
@@ -2920,7 +2995,7 @@ function ctfdRestoreSnapshot() {
     CTFD_SELECTED_PIDS = derived;
     CTFD_USER_META = data.userMeta || {};
     if (data.mode === 'single' && data.proj && data.proj.id) {
-      ctfdSeedFirstPlaceHistory(data.proj.id, CTFD_USER_META);
+      ctfdSeedFirstPlaceHistory(data.proj.id, ctfdProjectMetaEntries(data.proj.id, CTFD_USER_META));
     }
     if (data.mode === 'multi') {
       PROJ = null;
@@ -3366,6 +3441,7 @@ function ctfdSummarizeScore(meta) {
   try {
     Object.entries(meta || {}).forEach(([username, info]) => {
       if (!info) return;
+      const displayUser = ctfdMetaDisplayUserName(info, username);
       const userPointsRaw = Number(info?.user_points);
       const teamPointsRaw = Number(info?.team_points);
       const hasUserPoints = Number.isFinite(userPointsRaw) && userPointsRaw > 0;
@@ -3376,7 +3452,7 @@ function ctfdSummarizeScore(meta) {
       const teamSolve = info?.team_last_solve_time ? Date.parse(info.team_last_solve_time) : NaN;
       if (hasUserPoints) {
         const candidate = {
-          username,
+          username: displayUser || null,
           team: String(info?.team_name || '').trim() || null,
           points: userPointsRaw,
           challenge: info?.user_last_solve_challenge ? String(info.user_last_solve_challenge) : null,
@@ -3413,13 +3489,10 @@ function ctfdSpeechContextFirstScore(projectId, summary) {
   const teamNameRaw = data.firstTeam ? String(data.firstTeam).trim() : '';
   const teamName = ctfdSpeechTrimTeamName(teamNameRaw);
   const userName = data.firstUser || '';
-  const leader = userName || teamName;
-  ctx.leader = leader;
-  ctx.user_first = userName;
+  ctx.event_user = userName;
+  ctx.event_team = userName ? '' : teamName;
   if (userName && teamNameRaw && userName !== teamNameRaw) {
     ctx.team_clause = ` from team ${teamName}`;
-  } else if (!userName && teamNameRaw) {
-    ctx.team_clause = ` for team ${teamName}`;
   } else {
     ctx.team_clause = '';
   }
@@ -3599,10 +3672,11 @@ function ctfdComputeFirstPlace(meta) {
     Object.entries(meta || {}).forEach(([username, info]) => {
       if (!info) return;
       if (info.exists === false) return;
+      const displayUser = ctfdMetaDisplayUserName(info, username);
       const uRank = rankNumber(info.user_rank);
-      if (Number.isFinite(uRank) && uRank > 0 && uRank < topUserRank) {
+      if (displayUser && Number.isFinite(uRank) && uRank > 0 && uRank < topUserRank) {
         topUserRank = uRank;
-        result.user = username;
+        result.user = displayUser;
         result.userRank = uRank;
       }
       const teamName = String(info.team_name || '').trim();
@@ -4568,6 +4642,7 @@ async function ctfdLoadProjectById(pid, opts) {
           const uname = String(u?.username || '').trim();
           if (!uname) return;
           metaMap[uname] = {
+            username: uname,
             exists: !!u?.exists,
             user_rank: (u?.user_rank ?? null),
             user_points: (u?.user_points ?? null),
@@ -4768,6 +4843,7 @@ async function ctfdRefreshMulti(opts) {
         const uname = String(u?.username || '').trim();
         if (!uname) return;
         const entry = {
+          username: uname,
           exists: !!u?.exists,
           user_rank: (u?.user_rank ?? null),
           user_points: (u?.user_points ?? null),
@@ -6274,6 +6350,7 @@ async function ctfdCheckExistence() {
       const name = String(u?.username || '').trim();
       if (!name) return;
       map[name] = {
+        username: name,
         exists: !!u?.exists,
         user_rank: (u?.user_rank ?? null),
         user_points: (u?.user_points ?? null),

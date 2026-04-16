@@ -494,10 +494,10 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-user-speak-template-add',
     templateListId: 'settings-audio-ctfd-user-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-user-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{first_team}}, {{team_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
+    placeholderHint: '{{audio}}, {{user_first}}, {{user_second}}, {{user_third}}, {{first_team}}, {{event_user}}, {{event_team}}, {{team_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} {{leader}} is now in first place{{project_clause}}.',
+    defaultSpeakTemplate: '{{audio}} {{user_first}} is now in first place{{project_clause}}.',
     legacyDefaultSpeakBefore: '',
     legacyDefaultSpeakAfter: 'User {{user_first}}{{team_clause}} is now in first place{{project_clause}}.'
   },
@@ -514,12 +514,12 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-team-speak-template-add',
     templateListId: 'settings-audio-ctfd-team-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-team-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{first_team}}, {{second_team}}, {{third_team}}, {{project}}, {{project_clause}}',
+    placeholderHint: '{{audio}}, {{first_team}}, {{second_team}}, {{third_team}}, {{user_first}}, {{user_second}}, {{user_third}}, {{event_team}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} {{leader}} is now in first place{{project_clause}}.',
+    defaultSpeakTemplate: '{{audio}} {{first_team}} is now in first place{{project_clause}}.',
     legacyDefaultSpeakBefore: '',
-    legacyDefaultSpeakAfter: '{{leader}} is now in first place{{project_clause}}.'
+    legacyDefaultSpeakAfter: 'Team {{first_team}} is now in first place{{project_clause}}.'
   },
   ctfdFirstScore: {
     inputId: 'settings-audio-ctfd-score',
@@ -534,12 +534,12 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-score-speak-template-add',
     templateListId: 'settings-audio-ctfd-score-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-score-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{user_first}}, {{first_team}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{points}}, {{points_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
+    placeholderHint: '{{audio}}, {{user_first}}, {{user_second}}, {{user_third}}, {{first_team}}, {{event_user}}, {{event_team}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{points}}, {{points_clause}}, {{project}}, {{project_clause}}, {{second_team}}, {{third_team}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} First score{{project_clause}} goes to {{leader}}{{team_clause}}{{challenge_clause}}{{points_clause}}.',
+    defaultSpeakTemplate: '{{audio}} First score{{project_clause}} goes to {{event_user}}{{event_team}}{{team_clause}}{{challenge_clause}}{{points_clause}}.',
     legacyDefaultSpeakBefore: '',
-    legacyDefaultSpeakAfter: 'First score{{project_clause}} goes to {{leader}}{{team_clause}}{{challenge_clause}}{{points_clause}}.'
+    legacyDefaultSpeakAfter: 'First score{{project_clause}} goes to {{event_user}}{{event_team}}{{team_clause}}{{challenge_clause}}{{points_clause}}.'
   },
   ctfdCountdown: {
     inputId: 'settings-audio-ctfd-countdown',
@@ -625,12 +625,12 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-cat-user-speak-template-add',
     templateListId: 'settings-audio-ctfd-cat-user-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-cat-user-speak-help',
-    placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{leader}}, {{user_first}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
+    placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{user_first}}, {{user_second}}, {{user_third}}, {{event_user}}, {{event_team}}, {{team_clause}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} {{leader}} just solved the first challenge in {{category}}{{project_clause}}.',
+    defaultSpeakTemplate: '{{audio}} {{event_user}} just solved the first challenge in {{category}}{{project_clause}}.',
     legacyDefaultSpeakBefore: '',
-    legacyDefaultSpeakAfter: '{{leader}} just solved the first challenge in {{category}}{{project_clause}}.'
+    legacyDefaultSpeakAfter: '{{event_user}} just solved the first challenge in {{category}}{{project_clause}}.'
   },
   ctfdFirstCategoryTeam: {
     inputId: 'settings-audio-ctfd-cat-team',
@@ -645,21 +645,24 @@ const SETTINGS_AUDIO_FIELDS = {
     templateAddId: 'settings-audio-ctfd-cat-team-speak-template-add',
     templateListId: 'settings-audio-ctfd-cat-team-speak-template-list',
     speakHelpId: 'settings-audio-ctfd-cat-team-speak-help',
-    placeholderHint: '{{audio}}, {{leader}}, {{category}}, {{category_clause}}, {{first_team}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
+    placeholderHint: '{{audio}}, {{category}}, {{category_clause}}, {{first_team}}, {{event_team}}, {{challenge}}, {{challenge_clause}}, {{project}}, {{project_clause}}',
     defaultEnabled: true,
     defaultSpeak: true,
-    defaultSpeakTemplate: '{{audio}} {{leader}} is first to solve a {{category}} challenge{{project_clause}}.',
+    defaultSpeakTemplate: '{{audio}} {{event_team}} is first to solve a {{category}} challenge{{project_clause}}.',
     legacyDefaultSpeakBefore: '',
-    legacyDefaultSpeakAfter: '{{leader}} is first to solve a {{category}} challenge{{project_clause}}.'
+    legacyDefaultSpeakAfter: '{{event_team}} is first to solve a {{category}} challenge{{project_clause}}.'
   }
 };
 const SETTINGS_AUDIO_DEFAULTS = Object.fromEntries(Object.entries(SETTINGS_AUDIO_FIELDS).map(([key, cfg]) => [key, cfg.defaultEnabled !== undefined ? !!cfg.defaultEnabled : true]));
 window.SETTINGS_AUDIO_DEFAULTS = SETTINGS_AUDIO_DEFAULTS;
 window.SETTINGS_AUDIO_FIELDS_META = SETTINGS_AUDIO_FIELDS;
 const SETTINGS_AUDIO_PREVIEW_DEFAULT_CONTEXT = {
-  leader: 'Alex Jordan',
   user_first: 'Alex Jordan',
+  user_second: 'Jamie Lee',
+  user_third: 'Morgan Vale',
   first_team: 'Team Eclipse',
+  event_user: 'Alex Jordan',
+  event_team: '',
   team_clause: ' from Team Eclipse',
   project: 'Cyber Shield',
   project_clause: ' in Cyber Shield',
@@ -678,10 +681,10 @@ const SETTINGS_AUDIO_PREVIEW_DEFAULT_CONTEXT = {
   interval_minutes: '30'
 };
 const SETTINGS_AUDIO_PREVIEW_CONTEXT = {
-  ctfdFirstTeam: { leader: 'Team Eclipse' },
+  ctfdFirstTeam: { first_team: 'Team Eclipse', event_team: 'Team Eclipse' },
   ctfdPeriodic: { interval_minutes: '30' },
-  ctfdFirstCategoryUser: { category: 'Web Exploitation', leader: 'Alex Jordan' },
-  ctfdFirstCategoryTeam: { category: 'Reverse Engineering', leader: 'Team Aurora' },
+  ctfdFirstCategoryUser: { category: 'Web Exploitation', event_user: 'Alex Jordan' },
+  ctfdFirstCategoryTeam: { category: 'Reverse Engineering', event_team: 'Team Aurora' },
   ctfdCountdownStop: { reason: 'challenges_hidden', reason_clause: ' while challenges are hidden' }
 };
 function settingsModalPreviewContext(key) {
@@ -705,7 +708,7 @@ function settingsModalRenderSpeechTemplate(template, context) {
   return replaced.replace(/\s{2,}/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
 }
 function settingsModalBuildPreviewSpeechText(key, entry) {
-  const templates = settingsAudioValidTemplates(entry);
+  const templates = settingsAudioValidTemplates(entry, key);
   const tpl = templates.length ? templates[0] : settingsAudioDefaultSpeakTemplate(key);
   if (!tpl) return '';
   const context = settingsModalPreviewContext(key);
@@ -1825,11 +1828,11 @@ function settingsAudioValidSounds(entry) {
     return dataUrl.startsWith('data:');
   });
 }
-function settingsAudioValidTemplates(entry) {
+function settingsAudioValidTemplates(entry, key) {
   const list = Array.isArray(entry && entry.speakTemplates) ? entry.speakTemplates : [];
   return list.map(t => {
-    if (typeof t === 'string') return t.trim();
-    if (t != null) return String(t).trim();
+    if (typeof t === 'string') return settingsAudioNormalizeTemplateText(t, key).trim();
+    if (t != null) return settingsAudioNormalizeTemplateText(t, key).trim();
     return '';
   }).filter(Boolean);
 }
@@ -1870,6 +1873,26 @@ function settingsAudioLegacyDefaultSpeakAfter(key) {
   if (!cfg || cfg.legacyDefaultSpeakAfter === undefined) return '';
   return String(cfg.legacyDefaultSpeakAfter || '') || '';
 }
+function settingsAudioNormalizeTemplateText(value, key) {
+  const text = String(value || '');
+  const eventKey = String(key || '').trim();
+  if (eventKey === 'ctfdFirstUser') {
+    return text.replace(/\{\{\s*leader\s*\}\}/g, '{{user_first}}');
+  }
+  if (eventKey === 'ctfdFirstTeam') {
+    return text.replace(/\{\{\s*leader\s*\}\}/g, '{{first_team}}');
+  }
+  if (eventKey === 'ctfdFirstScore') {
+    return text.replace(/\{\{\s*leader\s*\}\}/g, '{{event_user}}{{event_team}}');
+  }
+  if (eventKey === 'ctfdFirstCategoryUser') {
+    return text.replace(/\{\{\s*leader\s*\}\}/g, '{{event_user}}');
+  }
+  if (eventKey === 'ctfdFirstCategoryTeam') {
+    return text.replace(/\{\{\s*leader\s*\}\}/g, '{{event_team}}');
+  }
+  return text;
+}
 function settingsAudioNormalizeLegacyTemplate(entry, key) {
   if (!entry || typeof entry !== 'object') return;
   const hasLegacyBefore = typeof entry.speakBefore === 'string';
@@ -1881,8 +1904,9 @@ function settingsAudioNormalizeLegacyTemplate(entry, key) {
     if (before) pieces.push(before);
     if (after) pieces.push(after);
     const combined = pieces.join(pieces.length > 1 ? ' ' : '');
-    entry.speakTemplate = combined;
+    entry.speakTemplate = settingsAudioNormalizeTemplateText(combined, key);
   }
+  if (typeof entry.speakTemplate === 'string') entry.speakTemplate = settingsAudioNormalizeTemplateText(entry.speakTemplate, key);
   delete entry.speakBefore;
   delete entry.speakAfter;
 }
@@ -1962,7 +1986,7 @@ function settingsAudioEnsureEntry(key) {
   if (entry.speakTemplate !== undefined && entry.speakTemplate !== null) {
     entry.speakTemplates.push(String(entry.speakTemplate));
   }
-  entry.speakTemplates = settingsAudioValidTemplates(entry);
+  entry.speakTemplates = settingsAudioValidTemplates(entry, key);
   if (!entry.speakTemplates.length && defTemplate) entry.speakTemplates = [String(defTemplate)];
   delete entry.speakTemplate;
   settingsAudioApplyNumericFields(entry, key);
@@ -1984,7 +2008,7 @@ function settingsModalUpdateAudioUi(key) {
   const speakHelp = cfg.speakHelpId ? document.getElementById(cfg.speakHelpId) : null;
   const entry = settingsAudioEnsureEntry(key);
   const sounds = settingsAudioValidSounds(entry);
-  const templates = settingsAudioValidTemplates(entry);
+  const templates = settingsAudioValidTemplates(entry, key);
   if (toggle) toggle.checked = !!entry.enabled;
   const speechSupported = settingsSpeechSupported();
   if (speakToggle) {
