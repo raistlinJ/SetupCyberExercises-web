@@ -239,6 +239,8 @@
                 Upload Audio<input type="file" id="settings-media-upload" accept="audio/*" multiple hidden>
               </label>
               <button type="button" class="btn btn-outline-secondary btn-sm" id="settings-media-refresh">Refresh</button>
+              <button type="button" class="btn btn-outline-success btn-sm" id="settings-media-enable-selected" data-remote-disable="audio" data-remote-tooltip="Audio is disabled when app is running in remote mode." disabled>Enable Selected</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="settings-media-disable-selected" data-remote-disable="audio" data-remote-tooltip="Audio is disabled when app is running in remote mode." disabled>Disable Selected</button>
               <button type="button" class="btn btn-outline-danger btn-sm" id="settings-media-delete-selected" data-remote-disable="audio" data-remote-tooltip="Audio is disabled when app is running in remote mode." disabled>Delete Selected</button>
               <span class="small text-muted">Max 10 MB per file.</span>
             </div>

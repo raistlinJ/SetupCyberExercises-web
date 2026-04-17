@@ -999,6 +999,12 @@ function audioIsMediaKey(key) {
   return typeof key === 'string' && key.startsWith(AUDIO_MEDIA_PREFIX);
 }
 
+function audioMediaEntryEnabled(entry) {
+  if (!entry || typeof entry !== 'object') return true;
+  if (entry.enabled === undefined && entry.disabled !== undefined) return entry.disabled === false;
+  return entry.enabled !== false;
+}
+
 function audioNormalizeSingleSound(entry) {
   if (!entry || typeof entry !== 'object') return null;
   const sounds = Array.isArray(entry.sounds) ? entry.sounds : [];
@@ -1028,14 +1034,18 @@ function audioNormalizeSingleSoundLoose(entry) {
   };
 }
 
-function audioListMediaItems(audioStore) {
+function audioListMediaItems(audioStore, options) {
   const store = audioStore && typeof audioStore === 'object' ? audioStore : {};
+  const opts = options && typeof options === 'object' ? options : {};
+  const includeDisabled = opts.includeDisabled !== false;
   const items = [];
   Object.entries(store).forEach(([key, entry]) => {
     if (!audioIsMediaKey(String(key))) return;
     const sound = audioNormalizeSingleSoundLoose(entry);
     if (!sound) return;
-    items.push({ key: String(key), ...sound });
+    const enabled = audioMediaEntryEnabled(entry);
+    if (!includeDisabled && !enabled) return;
+    items.push({ key: String(key), enabled, ...sound });
   });
   items.sort((a, b) => (b.updated || 0) - (a.updated || 0) || String(a.name).localeCompare(String(b.name)));
   return items;
@@ -1198,24 +1208,36 @@ function mediaManagerFindDuplicateKeyByDataUrl(audioStore, dataUrl) {
 }
 
 function mediaManagerGetSelectedKeys() {
+  return mediaManagerGetSelectedItems().map(item => item.key);
+}
+
+function mediaManagerGetSelectedItems() {
   const listEl = document.getElementById('settings-media-list');
   if (!listEl) return [];
-  const keys = Array.from(listEl.querySelectorAll('input.media-select:checked')).map(el => String(el.getAttribute('data-media-key') || '')).filter(Boolean);
-  // De-dupe while preserving order
   const seen = new Set();
   const out = [];
-  for (const k of keys) {
+  const boxes = Array.from(listEl.querySelectorAll('input.media-select:checked'));
+  for (const box of boxes) {
+    const k = String(box.getAttribute('data-media-key') || '').trim();
+    if (!k) continue;
     if (seen.has(k)) continue;
     seen.add(k);
-    out.push(k);
+    const row = box.closest('[data-media-key]');
+    const enabled = row ? String(row.getAttribute('data-media-enabled') || '1') !== '0' : true;
+    out.push({ key: k, enabled });
   }
   return out;
 }
 
 function mediaManagerUpdateBatchDeleteButton() {
-  const btn = document.getElementById('settings-media-delete-selected');
-  if (!btn) return;
-  try { btn.disabled = mediaManagerGetSelectedKeys().length === 0; } catch { btn.disabled = true; }
+  const selected = mediaManagerGetSelectedItems();
+  const deleteBtn = document.getElementById('settings-media-delete-selected');
+  const enableBtn = document.getElementById('settings-media-enable-selected');
+  const disableBtn = document.getElementById('settings-media-disable-selected');
+  const hasSelection = selected.length > 0;
+  if (deleteBtn) deleteBtn.disabled = !hasSelection;
+  if (enableBtn) enableBtn.disabled = !hasSelection;
+  if (disableBtn) disableBtn.disabled = !hasSelection;
 }
 
 function mediaManagerSetSelectAllState({ disabled, checked } = {}) {
@@ -1292,6 +1314,27 @@ async function mediaManagerDeleteItems(mediaKeys) {
   }
 
   return { deleted, failed };
+}
+
+async function mediaManagerSetItemsEnabled(mediaKeys, enabled) {
+  if (mediaManagerRemoteBlocked()) return false;
+  const pid = mediaManagerReadCurrentPid();
+  if (!pid) return false;
+  const keys = Array.isArray(mediaKeys) ? mediaKeys.map(key => String(key || '').trim()).filter(audioIsMediaKey) : [];
+  const unique = Array.from(new Set(keys));
+  if (!unique.length) return { updated: 0 };
+  const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+  const nextEnabled = !!enabled;
+  let updated = 0;
+  unique.forEach((key) => {
+    const entry = audioStore && typeof audioStore[key] === 'object' ? audioStore[key] : null;
+    if (!entry) return;
+    if (audioMediaEntryEnabled(entry) === nextEnabled && entry.enabled !== undefined) return;
+    audioStore[key] = { ...entry, enabled: nextEnabled };
+    updated += 1;
+  });
+  if (updated) await saveProjectAudio(pid, audioStore);
+  return { updated };
 }
 
 async function mediaManagerUploadFilesBatch(files) {
@@ -1665,11 +1708,17 @@ async function mediaManagerRefreshList(options) {
     const sizeKb = item.size ? `${Math.round(item.size / 1024)} KB` : 'Size unknown';
     const typeLabel = item.type ? escHtml(item.type) : 'Audio';
     const meta = `${sizeKb} | ${typeLabel}`;
-    return `<li class="list-group-item d-flex align-items-center justify-content-between gap-2" data-media-key="${escHtml(item.key)}">
+    const enabled = item.enabled !== false;
+    const stateBadge = enabled
+      ? '<span class="badge bg-success">Enabled</span>'
+      : '<span class="badge bg-secondary">Disabled</span>';
+    const stateHelp = enabled ? 'Available in notification clip dropdowns.' : 'Hidden from notification clip dropdowns.';
+    return `<li class="list-group-item d-flex align-items-center justify-content-between gap-2" data-media-key="${escHtml(item.key)}" data-media-enabled="${enabled ? '1' : '0'}">
   <input class="form-check-input me-2 media-select" type="checkbox" data-media-key="${escHtml(item.key)}" aria-label="Select audio file">
   <div class="flex-grow-1">
-    <div>${safeName}</div>
+    <div class="d-flex align-items-center gap-2 flex-wrap"><span>${safeName}</span>${stateBadge}</div>
     <div class="small text-muted">${meta}</div>
+    <div class="small text-muted">${escHtml(stateHelp)}</div>
   </div>
   <div class="btn-group btn-group-sm">
     <button type="button" class="btn btn-outline-secondary" data-action="media-preview">Preview</button>
@@ -1684,6 +1733,8 @@ async function mediaManagerRefreshList(options) {
 function wireMediaManagerControls() {
   const upload = document.getElementById('settings-media-upload');
   const refresh = document.getElementById('settings-media-refresh');
+  const enableSelected = document.getElementById('settings-media-enable-selected');
+  const disableSelected = document.getElementById('settings-media-disable-selected');
   const delSelected = document.getElementById('settings-media-delete-selected');
   const selectAll = document.getElementById('settings-media-select-all');
   const list = document.getElementById('settings-media-list');
@@ -1712,6 +1763,40 @@ function wireMediaManagerControls() {
   if (refresh && !refresh._toolhubBound) {
     refresh.addEventListener('click', () => mediaManagerRefreshList({ force: true }));
     refresh._toolhubBound = true;
+  }
+  if (enableSelected && !enableSelected._toolhubBound) {
+    enableSelected.addEventListener('click', async () => {
+      if (mediaManagerRemoteBlocked()) return;
+      const keys = mediaManagerGetSelectedKeys();
+      if (!keys.length) return;
+      enableSelected.disabled = true;
+      try {
+        const res = await mediaManagerSetItemsEnabled(keys, true);
+        const updated = res && Number.isFinite(res.updated) ? res.updated : 0;
+        try { showToast(updated ? `Enabled ${updated} audio file${updated === 1 ? '' : 's'}.` : 'Selected audio files were already enabled.', 'success'); } catch { }
+      } catch (err) {
+        try { showToast(`Enable failed: ${err?.message || err}`, 'warning'); } catch { }
+      }
+      try { await mediaManagerRefreshList({ force: true }); } catch { }
+    });
+    enableSelected._toolhubBound = true;
+  }
+  if (disableSelected && !disableSelected._toolhubBound) {
+    disableSelected.addEventListener('click', async () => {
+      if (mediaManagerRemoteBlocked()) return;
+      const keys = mediaManagerGetSelectedKeys();
+      if (!keys.length) return;
+      disableSelected.disabled = true;
+      try {
+        const res = await mediaManagerSetItemsEnabled(keys, false);
+        const updated = res && Number.isFinite(res.updated) ? res.updated : 0;
+        try { showToast(updated ? `Disabled ${updated} audio file${updated === 1 ? '' : 's'}.` : 'Selected audio files were already disabled.', 'success'); } catch { }
+      } catch (err) {
+        try { showToast(`Disable failed: ${err?.message || err}`, 'warning'); } catch { }
+      }
+      try { await mediaManagerRefreshList({ force: true }); } catch { }
+    });
+    disableSelected._toolhubBound = true;
   }
   if (delSelected && !delSelected._toolhubBound) {
     delSelected.addEventListener('click', async () => {

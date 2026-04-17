@@ -392,6 +392,7 @@ function ctfdListProjectMediaOptions(audioStore) {
   const { media } = ctfdSplitProjectAudioStore(audioStore);
   const items = [];
   Object.entries(media).forEach(([key, entry]) => {
+    if (!ctfdMediaEntryEnabled(entry)) return;
     const sound = ctfdNormalizeMediaSound(entry);
     if (!sound) return;
     items.push({ key: String(key), ...sound });
@@ -400,11 +401,22 @@ function ctfdListProjectMediaOptions(audioStore) {
   return items;
 }
 
+function ctfdMediaEntryEnabled(entry) {
+  if (!entry || typeof entry !== 'object') return true;
+  if (entry.enabled === undefined && entry.disabled !== undefined) return entry.disabled === false;
+  return entry.enabled !== false;
+}
+
 function ctfdNotifyAudioTokenTitle(audioStore, soundKey) {
   const key = String(soundKey || '').trim();
   if (!key) return 'Built-in tone (no uploaded clip selected).';
   try {
     const entry = (audioStore && typeof audioStore === 'object') ? audioStore[key] : null;
+    if (!ctfdMediaEntryEnabled(entry)) {
+      const sound = ctfdNormalizeMediaSound(entry);
+      const name = sound && sound.name ? String(sound.name) : '';
+      return name ? `Audio clip disabled: ${name}` : 'Audio clip disabled';
+    }
     const sound = ctfdNormalizeMediaSound(entry);
     const name = sound && sound.name ? String(sound.name) : '';
     return name ? `Audio clip: ${name}` : 'Audio clip';
@@ -418,6 +430,7 @@ function ctfdNotifyMediaLabelForKey(audioStore, soundKey) {
   if (!key) return '';
   try {
     const entry = (audioStore && typeof audioStore === 'object') ? audioStore[key] : null;
+    if (!ctfdMediaEntryEnabled(entry)) return '';
     const sound = ctfdNormalizeMediaSound(entry);
     const name = sound && sound.name ? String(sound.name) : '';
     return name || key;
@@ -444,10 +457,12 @@ function ctfdSelectEnsureValue(select, value, label) {
   const desired = String(value || '').trim();
   if (!desired) return;
   if (ctfdSelectHasValue(select, desired)) return;
+  const text = String(label || '').trim();
+  if (!text) return;
   try {
     const opt = document.createElement('option');
     opt.value = desired;
-    opt.textContent = String(label || desired);
+    opt.textContent = text;
     select.appendChild(opt);
   } catch { }
 }
@@ -500,7 +515,7 @@ function ctfdGetSettingsAudio() {
     const soundKey = typeof entry.soundKey === 'string' ? entry.soundKey.trim() : '';
     if (soundKey && Object.prototype.hasOwnProperty.call(media, soundKey)) {
       const mediaEntry = media[soundKey];
-      if (mediaEntry && typeof mediaEntry === 'object') {
+      if (mediaEntry && typeof mediaEntry === 'object' && ctfdMediaEntryEnabled(mediaEntry)) {
         if (Array.isArray(mediaEntry.sounds)) entry.sounds = mediaEntry.sounds;
         else if (mediaEntry.dataUrl) entry.dataUrl = mediaEntry.dataUrl;
       }
@@ -1221,7 +1236,7 @@ async function ctfdRenderNotifyConfig(options) {
     });
   });
 
-  if (status) status.textContent = mediaItems.length ? '' : 'No uploaded audio yet. Upload files in Settings → Media Manager.';
+  if (status) status.textContent = mediaItems.length ? '' : 'No enabled uploaded audio. Upload files or enable them in Settings → Media Manager.';
 }
 
 async function ctfdSaveNotifyConfig() {
@@ -2464,6 +2479,7 @@ function ctfdResolveProjectMediaSound(soundKey) {
   const pid = ctfdCurrentPid();
   const audioStore = ctfdGetProjectAudioStore(pid);
   const mediaEntry = (audioStore && typeof audioStore[key] === 'object') ? audioStore[key] : null;
+  if (!ctfdMediaEntryEnabled(mediaEntry)) return null;
   return ctfdNormalizeMediaSound(mediaEntry);
 }
 
@@ -2960,6 +2976,57 @@ function ctfdHandleChallengesStateChange(newState) {
 
 // --- Persist last rendered view so switching pages doesn't clear data ---
 const CTFD_CACHE_KEY = 'toolhub.ctfd.mgr.cache.v1';
+const CTFD_LIVE_META_KEY = 'toolhub.ctfd.mgr.liveMeta.v1';
+let CTFD_SNAPSHOT_RESTORED_ON_BOOT = false;
+
+function ctfdMetaEntryHasDisplayState(entry) {
+  try {
+    if (!entry || typeof entry !== 'object') return false;
+    const hasValue = (value) => {
+      if (value === null || value === undefined) return false;
+      return String(value).trim() !== '';
+    };
+    return !!(
+      hasValue(entry.user_rank)
+      || hasValue(entry.user_points)
+      || hasValue(entry.team_name)
+      || hasValue(entry.team_rank)
+      || hasValue(entry.team_points)
+      || hasValue(entry.user_id)
+      || hasValue(entry.team_id)
+      || hasValue(entry.user_last_solve_time)
+      || hasValue(entry.user_last_solve_challenge)
+      || hasValue(entry.team_captain)
+      || hasValue(entry.team_size)
+      || hasValue(entry.team_last_solve_time)
+      || hasValue(entry.team_last_solve_challenge)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function ctfdSnapshotHasProjectMeta(proj, source) {
+  try {
+    const pid = String(proj?.id || '').trim();
+    const meta = source && typeof source === 'object' ? source : {};
+    if (!pid) return Object.values(meta).some(entry => ctfdMetaEntryHasDisplayState(entry));
+    const creds = Array.isArray(proj?.credentials) ? proj.credentials : [];
+    const usernames = creds.map(cred => String(cred?.username || '').trim()).filter(Boolean);
+    for (const username of usernames) {
+      const scoped = ctfdMetaKey(pid, username);
+      const scopedEntry = scoped && Object.prototype.hasOwnProperty.call(meta, scoped) ? meta[scoped] : null;
+      const plainEntry = Object.prototype.hasOwnProperty.call(meta, username) ? meta[username] : null;
+      if (ctfdMetaEntryHasDisplayState(scopedEntry) || ctfdMetaEntryHasDisplayState(plainEntry)) {
+        return true;
+      }
+    }
+    return Object.values(ctfdProjectMetaEntries(pid, meta)).some(entry => ctfdMetaEntryHasDisplayState(entry));
+  } catch {
+    return false;
+  }
+}
+
 function ctfdCacheSnapshot(mode) {
   try {
     const payload = {
@@ -2977,6 +3044,85 @@ function ctfdCacheSnapshot(mode) {
     sessionStorage.setItem(CTFD_CACHE_KEY, JSON.stringify(payload));
   } catch { }
 }
+
+function ctfdReadLiveMetaCache() {
+  try {
+    const raw = sessionStorage.getItem(CTFD_LIVE_META_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function ctfdWriteLiveMetaCache(cache) {
+  try {
+    sessionStorage.setItem(CTFD_LIVE_META_KEY, JSON.stringify(cache && typeof cache === 'object' ? cache : {}));
+  } catch { }
+}
+
+function ctfdPersistLiveProjectMeta(projectId, meta) {
+  try {
+    const pid = String(projectId || '').trim();
+    if (!pid) return;
+    const source = meta && typeof meta === 'object' ? meta : {};
+    const normalized = {};
+    Object.entries(source).forEach(([key, value]) => {
+      const uname = String(key || '').trim();
+      if (!uname) return;
+      normalized[uname] = value;
+    });
+    if (!Object.keys(normalized).length) return;
+    const cache = ctfdReadLiveMetaCache();
+    const hasDisplayState = Object.values(normalized).some(entry => ctfdMetaEntryHasDisplayState(entry));
+    if (!hasDisplayState) {
+      const existingMeta = cache?.[pid]?.meta;
+      if (!(existingMeta && Object.values(existingMeta).some(entry => ctfdMetaEntryHasDisplayState(entry)))) return;
+      return;
+    }
+    cache[pid] = { ts: Date.now(), meta: normalized };
+    ctfdWriteLiveMetaCache(cache);
+  } catch { }
+}
+
+function ctfdReadLiveProjectMeta(projectId) {
+  try {
+    const pid = String(projectId || '').trim();
+    if (!pid) return null;
+    const cache = ctfdReadLiveMetaCache();
+    const entry = cache && typeof cache === 'object' ? cache[pid] : null;
+    const meta = entry && entry.meta && typeof entry.meta === 'object' ? entry.meta : null;
+    return meta && Object.keys(meta).length ? meta : null;
+  } catch {
+    return null;
+  }
+}
+
+function ctfdClearLiveProjectMeta(projectId) {
+  try {
+    const pid = String(projectId || '').trim();
+    if (!pid) return;
+    const cache = ctfdReadLiveMetaCache();
+    if (!Object.prototype.hasOwnProperty.call(cache, pid)) return;
+    delete cache[pid];
+    ctfdWriteLiveMetaCache(cache);
+  } catch { }
+}
+
+function ctfdRestoreLiveProjectMeta(project) {
+  try {
+    const pid = String(project?.id || '').trim();
+    if (!pid || ctfdSnapshotHasProjectMeta(project, CTFD_USER_META || {})) return false;
+    const cachedMeta = ctfdReadLiveProjectMeta(pid);
+    if (!cachedMeta) return false;
+    ctfdApplyUserMeta(pid, cachedMeta);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function ctfdRestoreSnapshot() {
   try {
     const raw = sessionStorage.getItem(CTFD_CACHE_KEY);
@@ -2995,6 +3141,7 @@ function ctfdRestoreSnapshot() {
     CTFD_SELECTED_PIDS = derived;
     CTFD_USER_META = data.userMeta || {};
     if (data.mode === 'single' && data.proj && data.proj.id) {
+      ctfdRestoreLiveProjectMeta(data.proj);
       ctfdSeedFirstPlaceHistory(data.proj.id, ctfdProjectMetaEntries(data.proj.id, CTFD_USER_META));
     }
     if (data.mode === 'multi') {
@@ -3015,6 +3162,20 @@ function ctfdRestoreSnapshot() {
     }
     return false;
   } catch { return false; }
+}
+
+function ctfdTryRestoreSnapshotEarly() {
+  if (CTFD_SNAPSHOT_RESTORED_ON_BOOT) return true;
+  try {
+    if (!document.getElementById('ctfd-table')) return false;
+    const restored = !!ctfdRestoreSnapshot();
+    if (!restored) return false;
+    CTFD_SNAPSHOT_RESTORED_ON_BOOT = true;
+    try { updateCtfdControlsEnabled(); } catch { }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Column visibility (persisted per project)
@@ -4417,6 +4578,9 @@ function wireCtfdVerifySsl() {
 async function ctfdLoadProjectConfig(pid) {
   try {
     const id = String(pid || '').trim(); if (!id) return;
+    const priorPid = String(PROJ && PROJ.id !== undefined ? PROJ.id : '').trim();
+    const tableHost = document.getElementById('ctfd-table');
+    const keepExistingTableVisible = !!(priorPid && priorPid === id && tableHost && tableHost.querySelector('table'));
     const token = ++CTFD_CONFIG_REQUEST_TOKEN;
     const data = await http('GET', '/api/projects');
     if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
@@ -4432,6 +4596,7 @@ async function ctfdLoadProjectConfig(pid) {
     }
     if (token !== CTFD_CONFIG_REQUEST_TOKEN || ctfdSelectionChanged(id)) return;
     PROJ = proj;
+    ctfdRestoreLiveProjectMeta(PROJ);
     ctfdApplyVerifySSL(PROJ.id, ctfdProjectVerifySSL(PROJ));
     try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
     ctfdStopCountdown(false);
@@ -4456,8 +4621,10 @@ async function ctfdLoadProjectConfig(pid) {
       const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'];
       ids.forEach(id => { const el = document.getElementById(`ctfd-col-${id}`); if (el) el.checked = !!CTFD_COLS[id]; });
     } catch { }
-    // Render table; most meta columns will show 'n/a' as intended
-    renderCtfdTable(PROJ);
+    // Keep the restored or current table visible for same-project config loads.
+    if (!keepExistingTableVisible) {
+      renderCtfdTable(PROJ);
+    }
     try { await hydrateCtfdCredsFromPersisted(PROJ.id); } catch { }
     updateCtfdControlsEnabled();
     ctfdRestoreSkippedIndicator();
@@ -4616,7 +4783,8 @@ async function ctfdLoadProjectById(pid, opts) {
     const port = Number(PROJ.challenge_port || 443);
     const verifySSL = ctfdCurrentVerifySSL(PROJ);
     const payloadBase = { baseUrl, port, token: sess.token || '', verifySSL };
-    const metaMap = {};
+    const metaMap = total > 0 ? { ...ctfdProjectMetaEntries(PROJ?.id || id, CTFD_USER_META) } : {};
+    let receivedUserState = total === 0;
     // Optimization: perform a single bulk users_check (omit 'only') instead of one request per username.
     // Fallback: if bulk fails, revert to legacy per-username loop to preserve functionality.
     let bulkSucceeded = false;
@@ -4642,6 +4810,7 @@ async function ctfdLoadProjectById(pid, opts) {
           categoryPayload = resp.category_firsts || {};
         }
         const list = Array.isArray(resp?.users) ? resp.users : [];
+        if (list.length) receivedUserState = true;
         list.forEach(u => {
           const uname = String(u?.username || '').trim();
           if (!uname) return;
@@ -4691,6 +4860,7 @@ async function ctfdLoadProjectById(pid, opts) {
             list.forEach(u => {
               const uname = String(u?.username || '').trim();
               if (!uname) return;
+              receivedUserState = true;
               metaMap[uname] = {
                 exists: !!u?.exists,
                 user_rank: (u?.user_rank ?? null),
@@ -4715,6 +4885,13 @@ async function ctfdLoadProjectById(pid, opts) {
       }
     }
     if (abortIfStale()) return;
+    if (total > 0 && !receivedUserState) {
+      setProgress(`Step 3/${totalSteps}: Keeping previous state…`, 95, false, `No fresh CTFd user state was returned for ${PROJ?.name || id}. Keeping the previous table values visible.`);
+      renderCtfdTable(PROJ);
+      try { ctfdCacheSnapshot('single'); } catch { }
+      return;
+    }
+    ctfdPersistLiveProjectMeta(PROJ?.id, metaMap);
     ctfdApplyUserMeta(PROJ?.id, metaMap);
     if (categoryPayload !== null) {
       ctfdHandleCategoryFirsts(PROJ?.id, categoryPayload);
@@ -4817,6 +4994,14 @@ async function ctfdRefreshMulti(opts) {
   // Clear any previous indicator
   try { ctfdRenderSkippedIndicator([], ''); } catch { }
   const metaMap = {};
+  pids.forEach(pid => {
+    const previous = ctfdProjectMetaEntries(pid, CTFD_USER_META);
+    Object.entries(previous).forEach(([uname, entry]) => {
+      const key = ctfdMetaKey(pid, uname);
+      if (key) metaMap[key] = entry;
+    });
+  });
+  let receivedAnyUserState = false;
   const failures = [];
   let done = 0;
   for (const pid of pids) {
@@ -4840,6 +5025,7 @@ async function ctfdRefreshMulti(opts) {
       if (abortIfStale()) return;
       refreshedPids.push(String(pid));
       const list = Array.isArray(resp?.users) ? resp.users : [];
+      if (list.length) receivedAnyUserState = true;
       if (resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
         ctfdHandleCategoryFirsts(pid, resp.category_firsts || {});
       }
@@ -4867,12 +5053,19 @@ async function ctfdRefreshMulti(opts) {
         projectMeta[uname] = entry;
         metaMap[ctfdMetaKey(pid, uname)] = entry;
       });
+      ctfdPersistLiveProjectMeta(pid, projectMeta);
       ctfdDetectFirstPlaceChange(String(pid), projectMeta);
       ctfdDetectFirstScore(String(pid), projectMeta);
     } catch (e) { failures.push(pid); }
     done += 1;
   }
   if (abortIfStale()) return;
+  if (total > 0 && !receivedAnyUserState) {
+    setProgress(`Projects ${done}/${total}`, 95, false, `No fresh CTFd user state was returned for the selected projects. Keeping the previous table values visible.`);
+    ctfdRenderTableMerged();
+    try { ctfdCacheSnapshot('multi'); } catch { }
+    return;
+  }
   ctfdApplyUserMeta('multi', metaMap);
   if (abortIfStale()) return;
   setProgress(`Projects ${done}/${total}`, 95, false, `Applying refreshed CTFd data across ${done} project${done === 1 ? '' : 's'}…`);
@@ -5060,9 +5253,17 @@ function wireCtfdFilter() {
 // Initialization
 document.addEventListener('DOMContentLoaded', async () => {
   try { shell.logDebug('CTFd: init DOMContentLoaded'); } catch { }
+  try { ctfdTryRestoreSnapshotEarly(); } catch { }
   await shell.initShell('vm'); // reuse same sidebar population logic
   // First try to restore previous in-session view so page switch won't blank the table
-  try { if (ctfdRestoreSnapshot()) { updateCtfdControlsEnabled(); } } catch { }
+  let restoredSnapshot = false;
+  try {
+    restoredSnapshot = !!(CTFD_SNAPSHOT_RESTORED_ON_BOOT || ctfdRestoreSnapshot());
+    if (restoredSnapshot) {
+      CTFD_SNAPSHOT_RESTORED_ON_BOOT = true;
+      updateCtfdControlsEnabled();
+    }
+  } catch { }
   try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
   wireCtfdFilter();
   wireCtfdLogin();
@@ -5211,23 +5412,28 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     const pid = (window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : '';
     if (pid) {
-      ctfdLoadProjectConfig(pid);
-      // Also derive multi-selection for this base project
-      try {
-        ctfdMigrateSelectedToAssoc(pid);
-        const assoc = ctfdReadAssoc(pid);
-        CTFD_SELECTED_PIDS = (assoc && assoc.length) ? [String(pid), ...assoc.map(String)] : null;
-        ctfdProjectsBadgeUpdate();
-      } catch { }
-      // Mirror VM Manager: perform a best-effort initial refresh on load (non-interrupting)
-      try {
-        CTFD_ALLOW_LOAD = true;
-        if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
-          ctfdRefreshMulti({ suppressLoginModal: true });
-        } else {
-          ctfdLoadProjectById(pid);
-        }
-      } catch { }
+      if (!restoredSnapshot) {
+        ctfdLoadProjectConfig(pid);
+        // Also derive multi-selection for this base project
+        try {
+          ctfdMigrateSelectedToAssoc(pid);
+          const assoc = ctfdReadAssoc(pid);
+          CTFD_SELECTED_PIDS = (assoc && assoc.length) ? [String(pid), ...assoc.map(String)] : null;
+          ctfdProjectsBadgeUpdate();
+        } catch { }
+        // Mirror VM Manager: perform a best-effort initial refresh on load (non-interrupting)
+        try {
+          CTFD_ALLOW_LOAD = true;
+          if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
+            ctfdRefreshMulti({ suppressLoginModal: true });
+          } else {
+            ctfdLoadProjectById(pid);
+          }
+        } catch { }
+      } else {
+        try { await hydrateCtfdCredsFromPersisted(pid); } catch { }
+        try { updateCtfdControlsEnabled(); } catch { }
+      }
     }
   } catch { }
   // Wire settings toggles to updates
@@ -5493,6 +5699,7 @@ function deleteCtfdCreds(pid) {
     // Expire cookie immediately
     document.cookie = `${name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax${secure}`;
   } catch { }
+  ctfdClearLiveProjectMeta(pid);
   ctfdClearLiveRefresh(pid);
 }
 function ctfdNormalizePid(pid) { return String(pid || '').trim(); }
@@ -6367,6 +6574,7 @@ async function ctfdCheckExistence() {
       };
     });
   } catch { }
+  ctfdPersistLiveProjectMeta(PROJ?.id, map);
   ctfdApplyUserMeta(PROJ?.id, map);
 }
 
