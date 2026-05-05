@@ -83,3 +83,106 @@ class InstancesDeleteApiTests(unittest.TestCase):
             prox.reload_network.assert_not_called()
             prox.list_node_storages.assert_not_called()
             prox.list_storage_content.assert_not_called()
+
+    def test_delete_can_remove_users_and_pools_when_instance_has_no_remaining_vms(self):
+        self.project.credentials = [{'username': 'student1', 'password': 'secret1'}]
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(self.project)))
+            stack.enter_context(patch('app.routes.api._start_job'))
+            stack.enter_context(patch('app.routes.api._end_job'))
+            stack.enter_context(patch('app.routes.api._clear_vm_cache'))
+            stack.enter_context(patch('app.routes.api._is_cancelled', return_value=False))
+            cleanup_scheduler = stack.enter_context(patch('app.routes.api._schedule_delete_bridge_cleanup', return_value=True))
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_nodes.return_value = [{'node': 'node1'}]
+            prox.list_qemu_vms.side_effect = [
+                [{'name': self.target_name, 'vmid': 101}],
+                [],
+                [],
+            ]
+            prox.delete_qemu.return_value = 'UPID:node1:delete'
+            prox._wait_task.return_value = {'status': 'stopped', 'exitstatus': 'OK'}
+            prox.get_pool.return_value = {'poolid': 'student1'}
+            prox.list_pool_members.return_value = []
+            prox.get_user.return_value = {'userid': 'student1@pve'}
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/delete',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'verifyCleanup': False,
+                    'deleteUsersAndPools': True,
+                    'targets': [{'index': 1, 'name': 'alpha'}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json() or {}
+            self.assertEqual(len(payload.get('deleted') or []), 1)
+            self.assertEqual(len(payload.get('deleted_users') or []), 1)
+            self.assertEqual(len(payload.get('deleted_pools') or []), 1)
+
+            prox.delete_pool.assert_called_once_with('student1')
+            prox.delete_user.assert_called_once_with('student1@pve')
+            cleanup_scheduler.assert_called_once()
+
+    def test_delete_skips_user_pool_removal_when_other_instance_vms_remain(self):
+        vm_alpha = VMConfig(name='alpha')
+        vm_beta = VMConfig(name='beta')
+        project = Project(id='proj-delete-remain', name='Delete Project', tag='-lab-', vms=[vm_alpha, vm_beta])
+        project.credentials = [{'username': 'student1', 'password': 'secret1'}]
+        alpha_name = f'alpha{project.tag}1'
+        beta_name = f'beta{project.tag}1'
+
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(project)))
+            stack.enter_context(patch('app.routes.api._start_job'))
+            stack.enter_context(patch('app.routes.api._end_job'))
+            stack.enter_context(patch('app.routes.api._clear_vm_cache'))
+            stack.enter_context(patch('app.routes.api._is_cancelled', return_value=False))
+            stack.enter_context(patch('app.routes.api._schedule_delete_bridge_cleanup', return_value=True))
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_nodes.return_value = [{'node': 'node1'}]
+            prox.list_qemu_vms.side_effect = [
+                [
+                    {'name': alpha_name, 'vmid': 101},
+                    {'name': beta_name, 'vmid': 102},
+                ],
+                [
+                    {'name': beta_name, 'vmid': 102},
+                ],
+            ]
+            prox.delete_qemu.return_value = 'UPID:node1:delete'
+            prox._wait_task.return_value = {'status': 'stopped', 'exitstatus': 'OK'}
+
+            resp = self.client.post(
+                f'/api/projects/{project.id}/instances/actions/delete',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'verifyCleanup': False,
+                    'deleteUsersAndPools': True,
+                    'targets': [{'index': 1, 'name': 'alpha'}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json() or {}
+            self.assertEqual(len(payload.get('deleted') or []), 1)
+            self.assertEqual(payload.get('deleted_users') or [], [])
+            self.assertEqual(payload.get('deleted_pools') or [], [])
+            self.assertTrue(any('cleanup skipped' in str(item.get('reason') or '').lower() for item in (payload.get('notices') or [])))
+
+            prox.delete_pool.assert_not_called()
+            prox.delete_user.assert_not_called()

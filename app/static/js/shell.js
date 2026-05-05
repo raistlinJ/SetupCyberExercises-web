@@ -1734,6 +1734,7 @@ const ConsoleDock = (() => {
     }
     if (dropBtn) dropBtn.setAttribute('aria-expanded', dropMenu && dropMenu.style.display === 'block' ? 'true' : 'false');
     try { if (titleEl) titleEl.textContent = (state.mode === 'queue') ? 'Queue' : 'Console'; } catch {}
+    refreshQueueModeLabelsFromState();
   }
 
   function updateQueueModeLabels(activeCount, totalCount){

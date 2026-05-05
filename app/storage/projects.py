@@ -8,6 +8,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
+DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS = 10
 MAX_COMMAND_TIMEOUT_SECONDS = 86400
 
 
@@ -250,6 +251,71 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
     return steps
 
 
+def sanitize_validation_commands(value: Any) -> List[Dict[str, Any]]:
+    commands: List[Dict[str, Any]] = []
+
+    def _coerce_match(raw: Any) -> str:
+        try:
+            text = str(raw or "").strip()
+        except Exception:
+            text = ""
+        return text
+
+    def _append_entry(entry: Any):
+        if entry is None:
+            return
+        if isinstance(entry, dict):
+            raw_command = entry.get("command")
+            if raw_command is None:
+                raw_command = entry.get("cmd") or entry.get("value") or entry.get("text")
+            command_text = _clean_start_command(raw_command)
+            if not command_text:
+                return
+            enabled_hint = entry.get("enabled")
+            if enabled_hint is None and entry.get("disabled") is not None:
+                enabled_hint = not entry.get("disabled")
+            match_hint = entry.get("match")
+            if match_hint is None:
+                for alt in ("regex", "pattern", "re", "match_regex", "matchRegex"):
+                    if entry.get(alt) is not None:
+                        match_hint = entry.get(alt)
+                        break
+            timeout_hint = entry.get("timeout_seconds")
+            if timeout_hint is None:
+                for alt in ("timeoutSeconds", "timeout", "timeout_sec", "timeoutSec"):
+                    if entry.get(alt) is not None:
+                        timeout_hint = entry.get(alt)
+                        break
+            commands.append({
+                "command": command_text,
+                "enabled": _coerce_enabled(enabled_hint, True),
+                "match": _coerce_match(match_hint),
+                "timeout_seconds": _coerce_timeout(timeout_hint, default=DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+            })
+            return
+        if isinstance(entry, (list, tuple, set)):
+            for sub in entry:
+                _append_entry(sub)
+            return
+        command_text = _clean_start_command(entry)
+        if not command_text:
+            return
+        commands.append({
+            "command": command_text,
+            "enabled": True,
+            "match": "",
+            "timeout_seconds": DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS,
+        })
+
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _append_entry(item)
+    elif value is not None:
+        _append_entry(value)
+
+    return commands
+
+
 @dataclass
 class VMConfig:
     name: str
@@ -257,6 +323,7 @@ class VMConfig:
     viewable_to_user: bool = True
     start_commands: List[StartCommandStep] = field(default_factory=list)
     stored_commands: List[StartCommandStep] = field(default_factory=list)
+    validation_commands: List[Dict[str, Any]] = field(default_factory=list)
     internal_network_adaptors: Optional[List[str]] = None
     # Advanced per-VM clone options
     use_linked_clone: Optional[bool] = None  # override project default
@@ -751,6 +818,7 @@ class ProjectStore:
                     base["vmid"] = None
             base["start_commands"] = sanitize_start_command_steps(base.get("start_commands"))
             base["stored_commands"] = sanitize_start_command_steps(base.get("stored_commands"))
+            base["validation_commands"] = sanitize_validation_commands(base.get("validation_commands"))
             if base.get("vm_user") is not None:
                 base["vm_user"] = str(base["vm_user"])
             if base.get("vm_pass") is not None:
@@ -983,6 +1051,7 @@ class ProjectStore:
                     "viewable_to_user",
                     "start_commands",
                     "stored_commands",
+                    "validation_commands",
                     "internal_network_adaptors",
                     "use_linked_clone",
                     "clone_timeout_sec",
@@ -996,6 +1065,8 @@ class ProjectStore:
                             vm_data[k] = sanitize_start_command_steps(fields[k])
                         elif k == "stored_commands":
                             vm_data[k] = sanitize_start_command_steps(fields[k])
+                        elif k == "validation_commands":
+                            vm_data[k] = sanitize_validation_commands(fields[k])
                         else:
                             vm_data[k] = fields[k]
                 # Coerce vmid to int or None
@@ -1006,6 +1077,7 @@ class ProjectStore:
                         vm_data["vmid"] = None
                 vm_data["start_commands"] = sanitize_start_command_steps(vm_data.get("start_commands"))
                 vm_data["stored_commands"] = sanitize_start_command_steps(vm_data.get("stored_commands"))
+                vm_data["validation_commands"] = sanitize_validation_commands(vm_data.get("validation_commands"))
                 proj.vms[i] = VMConfig(**vm_data)
                 break
         if not found:
@@ -1030,6 +1102,7 @@ class ProjectStore:
                                        viewable_to_user=vm.viewable_to_user,
                                        start_commands=sanitize_start_command_steps(vm.start_commands),
                                        stored_commands=sanitize_start_command_steps(vm.stored_commands),
+                                       validation_commands=sanitize_validation_commands(getattr(vm, 'validation_commands', [])),
                                        internal_network_adaptors=vm.internal_network_adaptors,
                                        use_linked_clone=vm.use_linked_clone,
                                        clone_timeout_sec=vm.clone_timeout_sec,

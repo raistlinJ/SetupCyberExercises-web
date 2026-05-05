@@ -899,6 +899,30 @@
     </div>
   </div>
 
+  <!-- Validation Commands Manager Modal -->
+  <div class="modal fade" id="validationCommandsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="validationCommandsModalLabel">Manage Validation Commands</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="small text-muted">Configure validation commands that run in sequence. A command passes when its output matches the regex, including output available at timeout.</p>
+          <div class="border rounded mb-3" style="max-height: 50vh; overflow:auto;">
+            <div class="list-group list-group-flush" id="validation-commands-list"></div>
+            <div id="validation-commands-empty" class="text-muted small text-center py-3 d-none">No validation commands configured.</div>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline-primary" id="validation-commands-add">Add Command</button>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="validation-commands-save">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Proxmox Login Modal (session-only, used before VM export) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">

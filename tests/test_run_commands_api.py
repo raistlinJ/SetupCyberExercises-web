@@ -20,6 +20,21 @@ class _StoreStub:
         return None
 
 
+class _RuntimeStoreStub:
+    def __init__(self):
+        self.calls = []
+
+    def set_vm_validation_state(self, project_id, vm_name, passed, vmid=None, node=None):
+        self.calls.append({
+            'project_id': project_id,
+            'vm_name': vm_name,
+            'passed': bool(passed),
+            'vmid': vmid,
+            'node': node,
+        })
+        return bool(passed)
+
+
 class RunCommandsApiTests(unittest.TestCase):
 
     def setUp(self):
@@ -214,6 +229,162 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertEqual(payload.get('requested_command'), missing_command)
             self.assertNotIn('outputs_zip', payload)
             mock_client.agent_exec.assert_not_called()
+
+    def test_run_stored_cmds_validation_passes_on_timeout_match(self):
+        vm = self.project.vms[0]
+        vm.validation_commands = [
+            {
+                'command': 'systemctl is-active nginx',
+                'match': 'active',
+                'enabled': True,
+                'timeout_seconds': 7,
+            }
+        ]
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.agent_exec.side_effect = [
+                {'exitcode': None, 'stdout': 'active', 'stderr': '', 'timed_out': True},
+            ]
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                    'validateOnly': True,
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json()
+            ran = payload.get('ran') or []
+            self.assertEqual(len(ran), 1)
+            validation = ran[0].get('validation') or {}
+            self.assertTrue(validation.get('all_passed'))
+            results = validation.get('results') or []
+            self.assertEqual(len(results), 1)
+            self.assertTrue(results[0].get('passed'))
+            self.assertTrue(results[0].get('timed_out'))
+            self.assertEqual(payload.get('errors'), [])
+            self.assertEqual(mock_client.agent_exec.call_count, 1)
+            first_kwargs = mock_client.agent_exec.call_args_list[0].kwargs
+            self.assertTrue(first_kwargs.get('return_partial_on_timeout'))
+
+    def test_run_stored_cmds_validation_requires_all_pass(self):
+        vm = self.project.vms[0]
+        vm.validation_commands = [
+            {
+                'command': 'systemctl is-active nginx',
+                'match': 'active',
+                'enabled': True,
+                'timeout_seconds': 7,
+            },
+            {
+                'command': 'cat /tmp/health.txt',
+                'match': 'OK',
+                'enabled': True,
+                'timeout_seconds': 7,
+            },
+        ]
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.agent_exec.side_effect = [
+                {'exitcode': 0, 'stdout': 'active', 'stderr': ''},
+                {'exitcode': 0, 'stdout': 'DOWN', 'stderr': ''},
+            ]
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                    'validateOnly': True,
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json()
+            ran = payload.get('ran') or []
+            self.assertEqual(len(ran), 1)
+            validation = ran[0].get('validation') or {}
+            self.assertFalse(validation.get('all_passed'))
+            results = validation.get('results') or []
+            self.assertEqual(len(results), 2)
+            self.assertTrue(results[0].get('passed'))
+            self.assertFalse(results[1].get('passed'))
+            errors = payload.get('errors') or []
+            self.assertTrue(any('validation regex did not match output' in str(err.get('reason', '')) for err in errors if isinstance(err, dict)))
+
+    def test_run_stored_cmds_validate_only_runs_without_stored_commands(self):
+        vm = self.project.vms[0]
+        vm.stored_commands = []
+        vm.validation_commands = [
+            {
+                'command': 'systemctl is-active nginx',
+                'match': 'active',
+                'enabled': True,
+                'timeout_seconds': 7,
+            }
+        ]
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            runtime_store = _RuntimeStoreStub()
+            stack.enter_context(patch('app.routes.api._runtime_store', return_value=runtime_store))
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.agent_exec.return_value = {'exitcode': 0, 'stdout': 'active', 'stderr': ''}
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                    'validateOnly': True,
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json()
+            ran = payload.get('ran') or []
+            self.assertEqual(len(ran), 1)
+            self.assertEqual(ran[0].get('count'), 0)
+            self.assertEqual(ran[0].get('steps'), 0)
+            self.assertTrue(ran[0].get('validate_only'))
+            validation = ran[0].get('validation') or {}
+            self.assertTrue(validation.get('all_passed'))
+            results = validation.get('results') or []
+            self.assertEqual(len(results), 1)
+            self.assertTrue(results[0].get('passed'))
+            self.assertNotIn('requested_commands', payload)
+            self.assertNotIn('requested_command', payload)
+            zip_info = payload.get('outputs_zip')
+            self.assertIsNotNone(zip_info, 'expected outputs_zip in response')
+            summary = self._decode_outputs_zip(zip_info)
+            command_list = summary.get('commands') or []
+            self.assertEqual(len(command_list), 1)
+            self.assertEqual(command_list[0].get('command'), 'systemctl is-active nginx')
+            self.assertEqual(mock_client.agent_exec.call_count, 1)
+            self.assertTrue(mock_client.agent_exec.call_args.kwargs.get('return_partial_on_timeout'))
+            self.assertEqual(len(runtime_store.calls), 1)
+            self.assertEqual(runtime_store.calls[0]['project_id'], self.project.id)
+            self.assertEqual(runtime_store.calls[0]['vm_name'], self.target_name)
+            self.assertTrue(runtime_store.calls[0]['passed'])
 
 
 if __name__ == '__main__':

@@ -119,6 +119,59 @@ class VmUserAccessibilityApiTests(unittest.TestCase):
         self.assertFalse(reconcile_mock.call_args.kwargs.get('accessible'))
         self.assertTrue(reconcile_mock.call_args.kwargs.get('rollback_enabled'))
 
+    def test_create_can_skip_pool_and_acl_sync_when_disabled(self):
+        pid = self._create_project()
+
+        proj_resp = self.client.patch(f'/api/projects/{pid}', json={
+            'instances': 1,
+            'tag': '-set-',
+            'proxmox_url': 'https://proxmox.local',
+            'credentials': [{'username': 'alice', 'password': 'password1'}],
+        })
+        self.assertEqual(proj_resp.status_code, 200)
+
+        add_resp = self.client.post(f'/api/projects/{pid}/vms', json={'name': 'web'})
+        self.assertEqual(add_resp.status_code, 200)
+
+        vm_resp = self.client.patch(f'/api/projects/{pid}/vms/web', json={
+            'vmid': 900,
+            'viewable_to_user': True,
+        })
+        self.assertEqual(vm_resp.status_code, 200)
+
+        with patch('app.routes.api.ProxmoxClient') as mock_client_cls, \
+             patch('app.routes.api._reconcile_vm_access_roles') as reconcile_mock, \
+             patch('app.routes.api.random.randint', return_value=10001):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.list_nodes.return_value = [{'node': 'node1'}]
+            mock_client.list_qemu_vms.return_value = [{'vmid': 900, 'name': 'web-template', 'template': 1}]
+            mock_client.clone_qemu.return_value = 'UPID:clone'
+            mock_client.list_qemu_snapshots.return_value = []
+            mock_client.get_qemu_config.return_value = {}
+            mock_client.set_qemu_options.return_value = None
+            mock_client.list_network.return_value = []
+            mock_client.list_snapshots_qemu.return_value = [{'name': 'post-clone'}]
+            mock_client.snapshot_qemu.return_value = 'UPID:snapshot'
+
+            create_resp = self.client.post(
+                f'/api/projects/{pid}/instances/actions/create',
+                json={
+                    'targets': [{'index': 1, 'name': 'web'}],
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'verifySSL': False,
+                    'applyScenario': False,
+                    'syncUserAccess': False,
+                },
+            )
+
+        self.assertEqual(create_resp.status_code, 200)
+        reconcile_mock.assert_not_called()
+        mock_client.get_pool.assert_not_called()
+        mock_client.get_user.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

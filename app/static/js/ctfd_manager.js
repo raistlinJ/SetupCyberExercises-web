@@ -733,7 +733,7 @@ function ctfdShowAutocompleteDropdown(input, filter) {
       border-bottom: 1px solid #f0f0f0;
       ${isSelected ? 'background: #e9ecef;' : ''}
     ">
-      <div style="font-weight: 500; color: #495057;"><code style="background: #f8f9fa; padding: 2px 6px; border-radius: 3px;">{{${escHtml(v)}}}</code></div>
+      <div style="font-weight: 500; color: #495057;"><code style="background: #f8f9fa; padding: 2px 6px; border-radius: 3px;">{{${escHtml(v)}} */}</code></div>
       <div style="font-size: 0.8em; color: #6c757d; margin-top: 2px;">${escHtml(desc)}</div>
     </div>`;
   }).join('');
@@ -774,7 +774,7 @@ function ctfdInsertAutocompleteVariable(varName) {
   const value = input.value || '';
   const cursorPos = input.selectionStart || value.length;
 
-  // Find the position of the {{ that triggered autocomplete
+  // Find the position of the /* /* {{ that triggered autocomplete
   const beforeCursor = value.substring(0, cursorPos);
   const matchIndex = beforeCursor.lastIndexOf('{{');
 
@@ -786,7 +786,7 @@ function ctfdInsertAutocompleteVariable(varName) {
   // Replace from {{ to cursor with the complete variable
   const beforeMatch = value.substring(0, matchIndex);
   const afterCursor = value.substring(cursorPos);
-  const insertion = `{{${varName}}}`;
+  const insertion = `{{${varName}} */}`;
 
   input.value = beforeMatch + insertion + afterCursor;
 
@@ -4723,13 +4723,14 @@ async function ctfdLoadProjectById(pid, opts) {
       return;
     }
     if (abortIfStale()) return;
-    PROJ = proj; if (info) info.textContent = '';
+    const currentProject = proj;
+    PROJ = currentProject; if (info) info.textContent = '';
     try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
     ctfdStopCountdown(false);
     CTFD_LAST_CHALLENGES_STATE = null;
     // Restore UI state for this project
     try {
-      const st = readCtfdUiState(PROJ.id) || {};
+      const st = readCtfdUiState(currentProject.id) || {};
       CTFD_FILTER_TEXT = String(st.filterText || '');
       CTFD_FILTER_IS_REGEX = !!st.filterIsRegex;
       CTFD_SHOW_PASSWORDS = !!st.showPasswords;
@@ -4745,18 +4746,18 @@ async function ctfdLoadProjectById(pid, opts) {
       const reg = document.getElementById('ctfd-filter-regex'); if (reg) reg.checked = CTFD_FILTER_IS_REGEX;
     } catch { }
     if (abortIfStale()) return;
-    setProgress(`Step 2/${totalSteps}: Rendering table…`, 50, true, `Rendering the CTFd table for ${PROJ?.name || id}…`);
+    setProgress(`Step 2/${totalSteps}: Rendering table…`, 50, true, `Rendering the CTFd table for ${currentProject?.name || id}…`);
     // Load column visibility and reflect Columns dropdown
     try {
-      CTFD_COLS = readCtfdCols(PROJ.id);
+      CTFD_COLS = readCtfdCols(currentProject.id);
       const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last'];
       ids.forEach(cid => { const el = document.getElementById(`ctfd-col-${cid}`); if (el) el.checked = !!CTFD_COLS[cid]; });
     } catch { }
     if (!keepExistingTableVisible) {
-      renderCtfdTable(PROJ);
+      renderCtfdTable(currentProject);
       try { ctfdCacheSnapshot('single'); } catch { }
     }
-    setProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true, `Initializing table controls for ${PROJ?.name || id}…`);
+    setProgress(`Step 2/${totalSteps}: Initializing tooltips…`, 60, true, `Initializing table controls for ${currentProject?.name || id}…`);
     if (abortIfStale()) return;
     try {
       if (window.bootstrap) {
@@ -4767,43 +4768,44 @@ async function ctfdLoadProjectById(pid, opts) {
     } catch { }
     if (abortIfStale()) return;
     // Progressive per-user existence check with x/y
-    const creds = Array.isArray(PROJ.credentials) ? PROJ.credentials : [];
+    const creds = Array.isArray(currentProject.credentials) ? currentProject.credentials : [];
     const usernames = creds.map(c => String(c?.username || '').trim()).filter(Boolean);
     const total = usernames.length;
-    const sess = await hydrateCtfdCredsFromPersisted(PROJ.id);
+    const sess = await hydrateCtfdCredsFromPersisted(currentProject.id);
+    if (abortIfStale()) return;
     const hasValidatedAuth = !!(sess?.validated && (sess.token || (sess.username && sess.password)));
     if (!hasValidatedAuth) {
-      try { shell?.logInfo?.(`CTFd: skipping state refresh for ${PROJ.name || PROJ.id}; credentials not validated.`); } catch { }
-      setProgress('CTFd credentials not validated. Showing configuration only.', 95, false, `CTFd credentials for ${PROJ?.name || id} are not validated. Showing configuration only.`);
+      try { shell?.logInfo?.(`CTFd: skipping state refresh for ${currentProject.name || currentProject.id}; credentials not validated.`); } catch { }
+      setProgress('CTFd credentials not validated. Showing configuration only.', 95, false, `CTFd credentials for ${currentProject?.name || id} are not validated. Showing configuration only.`);
       try { ctfdHideSyncedProgress({ hideDialog: showProgressDialog }); } catch { }
       updateCtfdControlsEnabled();
       return;
     }
-    const baseUrl = (PROJ.challenge_url || '').trim();
-    const port = Number(PROJ.challenge_port || 443);
-    const verifySSL = ctfdCurrentVerifySSL(PROJ);
+    const baseUrl = (currentProject.challenge_url || '').trim();
+    const port = Number(currentProject.challenge_port || 443);
+    const verifySSL = ctfdCurrentVerifySSL(currentProject);
     const payloadBase = { baseUrl, port, token: sess.token || '', verifySSL };
-    const metaMap = total > 0 ? { ...ctfdProjectMetaEntries(PROJ?.id || id, CTFD_USER_META) } : {};
+    const metaMap = total > 0 ? { ...ctfdProjectMetaEntries(currentProject?.id || id, CTFD_USER_META) } : {};
     let receivedUserState = total === 0;
     // Optimization: perform a single bulk users_check (omit 'only') instead of one request per username.
     // Fallback: if bulk fails, revert to legacy per-username loop to preserve functionality.
     let bulkSucceeded = false;
     if (total === 0) {
-      setProgress(`Step 3/${totalSteps}: No users to check`, 85, false, `No configured CTFd users were found for ${PROJ?.name || id}.`);
+      setProgress(`Step 3/${totalSteps}: No users to check`, 85, false, `No configured CTFd users were found for ${currentProject?.name || id}.`);
     } else {
-      setProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, 72, true, `Checking CTFd users for ${PROJ?.name || id} with a bulk request…`);
+      setProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, 72, true, `Checking CTFd users for ${currentProject?.name || id} with a bulk request…`);
       let animPct = 72;
       animTimer = setInterval(() => {
         try {
           animPct = Math.min(animPct + 2, 88);
-          setProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, animPct, true, `Checking CTFd users for ${PROJ?.name || id} with a bulk request…`);
+          setProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, animPct, true, `Checking CTFd users for ${currentProject?.name || id} with a bulk request…`);
         } catch { }
       }, 500);
       try {
         let resp;
-        await runQueued(`Check CTFd users for ${PROJ?.name || PROJ?.id || ''}`, async () => {
-          resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, { ...payloadBase });
-        }, { projectId: PROJ?.id });
+        await runQueued(`Check CTFd users for ${currentProject?.name || currentProject?.id || ''}`, async () => {
+          resp = await http('POST', `/api/projects/${currentProject.id}/ctfd/users_check`, { ...payloadBase });
+        }, { projectId: currentProject?.id });
         if (abortIfStale()) return;
         if (animTimer) { clearInterval(animTimer); animTimer = null; }
         if (resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
@@ -4833,7 +4835,7 @@ async function ctfdLoadProjectById(pid, opts) {
           };
         });
         bulkSucceeded = true;
-        setProgress(`Step 3/${totalSteps}: Users loaded (${list.length})`, 90, false, `Loaded ${list.length} CTFd user state entr${list.length === 1 ? 'y' : 'ies'} for ${PROJ?.name || id}.`);
+        setProgress(`Step 3/${totalSteps}: Users loaded (${list.length})`, 90, false, `Loaded ${list.length} CTFd user state entr${list.length === 1 ? 'y' : 'ies'} for ${currentProject?.name || id}.`);
       } catch (bulkErr) {
         try { console.warn('CTFd users bulk check failed; falling back to per-user mode:', bulkErr); } catch { }
         if (animTimer) { try { clearInterval(animTimer); } catch { } animTimer = null; }
@@ -4844,14 +4846,14 @@ async function ctfdLoadProjectById(pid, opts) {
         let done = 0;
         const baseStart = 70, baseEnd = 90;
         const computePercent = () => { if (total <= 0) return baseEnd; const frac = Math.min(1, Math.max(0, done / total)); return Math.floor(baseStart + frac * (baseEnd - baseStart)); };
-        setProgress(`Step 3/${totalSteps}: Checking CTFd users (0/${total})…`, computePercent(), true, `Checking CTFd users for ${PROJ?.name || id}: 0/${total} complete…`);
+        setProgress(`Step 3/${totalSteps}: Checking CTFd users (0/${total})…`, computePercent(), true, `Checking CTFd users for ${currentProject?.name || id}: 0/${total} complete…`);
         for (const name of usernames) {
           if (abortIfStale()) return;
           try {
             let resp;
             await runQueued(`Check CTFd user ${name}`, async () => {
-              resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, { ...payloadBase, only: [name] });
-            }, { projectId: PROJ?.id });
+              resp = await http('POST', `/api/projects/${currentProject.id}/ctfd/users_check`, { ...payloadBase, only: [name] });
+            }, { projectId: currentProject?.id });
             if (abortIfStale()) return;
             const list = Array.isArray(resp?.users) ? resp.users : [];
             if (!categoryPayload && resp && Object.prototype.hasOwnProperty.call(resp, 'category_firsts')) {
@@ -4880,30 +4882,30 @@ async function ctfdLoadProjectById(pid, opts) {
             });
           } catch (e) { /* continue */ }
           done += 1;
-          setProgress(`Step 3/${totalSteps}: Checking CTFd users (${done}/${total})…`, computePercent(), true, `Checking CTFd users for ${PROJ?.name || id}: ${done}/${total} complete…`);
+          setProgress(`Step 3/${totalSteps}: Checking CTFd users (${done}/${total})…`, computePercent(), true, `Checking CTFd users for ${currentProject?.name || id}: ${done}/${total} complete…`);
         }
       }
     }
     if (abortIfStale()) return;
     if (total > 0 && !receivedUserState) {
-      setProgress(`Step 3/${totalSteps}: Keeping previous state…`, 95, false, `No fresh CTFd user state was returned for ${PROJ?.name || id}. Keeping the previous table values visible.`);
-      renderCtfdTable(PROJ);
+      setProgress(`Step 3/${totalSteps}: Keeping previous state…`, 95, false, `No fresh CTFd user state was returned for ${currentProject?.name || id}. Keeping the previous table values visible.`);
+      renderCtfdTable(currentProject);
       try { ctfdCacheSnapshot('single'); } catch { }
       return;
     }
-    ctfdPersistLiveProjectMeta(PROJ?.id, metaMap);
-    ctfdApplyUserMeta(PROJ?.id, metaMap);
+    ctfdPersistLiveProjectMeta(currentProject?.id, metaMap);
+    ctfdApplyUserMeta(currentProject?.id, metaMap);
     if (categoryPayload !== null) {
-      ctfdHandleCategoryFirsts(PROJ?.id, categoryPayload);
+      ctfdHandleCategoryFirsts(currentProject?.id, categoryPayload);
     }
     if (abortIfStale()) return;
-    setProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false, `Applying refreshed CTFd user state to ${PROJ?.name || id}…`);
-    renderCtfdTable(PROJ);
+    setProgress(`Step 3/${totalSteps}: Applying updates…`, 95, false, `Applying refreshed CTFd user state to ${currentProject?.name || id}…`);
+    renderCtfdTable(currentProject);
     try { ctfdCacheSnapshot('single'); } catch { }
-    setProgress('Done', 100, false, `Refresh complete for ${PROJ?.name || id}.`);
+    setProgress('Done', 100, false, `Refresh complete for ${currentProject?.name || id}.`);
     if (abortIfStale()) return;
-    ctfdMarkLiveRefreshed(PROJ?.id || id);
-    try { await ctfdLoadSettings(); } catch { }
+    ctfdMarkLiveRefreshed(currentProject?.id || id);
+    try { await ctfdLoadSettings(currentProject); } catch { }
   } catch (e) {
     if (!aborted) {
       try { shell.logError(`CTFd Refresh failed: ${e?.message || e}`); } catch { }
@@ -5453,19 +5455,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // --- CTFd Settings: load + update ---
-async function ctfdLoadSettings() {
-  if (!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id) || {};
+async function ctfdLoadSettings(projectOverride) {
+  const project = projectOverride || PROJ || null;
+  const projectId = String(project?.id || '').trim();
+  if (!projectId) return;
+  const projectName = String(project?.name || projectId);
+  const selectionChanged = () => {
+    const current = String(ctfdCurrentPid() || '').trim();
+    return !!(current && current !== projectId);
+  };
+  const sess = readCtfdCreds(projectId) || {};
   if (!(sess?.validated && (sess.token || (sess.username && sess.password)))) return;
-  const baseUrl = (PROJ.challenge_url || '').trim();
-  const port = Number(PROJ.challenge_port || 443);
-  const verifySSL = ctfdCurrentVerifySSL(PROJ);
+  const baseUrl = (project.challenge_url || '').trim();
+  const port = Number(project.challenge_port || 443);
+  const verifySSL = ctfdCurrentVerifySSL(project);
   const payload = { baseUrl, port, token: sess.token || '', verifySSL };
   try {
     let res;
-    await runQueued(`CTFd load settings for ${PROJ?.name || PROJ?.id || ''}`, async () => {
-      res = await http('POST', `/api/projects/${PROJ.id}/ctfd/settings`, payload);
-    }, { projectId: PROJ?.id });
+    await runQueued(`CTFd load settings for ${projectName}`, async () => {
+      res = await http('POST', `/api/projects/${projectId}/ctfd/settings`, payload);
+    }, { projectId });
+    if (selectionChanged()) return;
     const st = res?.settings || {};
     const ch = document.getElementById('ctfd-toggle-chals');
     if (ch) {

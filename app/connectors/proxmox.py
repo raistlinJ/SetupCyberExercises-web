@@ -459,7 +459,15 @@ class ProxmoxClient:
         return out
 
     # --- QEMU Guest Agent helpers ---
-    def agent_exec(self, node: str, vmid: int, command: str, shell: bool = True, timeout: int = 300) -> Dict[str, Any]:
+    def agent_exec(
+        self,
+        node: str,
+        vmid: int,
+        command: str,
+        shell: bool = True,
+        timeout: int = 300,
+        return_partial_on_timeout: bool = False,
+    ) -> Dict[str, Any]:
         """Execute a command inside the guest via QEMU Guest Agent and wait for completion.
         Returns dict with keys: exitcode, stdout, stderr.
         """
@@ -514,6 +522,43 @@ class ProxmoxClient:
         while True:
             elapsed = _t.time() - start
             if elapsed > timeout:
+                if return_partial_on_timeout:
+                    params = {'pid': pid}
+                    stdout = ''
+                    stderr = ''
+                    exitcode = None
+                    try:
+                        rs = s.get(status_url, params=params, timeout=10)
+                        if rs.status_code < 400:
+                            st = rs.json().get('data', {}) if rs.content else {}
+                            stdout = st.get('out-data') or ''
+                            stderr = st.get('err-data') or ''
+                            exitcode_raw = st.get('exitcode')
+                            if exitcode_raw not in (None, ''):
+                                try:
+                                    exitcode = int(str(exitcode_raw).strip())
+                                except Exception:
+                                    try:
+                                        exitcode = int(float(str(exitcode_raw).strip()))
+                                    except Exception:
+                                        exitcode = None
+                    except Exception:
+                        pass
+                    try:
+                        stdout = stdout if isinstance(stdout, str) else str(stdout)
+                    except Exception:
+                        stdout = ''
+                    try:
+                        stderr = stderr if isinstance(stderr, str) else str(stderr)
+                    except Exception:
+                        stderr = ''
+                    logger.warning("guest agent exec timeout node=%s vmid=%s pid=%s", node, vmid, pid)
+                    return {
+                        'exitcode': exitcode,
+                        'stdout': stdout,
+                        'stderr': stderr,
+                        'timed_out': True,
+                    }
                 raise RuntimeError("agent exec timed out")
             remaining = max(1, timeout - int(elapsed))
             wait_secs = min(remaining, 15)

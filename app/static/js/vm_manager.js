@@ -12,6 +12,7 @@ let ALL_PROJECTS = [];
 let SELECTED_PIDS = [];
 let FILTER_TEXT = '';
 let FILTER_IS_REGEX = false;
+let FILTER_AGENT_ON = false;
 let SELECTED_ROWS = new Set();
 let SORT_STATE = { key: 'index', dir: 'asc' };
 let SHOW_PASSWORDS = false;
@@ -22,6 +23,7 @@ let ACTION_RUN_ID = 0;
 let FIX_CREDS_IN_PROGRESS = false;
 const VM_LIVE_REFRESHED_PIDS = new Set();
 let VM_LOAD_REQUEST_TOKEN = 0;
+const VM_MULTI_REFRESH_PROMISES = new Map();
 
 function _coerceEnabled(value, def = true) {
   if (value === null || value === undefined) return def;
@@ -208,6 +210,7 @@ const VM_STATUS_PHASE_LABELS = Object.freeze({
   deleting: 'Deleting',
   restoring: 'Restoring',
   applying: 'Applying',
+  validation: 'Validating',
 });
 
 function showVmInlineProgress(label, percent = 20, detail) {
@@ -241,11 +244,35 @@ function hideVmInlineProgress() {
   } catch { }
 }
 
-function deriveStatusProgressCounts(status) {
+function deriveStatusCountParts(status) {
   const step = Number(status?.step);
   const total = Number(status?.total_steps);
-  if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0) return '';
-  return `${Math.max(0, Math.min(total, step))}/${total}`;
+  if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0) return null;
+  return { current: Math.max(0, Math.min(total, step)), total };
+}
+
+function deriveStatusProgressCounts(status, style = 'words') {
+  const parts = deriveStatusCountParts(status);
+  if (!parts) return '';
+  if (style === 'slash') return `${parts.current} / ${parts.total}`;
+  if (style === 'compact') return `${parts.current}/${parts.total}`;
+  return `${parts.current} of ${parts.total}`;
+}
+
+function deriveStatusCountStyle(status) {
+  const action = String(status?.action || '').trim().toLowerCase();
+  const phase = String(status?.phase || '').trim().toLowerCase();
+  if (action === 'start' || phase === 'starting') return 'slash';
+  return 'words';
+}
+
+function statusMessageHasCounts(message, status) {
+  const text = String(message || '').trim();
+  if (!text) return false;
+  const compact = deriveStatusProgressCounts(status, 'compact');
+  const slash = deriveStatusProgressCounts(status, 'slash');
+  const words = deriveStatusProgressCounts(status, 'words');
+  return !!((compact && text.includes(compact)) || (slash && text.includes(slash)) || (words && text.includes(words)));
 }
 
 function deriveStatusPhaseLabel(status) {
@@ -258,7 +285,7 @@ function deriveStatusPhaseLabel(status) {
 function deriveStatusProgressLabel(status) {
   if (!status) return '';
   const phaseLabel = deriveStatusPhaseLabel(status);
-  const counts = deriveStatusProgressCounts(status);
+  const counts = deriveStatusProgressCounts(status, deriveStatusCountStyle(status));
   const progress = Number(status?.progress);
   if (phaseLabel && counts) return `${phaseLabel} ${counts}`;
   if (counts) return counts;
@@ -269,7 +296,7 @@ function deriveStatusProgressLabel(status) {
 function deriveStatusDetailMessage(status) {
   if (!status) return '';
   const base = typeof status.message === 'string' ? status.message.trim() : '';
-  const counts = deriveStatusProgressCounts(status);
+  const counts = deriveStatusProgressCounts(status, deriveStatusCountStyle(status));
   const phaseLabel = deriveStatusPhaseLabel(status);
   const detail = (status && status.detail) || {};
   const kind = typeof detail.kind === 'string' ? detail.kind.toLowerCase() : '';
@@ -309,11 +336,57 @@ function deriveStatusDetailMessage(status) {
     if (vmLabel) return `${prefix} on ${vmLabel}`;
     return prefix;
   }
-  if (base) return counts && !base.includes(counts) ? `${base} (${counts})` : base;
+  if (kind === 'validation') {
+    const cmd = String(detail.command || '').trim();
+    const match = String(detail.match || '').trim();
+    const timeout = Number(detail.timeout_seconds);
+    const seqBits = [];
+    const commandNumber = Number(detail.command_number || detail.step);
+    const commandTotal = Number(detail.command_total || status?.total_steps);
+    if (Number.isFinite(commandNumber) && commandNumber > 0) {
+      let seq = `check ${commandNumber}`;
+      if (Number.isFinite(commandTotal) && commandTotal > 0) seq += `/${commandTotal}`;
+      seqBits.push(seq);
+    }
+    const result = String(detail.result || '').trim().toLowerCase();
+    if (result) seqBits.push(result);
+    const timedOut = !!detail.timed_out;
+    if (timedOut) seqBits.push('timed out');
+    if (Number.isFinite(timeout) && timeout > 0) seqBits.push(`timeout ${timeout}s`);
+    if (match) seqBits.push(`match /${match}/`);
+    const reason = String(detail.reason || '').trim();
+    const preview = String(detail.stdout_preview || detail.stderr_preview || '').trim();
+    const prefix = seqBits.length ? `Validating ${seqBits.join(' · ')}` : 'Validating';
+    let msg = prefix;
+    if (vmLabel) msg += ` on ${vmLabel}`;
+    if (cmd) msg += `: ${cmd}`;
+    if (reason) msg += ` — ${reason}`;
+    if (preview) msg += ` — ${preview}`;
+    return msg;
+  }
+  if (base) return counts && !statusMessageHasCounts(base, status) ? `${base} (${counts})` : base;
   if (phaseLabel && counts) return `${phaseLabel} ${counts}`;
   if (counts && vmLabel) return `${vmLabel} (${counts})`;
   if (counts) return counts;
   return '';
+}
+
+const VM_BATCH_STATUS_ACTIONS = new Set([
+  'delete',
+  'start',
+  'unlock',
+  'suspend',
+  'poweroff',
+  'snapshot',
+  'restore',
+  'run_startup_cmds',
+  'run_stored_cmds',
+  'validate',
+  'apply_scenario',
+]);
+
+function vmActionShouldPollStatus(action) {
+  return VM_BATCH_STATUS_ACTIONS.has(String(action || '').trim().toLowerCase());
 }
 
 function startVmActionStatusPolling(pid, options = {}) {
@@ -881,15 +954,38 @@ async function setupProjectsSelector() {
 }
 function vmIsMulti() { return Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1; }
 function getActivePids() { if (vmIsMulti()) return canonicalPidList(SELECTED_PIDS.slice()); const cur = getCurrentPid(); return cur ? [cur] : []; }
-function vmClearFilter() { try { const el = document.getElementById('vm-filter'); if (el) el.value = ''; FILTER_TEXT = ''; } catch { } try { if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); } }
+function vmRowHasAgentEnabled(detail) {
+  try {
+    if (!detail || typeof detail !== 'object') return false;
+    if (!Object.prototype.hasOwnProperty.call(detail, 'qemu_agent_enabled')) return false;
+    return !!detail.qemu_agent_enabled;
+  } catch {
+    return false;
+  }
+}
+
+function vmClearFilter() {
+  try {
+    const el = document.getElementById('vm-filter');
+    if (el) el.value = '';
+    FILTER_TEXT = '';
+  } catch { }
+  try {
+    const agentEl = document.getElementById('vm-filter-agent-on');
+    if (agentEl) agentEl.checked = false;
+    FILTER_AGENT_ON = false;
+  } catch { }
+  try { if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
+}
 
 async function refreshVmView(opts) {
   const forceRefresh = (() => {
     try {
       if (typeof opts === 'boolean') return !!opts;
-      return !!(opts && opts.forceRefresh);
+      if (opts && Object.prototype.hasOwnProperty.call(opts, 'forceRefresh')) return !!opts.forceRefresh;
+      return true;
     } catch {
-      return false;
+      return true;
     }
   })();
   const showProgressDialog = (() => {
@@ -905,6 +1001,12 @@ async function refreshVmView(opts) {
   const startPids = getActivePids();
   const pids = startPids.slice();
   if (pids.length <= 1) { const id = pids[0]; if (!id) return; await vmLoadProjectById(id); return; }
+  const refreshKey = `multi::${forceRefresh ? 'force' : 'normal'}::${canonicalPidList(pids).join('|')}`;
+  const activeRefresh = VM_MULTI_REFRESH_PROMISES.get(refreshKey);
+  if (activeRefresh) {
+    return activeRefresh;
+  }
+  const refreshTask = (async () => {
   const byId = {}; (ALL_PROJECTS || []).forEach(p => { const key = canonicalPid(p.id); if (key) byId[key] = p; });
   const ok = []; const skipped = [];
   const eligibility = await Promise.all(pids.map(async (pid) => {
@@ -1127,6 +1229,15 @@ async function refreshVmView(opts) {
   if (showProgressDialog) {
     try { hideActionProgress(); } catch { }
   }
+  })();
+  VM_MULTI_REFRESH_PROMISES.set(refreshKey, refreshTask);
+  try {
+    return await refreshTask;
+  } finally {
+    if (VM_MULTI_REFRESH_PROMISES.get(refreshKey) === refreshTask) {
+      VM_MULTI_REFRESH_PROMISES.delete(refreshKey);
+    }
+  }
 }
 
 function renderMergedVmTable(rows) {
@@ -1147,8 +1258,12 @@ function renderMergedVmTable(rows) {
       filtered = allRows.filter(r => { const d = r.detail || {}; const parts = [r.project, r.vmName, r.uname, String(r.status || ''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.power_state) parts.push(String(d.power_state)); if (d.qmp_state) parts.push(String(d.qmp_state)); if (d.lock) parts.push(String(d.lock)); if (d.node) parts.push(String(d.node)); if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); return parts.join(' ').toLowerCase().includes(f); });
     }
   }
+  if (FILTER_AGENT_ON) {
+    filtered = filtered.filter(r => vmRowHasAgentEnabled(r.detail));
+  }
   if (!filtered.length) {
-    const reason = f ? 'No VMs match the current filter.' : 'No VM entries were returned for the selected projects.';
+    const hasFilter = !!f || !!FILTER_AGENT_ON;
+    const reason = hasFilter ? 'No VMs match the current filter.' : 'No VM entries were returned for the selected projects.';
     host.innerHTML = `<div class="alert alert-warning mb-0">${reason}</div>`;
     return;
   }
@@ -1245,7 +1360,24 @@ function renderMergedVmTable(rows) {
         const tid = d && d.template_id != null ? `#${d.template_id}` : '';
         const tn = d && d.template_name ? escHtml(d.template_name) : '';
         const both = [tn, tid].filter(Boolean).join(' ');
-        return both || '—';
+        const hasValidationCommands = resolveValidationConfiguredFlag(r, d);
+        if (!hasValidationCommands) {
+          return `${both || '—'}<div class="mt-1"><span class="d-inline-flex align-items-center gap-1 text-muted" title="Validation commands not configured"><i class="bi bi-robot"></i><i class="bi bi-dash-circle-fill small"></i></span></div>`;
+        }
+        const agentEnabled = !!(d && d.qemu_agent_enabled);
+        const validationState = String(d?.qemu_agent_validation_state || '').trim().toLowerCase();
+        const agentValidated = validationState ? validationState === 'passed' : !!(d && d.qemu_agent_validated);
+        let agentIcon = '';
+        if (!agentEnabled) {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-secondary" title="QEMU Guest Agent off"><i class="bi bi-robot"></i><i class="bi bi-slash-circle-fill small"></i></span>';
+        } else if (agentValidated) {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-success" title="QEMU Guest Agent on and validated"><i class="bi bi-robot"></i><i class="bi bi-check-circle-fill small"></i></span>';
+        } else if (validationState === 'failed') {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-danger" title="QEMU guest agent on, validation failed"><i class="bi bi-robot"></i><i class="bi bi-x-circle-fill small"></i></span>';
+        } else {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-warning" title="QEMU Guest Agent on, not validated"><i class="bi bi-robot"></i><i class="bi bi-exclamation-circle-fill small"></i></span>';
+        }
+        return `${both || '—'}<div class="mt-1">${agentIcon}</div>`;
       })();
       const effAccess = (r.user_access !== undefined && r.user_access !== null) ? _coerceEnabled(r.user_access, false) : _coerceEnabled(r.viewable_to_user, true);
       const accessIcon = effAccess
@@ -1499,9 +1631,10 @@ async function vmRefresh(opts) {
   const forceRefresh = (() => {
     try {
       if (typeof opts === 'boolean') return !!opts;
-      return !!(opts && opts.forceRefresh);
+      if (opts && Object.prototype.hasOwnProperty.call(opts, 'forceRefresh')) return !!opts.forceRefresh;
+      return true;
     } catch {
-      return false;
+      return true;
     }
   })();
   const showProgressDialog = (() => {
@@ -1514,10 +1647,17 @@ async function vmRefresh(opts) {
   })();
   if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) { try { await refreshVmView({ forceRefresh, showProgressDialog }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
   if (!PROJ) { alert('Load a project first.'); return; }
-  const label = `Refresh VMs for project ${PROJ?.name || PROJ?.id || ''}`.trim();
+  const refreshProject = {
+    id: PROJ.id,
+    name: PROJ.name,
+    proxmox_url: PROJ.proxmox_url,
+    proxmox_api_port: PROJ.proxmox_api_port,
+    proxmox_verify_ssl: PROJ.proxmox_verify_ssl,
+  };
+  const label = `Refresh VMs for project ${refreshProject?.name || refreshProject?.id || ''}`.trim();
   await runQueued(label, async () => {
     // Capture the project ID at the start to prevent race conditions when switching projects
-    const refreshPid = PROJ.id;
+    const refreshPid = refreshProject.id;
     const setProg = (pct, text, detail) => {
       try { updateVmInlineProgress(pct, text, detail); } catch { }
       if (showProgressDialog) {
@@ -1538,9 +1678,9 @@ async function vmRefresh(opts) {
       const body = {
         username: sess.username || undefined,
         password: sess.password || undefined,
-        baseUrl: PROJ.proxmox_url || undefined,
-        apiPort: PROJ.proxmox_api_port || undefined,
-        verifySSL: PROJ.proxmox_verify_ssl !== false,
+        baseUrl: refreshProject.proxmox_url || undefined,
+        apiPort: refreshProject.proxmox_api_port || undefined,
+        verifySSL: refreshProject.proxmox_verify_ssl !== false,
         forceRefresh: forceRefresh || undefined,
       };
       try { shell.step('Prepared refresh body'); } catch { }
@@ -1580,8 +1720,8 @@ async function vmRefresh(opts) {
       }
     }
   }, {
-    projectId: PROJ?.id,
-    dedupeKey: PROJ && PROJ.id ? `vm-refresh::${PROJ.id}` : label,
+    projectId: refreshProject?.id,
+    dedupeKey: refreshProject && refreshProject.id ? `vm-refresh::${refreshProject.id}` : label,
     exclusive: false,
     lockProject: false,
     dedupeWhileActive: true,
@@ -1899,6 +2039,9 @@ function renderVmTable(proj) {
       });
     }
   }
+  if (FILTER_AGENT_ON) {
+    filtered = filtered.filter(r => vmRowHasAgentEnabled(r.detail));
+  }
   // Sort rows (we'll sort within instance groups so credentials can be row-spanned once per instance)
   const compareRows = (a, b) => {
     const dir = SORT_STATE.dir === 'desc' ? -1 : 1;
@@ -2000,7 +2143,24 @@ function renderVmTable(proj) {
         const tid = (d && d.template_id !== undefined && d.template_id !== null) ? `#${d.template_id}` : '';
         const tn = (d && d.template_name) ? escHtml(d.template_name) : '';
         const both = [tn, tid].filter(Boolean).join(' ');
-        return both || '—';
+        const hasValidationCommands = resolveValidationConfiguredFlag(r, d);
+        if (!hasValidationCommands) {
+          return `${both || '—'}<div class="mt-1"><span class="d-inline-flex align-items-center gap-1 text-muted" title="Validation commands not configured"><i class="bi bi-robot"></i><i class="bi bi-dash-circle-fill small"></i></span></div>`;
+        }
+        const agentEnabled = !!(d && d.qemu_agent_enabled);
+        const validationState = String(d?.qemu_agent_validation_state || '').trim().toLowerCase();
+        const agentValidated = validationState ? validationState === 'passed' : !!(d && d.qemu_agent_validated);
+        let agentIcon = '';
+        if (!agentEnabled) {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-secondary" title="QEMU Guest Agent off"><i class="bi bi-robot"></i><i class="bi bi-slash-circle-fill small"></i></span>';
+        } else if (agentValidated) {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-success" title="QEMU Guest Agent on and validated"><i class="bi bi-robot"></i><i class="bi bi-check-circle-fill small"></i></span>';
+        } else if (validationState === 'failed') {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-danger" title="QEMU guest agent on, validation failed"><i class="bi bi-robot"></i><i class="bi bi-x-circle-fill small"></i></span>';
+        } else {
+          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-warning" title="QEMU Guest Agent on, not validated"><i class="bi bi-robot"></i><i class="bi bi-exclamation-circle-fill small"></i></span>';
+        }
+        return `${both || '—'}<div class="mt-1">${agentIcon}</div>`;
       })();
       const effAccess = (r.user_access !== undefined && r.user_access !== null) ? _coerceEnabled(r.user_access, false) : _coerceEnabled(r.viewable_to_user, true);
       const accessIcon = effAccess
@@ -2238,16 +2398,10 @@ window.addEventListener('DOMContentLoaded', () => {
   setTimeout(wireProxEnterSubmit, 300);
   // Prefill login modal when clicking the login button
   const loginBtn = document.getElementById('btn-prox-login');
-  if (loginBtn) loginBtn.addEventListener('click', () => {
-    prefillProxLoginModal();
-    try {
-      const modalEl = document.getElementById('proxLoginModal');
-      if (modalEl && window.bootstrap) {
-        const inst = (bootstrap.Modal.getOrCreateInstance ? bootstrap.Modal.getOrCreateInstance(modalEl) : new bootstrap.Modal(modalEl));
-        inst.show();
-      }
-    } catch { }
-  });
+  if (loginBtn && !loginBtn._toolhubBound) {
+    loginBtn.addEventListener('click', handleProxLoginClick);
+    loginBtn._toolhubBound = true;
+  }
   updateRefreshState();
   // If modal inputs are modified, immediately invalidate session creds and disable Refresh
   const wireConnInputInvalidation = () => {
@@ -2274,6 +2428,11 @@ window.addEventListener('DOMContentLoaded', () => {
     FILTER_IS_REGEX = !!e.target.checked;
     const errEl = document.getElementById('vm-filter-error');
     if (!FILTER_IS_REGEX && errEl) errEl.classList.add('d-none');
+    try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
+  });
+  const filterAgentOn = document.getElementById('vm-filter-agent-on');
+  if (filterAgentOn) filterAgentOn.addEventListener('change', (e) => {
+    FILTER_AGENT_ON = !!e.target.checked;
     try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
   });
   // Sidebar: allow pressing Enter in the project name field to create a project
@@ -2470,6 +2629,52 @@ async function prefillProxLoginModal() {
   } catch { }
 }
 
+async function handleProxLoginClick(ev) {
+  try { ev?.preventDefault?.(); } catch { }
+  const targets = canonicalPidList(getActivePids());
+  if (targets.length > 1) {
+    try { await ensureAllProjects(); } catch { }
+    return openProxLoginMultiForPids(targets);
+  }
+  const pid = targets[0] || canonicalPid(PROJ?.id);
+  if (!pid) {
+    alert('Select a project first.');
+    return;
+  }
+  return openProxLoginForPid(pid);
+}
+
+async function openProxLoginMultiForPids(pids) {
+  const targets = canonicalPidList(pids);
+  if (!targets.length) {
+    return { success: false, skipped: true, reason: 'no_targets' };
+  }
+  if (targets.length === 1) {
+    return openProxLoginForPid(targets[0]);
+  }
+  const note = document.getElementById('vm-skipped-note');
+  if (!note) {
+    let successful = 0;
+    let cancelled = false;
+    for (const pid of targets) {
+      const result = await openProxLoginForPid(pid, { showErrors: false });
+      if (result?.cancelled) {
+        cancelled = true;
+        break;
+      }
+      if (result?.success) successful += 1;
+    }
+    try { updateRefreshState(); } catch { }
+    return { success: successful > 0, completed: successful, requested: targets.length, cancelled };
+  }
+  try { note.dataset.skipped = JSON.stringify(targets); } catch { }
+  try { note.dataset.flow = 'reauth'; } catch { }
+  note.innerHTML = `<div class="alert alert-info py-2 px-3 small">Re-authenticating ${targets.length} selected project(s)…</div>`;
+  await fixAllCredsFromNote();
+  try { updateRefreshState(); } catch { }
+  return { success: true, requested: targets.length };
+}
+
 // Open Proxmox login modal for a specific project id (used by Fix Creds buttons)
 function openProxLoginForPid(pid, options = {}) {
   return new Promise(async (resolve, reject) => {
@@ -2505,19 +2710,30 @@ function openProxLoginForPid(pid, options = {}) {
         return;
       }
 
-      // Track whether credentials were successfully saved
+      // Track whether credentials were submitted and successfully saved
       let credsSaved = false;
+      let submitAttempted = false;
+      let submitFailed = false;
       const originalSaveHandler = window.saveProxCredsFromModal;
 
       // Temporarily wrap the save handler to track success
       window.saveProxCredsFromModal = async function () {
-        const result = await originalSaveHandler();
-        // Check if credentials were actually saved (session storage has them)
-        const sess = readProxCreds(proj.id) || {};
-        if (sess.username && sess.password) {
-          credsSaved = true;
+        submitAttempted = true;
+        try {
+          const result = await originalSaveHandler();
+          // Check if credentials were actually saved (session storage has them)
+          const sess = readProxCreds(proj.id) || {};
+          if (sess.username && sess.password) {
+            credsSaved = true;
+            submitFailed = false;
+          } else if (!result?.success) {
+            submitFailed = true;
+          }
+          return result;
+        } catch (error) {
+          submitFailed = true;
+          throw error;
         }
-        return result;
       };
 
       const inst = (bootstrap.Modal.getOrCreateInstance ? bootstrap.Modal.getOrCreateInstance(modalEl) : new bootstrap.Modal(modalEl));
@@ -2526,6 +2742,7 @@ function openProxLoginForPid(pid, options = {}) {
         try {
           PROJ = prev;
           window.saveProxCredsFromModal = originalSaveHandler;
+          updateRefreshState();
           // Reset modal title
           const modalTitle = document.getElementById('proxLoginModalLabel');
           if (modalTitle) modalTitle.textContent = 'Proxmox Login';
@@ -2541,7 +2758,16 @@ function openProxLoginForPid(pid, options = {}) {
       const onHidden = () => {
         cleanup();
         try { modalEl.removeEventListener('hidden.bs.modal', onHidden); } catch { }
-        resolve({ success: credsSaved, skipped: !credsSaved, projectId: pid, projectName: proj.name });
+        const cancelled = !submitAttempted && !credsSaved;
+        const failed = !!(submitFailed && !credsSaved);
+        resolve({
+          success: credsSaved,
+          skipped: !credsSaved && !cancelled && !failed,
+          cancelled,
+          failed,
+          projectId: pid,
+          projectName: proj.name,
+        });
       };
 
       // Ensure any existing modal instances are properly hidden first
@@ -2587,6 +2813,9 @@ async function fixAllCredsFromNote() {
     let completed = 0;
     let successful = 0;
     let cancelled = false;
+    const flow = (() => {
+      try { return String(note.dataset.flow || ''); } catch { return ''; }
+    })();
 
     const updateProgress = (current, status, showCancel = true) => {
       note.innerHTML = `<div class="alert alert-info py-2 px-3 small">
@@ -2625,11 +2854,17 @@ async function fixAllCredsFromNote() {
 
       try {
         const result = await openProxLoginForPid(pid, { showErrors: false });
+        if (result?.cancelled) {
+          cancelled = true;
+          break;
+        }
         results.push(result);
 
         if (result.success) {
           successful++;
           try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Credentials saved for ${projName}`) : console.log(`Creds saved for ${projName}`); } catch { }
+        } else if (result.failed) {
+          try { (window.shell && shell.logWarn) ? shell.logWarn(`Credentials not verified for ${projName}`) : console.warn(`Credentials not verified for ${projName}`); } catch { }
         } else if (!result.skipped) {
           try { (window.shell && shell.logWarn) ? shell.logWarn(`Skipped ${projName}`) : console.warn(`Skipped ${projName}`); } catch { }
         }
@@ -2645,8 +2880,19 @@ async function fixAllCredsFromNote() {
     window.CANCEL_FIX_CREDS = false;
 
     // Show final summary
+    const failedCount = results.filter(r => r.failed).length;
     const skippedCount = results.filter(r => r.skipped).length;
     let summaryClass, summaryTitle;
+
+    if (cancelled && completed === 0 && successful === 0 && failedCount === 0) {
+      if (flow === 'reauth') {
+        note.innerHTML = '';
+      } else {
+        note.innerHTML = originalHtml || '';
+      }
+      try { delete note.dataset.flow; } catch { }
+      return;
+    }
 
     if (cancelled) {
       summaryClass = 'alert-warning';
@@ -2665,8 +2911,9 @@ async function fixAllCredsFromNote() {
     note.innerHTML = `<div class="alert ${summaryClass} py-2 px-3 small">
       <div class="mb-1"><strong>${summaryTitle}</strong></div>
       <div>✓ ${successful} of ${completed} project(s) configured successfully</div>
+      ${failedCount > 0 ? `<div class="text-muted mt-1">${failedCount} project(s) still need valid Proxmox credentials</div>` : ''}
       ${cancelled ? `<div class="text-muted mt-1">Cancelled after ${completed} of ${total} projects</div>` : ''}
-      ${skippedCount > 0 && !cancelled ? `<div class="text-muted mt-1">${skippedCount} project(s) skipped or cancelled</div>` : ''}
+      ${skippedCount > 0 && !cancelled ? `<div class="text-muted mt-1">${skippedCount} project(s) were skipped</div>` : ''}
       ${cancelled && (total - completed) > 0 ? `<div class="text-muted mt-1">${total - completed} project(s) not processed</div>` : ''}
       <div class="mt-2">
         ${successful > 0 ? '<button class="btn btn-sm btn-primary" onclick="refreshVmView()">Refresh Now</button>' : ''}
@@ -2681,6 +2928,8 @@ async function fixAllCredsFromNote() {
         try { refreshVmView(); } catch { }
       }, 500);
     }
+
+    try { delete note.dataset.flow; } catch { }
 
   } catch (e) {
     try { (window.shell && shell.logError) ? shell.logError(`Fix all creds failed: ${e.message}`) : console.error('Fix all creds failed:', e); } catch { }
@@ -2856,23 +3105,27 @@ function updateRefreshState() {
   const btn = document.getElementById('btn-refresh');
   const wrap = document.getElementById('refresh-wrapper');
   const colsBtn = document.getElementById('vm-cols-btn');
-  // In multi mode, consider auth across selected project(s)
-  const loggedIn = (vmIsMulti && vmIsMulti()) ? hasAuthForAllSelected() : hasAuth();
-  if (btn) btn.disabled = (vmIsMulti && vmIsMulti()) ? true : !loggedIn;
+  const loginBtn = document.getElementById('btn-prox-login');
+  const multiMode = vmIsMulti && vmIsMulti();
+  // In multi mode, refresh can preflight auth per selected project and surface skipped projects.
+  const loggedIn = multiMode ? hasAuthForAllSelected() : hasAuth();
+  const refreshEnabled = multiMode ? getActivePids().length > 1 : loggedIn;
+  if (loginBtn) {
+    loginBtn.setAttribute('title', multiMode ? 'Update Proxmox credentials for all selected projects' : 'Update Proxmox URL/ports and credentials');
+  }
+  if (btn) btn.disabled = !refreshEnabled;
   if (colsBtn) colsBtn.disabled = !loggedIn;
-  const refreshEnabled = !!(btn && !btn.disabled);
   // Toggle config-only notice
   try {
     const note = document.getElementById('vm-config-only-alert');
     if (note) {
-      if (vmIsMulti && vmIsMulti()) { note.classList.add('d-none'); note.setAttribute('aria-hidden', 'true'); }
+      if (multiMode) { note.classList.add('d-none'); note.setAttribute('aria-hidden', 'true'); }
       else if (loggedIn) { note.classList.add('d-none'); note.setAttribute('aria-hidden', 'true'); }
       else { note.classList.remove('d-none'); note.removeAttribute('aria-hidden'); }
     }
   } catch { }
   // Enable/disable Actions toolbar groups depending on selection and login state
   try {
-    const multiMode = vmIsMulti && vmIsMulti();
     const scopedSelections = multiMode ? listSelectedEntries() : (PROJ ? listSelectedEntriesForPid(PROJ.id) : []);
     const anySelected = scopedSelections.length > 0;
     const disable = !(loggedIn && anySelected);
@@ -2968,6 +3221,46 @@ function getActionableSelections() {
   return [];
 }
 
+function _findVmDetailForTarget(proj, target) {
+  try {
+    const index = Number(target?.index);
+    const name = String(target?.name || '').trim();
+    if (!proj || !Number.isFinite(index) || !name) return null;
+    const statuses = Array.isArray(proj.instance_statuses) ? proj.instance_statuses : [];
+    const status = statuses.find(item => Number(item?.index) === index) || null;
+    if (!status) return null;
+    const details = Array.isArray(status.vm_details) ? status.vm_details : [];
+    return details.find(item => String(item?.name || '').trim() === name) || null;
+  } catch {
+    return null;
+  }
+}
+
+function _vmDetailIsRunning(detail) {
+  if (!detail || typeof detail !== 'object') return false;
+  const mapped = mapProxmoxPowerState(detail.power_state || detail.state || detail.qmp_state || '');
+  if (String(mapped?.label || '').toLowerCase() === 'running') return true;
+  return String(detail.qmp_state || '').trim().toLowerCase() === 'running';
+}
+
+function filterRunningTargetsForProject(proj, targets) {
+  const running = [];
+  const skipped = [];
+  for (const target of (Array.isArray(targets) ? targets : [])) {
+    const index = Number(target?.index);
+    const name = String(target?.name || '').trim();
+    if (!Number.isFinite(index) || !name) continue;
+    const detail = _findVmDetailForTarget(proj, target);
+    if (_vmDetailIsRunning(detail)) {
+      running.push({ index, name });
+      continue;
+    }
+    const stateHint = String(detail?.power_state || detail?.state || detail?.qmp_state || 'unknown');
+    skipped.push({ index, name, reason: `validate requires VM state running (current: ${stateHint})` });
+  }
+  return { running, skipped };
+}
+
 function countExplicitActionTargets(opts = {}) {
   try {
     if (Array.isArray(opts.targets) && opts.targets.length) return opts.targets.length;
@@ -2996,6 +3289,478 @@ function buildCredsSetConfirmationMessage(opts = {}) {
   const rowLabel = `${targetCount} row${targetCount === 1 ? '' : 's'}`;
   const projectLabel = projectCount > 1 ? ` across ${projectCount} projects` : '';
   return `This will create or update Proxmox users, reset passwords to the current credential list, ensure pools and memberships, and reconcile VM access for ${rowLabel}${projectLabel}. Continue?`;
+}
+
+const VM_CREATE_OPTION_DEFAULTS = Object.freeze({
+  createUsersAndPerms: true,
+  enableUserAccessibility: true,
+  applyScenario: true,
+  setNetworkInterfaces: true,
+  takeSnapshot: true,
+  startVm: false,
+});
+
+const VM_DELETE_OPTION_DEFAULTS = Object.freeze({
+  deleteUsersAndPools: true,
+  disableUserAccessibility: false,
+  verifyCleanup: false,
+});
+
+function normalizeVmCreateOptions(options = {}) {
+  const source = (options && typeof options === 'object') ? options : {};
+  return {
+    createUsersAndPerms: _coerceEnabled(source.createUsersAndPerms, VM_CREATE_OPTION_DEFAULTS.createUsersAndPerms),
+    enableUserAccessibility: _coerceEnabled(source.enableUserAccessibility, VM_CREATE_OPTION_DEFAULTS.enableUserAccessibility),
+    applyScenario: _coerceEnabled(source.applyScenario, VM_CREATE_OPTION_DEFAULTS.applyScenario),
+    setNetworkInterfaces: _coerceEnabled(source.setNetworkInterfaces, VM_CREATE_OPTION_DEFAULTS.setNetworkInterfaces),
+    takeSnapshot: _coerceEnabled(source.takeSnapshot, VM_CREATE_OPTION_DEFAULTS.takeSnapshot),
+    startVm: _coerceEnabled(source.startVm, VM_CREATE_OPTION_DEFAULTS.startVm),
+  };
+}
+
+function normalizeVmDeleteOptions(options = {}) {
+  const source = (options && typeof options === 'object') ? options : {};
+  return {
+    deleteUsersAndPools: _coerceEnabled(source.deleteUsersAndPools, VM_DELETE_OPTION_DEFAULTS.deleteUsersAndPools),
+    disableUserAccessibility: _coerceEnabled(source.disableUserAccessibility, VM_DELETE_OPTION_DEFAULTS.disableUserAccessibility),
+    verifyCleanup: _coerceEnabled(source.verifyCleanup, VM_DELETE_OPTION_DEFAULTS.verifyCleanup),
+  };
+}
+
+function buildVmCreateOptionsSummary(opts = {}) {
+  const explicitTargetCount = countExplicitActionTargets(opts);
+  const targetCount = explicitTargetCount || getActionableSelections().length;
+  let projectCount = explicitActionProjectCount(opts);
+  if (!projectCount) {
+    if ((vmIsMulti && vmIsMulti()) || !!opts.targetsByPid) {
+      const entries = getActionableSelections();
+      projectCount = new Set(entries.map(entry => canonicalPid(entry?.pid || PROJ?.id || '')).filter(Boolean)).size;
+    } else if (PROJ && PROJ.id) {
+      projectCount = 1;
+    }
+  }
+  const rowLabel = `${targetCount} row${targetCount === 1 ? '' : 's'}`;
+  const projectLabel = projectCount > 1 ? ` across ${projectCount} projects` : '';
+  return `Clone ${rowLabel}${projectLabel}. Selected create steps and follow-up actions run during or after cloning finishes.`;
+}
+
+function buildVmDeleteOptionsSummary(opts = {}) {
+  const explicitTargetCount = countExplicitActionTargets(opts);
+  const targetCount = explicitTargetCount || getActionableSelections().length;
+  let projectCount = explicitActionProjectCount(opts);
+  if (!projectCount) {
+    if ((vmIsMulti && vmIsMulti()) || !!opts.targetsByPid) {
+      const entries = getActionableSelections();
+      projectCount = new Set(entries.map(entry => canonicalPid(entry?.pid || PROJ?.id || '')).filter(Boolean)).size;
+    } else if (PROJ && PROJ.id) {
+      projectCount = 1;
+    }
+  }
+  const rowLabel = `${targetCount} row${targetCount === 1 ? '' : 's'}`;
+  const projectLabel = projectCount > 1 ? ` across ${projectCount} projects` : '';
+  return `Delete ${rowLabel}${projectLabel}. Selected pre-delete and post-delete actions run around VM deletion, while user/pool cleanup still only runs for instances with no remaining scenario VMs.`;
+}
+
+function mergeVmActionSummaryData(baseResp, extraResp) {
+  const merged = { ...(baseResp || {}) };
+  const source = extraResp || {};
+  Object.keys(source).forEach((key) => {
+    const value = source[key];
+    if (Array.isArray(value)) {
+      const existing = Array.isArray(merged[key]) ? merged[key] : [];
+      merged[key] = [...existing, ...value];
+      return;
+    }
+    if (key === 'outputs_zip') {
+      if (!merged.outputs_zip && value) merged.outputs_zip = value;
+      return;
+    }
+    if (merged[key] === undefined) {
+      merged[key] = value;
+    }
+  });
+  return merged;
+}
+
+function buildVmCreateFinalizeDetail(options = {}) {
+  const normalizedOptions = normalizeVmCreateOptions(options);
+  const steps = [];
+  if (normalizedOptions.setNetworkInterfaces) steps.push('applying network interfaces');
+  if (normalizedOptions.takeSnapshot) steps.push('taking post-clone snapshots');
+  if (!steps.length) return 'Skipping network and snapshot steps';
+  if (steps.length === 1) {
+    const step = steps[0];
+    return step.charAt(0).toUpperCase() + step.slice(1);
+  }
+  return 'Applying network interfaces and taking post-clone snapshots';
+}
+
+function buildVmCreateUserAccessibilityPlan(proj, targets) {
+  const baseNameSet = new Set((proj?.vms || []).map(v => String(v?.name || '')));
+  const bases = new Set();
+  const indices = new Set();
+  const skipped = [];
+  for (const target of (targets || [])) {
+    const index = Number(target?.index);
+    const name = String(target?.name || '');
+    if (Number.isFinite(index) && index > 0) indices.add(index);
+    const baseName = deriveBaseVmName(proj, name, index);
+    if (!baseName || !baseNameSet.has(baseName)) {
+      skipped.push({ name, reason: 'template not found in project configuration' });
+      continue;
+    }
+    bases.add(baseName);
+  }
+  return {
+    bases: Array.from(bases),
+    indices: Array.from(indices),
+    skipped,
+  };
+}
+
+async function runVmCreateUserAccessibilityFollowUp({ proj, targets, baseBody, setProgress, contextLabel, syncAccess = true, enable = true }) {
+  const plan = buildVmCreateUserAccessibilityPlan(proj, targets);
+  const result = {
+    infos: [],
+    skipped: [...plan.skipped],
+    errors: [],
+  };
+  if (!proj || !proj.id || !plan.bases.length) return result;
+
+  const queue = plan.bases.slice();
+  let completed = 0;
+  const maxConcurrent = Math.min(4, Math.max(1, queue.length));
+  const worker = async () => {
+    for (;;) {
+      const baseName = queue.shift();
+      if (!baseName) return;
+      if (typeof setProgress === 'function') {
+        setProgress(
+          92,
+          'User Accessibility…',
+          `${enable ? 'Enabling' : 'Disabling'} user accessibility for ${baseName}${contextLabel ? ` in ${contextLabel}` : ''} (${completed + 1}/${plan.bases.length})…`
+        );
+      }
+      try {
+        await http('PATCH', `/api/projects/${encodeURIComponent(proj.id)}/vms/${encodeURIComponent(baseName)}`, { viewable_to_user: !!enable });
+        try {
+          const vmCfg = (proj?.vms || []).find(v => String(v?.name || '') === baseName);
+          if (vmCfg) vmCfg.viewable_to_user = !!enable;
+        } catch { }
+        result.infos.push({ name: baseName, reason: `set viewable_to_user=${enable ? 'true' : 'false'}` });
+      } catch (err) {
+        result.errors.push({ name: baseName, reason: `set viewable_to_user failed: ${err?.message || err}` });
+      }
+      completed += 1;
+    }
+  };
+
+  await Promise.all(Array.from({ length: maxConcurrent }, () => worker()));
+  if (!syncAccess || !plan.indices.length) return result;
+
+  if (typeof setProgress === 'function') {
+    setProgress(93, 'User Accessibility…', `${enable ? 'Granting' : 'Revoking'} Proxmox access${contextLabel ? ` in ${contextLabel}` : ''}…`);
+  }
+  try {
+    const syncResp = await http('POST', `/api/projects/${encodeURIComponent(proj.id)}/instances/actions/users_access_sync`, {
+      ...(baseBody || {}),
+      templates: plan.bases,
+      indices: plan.indices,
+      enable: !!enable,
+    });
+    return mergeVmActionSummaryData(result, syncResp);
+  } catch (err) {
+    return mergeVmActionSummaryData(result, {
+      errors: [{ reason: `User accessibility sync failed${contextLabel ? ` in ${contextLabel}` : ''}: ${err?.message || err}` }],
+    });
+  }
+}
+
+async function runVmCreateActionFollowUp({ proj, action, baseBody, requestTargets, setProgress, progress = 95, label, detail, contextLabel, verifyRetry = false }) {
+  if (typeof setProgress === 'function') {
+    setProgress(progress, label, detail);
+  }
+  let resp = await http('POST', `/api/projects/${encodeURIComponent(proj.id)}/instances/actions/${action}`, {
+    ...(baseBody || {}),
+    targets: requestTargets,
+  });
+  if (verifyRetry) {
+    const retryOutcome = await maybeRetryVerifiedVmAction({
+      proj,
+      action,
+      resp,
+      requestPath: `/api/projects/${encodeURIComponent(proj.id)}/instances/actions/${action}`,
+      requestBody: baseBody,
+      setProgress,
+      contextLabel,
+    });
+    resp = retryOutcome.resp;
+  }
+  return resp;
+}
+
+async function runVmCreateFollowUpActions({ proj, targets, baseBody, createOptions, setProgress, contextLabel, summaryResp }) {
+  const normalizedOptions = normalizeVmCreateOptions(createOptions);
+  const requestTargets = Array.isArray(targets)
+    ? targets
+      .map(entry => ({ index: Number(entry.index), name: String(entry.name || '') }))
+      .filter(entry => Number.isFinite(entry.index) && entry.name)
+    : [];
+  let mergedResp = summaryResp || {};
+  if (!proj || !proj.id || !requestTargets.length) return mergedResp;
+
+  const addFollowUpError = (label, err) => {
+    mergedResp = mergeVmActionSummaryData(mergedResp, {
+      errors: [{ reason: `${label} failed${contextLabel ? ` in ${contextLabel}` : ''}: ${err?.message || err}` }],
+    });
+  };
+
+  if (normalizedOptions.enableUserAccessibility) {
+    try {
+      const accessibilityResp = await runVmCreateUserAccessibilityFollowUp({
+        proj,
+        targets: requestTargets,
+        baseBody,
+        setProgress,
+        contextLabel,
+        syncAccess: !normalizedOptions.createUsersAndPerms,
+      });
+      mergedResp = mergeVmActionSummaryData(mergedResp, accessibilityResp);
+    } catch (err) {
+      addFollowUpError('User accessibility follow-up', err);
+    }
+  }
+
+  if (normalizedOptions.createUsersAndPerms) {
+    try {
+      const usersResp = await runVmCreateActionFollowUp({
+        proj,
+        action: 'users_create',
+        baseBody,
+        requestTargets,
+        setProgress,
+        progress: 94,
+        label: 'Users & Access…',
+        detail: `Creating users, pools, and permissions${contextLabel ? ` in ${contextLabel}` : ''}…`,
+      });
+      mergedResp = mergeVmActionSummaryData(mergedResp, usersResp);
+    } catch (err) {
+      addFollowUpError('Users & Access follow-up', err);
+    }
+  }
+
+  if (normalizedOptions.applyScenario) {
+    try {
+      const scenarioResp = await runVmCreateActionFollowUp({
+        proj,
+        action: 'apply_scenario',
+        baseBody,
+        requestTargets,
+        setProgress,
+        progress: 97,
+        label: 'Scenario…',
+        detail: `Applying scenario notes${contextLabel ? ` in ${contextLabel}` : ''}…`,
+      });
+      mergedResp = mergeVmActionSummaryData(mergedResp, scenarioResp);
+    } catch (err) {
+      addFollowUpError('Scenario follow-up', err);
+    }
+  }
+
+  if (normalizedOptions.startVm) {
+    try {
+      const startResp = await runVmCreateActionFollowUp({
+        proj,
+        action: 'start',
+        baseBody,
+        requestTargets,
+        setProgress,
+        progress: 99,
+        label: 'Starting…',
+        detail: `Starting newly created VMs${contextLabel ? ` in ${contextLabel}` : ''}…`,
+        contextLabel,
+        verifyRetry: true,
+      });
+      mergedResp = mergeVmActionSummaryData(mergedResp, startResp);
+    } catch (err) {
+      addFollowUpError('Start follow-up', err);
+    }
+  }
+
+  return mergedResp;
+}
+
+async function runVmDeleteFollowUpActions({ proj, targets, baseBody, deleteOptions, setProgress, contextLabel, summaryResp }) {
+  const normalizedOptions = normalizeVmDeleteOptions(deleteOptions);
+  const requestTargets = Array.isArray(targets)
+    ? targets
+      .map(entry => ({ index: Number(entry.index), name: String(entry.name || '') }))
+      .filter(entry => Number.isFinite(entry.index) && entry.name)
+    : [];
+  let mergedResp = summaryResp || {};
+  if (!proj || !proj.id || !requestTargets.length) return mergedResp;
+
+  const addFollowUpError = (label, err) => {
+    mergedResp = mergeVmActionSummaryData(mergedResp, {
+      errors: [{ reason: `${label} failed${contextLabel ? ` in ${contextLabel}` : ''}: ${err?.message || err}` }],
+    });
+  };
+
+  if (normalizedOptions.disableUserAccessibility) {
+    try {
+      const accessibilityResp = await runVmCreateUserAccessibilityFollowUp({
+        proj,
+        targets: requestTargets,
+        baseBody,
+        setProgress,
+        contextLabel,
+        syncAccess: true,
+        enable: false,
+      });
+      mergedResp = mergeVmActionSummaryData(mergedResp, accessibilityResp);
+    } catch (err) {
+      addFollowUpError('User accessibility follow-up', err);
+    }
+  }
+
+  return mergedResp;
+}
+
+async function promptVmCreateOptions(opts = {}) {
+  const modalEl = document.getElementById('vmCreateOptionsModal');
+  if (!modalEl || !(window.bootstrap && typeof bootstrap.Modal === 'function')) {
+    alert('Create options dialog is unavailable in this view.');
+    return null;
+  }
+  const summaryEl = document.getElementById('vm-create-options-summary');
+  const usersToggle = document.getElementById('vm-create-opt-users');
+  const accessibilityToggle = document.getElementById('vm-create-opt-accessibility');
+  const scenarioToggle = document.getElementById('vm-create-opt-scenario');
+  const networkToggle = document.getElementById('vm-create-opt-network');
+  const snapshotToggle = document.getElementById('vm-create-opt-snapshot');
+  const startToggle = document.getElementById('vm-create-opt-start');
+  const confirmBtn = document.getElementById('vm-create-options-confirm');
+  if (!summaryEl || !usersToggle || !accessibilityToggle || !scenarioToggle || !networkToggle || !snapshotToggle || !startToggle || !confirmBtn) {
+    alert('Create options dialog is incomplete in this view.');
+    return null;
+  }
+
+  const defaults = normalizeVmCreateOptions(opts.createOptions);
+  summaryEl.textContent = buildVmCreateOptionsSummary(opts);
+  usersToggle.checked = defaults.createUsersAndPerms;
+  accessibilityToggle.checked = defaults.enableUserAccessibility;
+  scenarioToggle.checked = defaults.applyScenario;
+  networkToggle.checked = defaults.setNetworkInterfaces;
+  snapshotToggle.checked = defaults.takeSnapshot;
+  startToggle.checked = defaults.startVm;
+
+  return new Promise((resolve) => {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    let finished = false;
+    let result = null;
+
+    const cleanup = () => {
+      confirmBtn.removeEventListener('click', onConfirm);
+      modalEl.removeEventListener('hidden.bs.modal', onHidden);
+      modalEl.removeEventListener('shown.bs.modal', onShown);
+    };
+
+    const finish = (value) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const onConfirm = () => {
+      result = normalizeVmCreateOptions({
+        createUsersAndPerms: !!usersToggle.checked,
+        enableUserAccessibility: !!accessibilityToggle.checked,
+        applyScenario: !!scenarioToggle.checked,
+        setNetworkInterfaces: !!networkToggle.checked,
+        takeSnapshot: !!snapshotToggle.checked,
+        startVm: !!startToggle.checked,
+      });
+      modal.hide();
+    };
+
+    const onHidden = () => {
+      finish(result);
+    };
+
+    const onShown = () => {
+      try { confirmBtn.focus(); } catch { }
+    };
+
+    confirmBtn.addEventListener('click', onConfirm);
+    modalEl.addEventListener('hidden.bs.modal', onHidden);
+    modalEl.addEventListener('shown.bs.modal', onShown);
+    modal.show();
+  });
+}
+
+async function promptVmDeleteOptions(opts = {}) {
+  const modalEl = document.getElementById('vmDeleteOptionsModal');
+  if (!modalEl || !(window.bootstrap && typeof bootstrap.Modal === 'function')) {
+    alert('Delete options dialog is unavailable in this view.');
+    return null;
+  }
+  const summaryEl = document.getElementById('vm-delete-options-summary');
+  const usersToggle = document.getElementById('vm-delete-opt-users');
+  const accessibilityToggle = document.getElementById('vm-delete-opt-accessibility');
+  const verifyCleanupToggle = document.getElementById('vm-delete-opt-verify-cleanup');
+  const confirmBtn = document.getElementById('vm-delete-options-confirm');
+  if (!summaryEl || !usersToggle || !accessibilityToggle || !verifyCleanupToggle || !confirmBtn) {
+    alert('Delete options dialog is incomplete in this view.');
+    return null;
+  }
+
+  const defaults = normalizeVmDeleteOptions(opts.deleteOptions);
+  summaryEl.textContent = buildVmDeleteOptionsSummary(opts);
+  usersToggle.checked = defaults.deleteUsersAndPools;
+  accessibilityToggle.checked = defaults.disableUserAccessibility;
+  verifyCleanupToggle.checked = defaults.verifyCleanup;
+
+  return new Promise((resolve) => {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    let finished = false;
+    let result = null;
+
+    const cleanup = () => {
+      confirmBtn.removeEventListener('click', onConfirm);
+      modalEl.removeEventListener('hidden.bs.modal', onHidden);
+      modalEl.removeEventListener('shown.bs.modal', onShown);
+    };
+
+    const finish = (value) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const onConfirm = () => {
+      result = normalizeVmDeleteOptions({
+        deleteUsersAndPools: !!usersToggle.checked,
+        disableUserAccessibility: !!accessibilityToggle.checked,
+        verifyCleanup: !!verifyCleanupToggle.checked,
+      });
+      modal.hide();
+    };
+
+    const onHidden = () => {
+      finish(result);
+    };
+
+    const onShown = () => {
+      try { confirmBtn.focus(); } catch { }
+    };
+
+    confirmBtn.addEventListener('click', onConfirm);
+    modalEl.addEventListener('hidden.bs.modal', onHidden);
+    modalEl.addEventListener('shown.bs.modal', onShown);
+    modal.show();
+  });
 }
 
 function deriveCredsRepairTargetsFromChecked(checked) {
@@ -3041,6 +3806,7 @@ function friendlyActionName(action) {
     nets_clear: 'Remove Network Interfaces',
     run_startup_cmds: 'Run Startup Commands',
     run_stored_cmds: 'Run Stored Commands',
+    validate: 'Validate',
     users_create: 'Create Users',
     users_delete: 'Delete Users',
     users_perms: 'Set User Perms',
@@ -3255,6 +4021,50 @@ function deriveBaseVmName(proj, generatedName, index) {
 function findVmConfigByBaseName(proj, baseName) {
   const vmList = Array.isArray(proj?.vms) ? proj.vms : [];
   return vmList.find(v => String(v?.name || '') === String(baseName || '')) || null;
+}
+
+function vmHasConfiguredValidationCommands(vmCfg) {
+  const raw = Array.isArray(vmCfg?.validation_commands) ? vmCfg.validation_commands : [];
+  for (const entry of raw) {
+    if (entry === null || entry === undefined) continue;
+    if (typeof entry === 'string' || typeof entry === 'number') {
+      if (String(entry).trim()) return true;
+      continue;
+    }
+    if (typeof entry !== 'object') continue;
+    const command = String(entry.command ?? entry.cmd ?? entry.value ?? entry.text ?? '').trim();
+    if (!command) continue;
+    let enabled = entry.enabled;
+    if (enabled === undefined && entry.disabled !== undefined) enabled = !entry.disabled;
+    if (enabled === false) continue;
+    if (typeof enabled === 'string') {
+      const normalized = enabled.trim().toLowerCase();
+      if (['false', '0', 'no', 'off', 'disabled'].includes(normalized)) continue;
+    }
+    if (typeof enabled === 'number' && enabled === 0) continue;
+    return true;
+  }
+  return false;
+}
+
+function resolveValidationConfiguredFlag(rowLike, detail) {
+  const d = detail && typeof detail === 'object' ? detail : {};
+  if (Object.prototype.hasOwnProperty.call(d, 'validation_commands_configured')) {
+    return !!d.validation_commands_configured;
+  }
+  try {
+    const pid = canonicalPid(rowLike?.pid || PROJ?.id || '');
+    const proj = getProjectSnapshot(pid);
+    if (!proj) return true;
+    const generatedName = String(rowLike?.vmName || d?.name || '').trim();
+    const index = Number(rowLike?.index);
+    const baseName = deriveBaseVmName(proj, generatedName, index);
+    const vmCfg = findVmConfigByBaseName(proj, baseName);
+    if (!vmCfg) return true;
+    return vmHasConfiguredValidationCommands(vmCfg);
+  } catch {
+    return true;
+  }
 }
 
 const STORED_CMD_CORE = (typeof window !== 'undefined' && window.StoredCommandCore) ? window.StoredCommandCore : null;
@@ -4469,6 +5279,24 @@ async function vmAction(action, opts) {
       delete options.storedCommandOverrides;
     }
   }
+  if (action === 'create') {
+    if (options.createOptions) {
+      options.createOptions = normalizeVmCreateOptions(options.createOptions);
+    } else {
+      const createOptions = await promptVmCreateOptions(options);
+      if (!createOptions) return;
+      options.createOptions = createOptions;
+    }
+  }
+  if (action === 'delete') {
+    if (options.deleteOptions) {
+      options.deleteOptions = normalizeVmDeleteOptions(options.deleteOptions);
+    } else {
+      const deleteOptions = await promptVmDeleteOptions(options);
+      if (!deleteOptions) return;
+      options.deleteOptions = deleteOptions;
+    }
+  }
   const multi = (vmIsMulti && vmIsMulti()) || !!(options && options.targetsByPid);
   const selCount = countExplicitActionTargets(options) || getActionableSelections().length;
   const labelName = friendlyActionName(action) || action;
@@ -4677,6 +5505,7 @@ async function vmActionExec(action, opts = {}) {
       return;
     }
     if (action === 'create') {
+      const createOptions = normalizeVmCreateOptions(opts.createOptions);
       // Convert generated names back to base config names
       const tag = String(PROJ?.tag || '').trim();
       const baseNames = new Set((PROJ?.vms || []).map(v => v.name));
@@ -4722,6 +5551,10 @@ async function vmActionExec(action, opts = {}) {
         baseUrl: PROJ.proxmox_url || undefined,
         apiPort: PROJ.proxmox_api_port || undefined,
         verifySSL: PROJ.proxmox_verify_ssl !== false,
+        applyScenario: false,
+        syncUserAccess: false,
+        setNetworkInterfaces: createOptions.setNetworkInterfaces,
+        takeSnapshot: createOptions.takeSnapshot,
       };
       const makeRequest = async () => {
         try { shell.step('Submitting create batch'); } catch { }
@@ -4817,7 +5650,7 @@ async function vmActionExec(action, opts = {}) {
           createdCount = Array.isArray(lastResp.created) ? lastResp.created.length : createdCount;
           skippedCount = Array.isArray(lastResp.skipped) ? lastResp.skipped.length : skippedCount;
         }
-        setProg(90, `Finalizing…`, 'Applying network and taking snapshots…');
+        setProg(90, `Finalizing…`, `${buildVmCreateFinalizeDetail(createOptions)}…`);
       } catch (e) {
         // Unexpected error: surface and abort create handler
         throw e;
@@ -4834,6 +5667,15 @@ async function vmActionExec(action, opts = {}) {
       createdCount = Array.isArray(lastResp?.created) ? lastResp.created.length : 0;
       skippedCount = Array.isArray(lastResp?.skipped) ? lastResp.skipped.length : skippedCount;
       const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
+      lastResp = await runVmCreateFollowUpActions({
+        proj: PROJ,
+        targets: selected,
+        baseBody: retryBaseBody,
+        createOptions,
+        setProgress: setProg,
+        contextLabel: PROJ?.name || PROJ?.id || '',
+        summaryResp: lastResp || {},
+      });
       const verifiedSuffix = verifiedCount ? `, verified ${verifiedCount}` : '';
       setProg(100, 'Done', `Created ${createdCount + verifiedCount}/${total}${verifiedSuffix}${skippedCount ? ', skipped ' + skippedCount : ''}`);
       try { showActionSummary('Create', lastResp || {}); } catch { }
@@ -4882,7 +5724,7 @@ async function vmActionExec(action, opts = {}) {
       try { shell.endActionContext(true); } catch { }
       return;
     }
-    if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'apply_scenario') {
+    if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'validate' || action === 'apply_scenario') {
       try { shell.beginActionContext(action.charAt(0).toUpperCase() + action.slice(1)); } catch { }
       try { (window.shell && shell.logInfo) ? shell.logInfo(`Action: ${action} on ${targets.length} target(s)`) : console.log('Action', action, 'on', targets); } catch { }
       const setProg = (pct, text, detail) => setAp(pct, text, detail);
@@ -4895,12 +5737,28 @@ async function vmActionExec(action, opts = {}) {
         restore: ['Restoring…', 'Restoring snapshot(s)', 'Restored'],
         run_startup_cmds: ['Running…', 'Running startup commands', 'Ran startup cmds'],
         run_stored_cmds: ['Running…', 'Running stored commands', 'Ran stored cmds'],
+        validate: ['Validating…', 'Running validation checks', 'Validated'],
         apply_scenario: ['Applying…', 'Applying scenario notes', 'Applied scenario notes']
       };
       const [shortStart, longStart, pastTense] = verbMap[action] || ['Working…', 'Working', 'Done'];
+      let validateSkipped = [];
+      if (action === 'validate') {
+        const split = filterRunningTargetsForProject(PROJ, targets);
+        targets = split.running;
+        validateSkipped = split.skipped;
+        if (!targets.length) {
+          const prefiltered = { ran: [], skipped: validateSkipped, errors: [] };
+          try { showActionSummary('Validate', prefiltered); } catch { }
+          try { emitActionLogs('Validate', prefiltered); } catch { }
+          try { (window.shell && shell.logWarn) ? shell.logWarn('Validate skipped: no selected VMs are currently running') : console.warn('Validate skipped: no running VMs'); } catch { }
+          try { shell.endActionContext(true); } catch { }
+          return;
+        }
+      }
       setProg(10, 'Preparing…', `${longStart} for ${targets.length} VM(s)…`);
       // No snapshot/restore prompt: handled server-side (timestamp name; restore latest)
-      const path = `/api/projects/${PROJ.id}/instances/actions/${action}`;
+      const actionPathName = action === 'validate' ? 'run_stored_cmds' : action;
+      const path = `/api/projects/${PROJ.id}/instances/actions/${actionPathName}`;
       try { shell.step('Submitting action'); } catch { }
       const payload = {
         username: sess.username || undefined,
@@ -4910,6 +5768,9 @@ async function vmActionExec(action, opts = {}) {
         verifySSL: PROJ.proxmox_verify_ssl !== false,
         targets,
       };
+      if (action === 'validate') {
+        payload.validateOnly = true;
+      }
       if (Array.isArray(opts.selectedCommands) && opts.selectedCommands.length) {
         payload.commands = opts.selectedCommands.slice();
         if (opts.selectedCommands.length === 1) {
@@ -4927,7 +5788,7 @@ async function vmActionExec(action, opts = {}) {
         }));
       }
       const requestPromise = http('POST', path, payload);
-      const shouldPollDetail = action === 'run_startup_cmds' || action === 'run_stored_cmds';
+      const shouldPollDetail = vmActionShouldPollStatus(action);
       let stopStatusPoll = null;
       if (shouldPollDetail && typeof startVmActionStatusPolling === 'function') {
         try { stopStatusPoll = startVmActionStatusPolling(PROJ.id, { setProgress: setProg, initialDelay: 200 }); } catch { }
@@ -4952,22 +5813,33 @@ async function vmActionExec(action, opts = {}) {
         setProgress: setProg,
       });
       resp = retryOutcome.resp;
+      if (validateSkipped.length) {
+        const existingSkipped = Array.isArray(resp?.skipped) ? resp.skipped : [];
+        resp.skipped = [...validateSkipped, ...existingSkipped];
+      }
       const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
       // Determine counts based on action response keys
-      const keyMap = { start: 'started', unlock: 'unlocked', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', apply_scenario: 'applied' };
+      const keyMap = { start: 'started', unlock: 'unlocked', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', validate: 'ran', apply_scenario: 'applied' };
       const k = keyMap[action];
       let doneArr = Array.isArray(resp[k]) ? resp[k] : [];
-      // If start action returned resumed array, include it in counts and tweak wording
-      if (action === 'start' && Array.isArray(resp.resumed) && resp.resumed.length) {
+      if (action === 'start') {
         const total = targets.length;
         const skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
         const startedCount = doneArr.length;
-        const resumedCount = resp.resumed.length;
-        const verifiedSuffix = verifiedCount ? `, verified ${verifiedCount}` : '';
-        setProg(100, 'Done', `Started ${startedCount}, resumed ${resumedCount}${verifiedSuffix} / ${total}${skippedCount ? ', skipped ' + skippedCount : ''}`);
+        const resumedCount = Array.isArray(resp.resumed) ? resp.resumed.length : 0;
+        const completedCount = startedCount + resumedCount + verifiedCount;
+        const breakdown = [];
+        if (resumedCount > 0 || verifiedCount > 0) {
+          if (startedCount) breakdown.push(`${startedCount} started`);
+          if (resumedCount) breakdown.push(`${resumedCount} resumed`);
+          if (verifiedCount) breakdown.push(`${verifiedCount} verified`);
+        }
+        const detailSuffix = breakdown.length ? ` (${breakdown.join(', ')})` : '';
+        const verb = resumedCount > 0 ? 'Started or resumed' : 'Started';
+        setProg(100, 'Done', `${verb} ${completedCount} / ${total}${skippedCount ? ', skipped ' + skippedCount : ''}${detailSuffix}`);
         try { showActionSummary('Start', resp || {}); } catch { }
         try { emitActionLogs('Start', resp || {}); } catch { }
-        try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Start/Resume: ${startedCount + resumedCount + verifiedCount} VM(s)`) : console.log('Start done'); } catch { }
+        try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Start/Resume: ${completedCount} VM(s)`) : console.log('Start done'); } catch { }
         try { shell.endActionContext(true); } catch { }
         return;
       }
@@ -4982,6 +5854,7 @@ async function vmActionExec(action, opts = {}) {
       return;
     }
     if (action === 'delete') {
+      const deleteOptions = normalizeVmDeleteOptions(opts.deleteOptions);
       try { shell.beginActionContext('Instances Delete'); } catch { }
       try { (window.shell && shell.logInfo) ? shell.logInfo(`Action: delete on ${targets.length} target(s)`) : console.log('Action delete on', targets); } catch { }
       // Normalize names to base and then compute generated names for pre-check
@@ -5035,11 +5908,36 @@ async function vmActionExec(action, opts = {}) {
         apiPort: PROJ.proxmox_api_port || undefined,
         verifySSL: PROJ.proxmox_verify_ssl !== false,
       };
-      let resp = await http('POST', `/api/projects/${PROJ.id}/instances/actions/delete`, {
+      let preDeleteResp = {};
+      if (deleteOptions.disableUserAccessibility) {
+        preDeleteResp = await runVmDeleteFollowUpActions({
+          proj: PROJ,
+          targets,
+          baseBody: retryBaseBody,
+          deleteOptions,
+          setProgress: setProg,
+          contextLabel: PROJ?.name || '',
+          summaryResp: {},
+        });
+      }
+      const requestPromise = http('POST', `/api/projects/${PROJ.id}/instances/actions/delete`, {
         ...retryBaseBody,
-        verifyCleanup: false,
+        deleteUsersAndPools: deleteOptions.deleteUsersAndPools,
+        verifyCleanup: deleteOptions.verifyCleanup,
         targets,
       });
+      let stopStatusPoll = null;
+      if (vmActionShouldPollStatus(action) && typeof startVmActionStatusPolling === 'function') {
+        try { stopStatusPoll = startVmActionStatusPolling(PROJ.id, { setProgress: setProg, initialDelay: 200 }); } catch { }
+      }
+      let resp;
+      try {
+        resp = await requestPromise;
+      } finally {
+        if (typeof stopStatusPoll === 'function') {
+          try { stopStatusPoll(); } catch { }
+        }
+      }
       try { shell.step('Delete response'); } catch { }
       const retryOutcome = await maybeRetryVerifiedVmAction({
         proj: PROJ,
@@ -5050,6 +5948,7 @@ async function vmActionExec(action, opts = {}) {
         setProgress: setProg,
       });
       resp = retryOutcome.resp;
+      resp = mergeVmActionSummaryData(preDeleteResp, resp);
       deletedCount = Array.isArray(resp.deleted) ? resp.deleted.length : 0;
       skippedCount = Array.isArray(resp.skipped) ? resp.skipped.length : 0;
       const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
@@ -5120,26 +6019,11 @@ async function vmActionMulti(action, opts) {
     return ` — ${cmds.length} cmds`;
   })();
   const label = `Multi ${labelName}${commandSuffix} (${selCount || 0} item${(selCount || 0) === 1 ? '' : 's'})`;
-        const runCreateRequest = async () => {
-          const requestPromise = makeReq('/instances/actions/create', { ...baseBody, targets: t });
-          let stopStatusPoll = null;
-          if (typeof startVmActionStatusPolling === 'function') {
-            try { stopStatusPoll = startVmActionStatusPolling(pid, { setProgress: setAp, initialDelay: 200 }); } catch { }
-          }
-          try {
-            return await requestPromise;
-          } finally {
-            if (typeof stopStatusPoll === 'function') {
-              try { stopStatusPoll(); } catch { }
-            }
-          }
-        };
-        const resp = await runCreateRequest();
+  await runQueued(label, async () => { await vmActionMultiExec(action, options); }, { projectId: PROJ?.id });
 }
 
 // Original implementation moved to vmActionMultiExec
 async function vmActionMultiExec(action, opts = {}) {
-          const resp2 = await runCreateRequest();
   const selected = (() => {
     if (opts.targetsByPid && typeof opts.targetsByPid === 'object') {
       const out = [];
@@ -5463,9 +6347,17 @@ async function vmActionMultiExec(action, opts = {}) {
         continue;
       }
       if (action === 'create') {
+        const createOptions = normalizeVmCreateOptions(opts.createOptions);
         // Convert to base and client-side skip those already existing
         let t = targets.map(toBase);
         if (t.length === 0) continue;
+        const createBaseBody = {
+          ...baseBody,
+          applyScenario: false,
+          syncUserAccess: false,
+          setNetworkInterfaces: createOptions.setNetworkInterfaces,
+          takeSnapshot: createOptions.takeSnapshot,
+        };
         // Preflight ambiguous templates per project
         try {
           // Temporarily switch PROJ for resolution dialog save
@@ -5474,7 +6366,7 @@ async function vmActionMultiExec(action, opts = {}) {
           for (; ;) {
             if (guard++ > 5) break;
             setAp(Math.max(10, pct), 'Checking templates…', `Resolving templates in ${projName}…`);
-            const pre = await makeReq('/instances/actions/create-preflight', { ...baseBody, targets: t });
+            const pre = await makeReq('/instances/actions/create-preflight', { ...createBaseBody, targets: t });
             const amb0 = Array.isArray(pre?.ambiguous) ? pre.ambiguous : [];
             if (!amb0.length) break;
             const group0 = new Map();
@@ -5491,16 +6383,26 @@ async function vmActionMultiExec(action, opts = {}) {
         } catch { }
         setAp(Math.max(35, pct), 'Cloning…', `Cloning in ${projName}…`);
         const createPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/create`;
-        let resp = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
+        let resp = await makeReq('/instances/actions/create', { ...createBaseBody, targets: t });
         // Retry once if ambiguous reported
         const amb = Array.isArray(resp.ambiguous) ? resp.ambiguous : [];
         if (amb.length) {
           try { const prev = PROJ; PROJ = proj; const group = new Map(); for (const entry of amb) { const baseName = String(entry?.name || ''); const list = Array.isArray(entry?.candidates) ? entry.candidates : []; if (!group.has(baseName)) group.set(baseName, new Map()); const seen = group.get(baseName); for (const c of list) { const vmid = (c && (c.vmid ?? c.id)); if (vmid === undefined || vmid === null || vmid === '') continue; const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || ''; const k = `${vmid}@@${node}`; if (!seen.has(k)) seen.set(k, { vmid, node }); } } for (const [baseName, map] of group.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values())); } PROJ = prev; } catch { }
-          resp = await makeReq('/instances/actions/create', { ...baseBody, targets: t });
+          resp = await makeReq('/instances/actions/create', { ...createBaseBody, targets: t });
         }
-        const createRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: createPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
+        setAp(Math.max(90, pct), 'Finalizing…', `${buildVmCreateFinalizeDetail(createOptions)} in ${projName}…`);
+        const createRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: createPath, requestBody: createBaseBody, setProgress: setAp, contextLabel: projName });
         resp = createRetryOutcome.resp;
-        ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'infos', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp[k], projName));
+        resp = await runVmCreateFollowUpActions({
+          proj,
+          targets,
+          baseBody,
+          createOptions,
+          setProgress: setAp,
+          contextLabel: projName,
+          summaryResp: resp,
+        });
+        ['created', 'skipped', 'errors', 'ambiguous', 'restored', 'snapshotted', 'notices', 'infos', 'started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'updated_users', 'checked', 'applied', 'network_applied_nodes', 'network_apply_errors', 'ran'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear') {
@@ -5526,17 +6428,45 @@ async function vmActionMultiExec(action, opts = {}) {
       }
       if (action === 'apply_scenario') {
         setAp(Math.max(20, pct), 'Working…', `Applying Scenario Name in ${projName}…`);
-        let resp = await makeReq(`/instances/actions/apply_scenario`, { ...baseBody, targets });
+        const requestPromise = makeReq(`/instances/actions/apply_scenario`, { ...baseBody, targets });
+        let stopStatusPoll = null;
+        if (vmActionShouldPollStatus(action) && typeof startVmActionStatusPolling === 'function') {
+          try { stopStatusPoll = startVmActionStatusPolling(pid, { setProgress: setAp, initialDelay: 200 }); } catch { }
+        }
+        let resp;
+        try {
+          resp = await requestPromise;
+        } finally {
+          if (typeof stopStatusPoll === 'function') {
+            try { stopStatusPoll(); } catch { }
+          }
+        }
         const scenarioPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/apply_scenario`;
         const scenarioRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: scenarioPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
         resp = scenarioRetryOutcome.resp;
         ['applied', 'skipped', 'errors', 'infos'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
-      if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds') {
+      if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'validate') {
         setAp(Math.max(20, pct), 'Working…', `${action} in ${projName}…`);
-        const shouldPollDetail = action === 'run_startup_cmds' || action === 'run_stored_cmds';
-        const requestPromise = makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
+        const shouldPollDetail = vmActionShouldPollStatus(action);
+        let requestTargets = targets;
+        let preSkipped = [];
+        if (action === 'validate') {
+          const split = filterRunningTargetsForProject(proj, targets);
+          requestTargets = split.running;
+          preSkipped = split.skipped;
+          if (!requestTargets.length) {
+            addArr('skipped', preSkipped, projName);
+            continue;
+          }
+        }
+        const actionPathName = action === 'validate' ? 'run_stored_cmds' : action;
+        const requestBody = { ...baseBody, targets: requestTargets };
+        if (action === 'validate') {
+          requestBody.validateOnly = true;
+        }
+        const requestPromise = makeReq(`/instances/actions/${actionPathName}`, requestBody);
         let stopStatusPoll = null;
         if (shouldPollDetail && typeof startVmActionStatusPolling === 'function') {
           try { stopStatusPoll = startVmActionStatusPolling(pid, { setProgress: setAp, initialDelay: 200 }); } catch { }
@@ -5559,21 +6489,51 @@ async function vmActionMultiExec(action, opts = {}) {
         if (!agg.outputs_zip && resp?.outputs_zip) {
           agg.outputs_zip = resp.outputs_zip;
         }
-        const actionPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/${action}`;
+        if (preSkipped.length) {
+          const existingSkipped = Array.isArray(resp?.skipped) ? resp.skipped : [];
+          resp.skipped = [...preSkipped, ...existingSkipped];
+        }
+        const actionPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/${actionPathName}`;
         const actionRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: actionPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
         resp = actionRetryOutcome.resp;
         ['started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'snapshotted', 'restored', 'skipped', 'errors', 'notices', 'infos', 'ran'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       if (action === 'delete') {
+        const deleteOptions = normalizeVmDeleteOptions(opts.deleteOptions);
         let t = targets.map(toBase);
         if (t.length === 0) continue;
+        let preDeleteResp = {};
+        if (deleteOptions.disableUserAccessibility) {
+          preDeleteResp = await runVmDeleteFollowUpActions({
+            proj,
+            targets,
+            baseBody,
+            deleteOptions,
+            setProgress: setAp,
+            contextLabel: projName,
+            summaryResp: {},
+          });
+        }
         setAp(Math.max(20, pct), 'Deleting…', `Deleting in ${projName}…`);
-        let resp = await makeReq('/instances/actions/delete', { ...baseBody, verifyCleanup: false, targets: t });
+        const requestPromise = makeReq('/instances/actions/delete', { ...baseBody, deleteUsersAndPools: deleteOptions.deleteUsersAndPools, verifyCleanup: deleteOptions.verifyCleanup, targets: t });
+        let stopStatusPoll = null;
+        if (vmActionShouldPollStatus(action) && typeof startVmActionStatusPolling === 'function') {
+          try { stopStatusPoll = startVmActionStatusPolling(pid, { setProgress: setAp, initialDelay: 200 }); } catch { }
+        }
+        let resp;
+        try {
+          resp = await requestPromise;
+        } finally {
+          if (typeof stopStatusPoll === 'function') {
+            try { stopStatusPoll(); } catch { }
+          }
+        }
         const deletePath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/delete`;
         const deleteRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: deletePath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
         resp = deleteRetryOutcome.resp;
-        ['deleted', 'skipped', 'errors', 'notices', 'infos'].forEach(k => addArr(k, resp[k], projName));
+        resp = mergeVmActionSummaryData(preDeleteResp, resp);
+        ['deleted', 'skipped', 'errors', 'notices', 'infos', 'applied', 'unchanged'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
       alert('Action not implemented yet: ' + action);
@@ -5822,6 +6782,45 @@ function showActionSummary(actionName, resp) {
 
     const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
     const list = (items, fmt) => items && items.length ? `<ul class="small">${items.map(fmt).join('')}</ul>` : '<div class="text-muted small">None</div>';
+    const buildLogDownloadLink = (filename, content, label = 'download log') => {
+      const href = `data:text/plain;charset=utf-8,${encodeURIComponent(String(content || ''))}`;
+      return `<a class="small ms-2" href="${href}" download="${esc(filename)}">${esc(label)}</a>`;
+    };
+    const buildRunLogText = (hostName, cmdObj) => {
+      const lines = [
+        `Host: ${String(hostName || '')}`,
+        `Command: ${String(cmdObj?.cmd || '')}`,
+        `Exit Code: ${cmdObj?.exitcode === null || cmdObj?.exitcode === undefined ? '' : String(cmdObj.exitcode)}`,
+        `Timeout (s): ${cmdObj?.timeout_seconds ?? ''}`,
+        `Long-running: ${cmdObj?.long_running ? 'yes' : 'no'}`,
+        '',
+        'STDOUT (preview):',
+        String(cmdObj?.stdout_preview || ''),
+        '',
+        'STDERR (preview):',
+        String(cmdObj?.stderr_preview || ''),
+      ];
+      return lines.join('\n');
+    };
+    const buildValidationLogText = (hostName, validationObj) => {
+      const lines = [
+        `Host: ${String(hostName || '')}`,
+        `Validation Command: ${String(validationObj?.command || '')}`,
+        `Match Regex: ${String(validationObj?.match || '')}`,
+        `Passed: ${validationObj?.passed ? 'yes' : 'no'}`,
+        `Timed Out: ${validationObj?.timed_out ? 'yes' : 'no'}`,
+        `Exit Code: ${validationObj?.exitcode === null || validationObj?.exitcode === undefined ? '' : String(validationObj.exitcode)}`,
+        `Timeout (s): ${validationObj?.timeout_seconds ?? ''}`,
+        validationObj?.reason ? `Reason: ${String(validationObj.reason)}` : '',
+        '',
+        'STDOUT (preview):',
+        String(validationObj?.stdout_preview || ''),
+        '',
+        'STDERR (preview):',
+        String(validationObj?.stderr_preview || ''),
+      ].filter(Boolean);
+      return lines.join('\n');
+    };
 
     const sections = [];
     const leadSections = [];
@@ -5985,13 +6984,37 @@ function showActionSummary(actionName, resp) {
     if (errors.length) sections.push(`<h6 class="text-danger">Errors</h6>${list(errors, e => `<li>${esc(e.name || e.node || '')} — ${esc(e.reason || '')}</li>`)}`);
     if (ran.length) sections.push(`<h6>Commands Run</h6>${list(ran, i => {
       const cmds = Array.isArray(i.cmds) ? i.cmds : [];
+      const hostSafe = String(i?.name || 'vm').replace(/[^A-Za-z0-9_.-]+/g, '_') || 'vm';
       const cmdList = cmds.length ? `<ul class="small">${cmds.map(c => {
         const exitLabel = c.exitcode === null ? '?' : String(c.exitcode);
         const preview = c.stdout_preview || c.stderr_preview || '';
         const previewBlock = preview ? `<pre class=\"mt-1 mb-2 small bg-light p-2 overflow-auto\" style=\"max-height:8rem\">${esc(preview)}</pre>` : '';
-        return `<li><code>${esc(c.cmd || '')}</code> — exit ${exitLabel}${previewBlock}</li>`;
+        const cmdNameSafe = String(c?.cmd || 'command').replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 48) || 'command';
+        const logLink = buildLogDownloadLink(
+          `${hostSafe}_${cmdNameSafe}.log.txt`,
+          buildRunLogText(i?.name || '', c),
+          'download log'
+        );
+        return `<li><code>${esc(c.cmd || '')}</code> — exit ${exitLabel}${logLink}${previewBlock}</li>`;
       }).join('')}</ul>` : '<div class="text-muted small">No commands</div>';
-      return `<li>${esc(i.name)} — ${i.count || 0} cmd(s)${cmds.length ? ':' : ''}${cmdList}</li>`;
+      const validationResults = Array.isArray(i?.validation?.results) ? i.validation.results : [];
+      const validationList = validationResults.length ? `<ul class="small">${validationResults.map((v, idx) => {
+        const statusClass = v?.passed ? 'text-success' : 'text-danger';
+        const statusText = v?.passed ? 'passed' : 'failed';
+        const preview = v?.stdout_preview || v?.stderr_preview || v?.reason || '';
+        const previewBlock = preview ? `<pre class=\"mt-1 mb-2 small bg-light p-2 overflow-auto\" style=\"max-height:8rem\">${esc(preview)}</pre>` : '';
+        const cmdNameSafe = String(v?.command || `validation_${idx + 1}`).replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 48) || `validation_${idx + 1}`;
+        const logLink = buildLogDownloadLink(
+          `${hostSafe}_validation_${idx + 1}_${cmdNameSafe}.log.txt`,
+          buildValidationLogText(i?.name || '', v),
+          'download log'
+        );
+        return `<li><code>${esc(v?.command || '')}</code> — <span class="${statusClass}">${statusText}</span>${v?.timed_out ? ' (timed out)' : ''}${logLink}${previewBlock}</li>`;
+      }).join('')}</ul>` : '<div class="text-muted small">No validation attempts</div>';
+      const validationSummary = i?.validation && typeof i.validation === 'object'
+        ? `<div class="small mt-2"><strong>Validation:</strong> ${i.validation.all_passed ? 'all passed' : 'one or more failed'} (${validationResults.length} attempted)</div>${validationList}`
+        : '';
+      return `<li>${esc(i.name)} — ${i.count || 0} cmd(s)${cmds.length ? ':' : ''}${cmdList}${validationSummary}</li>`;
     })}`);
     if (resp.notice && typeof resp.notice === 'string') {
       leadSections.unshift(`<div class="alert alert-warning py-1 small">${esc(resp.notice)}</div>`);

@@ -73,10 +73,103 @@ class CreateStatusDetailApiTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(any(msg == 'Creating VM alpha-lab-1 (1/1): cloning template…' for msg in messages), messages)
-        self.assertTrue(any(msg == 'Finalizing VM alpha-lab-1 (1/1): notes, pools, and access…' for msg in messages), messages)
+        self.assertTrue(any(msg == 'Finalizing VM alpha-lab-1 (1/1): post-clone settings…' for msg in messages), messages)
         self.assertTrue(any(msg == 'Creating adaptor for alpha-lab-1 (1/1): bridge lab1 1/2…' for msg in messages), messages)
         self.assertTrue(any(msg == 'Assigning adaptor for alpha-lab-1 (1/1): bridge dmz1 2/2…' for msg in messages), messages)
         self.assertTrue(any(msg == 'Snapshot created for alpha-lab-1 (1/1); 1/1 complete' for msg in messages), messages)
+
+    def test_create_can_skip_scenario_note_write_when_disabled(self):
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(self.project)))
+            stack.enter_context(patch('app.routes.api.random.randint', return_value=10001))
+            stack.enter_context(patch('app.routes.api._safe_sleep', return_value=None))
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_nodes.return_value = [{'node': 'node1'}]
+            prox.list_qemu_vms.return_value = [{'vmid': 900, 'name': 'alpha', 'template': 1}]
+            prox.clone_qemu.return_value = 'UPID:clone'
+            prox._wait_task.return_value = None
+            prox.list_qemu_snapshots.return_value = []
+            prox.get_qemu_config.return_value = {}
+            prox.list_network.return_value = []
+            prox.create_bridge.return_value = None
+            prox.set_qemu_nets.return_value = None
+            prox.snapshot_qemu.return_value = 'UPID:snapshot'
+            prox.list_snapshots_qemu.return_value = [{'name': 'post-clone'}]
+            prox.reload_network.return_value = None
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/create',
+                json={
+                    'baseUrl': self.project.proxmox_url,
+                    'verifySSL': False,
+                    'applyScenario': False,
+                    'syncUserAccess': False,
+                    'targets': [{'index': 1, 'name': 'alpha'}],
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        prox.set_qemu_options.assert_not_called()
+
+    def test_create_can_skip_network_and_snapshot_when_disabled(self):
+        messages = []
+
+        def capture_status(pid: str, **fields):
+            message = fields.get('message')
+            if isinstance(message, str) and message:
+                messages.append(message)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(self.project)))
+            stack.enter_context(patch('app.routes.api.random.randint', return_value=10001))
+            stack.enter_context(patch('app.routes.api._safe_sleep', return_value=None))
+            stack.enter_context(patch('app.routes.api._update_job_detail', side_effect=capture_status))
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_nodes.return_value = [{'node': 'node1'}]
+            prox.list_qemu_vms.return_value = [{'vmid': 900, 'name': 'alpha', 'template': 1}]
+            prox.clone_qemu.return_value = 'UPID:clone'
+            prox._wait_task.return_value = None
+            prox.list_qemu_snapshots.return_value = []
+            prox.get_qemu_config.return_value = {}
+            prox.list_network.return_value = []
+            prox.create_bridge.return_value = None
+            prox.set_qemu_nets.return_value = None
+            prox.snapshot_qemu.return_value = 'UPID:snapshot'
+            prox.list_snapshots_qemu.return_value = []
+            prox.reload_network.return_value = None
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/create',
+                json={
+                    'baseUrl': self.project.proxmox_url,
+                    'verifySSL': False,
+                    'applyScenario': False,
+                    'syncUserAccess': False,
+                    'setNetworkInterfaces': False,
+                    'takeSnapshot': False,
+                    'targets': [{'index': 1, 'name': 'alpha'}],
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.get_json() or {}
+        notices = payload.get('notices') or []
+        self.assertTrue(any('network interface assignment skipped by request' in str(item.get('reason') or '').lower() for item in notices), payload)
+        self.assertTrue(any('post-clone snapshot skipped by request' in str(item.get('reason') or '').lower() for item in notices), payload)
+        prox.create_bridge.assert_not_called()
+        prox.set_qemu_nets.assert_not_called()
+        prox.snapshot_qemu.assert_not_called()
+        prox.reload_network.assert_not_called()
+        self.assertFalse(any('Creating adaptor for' in msg for msg in messages), messages)
+        self.assertFalse(any('Snapshot created for' in msg for msg in messages), messages)
 
     def test_create_does_not_fallback_to_full_clone_when_linked_clone_is_selected(self):
         self.project.proxmox_use_linked_clones = True

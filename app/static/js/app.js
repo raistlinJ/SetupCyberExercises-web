@@ -9,7 +9,9 @@ window.MATERIAL_PENDING = window.MATERIAL_PENDING || {};
 
 const START_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
 const STORED_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
+const VALIDATION_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', commands: [] };
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 300;
+const DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS = 10;
 
 function normalizeCommandTimeout(rawValue, defaultValue = DEFAULT_COMMAND_TIMEOUT_SECONDS) {
   if (rawValue === undefined || rawValue === null || rawValue === '') {
@@ -2712,8 +2714,10 @@ async function saveSettingsInternal() {
 window.saveSettings = saveSettingsInternal;
 window.importProject = importProject;
 window.openStartCommandsManager = openStartCommandsManager;
+window.openValidationCommandsManager = openValidationCommandsManager;
 window.addEventListener('DOMContentLoaded', wireStartCommandsModal);
 window.addEventListener('DOMContentLoaded', wireStoredCommandsModal);
+window.addEventListener('DOMContentLoaded', wireValidationCommandsModal);
 
 async function loadProjects() {
   const container = document.getElementById('projects');
@@ -3702,7 +3706,14 @@ window.wizardNext = async function() {
       if (testRes && testRes.ok === false) throw new Error(testRes.error || 'Validation failed');
       
       const res = await http('POST', '/api/proxmox/templates', { baseUrl: url, username: user, password: pwd, verifySSL: verifySSL });
-      wizFetchedTemplates = res.templates || [];
+      const fetchedTemplates = Array.isArray(res?.templates) ? res.templates : [];
+      wizFetchedTemplates = fetchedTemplates.map(t => ({
+        node: String(t?.node || ''),
+        vmid: Number(t?.vmid || 0),
+        name: String(t?.name || ''),
+        bridges: Array.isArray(t?.bridges) ? t.bridges.map(b => String(b || '')) : [],
+        qemu_agent_enabled: !!t?.qemu_agent_enabled,
+      }));
       
       const tplContainer = document.getElementById('wiz-templates-list');
       tplContainer.innerHTML = '';
@@ -3731,6 +3742,7 @@ window.wizardNext = async function() {
                      <th style="width:32px;"></th>
                      <th>VM Name</th>
                      <th>Node</th>
+                     <th class="text-center" style="width:120px;" title="Whether QEMU Guest Agent is enabled on the template">QEMU Agent</th>
                      <th class="text-center" style="width:120px;">Creds</th>
                      <th class="text-center" style="width:150px; cursor:help;" title="These VMs will be directly accessible by participants">Make User Accessible</th>
                    </tr>
@@ -3741,6 +3753,10 @@ window.wizardNext = async function() {
              filtered.forEach(t => {
                 const creds = wizardGetTemplateCreds(t.vmid);
                 const hasCreds = !!(creds.username && creds.password);
+                const agentEnabled = !!t.qemu_agent_enabled;
+                const agentIcon = agentEnabled
+                  ? '<span class="d-inline-flex align-items-center text-success" title="QEMU Guest Agent enabled"><i class="bi bi-robot"></i></span>'
+                  : '';
                 const row = document.createElement('tr');
                 row.innerHTML = `
                   <td class="align-middle">
@@ -3753,6 +3769,9 @@ window.wizardNext = async function() {
                     </label>
                   </td>
                   <td class="align-middle text-muted small">${escHtml(t.node)}</td>
+                  <td class="text-center align-middle">
+                    ${agentIcon}
+                  </td>
                   <td class="text-center align-middle">
                     <button type="button" class="btn btn-sm d-none ${hasCreds ? 'btn-outline-success' : 'btn-outline-secondary'}" data-wiz-template-creds="${t.vmid}">${hasCreds ? 'Stored' : 'Specify'}</button>
                   </td>
@@ -4500,6 +4519,14 @@ window.submitProjectCreation = async function(mode) {
     try { if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid); } catch { }
 
     if (mode !== 'wizard') {
+      // Close the wizard modal if open
+      try {
+        const modalEl = document.getElementById('projectWizardModal');
+        if (modalEl) {
+          const modal = bootstrap.Modal.getInstance(modalEl);
+          if (modal) modal.hide();
+        }
+      } catch { }
       // Always navigate (or stay) on configuration page so the new project loads expanded
       try {
         if (location.pathname !== '/' && location.pathname !== '/index.html') {
@@ -4757,6 +4784,122 @@ async function autoSaveProjectField(pid) {
   }
 }
 
+function sanitizeValidationCommands(commands) {
+  const list = [];
+  if (!Array.isArray(commands)) return list;
+
+  const toBool = (raw, defaultValue = true) => {
+    if (raw === undefined || raw === null) return defaultValue;
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'number') return raw !== 0;
+    if (typeof raw === 'string') {
+      const normalized = raw.trim().toLowerCase();
+      if (!normalized) return defaultValue;
+      if (['false', '0', 'no', 'off', 'disabled'].includes(normalized)) return false;
+      if (['true', '1', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+    }
+    return !!raw;
+  };
+
+  for (const entry of commands) {
+    if (!entry) continue;
+    if (typeof entry === 'string' || typeof entry === 'number') {
+      const text = String(entry).trim();
+      if (!text) continue;
+      list.push({ command: text, enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS });
+      continue;
+    }
+    if (typeof entry !== 'object') continue;
+    const command = String(entry.command ?? entry.cmd ?? entry.value ?? entry.text ?? '').trim();
+    if (!command) continue;
+    let enabled = entry.enabled;
+    if (enabled === undefined && entry.disabled !== undefined) enabled = !entry.disabled;
+    const match = String(entry.match ?? entry.regex ?? entry.pattern ?? entry.re ?? entry.match_regex ?? entry.matchRegex ?? '').trim();
+    const timeoutSeconds = normalizeCommandTimeout(entry.timeoutSeconds ?? entry.timeout_seconds ?? entry.timeout, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS);
+    list.push({ command, enabled: toBool(enabled, true), match, timeoutSeconds });
+  }
+  return list;
+}
+
+function validationCommandsToServerPayload(commands) {
+  return sanitizeValidationCommands(commands).map(cmd => ({
+    command: cmd.command,
+    enabled: cmd.enabled !== false,
+    match: cmd.match || '',
+    timeout_seconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+  }));
+}
+
+function encodeValidationCommandsValue(commands) {
+  try { return JSON.stringify(validationCommandsToServerPayload(commands)); } catch { return '[]'; }
+}
+
+function parseValidationCommandsValue(raw) {
+  if (!raw) return [];
+  if (typeof raw === 'string') {
+    try { return sanitizeValidationCommands(JSON.parse(raw)); }
+    catch { return sanitizeValidationCommands(raw.split(/\r?\n/).map(line => ({ command: line }))); }
+  }
+  return sanitizeValidationCommands(raw);
+}
+
+function formatValidationCommandsSummary(commands) {
+  const clean = sanitizeValidationCommands(commands);
+  if (!clean.length) return 'No validation commands configured';
+  const enabled = clean.filter(cmd => cmd.enabled !== false).length;
+  const disabled = clean.length - enabled;
+  if (!disabled) return `${enabled} validation command${enabled === 1 ? '' : 's'}`;
+  return `${enabled} enabled / ${disabled} disabled`;
+}
+
+function formatValidationCommandsTooltip(commands) {
+  const clean = sanitizeValidationCommands(commands);
+  if (!clean.length) return 'No validation commands configured';
+  return clean.map((cmd, idx) => {
+    const status = cmd.enabled === false ? '[disabled] ' : '';
+    const timeout = normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS);
+    const match = cmd.match ? ` /${cmd.match}/` : ' [no regex]';
+    return `#${idx + 1} ${status}${cmd.command} (timeout ${timeout}s, match${match})`;
+  }).join('\n');
+}
+
+function getValidationCommandsFromDom(pid, idx) {
+  const hidden = document.getElementById(`vm-${pid}-${idx}-validation-data`);
+  if (!hidden) return [];
+  return parseValidationCommandsValue(hidden.value);
+}
+
+function updateValidationCommandsDomState(pid, idx, commands) {
+  const clean = sanitizeValidationCommands(commands);
+  const hidden = document.getElementById(`vm-${pid}-${idx}-validation-data`);
+  if (hidden) hidden.value = encodeValidationCommandsValue(clean);
+  const summary = document.getElementById(`vm-${pid}-${idx}-validation-summary`);
+  if (summary) {
+    summary.textContent = formatValidationCommandsSummary(clean);
+    summary.title = formatValidationCommandsTooltip(clean);
+  }
+  return clean;
+}
+
+function updateValidationCommandsCache(pid, vmName, commands, idxHint) {
+  const clean = sanitizeValidationCommands(commands);
+  const payload = validationCommandsToServerPayload(clean);
+  try {
+    const proj = (window.PROJ_CACHE || {})[pid];
+    const list = proj && Array.isArray(proj.vms) ? proj.vms : null;
+    if (list) {
+      let targetIdx = typeof idxHint === 'number' ? idxHint : -1;
+      if (targetIdx < 0 || !list[targetIdx] || list[targetIdx].name !== vmName) {
+        targetIdx = list.findIndex(vm => vm && vm.name === vmName);
+      }
+      if (targetIdx >= 0 && list[targetIdx]) {
+        list[targetIdx] = { ...list[targetIdx], validation_commands: payload.slice() };
+      }
+    }
+  } catch { }
+  return clean;
+}
+
 async function autoSaveVm(pid, idx) {
   const nameEl = document.getElementById(`vm-name-display-${pid}-${idx}`);
   const name = (nameEl?.textContent || '').trim();
@@ -4783,6 +4926,7 @@ async function autoSaveVm(pid, idx) {
   const startCommands = stepsToServerPayload(startSteps);
   const storedSteps = getStoredCommandsFromDom(pid, idx);
   const storedCommands = stepsToServerPayload(storedSteps);
+  const validationCommands = validationCommandsToServerPayload(getValidationCommandsFromDom(pid, idx));
   const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z]/g, '').slice(0, 8)).filter(Boolean);
   if (userEl && userEl.value.trim() !== '') {
     vm_user = userEl.value.trim();
@@ -4796,6 +4940,7 @@ async function autoSaveVm(pid, idx) {
     vm_pass: vm_pass,
     start_commands: startCommands,
     stored_commands: storedCommands,
+    validation_commands: validationCommands,
     internal_network_adaptors: adaptors
   };
   try {
@@ -4810,6 +4955,7 @@ async function autoSaveVm(pid, idx) {
             vmid: payload.vmid,
             start_commands: payload.start_commands,
             stored_commands: payload.stored_commands,
+            validation_commands: payload.validation_commands,
             internal_network_adaptors: payload.internal_network_adaptors,
             vm_user: payload.vm_user,
             vm_pass: payload.vm_pass
@@ -5561,6 +5707,213 @@ function wireStoredCommandsModal() {
   modalEl.addEventListener('hidden.bs.modal', resetStoredCommandsModal);
 }
 
+function renderValidationCommandsModal() {
+  const modalTitle = document.getElementById('validationCommandsModalLabel');
+  if (modalTitle) {
+    const name = VALIDATION_COMMAND_MODAL_STATE.vmName ? ` - ${VALIDATION_COMMAND_MODAL_STATE.vmName}` : '';
+    modalTitle.textContent = `Manage Validation Commands${name}`;
+  }
+  const listEl = document.getElementById('validation-commands-list');
+  const emptyEl = document.getElementById('validation-commands-empty');
+  if (!listEl) return;
+  const commands = Array.isArray(VALIDATION_COMMAND_MODAL_STATE.commands) ? VALIDATION_COMMAND_MODAL_STATE.commands : [];
+  if (!commands.length) {
+    listEl.innerHTML = '';
+    if (emptyEl) emptyEl.classList.remove('d-none');
+    return;
+  }
+
+  const html = commands.map((cmd, idx) => {
+    const commandObj = cmd && typeof cmd === 'object' ? cmd : { command: cmd, enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS };
+    const isEnabled = commandObj.enabled !== false;
+    const timeoutValue = normalizeCommandTimeout(commandObj.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS);
+    const inputClasses = ['form-control', 'form-control-sm'];
+    if (!isEnabled) inputClasses.push('text-decoration-line-through', 'opacity-50');
+    const matchClasses = ['form-control', 'form-control-sm'];
+    if (!isEnabled) matchClasses.push('opacity-50');
+    const upDisabled = idx === 0 ? 'disabled' : '';
+    const downDisabled = idx === commands.length - 1 ? 'disabled' : '';
+    return `<div class="list-group-item" data-validation-index="${idx}">
+      <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+        <span class="badge bg-primary">Cmd ${idx + 1}</span>
+        <div class="form-check form-switch m-0">
+          <input class="form-check-input" type="checkbox" data-role="validation-toggle" ${isEnabled ? 'checked' : ''}>
+        </div>
+        <input type="text" class="${inputClasses.join(' ')}" data-role="validation-command" placeholder="Validation command" value="${escHtml(String(commandObj.command || ''))}">
+        <div class="btn-group btn-group-sm">
+          <button type="button" class="btn btn-outline-secondary" data-role="validation-up" ${upDisabled} title="Move up"><span aria-hidden="true">&#8593;</span></button>
+          <button type="button" class="btn btn-outline-secondary" data-role="validation-down" ${downDisabled} title="Move down"><span aria-hidden="true">&#8595;</span></button>
+          <button type="button" class="btn btn-outline-danger" data-role="validation-delete">Remove</button>
+        </div>
+      </div>
+      <div class="row g-2 align-items-center">
+        <div class="col-md-8">
+          <label class="form-label small mb-1">Regex Match</label>
+          <input type="text" class="${matchClasses.join(' ')}" data-role="validation-match" placeholder="e.g. service\\s+active" value="${escHtml(String(commandObj.match || ''))}">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small mb-1">Timeout (seconds)</label>
+          <input type="number" min="1" step="1" class="form-control form-control-sm" data-role="validation-timeout" value="${escHtml(String(timeoutValue))}">
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  listEl.innerHTML = html;
+  if (emptyEl) emptyEl.classList.add('d-none');
+}
+
+function resetValidationCommandsModal() {
+  VALIDATION_COMMAND_MODAL_STATE.pid = null;
+  VALIDATION_COMMAND_MODAL_STATE.idx = null;
+  VALIDATION_COMMAND_MODAL_STATE.vmName = '';
+  VALIDATION_COMMAND_MODAL_STATE.commands = [];
+  renderValidationCommandsModal();
+}
+
+function openValidationCommandsManager(pid, idx) {
+  try { wireValidationCommandsModal(); } catch { }
+  const proj = (window.PROJ_CACHE || {})[pid];
+  const vmList = proj && Array.isArray(proj.vms) ? proj.vms : [];
+  const vm = vmList[idx] || vmList.find(entry => entry && entry.id === idx);
+  const fallback = getValidationCommandsFromDom(pid, idx);
+  const raw = Array.isArray(vm?.validation_commands) ? vm.validation_commands : fallback;
+  const commands = sanitizeValidationCommands(raw);
+  VALIDATION_COMMAND_MODAL_STATE.pid = pid;
+  VALIDATION_COMMAND_MODAL_STATE.idx = idx;
+  VALIDATION_COMMAND_MODAL_STATE.vmName = vm?.name || '';
+  VALIDATION_COMMAND_MODAL_STATE.commands = commands.map(cmd => ({
+    command: cmd.command,
+    enabled: cmd.enabled !== false,
+    match: cmd.match || '',
+    timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+  }));
+  renderValidationCommandsModal();
+  const modalEl = document.getElementById('validationCommandsModal');
+  if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+  } else {
+    alert('Validation command manager unavailable.');
+  }
+}
+
+async function saveValidationCommandsFromModal() {
+  const { pid, idx, vmName } = VALIDATION_COMMAND_MODAL_STATE;
+  if (!pid || idx === null || !vmName) return;
+  const saveBtn = document.getElementById('validation-commands-save');
+  if (saveBtn) saveBtn.disabled = true;
+  setVmStatus(pid, idx, 'Saving…', 'text-muted');
+  const sanitized = sanitizeValidationCommands(VALIDATION_COMMAND_MODAL_STATE.commands);
+  const payload = validationCommandsToServerPayload(sanitized);
+  try {
+    await saveVM(pid, vmName, { validation_commands: payload }, { silent: true });
+    updateValidationCommandsCache(pid, vmName, sanitized, idx);
+    updateValidationCommandsDomState(pid, idx, sanitized);
+    VALIDATION_COMMAND_MODAL_STATE.commands = sanitized.map(cmd => ({
+      command: cmd.command,
+      enabled: cmd.enabled !== false,
+      match: cmd.match || '',
+      timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+    }));
+    setVmStatus(pid, idx, 'Saved', 'text-success');
+    setTimeout(() => {
+      const el = document.getElementById(`vm-save-status-${pid}-${idx}`);
+      if (el && el.textContent === 'Saved') {
+        el.textContent = '';
+        el.className = 'small text-muted';
+      }
+    }, 1600);
+    try { showToast('Validation commands updated.', 'success'); } catch { }
+    const modalEl = document.getElementById('validationCommandsModal');
+    if (modalEl && window.bootstrap && typeof bootstrap.Modal === 'function') {
+      const modal = bootstrap.Modal.getInstance(modalEl);
+      if (modal) modal.hide();
+    }
+  } catch (e) {
+    try { showToast('Failed to save validation commands: ' + (e?.message || e), 'danger'); } catch { alert('Failed to save validation commands: ' + (e?.message || e)); }
+    setVmStatus(pid, idx, 'Save failed', 'text-danger');
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+function wireValidationCommandsModal() {
+  const modalEl = document.getElementById('validationCommandsModal');
+  if (!modalEl || modalEl._validationCommandsBound) return;
+  modalEl._validationCommandsBound = true;
+
+  const addBtn = document.getElementById('validation-commands-add');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => {
+      const list = VALIDATION_COMMAND_MODAL_STATE.commands;
+      list.push({ command: '', enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS });
+      renderValidationCommandsModal();
+    });
+  }
+
+  const listEl = document.getElementById('validation-commands-list');
+  if (listEl) {
+    listEl.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!target) return;
+      const row = target.closest && target.closest('[data-validation-index]');
+      if (!row) return;
+      const idx = Number(row.dataset.validationIndex);
+      if (!Number.isFinite(idx) || !VALIDATION_COMMAND_MODAL_STATE.commands[idx]) return;
+      const role = target.getAttribute('data-role');
+      const current = VALIDATION_COMMAND_MODAL_STATE.commands[idx];
+      if (role === 'validation-command') {
+        current.command = target.value;
+      } else if (role === 'validation-match') {
+        current.match = target.value;
+      } else if (role === 'validation-timeout') {
+        current.timeoutSeconds = normalizeCommandTimeout(target.value);
+        target.value = String(current.timeoutSeconds);
+      }
+    });
+
+    listEl.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!target || target.getAttribute('data-role') !== 'validation-toggle') return;
+      const row = target.closest && target.closest('[data-validation-index]');
+      if (!row) return;
+      const idx = Number(row.dataset.validationIndex);
+      if (!Number.isFinite(idx) || !VALIDATION_COMMAND_MODAL_STATE.commands[idx]) return;
+      VALIDATION_COMMAND_MODAL_STATE.commands[idx].enabled = !!target.checked;
+      renderValidationCommandsModal();
+    });
+
+    listEl.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-role]') : null;
+      if (!btn) return;
+      const row = btn.closest('[data-validation-index]');
+      if (!row) return;
+      const idx = Number(row.dataset.validationIndex);
+      if (!Number.isFinite(idx)) return;
+      const list = VALIDATION_COMMAND_MODAL_STATE.commands;
+      const role = btn.dataset.role;
+      if (role === 'validation-delete') {
+        list.splice(idx, 1);
+        renderValidationCommandsModal();
+        return;
+      }
+      if (role === 'validation-up' && idx > 0) {
+        [list[idx - 1], list[idx]] = [list[idx], list[idx - 1]];
+        renderValidationCommandsModal();
+        return;
+      }
+      if (role === 'validation-down' && idx < list.length - 1) {
+        [list[idx + 1], list[idx]] = [list[idx], list[idx + 1]];
+        renderValidationCommandsModal();
+      }
+    });
+  }
+
+  const saveBtn = document.getElementById('validation-commands-save');
+  if (saveBtn) saveBtn.addEventListener('click', saveValidationCommandsFromModal);
+  modalEl.addEventListener('hidden.bs.modal', resetValidationCommandsModal);
+}
+
 function showStatusDot(pid, state) {
   // state: 'saved' | 'error'
   let el = document.getElementById('save-status-' + pid);
@@ -5642,6 +5995,21 @@ function renderProjectCard(p) {
             <div id="vm-${p.id}-${i}-stored-summary" class="small text-muted flex-grow-1" title="${storedTitleAttr}">${escHtml(storedSummary)}</div>
           </div>
           <input type="hidden" id="vm-${p.id}-${i}-stored-data" value="${storedDataValue}">`;
+    })()}
+          ${(function () {
+      const validationCommands = sanitizeValidationCommands(v.validation_commands || []);
+      const validationSummary = formatValidationCommandsSummary(validationCommands);
+      const validationTooltip = formatValidationCommandsTooltip(validationCommands);
+      const validationTitleAttr = escHtml(validationTooltip).replace(/\n/g, '&#10;');
+      const validationDataValue = escHtml(encodeValidationCommandsValue(validationCommands));
+      const pidLiteralValidation = JSON.stringify(String(p.id));
+      return `
+          <label class="form-label mt-2">Validation Commands</label>
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button" onclick='openValidationCommandsManager(${pidLiteralValidation},${i})'>Manage</button>
+            <div id="vm-${p.id}-${i}-validation-summary" class="small text-muted flex-grow-1" title="${validationTitleAttr}">${escHtml(validationSummary)}</div>
+          </div>
+          <input type="hidden" id="vm-${p.id}-${i}-validation-data" value="${validationDataValue}">`;
     })()}
         </div>
     <div class="col-md-4">
@@ -6338,7 +6706,13 @@ async function fetchTemplatesForAFS() {
       try {
         const resp = await http('POST', '/api/proxmox/templates', body);
         const items = Array.isArray(resp?.templates) ? resp.templates : [];
-        AFS_CTX.templates = items.map(t => ({ node: String(t.node || ''), vmid: Number(t.vmid || 0), name: String(t.name || ''), bridges: Array.isArray(t.bridges) ? t.bridges.map(b => String(b || '')) : [] }));
+        AFS_CTX.templates = items.map(t => ({
+          node: String(t?.node || ''),
+          vmid: Number(t?.vmid || 0),
+          name: String(t?.name || ''),
+          bridges: Array.isArray(t?.bridges) ? t.bridges.map(b => String(b || '')) : [],
+          qemu_agent_enabled: !!t?.qemu_agent_enabled,
+        }));
         AFS_CTX.currentNode = deriveAfsCurrentNode(pid, AFS_CTX.templates, urlBase);
         // persist creds and meta for VM Manager prefill
         writeProxCreds(pid, { username: body.username || '', password: body.password || '' });
@@ -6422,6 +6796,10 @@ function renderAFSList() {
     const checkboxAttrs = `type="checkbox" class="form-check-input me-2" data-key="${key}" ${checked}${disableRow ? ' disabled' : ''}`;
     const nodeBadgeCls = disableRow ? 'badge bg-light text-dark border' : 'badge bg-secondary';
     const trailingBits = [];
+    const agentEnabled = !!t.qemu_agent_enabled;
+    if (agentEnabled) {
+      trailingBits.push('<span class="d-inline-flex align-items-center text-success" title="QEMU Guest Agent enabled"><i class="bi bi-robot"></i></span>');
+    }
     if (bridges) trailingBits.push(`<span class="small text-muted">bridges: ${escHtml(bridges)}</span>`);
     if (disableRow) trailingBits.push('<span class="badge bg-warning text-dark">Other node</span>');
     const trailing = trailingBits.length ? `<span class="ms-auto d-flex align-items-center gap-2 flex-wrap">${trailingBits.join('')}</span>` : '';

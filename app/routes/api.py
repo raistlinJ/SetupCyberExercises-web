@@ -26,7 +26,13 @@ from dataclasses import asdict
 import time
 from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
-from ..storage.projects import ProjectStore, Project, sanitize_start_command_steps, _coerce_enabled
+from ..storage.projects import (
+    ProjectStore,
+    Project,
+    sanitize_start_command_steps,
+    sanitize_validation_commands,
+    _coerce_enabled,
+)
 from ..storage.runtime import RuntimeStore
 from ..storage.secrets import encrypt_str as _enc_secret, decrypt_str as _dec_secret
 from ..storage.user_secrets import UserSecretsStore
@@ -784,6 +790,44 @@ def _get_cached_vm_config(client, node: str, vmid: int, force_refresh: bool = Fa
     cfg = client.get_qemu_config(node=node, vmid=int(vmid))
     _VM_CONFIG_CACHE[cache_key] = (now, cfg)
     return cfg
+
+
+def _qemu_agent_enabled_config(cfg: Dict[str, Any]) -> bool:
+    raw = (cfg or {}).get('agent')
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return int(raw) != 0
+    text = str(raw).strip().lower()
+    if not text:
+        return False
+    truthy = {'1', 'true', 'yes', 'on', 'enabled'}
+    falsy = {'0', 'false', 'no', 'off', 'disabled'}
+    head = text.split(',', 1)[0].strip()
+    if head in truthy:
+        return True
+    if head in falsy:
+        return False
+    for part in [p.strip() for p in text.split(',') if p.strip()]:
+        if '=' not in part:
+            continue
+        key, val = [x.strip() for x in part.split('=', 1)]
+        if key != 'enabled':
+            continue
+        if val in truthy:
+            return True
+        if val in falsy:
+            return False
+    return False
+
+
+def _qemu_agent_enabled_from_cfg_or_hint(cfg: Dict[str, Any], hint_raw: Any) -> bool:
+    """Prefer config-level agent option when present; otherwise use list hint."""
+    if isinstance(cfg, dict) and ('agent' in cfg):
+        return _qemu_agent_enabled_config(cfg)
+    return _qemu_agent_enabled_config({'agent': hint_raw})
 
 
 def _prefetch_vm_configs_parallel(
@@ -1619,8 +1663,13 @@ def instances_refresh_vm(pid: str):
             # Only include specs where either a name or vmid is provided
             spec_name = f"{vm_name}{suffix}" if vm_name else None
             spec_vmid = int(cfg_vmid) if (cfg_vmid is not None and str(cfg_vmid).strip() != '') else None
+            try:
+                raw_validation_commands = sanitize_validation_commands(getattr(vm, 'validation_commands', []))
+                validation_configured = any((entry or {}).get('enabled', True) is not False for entry in raw_validation_commands)
+            except Exception:
+                validation_configured = False
             if spec_name or spec_vmid is not None:
-                exp.append({ 'name': spec_name, 'vmid': spec_vmid, 'viewable': bool(viewable) })
+                exp.append({ 'name': spec_name, 'vmid': spec_vmid, 'viewable': bool(viewable), 'validation_configured': bool(validation_configured) })
         expected[i] = exp
     client = ProxmoxClient(base_url=base_url, token=token or None, username=username, password=password, verify=verify)
     try:
@@ -1633,6 +1682,8 @@ def instances_refresh_vm(pid: str):
         name_map = {}
         id_map = {}
         lower_name_to_canon = {}
+        running_vm_refs: Set[Tuple[str, int]] = set()
+        agent_hint_by_ref: Dict[Tuple[str, int], Any] = {}
         
         # PERFORMANCE OPTIMIZATION: Fetch VMs from all nodes in parallel
         def _fetch_node_vms(node_info):
@@ -1688,8 +1739,18 @@ def instances_refresh_vm(pid: str):
                         'state': q.get('qmpstatus') or q.get('status') or '',
                         'power_state': q.get('status') or '',
                         'qmp_state': q.get('qmpstatus') or '',
+                        'agent_hint': q.get('agent'),
                     }
                     lower_name_to_canon[canon.lower()] = canon
+                    try:
+                        if vmid_val is not None:
+                            agent_hint_by_ref[(str(node), int(vmid_val))] = q.get('agent')
+                            power_state = str(q.get('status') or '').strip().lower()
+                            qmp_state = str(q.get('qmpstatus') or '').strip().lower()
+                            if power_state == 'running' or qmp_state == 'running':
+                                running_vm_refs.add((str(node), int(vmid_val)))
+                    except Exception:
+                        pass
         
         t_fetch = time.time()
         logging.info(f"VM refresh: node fetching took {(t_fetch-t_start)*1000:.0f}ms for {len(nodes)} nodes")
@@ -1748,6 +1809,8 @@ def instances_refresh_vm(pid: str):
             verify=verify,
         ),
     )
+
+    runtime_store = _runtime_store()
 
     candidate_poolids: List[str] = []
     for i in range(1, instances + 1):
@@ -1914,9 +1977,12 @@ def instances_refresh_vm(pid: str):
                 count += 1
                 vmid = matched.get('vmid')
                 node = matched.get('node')
+                agent_hint_raw = matched.get('agent_hint')
                 nets = []
                 tmpl_id = None
                 tmpl_name = ''
+                cfg = {}
+                pool_val = ''
                 try:
                     if node and vmid is not None:
                         cfg = prefetched_vm_configs.get((str(node), int(vmid))) or {}
@@ -1982,12 +2048,34 @@ def instances_refresh_vm(pid: str):
                     'node': node,
                     'template_id': tmpl_id,
                     'template_name': tmpl_name,
+                    'validation_commands_configured': bool(spec.get('validation_configured')),
+                    'qemu_agent_enabled': _qemu_agent_enabled_from_cfg_or_hint(cfg if isinstance(cfg, dict) else {}, agent_hint_raw),
+                    'qemu_agent_validated': False,
+                    'qemu_agent_validation_state': 'unknown',
                     'lock': str(cfg.get('lock') or '').strip() if isinstance(cfg, dict) else '',
                     'description': str(cfg.get('description') or '').strip() if isinstance(cfg, dict) else '',
                     'pool': pool_val,
                     # Effective access for the instance user (credential username)
                     'user_access': _effective_user_access(userid, int(vmid), poolid) if (userid and vmid is not None) else None,
                 })
+                if node and vmid is not None:
+                    validation_result = None
+                    try:
+                        getter = getattr(runtime_store, 'get_vm_validation_result', None)
+                        if callable(getter):
+                            validation_result = getter(proj.id, canon_name, vmid=vmid, node=node)
+                        else:
+                            legacy_validated = runtime_store.get_vm_validation_state(proj.id, canon_name, vmid=vmid, node=node)
+                            if legacy_validated:
+                                validation_result = True
+                    except Exception:
+                        validation_result = None
+                    if validation_result is True:
+                        found_details[-1]['qemu_agent_validated'] = True
+                        found_details[-1]['qemu_agent_validation_state'] = 'passed'
+                    elif validation_result is False:
+                        found_details[-1]['qemu_agent_validated'] = False
+                        found_details[-1]['qemu_agent_validation_state'] = 'failed'
         if count == len(names) and len(names) > 0:
             mgrs['vm'] = 'created'
             entry['created'] = True
@@ -2098,6 +2186,28 @@ def instances_create(pid: str):
     except Exception:
         pass
     targets = body.get('targets') or []  # [{ index:int, name:str }]
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if not normalized:
+                return default
+            if normalized in {'false', '0', 'no', 'off', 'disabled'}:
+                return False
+            if normalized in {'true', '1', 'yes', 'on', 'enabled'}:
+                return True
+        return bool(value)
+
+    apply_scenario = _coerce_bool_flag(body.get('applyScenario') if 'applyScenario' in body else None, True)
+    sync_user_access = _coerce_bool_flag(body.get('syncUserAccess') if 'syncUserAccess' in body else None, True)
+    set_network_interfaces = _coerce_bool_flag(body.get('setNetworkInterfaces') if 'setNetworkInterfaces' in body else None, True)
+    take_snapshot = _coerce_bool_flag(body.get('takeSnapshot') if 'takeSnapshot' in body else None, True)
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
@@ -2208,9 +2318,14 @@ def instances_create(pid: str):
     bridges_to_reload = set()
     network_applied_nodes = []
     network_apply_errors = []
+    snapshotted = []
     # Track bridges created in this batch to avoid re-warn when we reencounter them
     created_bridges = set()  # set of (node, iface)
     notices = []
+    if not set_network_interfaces:
+        notices.append({ 'reason': 'Post-clone network interface assignment skipped by request.' })
+    if not take_snapshot:
+        notices.append({ 'reason': 'Post-clone snapshot skipped by request.' })
     # Optional: record vmid retry attempts to surface in response
     vmid_retry_info = []
     # Precompute API host for SSH fallback
@@ -2441,7 +2556,7 @@ def instances_create(pid: str):
             pass
         # Networking deferred: only record expected bridge names; creation & NIC assignment happen post-clone
         debug_msgs = []
-        adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
+        adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if set_network_interfaces else []
         expected_bridges_for_vm = []
         for i, a in enumerate(adaptors):
             bname = _bridge_iface_name(idx, a)
@@ -2454,7 +2569,7 @@ def instances_create(pid: str):
                 step=max((ordinal or 1) - 1, 0),
                 total_steps=total_targets,
                 progress=_clone_progress(ordinal, 0.7),
-                message=f'Finalizing VM {progress_label}: notes, pools, and access…',
+                message=f'Finalizing VM {progress_label}: post-clone settings…',
             )
         except Exception:
             pass
@@ -2466,98 +2581,112 @@ def instances_create(pid: str):
                 skip_snap = bool(getattr(proj, 'proxmox_skip_post_clone_snapshot', False))
         except Exception:
             skip_snap = False
+        skip_snap = bool(skip_snap) or (not take_snapshot)
         
-        # Scenario Credentials / Notes Overwrite
-        try:
-            creds_list = list(getattr(proj, 'credentials', []) or [])
-            urec_temp = creds_list[idx-1] if idx-1 < len(creds_list) else None
-            
-            # Fetch vm_user and vm_pass from the VMConfig
-            cfg_user = getattr(cfg, 'vm_user', None)
-            cfg_pass = getattr(cfg, 'vm_pass', None)
-            
-            # Prepare notes payload
-            notes_payload = {
-                "Scenario": proj.name
-            }
-            if cfg_user:
-                notes_payload["User"] = cfg_user
-            if cfg_pass:
-                notes_payload["Pass"] = cfg_pass
-                
-            json_notes = json.dumps(notes_payload, indent=4)
-            
-            # Fetch existing config to preserve old notes, if desired (or just overwrite)
-            ex_cfg = client.get_qemu_config(node=node, vmid=int(newid)) or {}
-            old_desc = ex_cfg.get('description', '')
-            
-            if old_desc:
-                new_desc = f"{old_desc}\n\n{json_notes}"
-            else:
-                new_desc = json_notes
-                
-            client.set_qemu_options(node=node, vmid=int(newid), options={'description': new_desc})
-            debug_msgs.append(f"Successfully appended scenario credentials to VM Notes for vmid={newid}")
-        except Exception as notes_err:
-            debug_msgs.append(f"Failed to append scenario credentials to VM Notes: {notes_err}")
-
-        # Pool membership: add ALL VMs to pool; ACL only per-VM for user-accessible VMs (no pool ACL grants)
-        assignment_info = {}
-        try:
-            # Determine user-accessible flag from base config
-            viewable = False
+        if apply_scenario:
             try:
-                if isinstance(cfg, dict):
-                    viewable = bool(cfg.get('viewable_to_user'))
+                cfg_user = getattr(cfg, 'vm_user', None)
+                cfg_pass = getattr(cfg, 'vm_pass', None)
+
+                notes_payload = {
+                    "Scenario": proj.name
+                }
+                if cfg_user:
+                    notes_payload["User"] = cfg_user
+                if cfg_pass:
+                    notes_payload["Pass"] = cfg_pass
+
+                json_notes = json.dumps(notes_payload, indent=4)
+                ex_cfg = client.get_qemu_config(node=node, vmid=int(newid)) or {}
+                old_desc = ex_cfg.get('description', '')
+
+                if old_desc:
+                    new_desc = f"{old_desc}\n\n{json_notes}"
                 else:
-                    viewable = bool(getattr(cfg, 'viewable_to_user', False))
-            except Exception:
+                    new_desc = json_notes
+
+                client.set_qemu_options(node=node, vmid=int(newid), options={'description': new_desc})
+                debug_msgs.append(f"Successfully appended scenario credentials to VM Notes for vmid={newid}")
+            except Exception as notes_err:
+                debug_msgs.append(f"Failed to append scenario credentials to VM Notes: {notes_err}")
+
+        assignment_info = {}
+        if sync_user_access:
+            try:
                 viewable = False
-            creds = list(getattr(proj, 'credentials', []) or [])
-            urec = creds[idx-1] if idx-1 < len(creds) else None
-            uname = (urec or {}).get('username') or ''
-            if uname:
-                poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
-                userid = f"{uname}@pve"
-                pool_exists = False
                 try:
-                    pool_exists = bool(client.get_pool(poolid) is not None)
-                except Exception as e:
-                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool lookup failed: {e}' })
-                if pool_exists:
-                    # Attempt to add VM to pool (retry + fallback)
+                    if isinstance(cfg, dict):
+                        viewable = bool(cfg.get('viewable_to_user'))
+                    else:
+                        viewable = bool(getattr(cfg, 'viewable_to_user', False))
+                except Exception:
+                    viewable = False
+                creds = list(getattr(proj, 'credentials', []) or [])
+                urec = creds[idx-1] if idx-1 < len(creds) else None
+                uname = (urec or {}).get('username') or ''
+                if uname:
+                    poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
+                    userid = f"{uname}@pve"
+                    pool_exists = False
                     try:
-                        debug_msgs.append(f"add_pool_member: attempting pool={poolid} vmid={int(newid)}")
-                    except Exception:
-                        pass
-                    try:
-                        client.add_pool_member(poolid, int(newid))
-                        assignment_info['pool'] = poolid
-                        assignment_info['pool_member_added'] = True
+                        pool_exists = bool(client.get_pool(poolid) is not None)
+                    except Exception as e:
+                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool lookup failed: {e}' })
+                    if pool_exists:
                         try:
-                            debug_msgs.append(f"add_pool_member: success pool={poolid} vmid={int(newid)}")
+                            debug_msgs.append(f"add_pool_member: attempting pool={poolid} vmid={int(newid)}")
                         except Exception:
                             pass
-                    except Exception as e:
-                        msg = str(e)
-                        do_retry = ('not found' in msg.lower()) or ('no such' in msg.lower()) or ('does not exist' in msg.lower())
-                        if do_retry:
+                        try:
+                            client.add_pool_member(poolid, int(newid))
+                            assignment_info['pool'] = poolid
+                            assignment_info['pool_member_added'] = True
                             try:
-                                _safe_sleep(2)
+                                debug_msgs.append(f"add_pool_member: success pool={poolid} vmid={int(newid)}")
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            msg = str(e)
+                            do_retry = ('not found' in msg.lower()) or ('no such' in msg.lower()) or ('does not exist' in msg.lower())
+                            if do_retry:
                                 try:
-                                    debug_msgs.append(f"add_pool_member: retrying pool={poolid} vmid={int(newid)} after transient error")
-                                except Exception:
-                                    pass
-                                client.add_pool_member(poolid, int(newid))
-                                assignment_info['pool'] = poolid
-                                assignment_info['pool_member_added'] = True
-                                try:
-                                    debug_msgs.append(f"add_pool_member: success (after retry) pool={poolid} vmid={int(newid)}")
-                                except Exception:
-                                    pass
-                            except Exception as e2:
-                                msg2 = str(e2)
-                                if ' 501' in msg2 or 'not implemented' in msg2.lower():
+                                    _safe_sleep(2)
+                                    try:
+                                        debug_msgs.append(f"add_pool_member: retrying pool={poolid} vmid={int(newid)} after transient error")
+                                    except Exception:
+                                        pass
+                                    client.add_pool_member(poolid, int(newid))
+                                    assignment_info['pool'] = poolid
+                                    assignment_info['pool_member_added'] = True
+                                    try:
+                                        debug_msgs.append(f"add_pool_member: success (after retry) pool={poolid} vmid={int(newid)}")
+                                    except Exception:
+                                        pass
+                                except Exception as e2:
+                                    msg2 = str(e2)
+                                    if ' 501' in msg2 or 'not implemented' in msg2.lower():
+                                        try:
+                                            client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
+                                            assignment_info['pool'] = poolid
+                                            assignment_info['pool_member_added'] = True
+                                            try:
+                                                debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> success")
+                                            except Exception:
+                                                pass
+                                        except Exception as e3:
+                                            try:
+                                                debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
+                                            except Exception:
+                                                pass
+                                            post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
+                                    else:
+                                        try:
+                                            debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e2}")
+                                        except Exception:
+                                            pass
+                                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e2}' })
+                            else:
+                                if ' 501' in msg or 'not implemented' in msg.lower():
                                     try:
                                         client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
                                         assignment_info['pool'] = poolid
@@ -2574,112 +2703,87 @@ def instances_create(pid: str):
                                         post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
                                 else:
                                     try:
-                                        debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e2}")
+                                        debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e}")
                                     except Exception:
                                         pass
-                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e2}' })
-                        else:
-                            if ' 501' in msg or 'not implemented' in msg.lower():
+                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e}' })
+                    try:
+                        if uname:
+                            try:
+                                if current_app.config.get('ACL_DEBUG'):
+                                    current_app.logger.info(f"[create][ACL] reconciling user={userid} for vmid={newid} name={newname} accessible={viewable}")
+                            except Exception:
+                                pass
+                            user_rec = client.get_user(userid)
+                            if user_rec is not None:
                                 try:
-                                    client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
-                                    assignment_info['pool'] = poolid
-                                    assignment_info['pool_member_added'] = True
+                                    if current_app.config.get('ACL_DEBUG'):
+                                        current_app.logger.info(f"[create][ACL] applying reconciled role user={userid} vmid={newid} accessible={viewable}")
+                                except Exception:
+                                    pass
+                                try:
+                                    acl_result = _reconcile_vm_access_roles(
+                                        client,
+                                        userid,
+                                        int(newid),
+                                        accessible=viewable,
+                                        rollback_enabled=bool(getattr(proj, 'proxmox_assign_rollback_on_non_viewable', True)),
+                                        current_roles=None,
+                                    )
+                                    assignment_info['acl_set'] = True
+                                    assignment_info['acl_role'] = acl_result.get('granted')
                                     try:
-                                        debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> success")
+                                        debug_msgs.append(
+                                            f"acl_set: user={userid} vmid={int(newid)} accessible={viewable} role={acl_result.get('granted') or 'unchanged'} removed={','.join(acl_result.get('removed') or []) or 'none'}"
+                                        )
                                     except Exception:
                                         pass
-                                except Exception as e3:
                                     try:
-                                        debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
+                                        entries = client.list_acls() or []
+                                        found = False
+                                        path_variants = {f"/vms/{int(newid)}", f"vms/{int(newid)}"}
+                                        for e in entries:
+                                            try:
+                                                if str(e.get('ugid') or '') == userid and str(e.get('path') or '') in path_variants:
+                                                    found = True
+                                                    break
+                                            except Exception:
+                                                continue
+                                        if current_app.config.get('ACL_DEBUG'):
+                                            current_app.logger.info(f"[create][ACL] verification user={userid} vmid={newid} present={found}")
+                                    except Exception as ve:
+                                        try:
+                                            if current_app.config.get('ACL_DEBUG'):
+                                                current_app.logger.warning(f"[create][ACL] verification failed user={userid} vmid={newid}: {ve}")
+                                        except Exception:
+                                            pass
+                                except Exception as e:
+                                    msg = str(e)
+                                    try:
+                                        current_app.logger.error(f"[create][ACL] failed user={userid} vmid={newid}: {msg}")
                                     except Exception:
                                         pass
-                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
+                                    if '501' in msg and 'not implemented' not in msg.lower():
+                                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'ACL permission issue (501) applying user {userid}: {msg}' })
+                                    elif 'not implemented' in msg.lower():
+                                        post_errors.append({ 'index': idx, 'name': newname, 'reason': 'ACL endpoint not implemented on this Proxmox build' })
+                                    else:
+                                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'per-VM ACL failed: {e}' })
                             else:
                                 try:
-                                    debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e}")
+                                    if current_app.config.get('ACL_DEBUG'):
+                                        current_app.logger.warning(f"[create][ACL] user not found user={userid} vmid={newid}")
                                 except Exception:
                                     pass
-                                post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e}' })
-                # ACLs: every VM must reconcile into exactly one role state.
-                # Viewable VMs get user access; non-viewable VMs get rollback-only when enabled.
-                try:
-                    if uname:
+                                post_errors.append({ 'index': idx, 'name': newname, 'reason': f'user {userid} not found; skipping ACL set' })
+                    except Exception as e:
                         try:
-                            if current_app.config.get('ACL_DEBUG'):
-                                current_app.logger.info(f"[create][ACL] reconciling user={userid} for vmid={newid} name={newname} accessible={viewable}")
+                            current_app.logger.error(f"[create][ACL] ACL processing failed user={userid} vmid={newid}: {e}")
                         except Exception:
                             pass
-                        user_rec = client.get_user(userid)
-                        if user_rec is not None:
-                            try:
-                                if current_app.config.get('ACL_DEBUG'):
-                                    current_app.logger.info(f"[create][ACL] applying reconciled role user={userid} vmid={newid} accessible={viewable}")
-                            except Exception:
-                                pass
-                            try:
-                                acl_result = _reconcile_vm_access_roles(
-                                    client,
-                                    userid,
-                                    int(newid),
-                                    accessible=viewable,
-                                    rollback_enabled=bool(getattr(proj, 'proxmox_assign_rollback_on_non_viewable', True)),
-                                    current_roles=None,
-                                )
-                                assignment_info['acl_set'] = True
-                                assignment_info['acl_role'] = acl_result.get('granted')
-                                try:
-                                    debug_msgs.append(
-                                        f"acl_set: user={userid} vmid={int(newid)} accessible={viewable} role={acl_result.get('granted') or 'unchanged'} removed={','.join(acl_result.get('removed') or []) or 'none'}"
-                                    )
-                                except Exception:
-                                    pass
-                                # Verify presence in ACL list (best effort)
-                                try:
-                                    entries = client.list_acls() or []
-                                    found = False
-                                    path_variants = {f"/vms/{int(newid)}", f"vms/{int(newid)}"}
-                                    for e in entries:
-                                        try:
-                                            if str(e.get('ugid') or '') == userid and str(e.get('path') or '') in path_variants:
-                                                found = True
-                                                break
-                                        except Exception:
-                                            continue
-                                    if current_app.config.get('ACL_DEBUG'):
-                                        current_app.logger.info(f"[create][ACL] verification user={userid} vmid={newid} present={found}")
-                                except Exception as ve:
-                                    try:
-                                        if current_app.config.get('ACL_DEBUG'):
-                                            current_app.logger.warning(f"[create][ACL] verification failed user={userid} vmid={newid}: {ve}")
-                                    except Exception:
-                                        pass
-                            except Exception as e:
-                                msg = str(e)
-                                try:
-                                    current_app.logger.error(f"[create][ACL] failed user={userid} vmid={newid}: {msg}")
-                                except Exception:
-                                    pass
-                                if '501' in msg and 'not implemented' not in msg.lower():
-                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'ACL permission issue (501) applying user {userid}: {msg}' })
-                                elif 'not implemented' in msg.lower():
-                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': 'ACL endpoint not implemented on this Proxmox build' })
-                                else:
-                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'per-VM ACL failed: {e}' })
-                        else:
-                            try:
-                                if current_app.config.get('ACL_DEBUG'):
-                                    current_app.logger.warning(f"[create][ACL] user not found user={userid} vmid={newid}")
-                            except Exception:
-                                pass
-                            post_errors.append({ 'index': idx, 'name': newname, 'reason': f'user {userid} not found; skipping ACL set' })
-                except Exception as e:
-                    try:
-                        current_app.logger.error(f"[create][ACL] ACL processing failed user={userid} vmid={newid}: {e}")
-                    except Exception:
-                        pass
-                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'ACL processing failed: {e}' })
-        except Exception as e:
-            post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool/acl assignment failed: {e}' })
+                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'ACL processing failed: {e}' })
+            except Exception as e:
+                post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool/acl assignment failed: {e}' })
         # Finalize
         if post_errors:
             payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal }
@@ -2746,7 +2850,6 @@ def instances_create(pid: str):
         max_jobs = 1
     # Schedule clones in parallel with a cap
     to_process = list(targets)
-    notices = []
     # For de-duplicating warning notices across the entire batch
     notice_keys = set()
     while to_process:
@@ -3113,7 +3216,12 @@ def instances_create(pid: str):
                     # Timeout matching the original logic (900s)
                     supid = client.snapshot_qemu(node=item['node'], vmid=item['vmid'], snapname='post-clone', description='Auto snapshot after clone')
                     client._wait_task(item['node'], supid, timeout=900)
-                    return None
+                    return {
+                        'name': item.get('name') or '',
+                        'vmid': item.get('vmid'),
+                        'node': item.get('node') or '',
+                        'snapname': 'post-clone',
+                    }
                 except Exception as e:
                     return f"snapshot failed for {item.get('name')}: {e}"
 
@@ -3135,13 +3243,15 @@ def instances_create(pid: str):
                             progress=_snapshot_progress(ordinal, len(snapshot_tasks), completed=snapshot_done),
                             message=(
                                 f'Snapshot created for {progress_label}; {snapshot_done}/{len(snapshot_tasks)} complete'
-                                if not res else
+                                if isinstance(res, dict) else
                                 f'Snapshot failed for {progress_label}; {snapshot_done}/{len(snapshot_tasks)} complete'
                             ),
                         )
                     except Exception:
                         pass
-                    if res:
+                    if isinstance(res, dict):
+                        snapshotted.append(res)
+                    elif res:
                         # Log error but don't fail the whole job
                         try:
                             t_item = snap_futs[fut]
@@ -3272,12 +3382,14 @@ def instances_create(pid: str):
                 if vmid is None or not node:
                     continue
                 # 1) Snapshot present?
-                has_snap = False
-                try:
-                    snaps = client.list_snapshots_qemu(node=node, vmid=vmid) or []
-                    has_snap = bool(snaps)
-                except Exception:
-                    has_snap = False
+                should_have_snapshot = not bool(r.get('skip_post_clone_snapshot'))
+                has_snap = not should_have_snapshot
+                if should_have_snapshot:
+                    try:
+                        snaps = client.list_snapshots_qemu(node=node, vmid=vmid) or []
+                        has_snap = bool(snaps)
+                    except Exception:
+                        has_snap = False
                 # 2) NICs match expected bridges?
                 expected_bridges = set([str(b) for b in (r.get('expected_bridges') or [])])
                 actual_bridges = set()
@@ -3386,6 +3498,17 @@ def instances_create(pid: str):
 
     # Only include retry info when there were multiple attempts or failures
     vmid_retry_info_filtered = [r for r in vmid_retry_info if (not r.get('success')) or (len(r.get('attempts') or []) > 1)]
+    try:
+        runtime_store = _runtime_store()
+        for item in results or []:
+            runtime_store.clear_vm_validation_state(
+                pid,
+                item.get('name'),
+                vmid=item.get('vmid'),
+                node=item.get('node'),
+            )
+    except Exception:
+        pass
     _end_job(pid)
     _update_job_detail(pid, phase='done', message='Create completed', progress=100)
     verify_summary = {
@@ -3393,7 +3516,7 @@ def instances_create(pid: str):
         'nets_mismatch': sum(1 for i in verify_issues if not i.get('nets_ok', True)),
         'ageing_missing': sum(1 for i in verify_issues if i.get('ageing_missing')),
     }
-    return jsonify({ 'created': results, 'skipped': skipped, 'errors': errors, 'notices': notices, 'ambiguous': ambiguous_out, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors, 'vmid_retry_info': vmid_retry_info_filtered, 'verify': { 'issues': verify_issues, 'summary': verify_summary } })
+    return jsonify({ 'created': results, 'skipped': skipped, 'errors': errors, 'notices': notices, 'ambiguous': ambiguous_out, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors, 'snapshotted': snapshotted, 'vmid_retry_info': vmid_retry_info_filtered, 'verify': { 'issues': verify_issues, 'summary': verify_summary } })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/create-preflight", methods=["POST"])
@@ -3433,15 +3556,100 @@ def instances_create_preflight(pid: str):
         pass
     targets = body.get('targets') or []
     DEFAULT_CMD_TIMEOUT = 300
+    DEFAULT_VALIDATION_TIMEOUT = 10
     MAX_CMD_TIMEOUT = 86400
 
-    def _coerce_timeout(value: Any) -> int:
+    def _coerce_timeout(value: Any, default: int = DEFAULT_CMD_TIMEOUT) -> int:
         try:
             num = float(value)
         except (TypeError, ValueError):
-            return DEFAULT_CMD_TIMEOUT
+            return default
         if num <= 0:
-            return DEFAULT_CMD_TIMEOUT
+            return default
+        try:
+            num = int(round(num))
+        except Exception:
+            num = int(num)
+        if num > MAX_CMD_TIMEOUT:
+            num = MAX_CMD_TIMEOUT
+        return num
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            if not norm:
+                return default
+            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
+                return True
+            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
+                return False
+        return bool(value)
+
+    def _compile_validation_regex(pattern: str) -> Tuple[Optional[re.Pattern], Optional[str]]:
+        text = str(pattern or '').strip()
+        if not text:
+            return None, 'missing regular expression'
+        body = text
+        flags = 0
+        if len(text) >= 2 and text.startswith('/'):
+            slash_idx = text.rfind('/')
+            if slash_idx > 0:
+                body = text[1:slash_idx]
+                flag_part = text[slash_idx + 1:]
+                for ch in flag_part:
+                    if ch == 'i':
+                        flags |= re.IGNORECASE
+                    elif ch == 'm':
+                        flags |= re.MULTILINE
+                    elif ch == 's':
+                        flags |= re.DOTALL
+                    elif ch == 'x':
+                        flags |= re.VERBOSE
+                    elif ch:
+                        return None, f"unsupported regex flag: {ch}"
+        try:
+            return re.compile(body, flags), None
+        except re.error as exc:
+            return None, f"invalid regex: {exc}"
+
+    def _extract_validation_commands(vcfg_obj: Any) -> List[Dict[str, Any]]:
+        raw = sanitize_validation_commands(getattr(vcfg_obj, 'validation_commands', [])) if vcfg_obj else []
+        out: List[Dict[str, Any]] = []
+        for order, entry in enumerate(raw, start=1):
+            if not isinstance(entry, dict):
+                continue
+            cmd_text = _normalize_command_text(entry.get('command'))
+            if not cmd_text:
+                continue
+            enabled = _coerce_bool_flag(entry.get('enabled'), True)
+            if not enabled:
+                continue
+            match_expr = str(entry.get('match') or '').strip()
+            timeout_seconds = _coerce_timeout(entry.get('timeout_seconds'), default=DEFAULT_VALIDATION_TIMEOUT)
+            out.append({
+                'order': order,
+                'command': cmd_text,
+                'match': match_expr,
+                'timeout_seconds': timeout_seconds,
+            })
+        return out
+    DEFAULT_CMD_TIMEOUT = 300
+    DEFAULT_VALIDATION_TIMEOUT = 10
+    MAX_CMD_TIMEOUT = 86400
+
+    def _coerce_timeout(value: Any, default: int = DEFAULT_CMD_TIMEOUT) -> int:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return default
+        if num <= 0:
+            return default
         try:
             num = int(round(num))
         except Exception:
@@ -3467,40 +3675,7 @@ def instances_create_preflight(pid: str):
                 return False
         return bool(value)
     DEFAULT_CMD_TIMEOUT = 300
-    MAX_CMD_TIMEOUT = 86400
-
-    def _coerce_timeout(value: Any) -> int:
-        try:
-            num = float(value)
-        except (TypeError, ValueError):
-            return DEFAULT_CMD_TIMEOUT
-        if num <= 0:
-            return DEFAULT_CMD_TIMEOUT
-        try:
-            num = int(round(num))
-        except Exception:
-            num = int(num)
-        if num > MAX_CMD_TIMEOUT:
-            num = MAX_CMD_TIMEOUT
-        return num
-
-    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return value != 0
-        if isinstance(value, str):
-            norm = value.strip().lower()
-            if not norm:
-                return default
-            if norm in {'true', '1', 'yes', 'on', 'enabled', 'long', 'longrunning'}:
-                return True
-            if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
-                return False
-        return bool(value)
-    DEFAULT_CMD_TIMEOUT = 300
+    DEFAULT_VALIDATION_TIMEOUT = 10
     MAX_CMD_TIMEOUT = 86400
 
     def _coerce_timeout(value: Any) -> int:
@@ -3750,15 +3925,16 @@ def instances_fix_ageing(pid: str):
         pass
     targets = body.get('targets') or []
     DEFAULT_CMD_TIMEOUT = 300
+    DEFAULT_VALIDATION_TIMEOUT = 10
     MAX_CMD_TIMEOUT = 86400
 
-    def _coerce_timeout(value: Any) -> int:
+    def _coerce_timeout(value: Any, default: int = DEFAULT_CMD_TIMEOUT) -> int:
         try:
             num = float(value)
         except (TypeError, ValueError):
-            return DEFAULT_CMD_TIMEOUT
+            return default
         if num <= 0:
-            return DEFAULT_CMD_TIMEOUT
+            return default
         try:
             num = int(round(num))
         except Exception:
@@ -3789,6 +3965,7 @@ def instances_fix_ageing(pid: str):
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+    runtime_store = _runtime_store()
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     # Helper to resolve node name to SSH host
     def _resolve_host_for_node(node_name: str) -> str:
@@ -3953,6 +4130,25 @@ def instances_delete(pid: str):
     username = body.get('username') or None
     password = body.get('password') or None
     verify_cleanup = bool(body.get('verifyCleanup')) if ('verifyCleanup' in body) else True
+
+    def _coerce_bool_flag(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if not normalized:
+                return default
+            if normalized in {'false', '0', 'no', 'off', 'disabled'}:
+                return False
+            if normalized in {'true', '1', 'yes', 'on', 'enabled'}:
+                return True
+        return bool(value)
+
+    delete_users_and_pools = _coerce_bool_flag(body.get('deleteUsersAndPools') if 'deleteUsersAndPools' in body else None, False)
     base_url = body.get('baseUrl') or proj.proxmox_url
     verify = bool(body.get('verifySSL')) if ('verifySSL' in body) else (getattr(proj, 'proxmox_verify_ssl', True) is not False)
     body_port = body.get('apiPort')
@@ -3978,6 +4174,7 @@ def instances_delete(pid: str):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
+    selected_indices = sorted({ int((t or {}).get('index', 0)) for t in targets if (t or {}).get('index') })
 
     tag = str(proj.tag or '').strip()
     vms_cfg = proj.vms or []
@@ -4012,6 +4209,8 @@ def instances_delete(pid: str):
     bridges_to_reload = set()
     network_applied_nodes = []
     network_apply_errors = []
+    deleted_users = []
+    deleted_pools = []
 
     # Prepare tasks for parallel deletion
     def prepare_target(t):
@@ -4236,8 +4435,59 @@ def instances_delete(pid: str):
         except Exception:
             pass
 
+    if delete_users_and_pools and selected_indices:
+        remaining_names_lc = set()
+        try:
+            post_nodes = client.list_nodes()
+        except Exception:
+            post_nodes = nodes
+        for n in post_nodes:
+            node = n.get('node') or n.get('id') or ''
+            if not node:
+                continue
+            try:
+                for q in client.list_qemu_vms(node):
+                    nm = str(q.get('name') or '').strip()
+                    if nm:
+                        remaining_names_lc.add(nm.lower())
+            except Exception:
+                continue
+
+        cleanup_indices = []
+        for idx in selected_indices:
+            remaining_for_idx = []
+            for cfg in vms_cfg:
+                base_name = str(getattr(cfg, 'name', '') or '').strip()
+                if not base_name:
+                    continue
+                gen_name = f"{base_name}{tag}{idx}"
+                if gen_name.lower() in remaining_names_lc:
+                    remaining_for_idx.append(gen_name)
+            if remaining_for_idx:
+                _append_unique_reason(notices, { 'index': idx, 'reason': f'user/pool cleanup skipped: scenario VMs still remain for instance {idx}' })
+                continue
+            cleanup_indices.append(idx)
+
+        if cleanup_indices:
+            cleanup_resp = _delete_proxmox_users_and_pools_for_indices(proj, client, cleanup_indices)
+            deleted_users.extend(list(cleanup_resp.get('deleted_users') or []))
+            deleted_pools.extend(list(cleanup_resp.get('deleted_pools') or []))
+            errors.extend(list(cleanup_resp.get('errors') or []))
+            notices.extend(list(cleanup_resp.get('notices') or []))
+
+    try:
+        runtime_store = _runtime_store()
+        for item in deleted or []:
+            runtime_store.clear_vm_validation_state(
+                pid,
+                item.get('name'),
+                vmid=item.get('vmid'),
+                node=item.get('node'),
+            )
+    except Exception:
+        pass
     _end_job(pid)
-    return jsonify({ 'deleted': deleted, 'skipped': skipped, 'errors': errors, 'notices': notices, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors, 'verify': verify_result, 'deferred_cleanup': deferred_cleanup })
+    return jsonify({ 'deleted': deleted, 'deleted_users': deleted_users, 'deleted_pools': deleted_pools, 'skipped': skipped, 'errors': errors, 'notices': notices, 'network_applied_nodes': network_applied_nodes, 'network_apply_errors': network_apply_errors, 'verify': verify_result, 'deferred_cleanup': deferred_cleanup })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/purge_leftovers", methods=["POST"])
@@ -6805,6 +7055,159 @@ def instances_users_creds_set(pid: str):
     })
 
 
+def _delete_proxmox_users_and_pools_for_indices(proj: Project, client: ProxmoxClient, indices: Iterable[int]) -> Dict[str, Any]:
+    deleted_users = []
+    deleted_pools = []
+    errors = []
+    notices = []
+    notice_keys = set()
+
+    def _add_notice_once(item):
+        try:
+            key = str((item or {}).get('reason', '') or item)
+            if key not in notice_keys:
+                notices.append(item)
+                notice_keys.add(key)
+        except Exception:
+            notices.append(item)
+
+    safe_indices = []
+    for raw_idx in indices or []:
+        try:
+            idx = int(raw_idx)
+        except Exception:
+            continue
+        if idx > 0 and idx not in safe_indices:
+            safe_indices.append(idx)
+
+    for idx in safe_indices:
+        try:
+            cred = (proj.credentials or [])[idx - 1] if idx - 1 < len(proj.credentials or []) else None
+            uname = (cred or {}).get('username') or ''
+            if not uname:
+                errors.append({ 'index': idx, 'reason': 'no credential username for instance' })
+                continue
+            userid = f"{uname}@pve"
+            poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
+            try:
+                if poolid:
+                    pool_exists = False
+                    try:
+                        pool_exists = bool(client.get_pool(poolid) is not None)
+                    except Exception as ge:
+                        msg = str(ge).lower()
+                        if 'not found' in msg or 'no such' in msg or 'does not exist' in msg or ' 404' in msg:
+                            pool_exists = False
+                        else:
+                            pool_exists = False
+                    if not pool_exists:
+                        _add_notice_once({ 'index': idx, 'reason': f'pool delete skipped: pool "{poolid}" does not exist' })
+                    else:
+                        try:
+                            client.delete_all_acls_for_path(f"/pool/{poolid}")
+                        except Exception:
+                            pass
+                        try:
+                            client.delete_acl_user_pool(userid, poolid, roles='PVEVMUser', propagate=True)
+                        except Exception as e:
+                            if ' 501' in str(e) or 'not implemented' in str(e).lower():
+                                _add_notice_once({ 'index': idx, 'reason': 'ACL delete unsupported; continuing' })
+                            else:
+                                _add_notice_once({ 'index': idx, 'reason': f'ACL delete failed: {e}' })
+                        vm_refs = []
+                        try:
+                            current_members = list(client.list_pool_members(poolid) or [])
+                            for m in current_members:
+                                if str(m.get('type') or '').lower() != 'qemu' or m.get('vmid') is None:
+                                    continue
+                                vmid_int = int(m.get('vmid'))
+                                try:
+                                    client.remove_pool_member(poolid, vmid_int)
+                                except Exception as me:
+                                    if ' 501' in str(me) or 'not implemented' in str(me).lower():
+                                        vm_refs.append(vmid_int)
+                                    else:
+                                        vm_refs.append(vmid_int)
+                            try:
+                                remain = list(client.list_pool_members(poolid) or [])
+                                for m in remain:
+                                    if str(m.get('type') or '').lower() == 'qemu' and m.get('vmid') is not None:
+                                        vmid_int = int(m.get('vmid'))
+                                        if vmid_int not in vm_refs:
+                                            vm_refs.append(vmid_int)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        if vm_refs:
+                            try:
+                                vmid_to_node = {}
+                                try:
+                                    for n in client.list_nodes():
+                                        node_name = n.get('node') or n.get('id') or ''
+                                        if not node_name:
+                                            continue
+                                        try:
+                                            for q in client.list_qemu_vms(node_name):
+                                                try:
+                                                    qid = q.get('vmid')
+                                                    if qid is not None:
+                                                        vmid_to_node[int(qid)] = node_name
+                                                except Exception:
+                                                    continue
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    pass
+                                for vmid in vm_refs:
+                                    node = vmid_to_node.get(int(vmid))
+                                    if not node:
+                                        continue
+                                    try:
+                                        client.delete_qemu_options(node, int(vmid), ['pool'])
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+                        try:
+                            client.delete_pool(poolid)
+                        except Exception as e1:
+                            msg1 = str(e1).lower()
+                            if 'does not exist' in msg1 or 'no such' in msg1 or 'not found' in msg1 or ' 404' in msg1:
+                                errors.append({ 'index': idx, 'reason': f'pool delete skipped: pool "{poolid}" does not exist' })
+                            elif ' 500' in str(e1):
+                                try:
+                                    client.delete_pool(poolid)
+                                except Exception as e2:
+                                    raise e2
+                            else:
+                                raise e1
+                        else:
+                            deleted_pools.append({ 'index': idx, 'pool': poolid })
+            except Exception as e:
+                errors.append({ 'index': idx, 'reason': f'pool delete failed: {e}' })
+            try:
+                try:
+                    rec = client.get_user(userid)
+                except Exception:
+                    rec = None
+                if rec is None:
+                    _add_notice_once({ 'index': idx, 'reason': f'user delete skipped: user "{userid}" does not exist' })
+                else:
+                    client.delete_user(userid)
+                    deleted_users.append({ 'index': idx, 'userid': userid })
+            except Exception as e:
+                msg = str(e).lower()
+                if 'not found' in msg or 'no such' in msg or 'does not exist' in msg or ' 404' in msg:
+                    _add_notice_once({ 'index': idx, 'reason': f'user delete skipped: user "{userid}" does not exist' })
+                else:
+                    errors.append({ 'index': idx, 'reason': f'user delete failed: {e}' })
+        except Exception as e:
+            errors.append({ 'index': idx, 'reason': f'users_delete failed: {e}' })
+
+    return { 'deleted_users': deleted_users, 'deleted_pools': deleted_pools, 'errors': errors, 'notices': notices }
+
+
 @api_bp.route("/projects/<pid>/instances/actions/users_delete", methods=["POST"])
 def instances_users_delete(pid: str):
     """Delete Proxmox user(s) and pools for selected instance credential usernames."""
@@ -6842,168 +7245,10 @@ def instances_users_delete(pid: str):
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
-    # We only need instance indices from targets to find corresponding usernames
     indices = sorted({ int((t or {}).get('index', 0)) for t in targets if (t or {}).get('index') })
-    deleted_users = []
-    deleted_pools = []
-    errors = []
-    notices = []
-    notice_keys = set()
-    def _add_notice_once(item):
-        try:
-            key = str((item or {}).get('reason', '') or item)
-            if key not in notice_keys:
-                notices.append(item)
-                notice_keys.add(key)
-        except Exception:
-            notices.append(item)
-    for idx in indices:
-        if _is_cancelled(pid):
-            errors.append({ 'reason': 'cancelled' })
-            break
-        try:
-            cred = (proj.credentials or [])[idx-1] if idx-1 < len(proj.credentials or []) else None
-            uname = (cred or {}).get('username') or ''
-            if not uname:
-                errors.append({ 'index': idx, 'reason': 'no credential username for instance' })
-                continue
-            userid = f"{uname}@pve"
-            poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
-            try:
-                if poolid:
-                    # Check if pool exists up-front; if not, return a clear error and skip pool operations
-                    pool_exists = False
-                    try:
-                        pool_exists = bool(client.get_pool(poolid) is not None)
-                    except Exception as ge:
-                        # If API errored but message indicates not found, treat as not exists
-                        msg = str(ge).lower()
-                        if 'not found' in msg or 'no such' in msg or 'does not exist' in msg or ' 404' in msg:
-                            pool_exists = False
-                        else:
-                            # Unknown error when checking; proceed with caution
-                            pool_exists = False
-                    if not pool_exists:
-                        _add_notice_once({ 'index': idx, 'reason': f'pool delete skipped: pool "{poolid}" does not exist' })
-                        # continue to attempt user deletion below
-                    else:
-                        # Best-effort: clear pool ACL for the user, remove members, then delete pool
-                        # First try bulk remove of all ACLs on the pool path (users and groups)
-                        try:
-                            client.delete_all_acls_for_path(f"/pool/{poolid}")
-                        except Exception:
-                            pass
-                        # Then try specific user ACL removal (best-effort)
-                        try:
-                            client.delete_acl_user_pool(userid, poolid, roles='PVEVMUser', propagate=True)
-                        except Exception as e:
-                            if ' 501' in str(e) or 'not implemented' in str(e).lower():
-                                notices.append({ 'index': idx, 'reason': 'ACL delete unsupported; continuing' })
-                            else:
-                                notices.append({ 'index': idx, 'reason': f'ACL delete failed: {e}' })
-                        # Attempt to remove all QEMU members via API; collect remaining vmids
-                        vm_refs = []
-                        member_api_unsupported = False
-                        try:
-                            current_members = list(client.list_pool_members(poolid) or [])
-                            for m in current_members:
-                                if str(m.get('type') or '').lower() != 'qemu' or m.get('vmid') is None:
-                                    continue
-                                vmid_int = int(m.get('vmid'))
-                                try:
-                                    client.remove_pool_member(poolid, vmid_int)
-                                except Exception as me:
-                                    # If not supported, mark for VM-side cleanup
-                                    if ' 501' in str(me) or 'not implemented' in str(me).lower():
-                                        member_api_unsupported = True
-                                        vm_refs.append(vmid_int)
-                                    else:
-                                        # If other failure, keep it in refs to attempt VM-side cleanup
-                                        vm_refs.append(vmid_int)
-                            # Re-list members; any still present go to VM-side cleanup
-                            try:
-                                remain = list(client.list_pool_members(poolid) or [])
-                                for m in remain:
-                                    if str(m.get('type') or '').lower() == 'qemu' and m.get('vmid') is not None:
-                                        vmid_int = int(m.get('vmid'))
-                                        if vmid_int not in vm_refs:
-                                            vm_refs.append(vmid_int)
-                            except Exception:
-                                pass
-                        except Exception:
-                            # If listing members failed, proceed to try pool delete and handle error
-                            pass
-                        # If any members remain or API unsupported, try VM-side pool option removal
-                        if vm_refs:
-                            try:
-                                # Map vmid -> node by scanning cluster
-                                vmid_to_node = {}
-                                try:
-                                    for n in client.list_nodes():
-                                        node_name = n.get('node') or n.get('id') or ''
-                                        if not node_name:
-                                            continue
-                                        try:
-                                            for q in client.list_qemu_vms(node_name):
-                                                try:
-                                                    qid = q.get('vmid')
-                                                    if qid is not None:
-                                                        vmid_to_node[int(qid)] = node_name
-                                                except Exception:
-                                                    continue
-                                        except Exception:
-                                            continue
-                                except Exception:
-                                    pass
-                                for vmid in vm_refs:
-                                    node = vmid_to_node.get(int(vmid))
-                                    if not node:
-                                        continue
-                                    try:
-                                        client.delete_qemu_options(node, int(vmid), ['pool'])
-                                    except Exception:
-                                        continue
-                            except Exception:
-                                pass
-                        # Attempt pool delete (retry once if first attempt fails with 500)
-                        try:
-                            client.delete_pool(poolid)
-                        except Exception as e1:
-                            msg1 = str(e1).lower()
-                            if 'does not exist' in msg1 or 'no such' in msg1 or 'not found' in msg1 or ' 404' in msg1:
-                                errors.append({ 'index': idx, 'reason': f'pool delete skipped: pool "{poolid}" does not exist' })
-                            elif ' 500' in str(e1):
-                                try:
-                                    client.delete_pool(poolid)
-                                except Exception as e2:
-                                    raise e2
-                            else:
-                                raise e1
-                        else:
-                            deleted_pools.append({ 'index': idx, 'pool': poolid })
-            except Exception as e:
-                errors.append({ 'index': idx, 'reason': f'pool delete failed: {e}' })
-            try:
-                # If user is already gone, warn-once
-                try:
-                    rec = client.get_user(userid)
-                except Exception:
-                    rec = None
-                if rec is None:
-                    _add_notice_once({ 'index': idx, 'reason': f'user delete skipped: user "{userid}" does not exist' })
-                else:
-                    client.delete_user(userid)
-                    deleted_users.append({ 'index': idx, 'userid': userid })
-            except Exception as e:
-                msg = str(e).lower()
-                if 'not found' in msg or 'no such' in msg or 'does not exist' in msg or ' 404' in msg:
-                    _add_notice_once({ 'index': idx, 'reason': f'user delete skipped: user "{userid}" does not exist' })
-                else:
-                    errors.append({ 'index': idx, 'reason': f'user delete failed: {e}' })
-        except Exception as e:
-            errors.append({ 'index': idx, 'reason': f'users_delete failed: {e}' })
+    resp = _delete_proxmox_users_and_pools_for_indices(proj, client, indices)
     _end_job(pid)
-    return jsonify({ 'deleted_users': deleted_users, 'deleted_pools': deleted_pools, 'errors': errors, 'notices': notices })
+    return jsonify(resp)
 
 
 @api_bp.route("/projects/<pid>/instances/actions/users_access_sync", methods=["POST"])
@@ -7837,15 +8082,16 @@ def instances_run_stored_cmds(pid: str):
         tmpl_id = getattr(vm_cfg_obj, 'template_id', None) or getattr(vm_cfg_obj, 'templateId', None) or getattr(vm_cfg_obj, 'template_vmid', None)
         return f"{_canonical_pid(getattr(project_obj, 'id', ''))}|{tmpl_name or base_name or generated_name}|{tmpl_id or ''}"
     DEFAULT_CMD_TIMEOUT = 300
+    DEFAULT_VALIDATION_TIMEOUT = 10
     MAX_CMD_TIMEOUT = 86400
 
-    def _coerce_timeout(value: Any) -> int:
+    def _coerce_timeout(value: Any, default: int = DEFAULT_CMD_TIMEOUT) -> int:
         try:
             num = float(value)
         except (TypeError, ValueError):
-            return DEFAULT_CMD_TIMEOUT
+            return default
         if num <= 0:
-            return DEFAULT_CMD_TIMEOUT
+            return default
         try:
             num = int(round(num))
         except Exception:
@@ -7870,6 +8116,55 @@ def instances_run_stored_cmds(pid: str):
             if norm in {'false', '0', 'no', 'off', 'disabled', 'short', 'standard'}:
                 return False
         return bool(value)
+
+    def _compile_validation_regex(pattern: str) -> Tuple[Optional[re.Pattern], Optional[str]]:
+        text = str(pattern or '').strip()
+        if not text:
+            return None, 'missing regular expression'
+        body = text
+        flags = 0
+        if len(text) >= 2 and text.startswith('/'):
+            slash_idx = text.rfind('/')
+            if slash_idx > 0:
+                body = text[1:slash_idx]
+                flag_part = text[slash_idx + 1:]
+                for ch in flag_part:
+                    if ch == 'i':
+                        flags |= re.IGNORECASE
+                    elif ch == 'm':
+                        flags |= re.MULTILINE
+                    elif ch == 's':
+                        flags |= re.DOTALL
+                    elif ch == 'x':
+                        flags |= re.VERBOSE
+                    elif ch:
+                        return None, f"unsupported regex flag: {ch}"
+        try:
+            return re.compile(body, flags), None
+        except re.error as exc:
+            return None, f"invalid regex: {exc}"
+
+    def _extract_validation_commands(vcfg_obj: Any) -> List[Dict[str, Any]]:
+        raw = sanitize_validation_commands(getattr(vcfg_obj, 'validation_commands', [])) if vcfg_obj else []
+        out: List[Dict[str, Any]] = []
+        for order, entry in enumerate(raw, start=1):
+            if not isinstance(entry, dict):
+                continue
+            cmd_text = _normalize_command_text(entry.get('command'))
+            if not cmd_text:
+                continue
+            enabled = _coerce_bool_flag(entry.get('enabled'), True)
+            if not enabled:
+                continue
+            match_expr = str(entry.get('match') or '').strip()
+            timeout_seconds = _coerce_timeout(entry.get('timeout_seconds'), default=DEFAULT_VALIDATION_TIMEOUT)
+            out.append({
+                'order': order,
+                'command': cmd_text,
+                'match': match_expr,
+                'timeout_seconds': timeout_seconds,
+            })
+        return out
     raw_override_list = body.get('storedCommandOverrides')
     override_lookup: Dict[Tuple[str, int, int], str] = {}
     if isinstance(raw_override_list, list):
@@ -7904,8 +8199,13 @@ def instances_run_stored_cmds(pid: str):
     elif raw_commands is not None:
         _append_selected(raw_commands)
     _append_selected(body.get('command'))
+    validate_only = _coerce_bool_flag(body.get('validateOnly'), False)
+    if validate_only:
+        selected_commands = []
+        override_lookup = {}
     selected_commands_filter: Optional[Set[str]] = set(selected_commands) if selected_commands else None
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+    runtime_store = _runtime_store()
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     ran = []
     zip_entries: List[Dict[str, Any]] = []
@@ -7925,6 +8225,7 @@ def instances_run_stored_cmds(pid: str):
             pass
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
         steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
+        validation_commands = _extract_validation_commands(vcfg)
         template_key = _make_template_key(proj, vcfg, base, m.get('name'))
 
         def extract_enabled_commands(step_obj, match_commands: Optional[Set[str]] = None):
@@ -7982,10 +8283,12 @@ def instances_run_stored_cmds(pid: str):
                 })
             return commands_out
 
-        total_commands = sum(len(extract_enabled_commands(step, selected_commands_filter)) for step in steps)
-        if not total_commands:
-            reason = 'no stored commands configured'
-            if selected_commands:
+        command_steps = [] if validate_only else steps
+        active_validation_commands = validation_commands if validate_only else []
+        total_commands = sum(len(extract_enabled_commands(step, selected_commands_filter)) for step in command_steps)
+        if (validate_only and not active_validation_commands) or ((not validate_only) and total_commands == 0):
+            reason = 'no validation commands configured' if validate_only else 'no stored commands configured'
+            if (not validate_only) and selected_commands:
                 joined = ', '.join(selected_commands)
                 if len(selected_commands) == 1:
                     reason = f'stored command not configured: {joined}'
@@ -8113,7 +8416,7 @@ def instances_run_stored_cmds(pid: str):
         cmd_results = []
         executed_commands = 0
         cancelled = False
-        for step_idx, step in enumerate(steps):
+        for step_idx, step in enumerate(command_steps):
             if _is_cancelled(pid):
                 cancelled = True
                 break
@@ -8217,16 +8520,280 @@ def instances_run_stored_cmds(pid: str):
         if cancelled:
             errors.append({ 'index': m['index'], 'name': m['name'], 'reason': 'cancelled' })
             break
+
+        validation_results: List[Dict[str, Any]] = []
+        validation_all_passed = True
+        total_validation_commands = len(active_validation_commands)
+        validation_step_idx = len(command_steps)
+        for vpos, vcmd in enumerate(active_validation_commands, start=1):
+            v_command = str(vcmd.get('command') or '').strip()
+            v_match = str(vcmd.get('match') or '').strip()
+            v_timeout = _coerce_timeout(vcmd.get('timeout_seconds'))
+            try:
+                _update_job_detail(
+                    pid,
+                    phase='validation',
+                    current=_format_vm_label(m),
+                    step=vpos,
+                    total_steps=total_validation_commands,
+                    message=(
+                        f"Validating command {vpos}/{total_validation_commands} on {_format_vm_label(m)}: "
+                        f"{_shorten_command_text(v_command)} (timeout {v_timeout}s, match /{v_match or '.*'}/)"
+                    ),
+                    detail={
+                        'kind': 'validation',
+                        'vm': _format_vm_label(m),
+                        'step': vpos,
+                        'command_number': vpos,
+                        'command_total': total_validation_commands,
+                        'command': _shorten_command_text(v_command),
+                        'match': v_match,
+                        'timeout_seconds': v_timeout,
+                    },
+                )
+            except Exception:
+                pass
+            regex, compile_err = _compile_validation_regex(v_match)
+            if compile_err:
+                validation_all_passed = False
+                reason = f"validation regex error ({v_command}): {compile_err}"
+                errors.append({ 'index': m['index'], 'name': m['name'], 'command': v_command, 'reason': reason })
+                validation_results.append({
+                    'order': vcmd.get('order'),
+                    'command': v_command,
+                    'match': v_match,
+                    'timeout_seconds': v_timeout,
+                    'passed': False,
+                    'reason': compile_err,
+                    'timed_out': False,
+                    'exitcode': None,
+                    'stdout_preview': '',
+                    'stderr_preview': '',
+                })
+                record_zip_entry(
+                    validation_step_idx,
+                    vpos - 1,
+                    0.0,
+                    {
+                        'cmd': v_command,
+                        'exitcode': None,
+                        'stdout_full': '',
+                        'stderr_full': compile_err,
+                        'timeout_seconds': v_timeout,
+                        'long_running': False,
+                    },
+                    f"validation regex error: {compile_err}",
+                )
+                try:
+                    _update_job_detail(
+                        pid,
+                        phase='validation',
+                        current=_format_vm_label(m),
+                        step=vpos,
+                        total_steps=total_validation_commands,
+                        message=(
+                            f"Validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
+                            f"regex error - {compile_err}"
+                        ),
+                        detail={
+                            'kind': 'validation',
+                            'vm': _format_vm_label(m),
+                            'step': vpos,
+                            'command_number': vpos,
+                            'command_total': total_validation_commands,
+                            'command': _shorten_command_text(v_command),
+                            'match': v_match,
+                            'timeout_seconds': v_timeout,
+                            'result': 'failed',
+                            'reason': compile_err,
+                            'timed_out': False,
+                        },
+                    )
+                except Exception:
+                    pass
+                continue
+            try:
+                res = client.agent_exec(
+                    node=m['node'],
+                    vmid=m['vmid'],
+                    command=v_command,
+                    timeout=v_timeout,
+                    return_partial_on_timeout=True,
+                )
+            except Exception as exc:
+                validation_all_passed = False
+                reason = f"validation command error ({v_command}): {exc}"
+                errors.append({ 'index': m['index'], 'name': m['name'], 'command': v_command, 'reason': reason })
+                validation_results.append({
+                    'order': vcmd.get('order'),
+                    'command': v_command,
+                    'match': v_match,
+                    'timeout_seconds': v_timeout,
+                    'passed': False,
+                    'reason': str(exc),
+                    'timed_out': False,
+                    'exitcode': None,
+                    'stdout_preview': '',
+                    'stderr_preview': str(exc),
+                })
+                record_zip_entry(
+                    validation_step_idx,
+                    vpos - 1,
+                    0.0,
+                    {
+                        'cmd': v_command,
+                        'exitcode': None,
+                        'stdout_full': '',
+                        'stderr_full': str(exc),
+                        'timeout_seconds': v_timeout,
+                        'long_running': False,
+                    },
+                    f"validation command error: {exc}",
+                )
+                try:
+                    _update_job_detail(
+                        pid,
+                        phase='validation',
+                        current=_format_vm_label(m),
+                        step=vpos,
+                        total_steps=total_validation_commands,
+                        message=(
+                            f"Validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
+                            f"command error - {exc}"
+                        ),
+                        detail={
+                            'kind': 'validation',
+                            'vm': _format_vm_label(m),
+                            'step': vpos,
+                            'command_number': vpos,
+                            'command_total': total_validation_commands,
+                            'command': _shorten_command_text(v_command),
+                            'match': v_match,
+                            'timeout_seconds': v_timeout,
+                            'result': 'failed',
+                            'reason': str(exc),
+                            'timed_out': False,
+                            'stderr_preview': err_preview,
+                        },
+                    )
+                except Exception:
+                    pass
+                continue
+
+            stdout_text = res.get('stdout', '') or ''
+            stderr_text = res.get('stderr', '') or ''
+            merged = f"{stdout_text}\n{stderr_text}".strip('\n')
+            matched = bool(regex.search(merged if isinstance(merged, str) else str(merged))) if regex else False
+            timed_out = bool(res.get('timed_out'))
+            out_preview, _ = _make_preview(stdout_text)
+            err_preview, _ = _make_preview(stderr_text)
+            if not matched:
+                validation_all_passed = False
+                if timed_out:
+                    reason = f"validation regex did not match before timeout ({v_command})"
+                else:
+                    reason = f"validation regex did not match output ({v_command})"
+                errors.append({ 'index': m['index'], 'name': m['name'], 'command': v_command, 'reason': reason })
+            validation_results.append({
+                'order': vcmd.get('order'),
+                'command': v_command,
+                'match': v_match,
+                'timeout_seconds': v_timeout,
+                'passed': matched,
+                'timed_out': timed_out,
+                'exitcode': res.get('exitcode'),
+                'stdout_preview': out_preview,
+                'stderr_preview': err_preview,
+            })
+            validation_err = None
+            if not matched:
+                validation_err = 'validation regex did not match output'
+                if timed_out:
+                    validation_err = 'validation regex did not match before timeout'
+            record_zip_entry(
+                validation_step_idx,
+                vpos - 1,
+                0.0,
+                {
+                    'cmd': v_command,
+                    'exitcode': res.get('exitcode'),
+                    'stdout_full': stdout_text,
+                    'stderr_full': stderr_text,
+                    'timeout_seconds': v_timeout,
+                    'long_running': False,
+                },
+                validation_err,
+            )
+            try:
+                result_label = 'passed' if matched else 'failed'
+                msg_bits = [f"Validation {vpos}/{total_validation_commands} {result_label} on {_format_vm_label(m)}"]
+                if timed_out:
+                    msg_bits.append('(timed out)')
+                preview_for_status = out_preview or err_preview
+                if preview_for_status:
+                    msg_bits.append(f"- {preview_for_status}")
+                _update_job_detail(
+                    pid,
+                    phase='validation',
+                    current=_format_vm_label(m),
+                    step=vpos,
+                    total_steps=total_validation_commands,
+                    message=' '.join(msg_bits),
+                    detail={
+                        'kind': 'validation',
+                        'vm': _format_vm_label(m),
+                        'step': vpos,
+                        'command_number': vpos,
+                        'command_total': total_validation_commands,
+                        'command': _shorten_command_text(v_command),
+                        'match': v_match,
+                        'timeout_seconds': v_timeout,
+                        'result': result_label,
+                        'timed_out': timed_out,
+                        'exitcode': res.get('exitcode'),
+                        'stdout_preview': out_preview,
+                        'stderr_preview': err_preview,
+                        'reason': '' if matched else ('regex did not match before timeout' if timed_out else 'regex did not match output'),
+                    },
+                )
+            except Exception:
+                pass
+
+        if active_validation_commands:
+            try:
+                runtime_store.set_vm_validation_state(
+                    proj.id,
+                    m.get('name'),
+                    bool(validation_all_passed),
+                    vmid=m.get('vmid'),
+                    node=m.get('node'),
+                )
+            except Exception as exc:
+                LOG.warning(
+                    "Could not persist validation state for %s/%s (%s): %s",
+                    m.get('node'),
+                    m.get('vmid'),
+                    m.get('name'),
+                    exc,
+                )
+
         ran_entry = {
             'index': m['index'],
             'name': m['name'],
             'vmid': m['vmid'],
             'node': m['node'],
-            'steps': len(steps),
+            'steps': len(command_steps),
             'count': len(cmd_results),
             'planned_count': total_commands,
-            'cmds': cmd_results
+            'cmds': cmd_results,
+            'validation': {
+                'configured_count': len(active_validation_commands),
+                'all_passed': bool(validation_all_passed),
+                'results': validation_results,
+            },
         }
+        if validate_only:
+            ran_entry['validate_only'] = True
         if selected_commands:
             ran_entry['selected_commands'] = selected_commands
             if len(selected_commands) == 1:
@@ -9596,6 +10163,7 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
         'viewable_to_user',
         'start_commands',
         'stored_commands',
+        'validation_commands',
         'internal_network_adaptors',
         'use_linked_clone',
         'clone_timeout_sec',
@@ -12562,9 +13130,11 @@ def remove_vm(pid: str, name: str):
 def update_vm(pid: str, name: str):
     data = request.get_json(force=True) or {}
     # basic type normalization
-    for k in ["start_commands", "stored_commands", "internal_network_adaptors"]:
+    for k in ["start_commands", "stored_commands", "validation_commands", "internal_network_adaptors"]:
         if k in data and isinstance(data[k], str):
             data[k] = [s.strip() for s in data[k].splitlines() if s.strip()]
+    if "validation_commands" in data:
+        data["validation_commands"] = sanitize_validation_commands(data.get("validation_commands"))
     # Validate internal_network_adaptors when provided: letters only, max 8 chars
     if "internal_network_adaptors" in data:
         adaptors = data.get("internal_network_adaptors")
@@ -12588,6 +13158,8 @@ def update_vm(pid: str, name: str):
             fields["start_commands"] = data.get("start_commands")
         if "stored_commands" in data:
             fields["stored_commands"] = data.get("stored_commands")
+        if "validation_commands" in data:
+            fields["validation_commands"] = data.get("validation_commands")
         if "internal_network_adaptors" in data:
             fields["internal_network_adaptors"] = data.get("internal_network_adaptors")
         if "vm_user" in data:
@@ -12848,7 +13420,7 @@ def proxmox_nodes():
 def proxmox_templates():
     """List QEMU templates across all nodes.
     Body: { baseUrl, verifySSL, username, password, token }
-    Returns: { templates: [ { node, vmid, name } ] }
+    Returns: { templates: [ { node, vmid, name, bridges, qemu_agent_enabled } ] }
     """
     data = request.get_json(force=True) or {}
     base_url = data.get("baseUrl")
@@ -12905,6 +13477,37 @@ def proxmox_templates():
             except Exception:
                 pass
             return bridges
+
+        def _qemu_agent_enabled(cfg: dict) -> bool:
+            raw = (cfg or {}).get('agent')
+            if raw is None:
+                return False
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                return int(raw) != 0
+            text = str(raw).strip().lower()
+            if not text:
+                return False
+            truthy = {'1', 'true', 'yes', 'on', 'enabled'}
+            falsy = {'0', 'false', 'no', 'off', 'disabled'}
+            head = text.split(',', 1)[0].strip()
+            if head in truthy:
+                return True
+            if head in falsy:
+                return False
+            for part in [p.strip() for p in text.split(',') if p.strip()]:
+                if '=' not in part:
+                    continue
+                key, val = [x.strip() for x in part.split('=', 1)]
+                if key != 'enabled':
+                    continue
+                if val in truthy:
+                    return True
+                if val in falsy:
+                    return False
+            return False
+
         for n in nodes:
             try:
                 node_name = n.get('node') or n.get('id') or n.get('name')
@@ -12926,12 +13529,19 @@ def proxmox_templates():
                             continue
                         # Best-effort: fetch config to discover assigned bridges for this template
                         bridges = []
+                        cfg = {}
                         try:
-                            cfg = client.get_qemu_config(str(node_name), int(vmid))
+                            cfg = client.get_qemu_config(str(node_name), int(vmid)) or {}
                             bridges = _extract_bridges(cfg)
                         except Exception:
                             bridges = []
-                        out.append({ 'node': str(node_name), 'vmid': vmid, 'name': str(name), 'bridges': bridges })
+                        out.append({
+                            'node': str(node_name),
+                            'vmid': vmid,
+                            'name': str(name),
+                            'bridges': bridges,
+                            'qemu_agent_enabled': _qemu_agent_enabled(cfg),
+                        })
                     except Exception:
                         continue
             except Exception:
