@@ -660,7 +660,16 @@
         if (!pid) return;
         const input = document.getElementById('vm-proj-id');
         if (input) input.value = pid;
-        try { await vmLoadProjectById(pid); } catch { }
+        try { 
+          await vmLoadProjectById(pid); 
+          const u = new URL(window.location.href);
+          if (u.searchParams.get('refresh') === '1') {
+            // Auto-refresh once after load if requested by redirect
+            if (typeof vmRefresh === 'function') {
+              vmRefresh({ forceRefresh: true, showProgressDialog: false });
+            }
+          }
+        } catch { }
       };
       document.addEventListener('project-selected', (e) => apply(e.detail));
       apply(shell.getCurrentProjectId());

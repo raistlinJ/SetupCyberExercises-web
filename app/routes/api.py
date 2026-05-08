@@ -10343,7 +10343,8 @@ def _project_to_json(p: Project) -> dict:
 
 def _project_to_json_filtered(p: Project, include_creds: bool = True, include_vms: bool = True) -> dict:
     """Project to JSON with optional exclusion of credentials or VMs for export.
-    When include_vms is False, we still include the VM names (schema: [{name}]) so imports can restore names without images.
+    When include_vms is False, we still include VM configurations (commands, adaptors, etc.)
+    but drop node-specific VMIDs and disk images.
     """
     d = _project_to_json(p)
     # Always strip multi-project association metadata from export payloads
@@ -10351,24 +10352,37 @@ def _project_to_json_filtered(p: Project, include_creds: bool = True, include_vm
         d.pop('associated_projects', None)
     except Exception:
         pass
+
     if not include_creds:
-        # Remove credentials if present
+        # Remove project-level credentials if present
         d.pop("credentials", None)
-    if not include_vms:
-        # Keep only VM names (no vmid or other fields)
-        try:
-            vms_list = d.get('vms') or []
-            names_only = []
-            for v in vms_list:
-                try:
-                    nm = (v.get('name') if isinstance(v, dict) else str(v)) or ''
-                except Exception:
-                    nm = ''
-                if nm:
-                    names_only.append({'name': nm})
-            d['vms'] = names_only
-        except Exception:
-            d['vms'] = []
+
+    # Process VMs list to apply selective stripping
+    try:
+        vms_list = d.get('vms') or []
+        cleaned_vms = []
+        for v in vms_list:
+            if not isinstance(v, dict):
+                continue
+
+            # Create a copy to ensure we don't modify the source if it's shared/cached
+            vm_cfg = dict(v)
+
+            # If not including VMs (backups), strip the node-specific ID
+            if not include_vms:
+                vm_cfg.pop('vmid', None)
+
+            # If not including credentials, strip VM-level secrets
+            if not include_creds:
+                vm_cfg.pop('vm_user', None)
+                vm_cfg.pop('vm_pass', None)
+
+            if vm_cfg.get('name'):
+                cleaned_vms.append(vm_cfg)
+        d['vms'] = cleaned_vms
+    except Exception:
+        d['vms'] = []
+
     return d
 
 

@@ -4606,7 +4606,7 @@ window.submitProjectCreation = async function(mode) {
           });
         }
       } finally {
-        if (window.vmRefresh) setTimeout(() => window.vmRefresh(), 1000);
+        // Redundant vmRefresh call removed; redirect handles refresh.
       }
 
       try { await loadProjects(); } catch { }
