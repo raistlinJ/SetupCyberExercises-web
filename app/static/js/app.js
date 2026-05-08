@@ -5805,10 +5805,12 @@ async function saveValidationCommandsFromModal() {
   setVmStatus(pid, idx, 'Saving…', 'text-muted');
   const sanitized = sanitizeValidationCommands(VALIDATION_COMMAND_MODAL_STATE.commands);
   const payload = validationCommandsToServerPayload(sanitized);
+  // Update DOM and cache before the async PATCH so any concurrent autoSaveVm triggered
+  // by a pending debounce timer reads the new values instead of the stale DOM state.
+  updateValidationCommandsCache(pid, vmName, sanitized, idx);
+  updateValidationCommandsDomState(pid, idx, sanitized);
   try {
-    await saveVM(pid, vmName, { validation_commands: payload }, { silent: true });
-    updateValidationCommandsCache(pid, vmName, sanitized, idx);
-    updateValidationCommandsDomState(pid, idx, sanitized);
+    await saveVM(pid, vmName, { validation_commands: payload }, { silent: true, rethrow: true });
     VALIDATION_COMMAND_MODAL_STATE.commands = sanitized.map(cmd => ({
       command: cmd.command,
       enabled: cmd.enabled !== false,
@@ -7148,6 +7150,7 @@ async function removeVM(id, name) {
 
 async function saveVM(id, name, fields, opts = {}) {
   const silent = !!opts.silent;
+  const rethrow = !!opts.rethrow;
   try {
     if (!silent) { try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: saving VM ${name}`) : console.log('Saving VM', name); } catch { } }
     await http('PATCH', `/api/projects/${id}/vms/${encodeURIComponent(name)}`, fields);
@@ -7160,6 +7163,7 @@ async function saveVM(id, name, fields, opts = {}) {
   catch (e) {
     if (!silent) alert('Error saving VM: ' + e.message);
     try { (window.shell && shell.logError) ? shell.logError('Config: save VM failed: ' + e.message) : console.error('Save VM failed:', e); } catch { }
+    if (rethrow) throw e;
   }
 }
 

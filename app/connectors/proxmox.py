@@ -237,14 +237,57 @@ class ProxmoxClient:
         data = resp.json()
         return data.get("data", {})
 
+    def get_qemu_status_current(self, node: str, vmid: int) -> Dict[str, Any]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/status/current"
+        resp = s.get(url, timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        return data.get("data", {})
+
     # --- Helpers for operations ---
-    def _wait_task(self, node: str, upid: str, timeout: float = 600.0, poll: float = 1.5) -> Dict[str, Any]:
+    def _wait_task(
+        self,
+        node: str,
+        upid: str,
+        timeout: float = 600.0,
+        poll: float = 1.5,
+        vmid: Optional[int] = None,
+        completed_vm_statuses: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         s = self._ensure_session()
         start = time.time()
+        desired_vm_statuses = {
+            str(value).strip().lower()
+            for value in (completed_vm_statuses or [])
+            if str(value).strip()
+        }
+
+        def _maybe_complete_from_vm_state() -> Optional[Dict[str, Any]]:
+            if vmid is None or not desired_vm_statuses:
+                return None
+            current = self.get_qemu_status_current(node, vmid)
+            current_status = str(current.get('status') or current.get('qmpstatus') or '').strip().lower()
+            if current_status in desired_vm_statuses:
+                return {
+                    'status': 'stopped',
+                    'exitstatus': 'OK',
+                    'completed_via': 'vm_state',
+                    'vm_status': current_status,
+                }
+            return None
+
         while True:
             url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/tasks/{requests.utils.quote(upid, safe='')}/status"
             r = s.get(url, timeout=30)
             if r.status_code >= 400:
+                try:
+                    fallback = _maybe_complete_from_vm_state()
+                except Exception:
+                    fallback = None
+                if fallback is not None:
+                    return fallback
                 raise RuntimeError(f"Proxmox task status error {r.status_code}: {r.text}")
             st = r.json().get('data', {})
             if st.get('status') == 'stopped':
@@ -252,6 +295,12 @@ class ProxmoxClient:
                 if exitstatus and exitstatus != 'OK':
                     raise RuntimeError(f"Proxmox task failed: {exitstatus}")
                 return st
+            try:
+                fallback = _maybe_complete_from_vm_state()
+            except Exception:
+                fallback = None
+            if fallback is not None:
+                return fallback
             if time.time() - start > timeout:
                 raise RuntimeError("Proxmox task timed out")
             time.sleep(poll)

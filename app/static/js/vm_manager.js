@@ -12,7 +12,6 @@ let ALL_PROJECTS = [];
 let SELECTED_PIDS = [];
 let FILTER_TEXT = '';
 let FILTER_IS_REGEX = false;
-let FILTER_AGENT_ON = false;
 let SELECTED_ROWS = new Set();
 let SORT_STATE = { key: 'index', dir: 'asc' };
 let SHOW_PASSWORDS = false;
@@ -748,6 +747,111 @@ function renderVmStateBadges(detail) {
   return badges.join(' ');
 }
 
+function vmBuildFilterParts(rowLike) {
+  const row = rowLike || {};
+  const d = row.detail || {};
+  const parts = [row.project, row.vmName, row.uname, String(row.status || ''), String(row.index || '')];
+  if (d.state) parts.push(String(d.state));
+  if (d.power_state) parts.push(String(d.power_state));
+  if (d.qmp_state) parts.push(String(d.qmp_state));
+  if (d.lock) parts.push(String(d.lock));
+  if (d.node) parts.push(String(d.node));
+  if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid));
+  if (d.template_name) parts.push(String(d.template_name));
+  if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id));
+  if (Array.isArray(d.nets)) parts.push(d.nets.join(' '));
+
+  const validationState = String(d.qemu_agent_validation_state || '').trim().toLowerCase();
+  if (validationState) parts.push(validationState);
+
+  const hasValidationCommands = resolveValidationConfiguredFlag(row, d);
+  if (!hasValidationCommands) {
+    parts.push('validation commands not configured');
+  } else {
+    const agentEnabled = !!(d && d.qemu_agent_enabled);
+    const agentValidated = validationState ? validationState === 'passed' : !!(d && d.qemu_agent_validated);
+    if (!agentEnabled) {
+      parts.push('qemu guest agent off', 'guest agent off');
+    } else if (agentValidated) {
+      parts.push('qemu guest agent on and validated', 'guest agent validated', 'passed');
+    } else if (validationState === 'failed') {
+      parts.push('qemu guest agent on validation failed', 'guest agent failed', 'failed');
+    } else {
+      parts.push('qemu guest agent on not validated', 'guest agent not validated');
+    }
+  }
+
+  const effAccess = (row.user_access !== undefined && row.user_access !== null)
+    ? _coerceEnabled(row.user_access, false)
+    : _coerceEnabled(row.viewable_to_user, true);
+  parts.push(effAccess ? 'user access granted' : 'user access not granted');
+
+  // Pool tooltip semantics
+  try {
+    const instStatus = row.instStatus || {};
+    const mgr = instStatus.managers || {};
+    const poolsStatus = String(mgr.pools || '').toLowerCase();
+    const total = Number(mgr.pools_member_total || 0);
+    const count = Number(mgr.pools_member_count || 0);
+    if (poolsStatus === 'missing') {
+      parts.push('no proxmox pool', 'pool missing');
+    } else if (poolsStatus === 'ready' || poolsStatus === 'ok' || poolsStatus === 'created') {
+      parts.push('pool exists');
+      const memberState = String(mgr.pools_member_state || '').toLowerCase();
+      if (memberState === 'all') {
+        parts.push('pool all members', 'pool member');
+        if (total || count) parts.push(`${count}/${total} in pool`);
+      } else if (memberState === 'partial') {
+        parts.push('pool partial members', 'pool not all members');
+        if (total || count) parts.push(`${count}/${total} in pool`);
+      } else if (memberState === 'error') {
+        parts.push('pool membership unknown');
+      } else {
+        parts.push('pool membership status unknown');
+      }
+    } else if (poolsStatus === 'error') {
+      parts.push('pool status error', 'pool error');
+    } else if (poolsStatus) {
+      parts.push('pool state unknown');
+    }
+  } catch { }
+
+  // User credential tooltip semantics
+  if (row.vm_user || row.vm_pass) {
+    parts.push(`user: ${row.vm_user || '(not set)'}`, `pass: ${row.vm_pass ? '(set)' : '(not set)'}`);
+    const desc = (d && d.description) ? String(d.description) : '';
+    try {
+      const match = desc.match(/\{[^{}]*"Scenario"[^{}]*\}/);
+      if (match) {
+        const parsed = JSON.parse(match[0]);
+        if (parsed && typeof parsed === 'object' && parsed.Scenario) {
+          const appliedUser = String(parsed.User || '');
+          const appliedPass = String(parsed.Pass || '');
+          const targetUser = String(row.vm_user || '');
+          const targetPass = String(row.vm_pass || '');
+          const appliedScenario = String(parsed.Scenario || '');
+          const targetScenario = String(row.project || '');
+          if (appliedScenario !== targetScenario || appliedUser !== targetUser || appliedPass !== targetPass) {
+            parts.push('credential mismatch', 'cred mismatch');
+          } else {
+            parts.push('credential applied', 'cred applied', 'granted');
+          }
+        } else {
+          parts.push('credential not applied', 'cred not applied');
+        }
+      } else {
+        parts.push('credential not applied', 'cred not applied');
+      }
+    } catch { parts.push('credential status unknown'); }
+  }
+
+  return parts.filter(part => part !== undefined && part !== null && String(part).trim() !== '');
+}
+
+function vmBuildFilterHaystack(rowLike) {
+  return vmBuildFilterParts(rowLike).join(' | ');
+}
+
 async function vmLoadProject() {
   const inputEl = document.getElementById('vm-proj-id');
   const pid = canonicalPid(inputEl ? inputEl.value : '');
@@ -954,26 +1058,12 @@ async function setupProjectsSelector() {
 }
 function vmIsMulti() { return Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1; }
 function getActivePids() { if (vmIsMulti()) return canonicalPidList(SELECTED_PIDS.slice()); const cur = getCurrentPid(); return cur ? [cur] : []; }
-function vmRowHasAgentEnabled(detail) {
-  try {
-    if (!detail || typeof detail !== 'object') return false;
-    if (!Object.prototype.hasOwnProperty.call(detail, 'qemu_agent_enabled')) return false;
-    return !!detail.qemu_agent_enabled;
-  } catch {
-    return false;
-  }
-}
 
 function vmClearFilter() {
   try {
     const el = document.getElementById('vm-filter');
     if (el) el.value = '';
     FILTER_TEXT = '';
-  } catch { }
-  try {
-    const agentEl = document.getElementById('vm-filter-agent-on');
-    if (agentEl) agentEl.checked = false;
-    FILTER_AGENT_ON = false;
   } catch { }
   try { if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
 }
@@ -1252,17 +1342,14 @@ function renderMergedVmTable(rows) {
   if (f) {
     if (FILTER_IS_REGEX) {
       let re = null; try { re = new RegExp(FILTER_TEXT, 'i'); } catch { re = null; }
-      const errEl = document.getElementById('vm-filter-error'); if (re) { if (errEl) errEl.classList.add('d-none'); filtered = allRows.filter(r => { const d = r.detail || {}; const parts = [r.project, r.vmName, r.uname, String(r.status || ''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.power_state) parts.push(String(d.power_state)); if (d.qmp_state) parts.push(String(d.qmp_state)); if (d.lock) parts.push(String(d.lock)); if (d.node) parts.push(String(d.node)); if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); const hay = parts.join(' | '); return re.test(hay); }); } else { if (errEl) errEl.classList.remove('d-none'); filtered = []; }
+      const errEl = document.getElementById('vm-filter-error'); if (re) { if (errEl) errEl.classList.add('d-none'); filtered = allRows.filter(r => re.test(vmBuildFilterHaystack(r))); } else { if (errEl) errEl.classList.remove('d-none'); filtered = []; }
     } else {
       const errEl = document.getElementById('vm-filter-error'); if (errEl) errEl.classList.add('d-none');
-      filtered = allRows.filter(r => { const d = r.detail || {}; const parts = [r.project, r.vmName, r.uname, String(r.status || ''), String(r.index)]; if (d.state) parts.push(String(d.state)); if (d.power_state) parts.push(String(d.power_state)); if (d.qmp_state) parts.push(String(d.qmp_state)); if (d.lock) parts.push(String(d.lock)); if (d.node) parts.push(String(d.node)); if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid)); if (d.template_name) parts.push(String(d.template_name)); if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id)); if (Array.isArray(d.nets)) parts.push(d.nets.join(' ')); return parts.join(' ').toLowerCase().includes(f); });
+      filtered = allRows.filter(r => vmBuildFilterHaystack(r).toLowerCase().includes(f));
     }
   }
-  if (FILTER_AGENT_ON) {
-    filtered = filtered.filter(r => vmRowHasAgentEnabled(r.detail));
-  }
   if (!filtered.length) {
-    const hasFilter = !!f || !!FILTER_AGENT_ON;
+    const hasFilter = !!f;
     const reason = hasFilter ? 'No VMs match the current filter.' : 'No VM entries were returned for the selected projects.';
     host.innerHTML = `<div class="alert alert-warning mb-0">${reason}</div>`;
     return;
@@ -1981,7 +2068,7 @@ function renderVmTable(proj) {
       const key = `${projectKey}|${i}|${vmName}`;
       // Before first refresh, default to N/A; afterwards, show created/missing
       const rowStatus = hasAnyStatus ? (d ? 'created' : 'missing') : 'n/a';
-      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: (d && d.user_access !== undefined && d.user_access !== null) ? _coerceEnabled(d.user_access, false) : null, uname, pword, status: rowStatus, detail: d, vm_user: v.vm_user, vm_pass: v.vm_pass });
+      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: (d && d.user_access !== undefined && d.user_access !== null) ? _coerceEnabled(d.user_access, false) : null, uname, pword, status: rowStatus, detail: d, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
     }
   }
   // Apply filter
@@ -1994,21 +2081,7 @@ function renderVmTable(proj) {
       const errEl = document.getElementById('vm-filter-error');
       if (re) {
         if (errEl) errEl.classList.add('d-none');
-        filtered = rows.filter(r => {
-          const d = r.detail || {};
-          const parts = [r.vmName, r.uname, String(r.status || ''), String(r.index)];
-          if (d.state) parts.push(String(d.state));
-          if (d.power_state) parts.push(String(d.power_state));
-          if (d.qmp_state) parts.push(String(d.qmp_state));
-          if (d.lock) parts.push(String(d.lock));
-          if (d.node) parts.push(String(d.node));
-          if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid));
-          if (d.template_name) parts.push(String(d.template_name));
-          if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id));
-          if (Array.isArray(d.nets)) parts.push(d.nets.join(' '));
-          const hay = parts.join(' | ');
-          return re.test(hay);
-        });
+        filtered = rows.filter(r => re.test(vmBuildFilterHaystack(r)));
       } else {
         // invalid regex; show nothing and display inline error
         if (errEl) errEl.classList.remove('d-none');
@@ -2017,30 +2090,8 @@ function renderVmTable(proj) {
     } else {
       const errEl = document.getElementById('vm-filter-error');
       if (errEl) errEl.classList.add('d-none');
-      filtered = rows.filter(r => {
-        const nameHit = (r.vmName.toLowerCase().includes(f));
-        const userHit = (r.uname.toLowerCase().includes(f));
-        const statusHit = (String(r.status || '').toLowerCase().includes(f));
-        const indexHit = String(r.index).includes(f);
-        const d = r.detail || {};
-        const parts = [];
-        if (d.state) parts.push(String(d.state));
-        if (d.power_state) parts.push(String(d.power_state));
-        if (d.qmp_state) parts.push(String(d.qmp_state));
-        if (d.lock) parts.push(String(d.lock));
-        if (d.node) parts.push(String(d.node));
-        if (d.vmid !== undefined && d.vmid !== null) parts.push(String(d.vmid));
-        if (d.template_name) parts.push(String(d.template_name));
-        if (d.template_id !== undefined && d.template_id !== null) parts.push(String(d.template_id));
-        if (Array.isArray(d.nets)) parts.push(d.nets.join(' '));
-        const detailsText = parts.join(' ').toLowerCase();
-        const detailsHit = detailsText.includes(f);
-        return nameHit || userHit || statusHit || indexHit || detailsHit;
-      });
+      filtered = rows.filter(r => vmBuildFilterHaystack(r).toLowerCase().includes(f));
     }
-  }
-  if (FILTER_AGENT_ON) {
-    filtered = filtered.filter(r => vmRowHasAgentEnabled(r.detail));
   }
   // Sort rows (we'll sort within instance groups so credentials can be row-spanned once per instance)
   const compareRows = (a, b) => {
@@ -2428,11 +2479,6 @@ window.addEventListener('DOMContentLoaded', () => {
     FILTER_IS_REGEX = !!e.target.checked;
     const errEl = document.getElementById('vm-filter-error');
     if (!FILTER_IS_REGEX && errEl) errEl.classList.add('d-none');
-    try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
-  });
-  const filterAgentOn = document.getElementById('vm-filter-agent-on');
-  if (filterAgentOn) filterAgentOn.addEventListener('change', (e) => {
-    FILTER_AGENT_ON = !!e.target.checked;
     try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
   });
   // Sidebar: allow pressing Enter in the project name field to create a project
@@ -3135,6 +3181,11 @@ function updateRefreshState() {
     });
     const usersBtn = document.getElementById('act-users');
     if (usersBtn) usersBtn.disabled = disable;
+  } catch { }
+  // Enable Cancel button only while an action is in flight
+  try {
+    const cancelBtn = document.getElementById('act-cancel');
+    if (cancelBtn) cancelBtn.disabled = !ACTION_IN_FLIGHT;
   } catch { }
   // Manage tooltip enable/disable
   try {
@@ -4021,6 +4072,45 @@ function deriveBaseVmName(proj, generatedName, index) {
 function findVmConfigByBaseName(proj, baseName) {
   const vmList = Array.isArray(proj?.vms) ? proj.vms : [];
   return vmList.find(v => String(v?.name || '') === String(baseName || '')) || null;
+}
+
+function vmBuildRestartTargetsForFailedValidation(proj, ranItems) {
+  const failed = (ranItems || [])
+    .filter(item => item.validation && !item.validation.all_passed)
+    .map(item => ({ index: item.index, name: item.name }));
+  if (!failed.length) return { failed: [], backends: [] };
+  const failedIndices = new Set(failed.map(f => f.index));
+  const failedNames = new Set(failed.map(f => f.name));
+  const tag = String(proj?.tag || '').trim();
+  const backends = [];
+  for (const idx of failedIndices) {
+    for (const vmTemplate of (proj?.vms || [])) {
+      const baseName = String(vmTemplate?.name || '').trim();
+      if (!baseName) continue;
+      const generatedName = `${baseName}${tag}${idx}`;
+      if (!failedNames.has(generatedName)) {
+        backends.push({ index: idx, name: generatedName });
+      }
+    }
+  }
+  return { failed, backends };
+}
+
+async function vmMaybeRestartFailedValidation(plan) {
+  if (!Array.isArray(plan) || !plan.length) return;
+  const totalFailed = plan.reduce((sum, p) => sum + p.failed.length, 0);
+  const totalBackends = plan.reduce((sum, p) => sum + p.backends.length, 0);
+  const allVmNames = plan.flatMap(p => [...p.failed, ...p.backends].map(t => t.name));
+  const namesPreview = allVmNames.slice(0, 6).join(', ') + (allVmNames.length > 6 ? ` (\u2026 +${allVmNames.length - 6} more)` : '');
+  const backendNote = totalBackends ? ` and ${totalBackends} backend(s) in the same group(s)` : '';
+  const msg = `${totalFailed} VM(s) failed validation.\n\nRestart failed VM(s)${backendNote}?\n\n${namesPreview}\n\nThis will power off then restart all of them.`;
+  if (!window.confirm(msg)) return;
+  for (const { proj, failed, backends } of plan) {
+    const allTargets = [...failed, ...backends];
+    if (!allTargets.length) continue;
+    try { await vmActionExec(proj, allTargets, 'poweroff', {}); } catch { }
+    try { await vmActionExec(proj, allTargets, 'start', {}); } catch { }
+  }
 }
 
 function vmHasConfiguredValidationCommands(vmCfg) {
@@ -5851,6 +5941,12 @@ async function vmActionExec(action, opts = {}) {
       try { emitActionLogs(action.charAt(0).toUpperCase() + action.slice(1), resp || {}); } catch { }
       try { (window.shell && shell.logSuccess) ? shell.logSuccess(`${action}: ${doneArr.length + verifiedCount} VM(s)`) : console.log(action, 'done'); } catch { }
       try { shell.endActionContext(true); } catch { }
+      if (action === 'validate') {
+        const { failed: vFailed, backends: vBackends } = vmBuildRestartTargetsForFailedValidation(PROJ, doneArr);
+        if (vFailed.length > 0) {
+          await vmMaybeRestartFailedValidation([{ proj: PROJ, failed: vFailed, backends: vBackends }]);
+        }
+      }
       return;
     }
     if (action === 'delete') {
@@ -6229,6 +6325,7 @@ async function vmActionMultiExec(action, opts = {}) {
   }
 
   // Iterate projects sequentially to keep UI manageable
+  const validateRestartPlan = [];
   for (const pid of pids) {
     const key = canonicalPid(pid);
     const proj = byId[key]; if (!proj) continue;
@@ -6497,6 +6594,10 @@ async function vmActionMultiExec(action, opts = {}) {
         const actionRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: actionPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
         resp = actionRetryOutcome.resp;
         ['started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'snapshotted', 'restored', 'skipped', 'errors', 'notices', 'infos', 'ran'].forEach(k => addArr(k, resp[k], projName));
+        if (action === 'validate') {
+          const { failed: vFailed, backends: vBackends } = vmBuildRestartTargetsForFailedValidation(proj, resp.ran || []);
+          if (vFailed.length) validateRestartPlan.push({ proj, failed: vFailed, backends: vBackends });
+        }
         continue;
       }
       if (action === 'delete') {
@@ -6551,6 +6652,9 @@ async function vmActionMultiExec(action, opts = {}) {
   try { showActionSummary(summaryName, agg); } catch { }
   try { emitActionLogs(summaryName, agg); } catch { }
   try { shell.endActionContext(true); } catch { }
+  if (action === 'validate' && validateRestartPlan.length > 0) {
+    await vmMaybeRestartFailedValidation(validateRestartPlan);
+  }
   // Optimistic table update (multi): if no errors, reflect expected adaptors immediately.
   try {
     if (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear') {
@@ -6582,14 +6686,21 @@ async function vmActionMultiExec(action, opts = {}) {
 
 async function vmCancelActions() {
   if (!PROJ) return;
+  // Immediately reflect cancellation in UI so repeated clicks are suppressed
+  try {
+    const cancelBtn = document.getElementById('act-cancel');
+    if (cancelBtn) cancelBtn.disabled = true;
+    const modalCancelBtn = document.getElementById('action-progress-cancel-btn');
+    if (modalCancelBtn) modalCancelBtn.disabled = true;
+  } catch { }
+  try { updateActionProgress(null, 'Cancelling…', 'Waiting for current step to stop…'); } catch { }
   await runQueued('Cancel remote actions', async () => {
     try {
       try { shell.beginActionContext('Cancel Job'); } catch { }
       await http('POST', `/api/projects/${PROJ.id}/instances/actions/cancel`, {});
       try { shell.step('Cancel request acknowledged'); } catch { }
       try { shell.endActionContext(true); } catch { }
-      const bar = document.getElementById('vm-create-progress-bar');
-      if (bar) bar.textContent = 'Cancelling…';
+      try { updateActionProgress(null, 'Cancelling…', 'Cancel request sent — waiting for job to stop…'); } catch { }
     } catch (e) {
       // noop
       try { shell.endActionContext(false); } catch { }

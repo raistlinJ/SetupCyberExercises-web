@@ -110,11 +110,6 @@
                     title="Treat filter as JavaScript RegExp (case-insensitive)" aria-label="Regex" />
                   <span class="ms-1">Regex</span>
                 </span>
-                <span class="input-group-text">
-                  <input id="vm-filter-agent-on" class="form-check-input mt-0" type="checkbox"
-                    title="Show only rows where QEMU Guest Agent is enabled" aria-label="Agent On only" />
-                  <span class="ms-1">Agent On</span>
-                </span>
                 <button class="btn btn-outline-secondary" type="button" title="Clear filter"
                   onclick="vmClearFilter()">Clear</button>
               </div>
@@ -444,11 +439,11 @@
   <!-- Settings modal injected via creds.js -->
   <script src="/static/js/creds.js?v=20251116b"></script>
   <script src="/static/js/auth.js?v=20251116b"></script>
-  <script src="/static/js/shell.js?v=20251116b"></script>
-  <script src="/static/js/app.js?v=20251116b"></script>
+  <script src="/static/js/shell.js?v=20260508c"></script>
+  <script src="/static/js/app.js?v=20260508b"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/vm_manager.js?v=20260504g"></script>
+  <script src="/static/js/vm_manager.js?v=20260508f"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
@@ -556,6 +551,8 @@
           </div>
         </div>
         <div class="modal-footer">
+          <button type="button" id="action-progress-cancel-btn" class="btn btn-warning"
+            onclick="vmCancelActions()" title="Send a cancel request to stop the current job">Cancel</button>
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
         </div>
       </div>

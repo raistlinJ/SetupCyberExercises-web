@@ -1315,10 +1315,16 @@ function showActionProgress(title, text){
 function updateActionProgress(percent, label, detail){
   const textEl = document.getElementById('action-progress-text');
   const barEl = document.getElementById('action-progress-bar');
-  const p = Math.max(0, Math.min(100, Number(percent) || 0));
+  // null/undefined percent means "keep current bar position"
+  const keepPercent = percent === null || percent === undefined;
+  const p = keepPercent
+    ? (ACTION_PROGRESS_STATE.percent ?? 0)
+    : Math.max(0, Math.min(100, Number(percent) || 0));
   if (barEl) {
-    barEl.style.width = `${p}%`;
-    barEl.setAttribute('aria-valuenow', String(p));
+    if (!keepPercent) {
+      barEl.style.width = `${p}%`;
+      barEl.setAttribute('aria-valuenow', String(p));
+    }
     if (label !== undefined && label !== null && label !== '') {
       barEl.textContent = String(label);
     }

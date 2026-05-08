@@ -16,3 +16,4 @@ users.json
 cookies.txt
 
 secret/
+.coverage

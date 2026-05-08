@@ -1,4 +1,5 @@
 import base64
+import concurrent.futures
 import io
 import json
 import unittest
@@ -385,6 +386,66 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertEqual(runtime_store.calls[0]['project_id'], self.project.id)
             self.assertEqual(runtime_store.calls[0]['vm_name'], self.target_name)
             self.assertTrue(runtime_store.calls[0]['passed'])
+
+    def test_run_stored_cmds_validate_only_uses_project_limited_parallel_workers(self):
+        vm = self.project.vms[0]
+        vm.validation_commands = [
+            {
+                'command': 'systemctl is-active nginx',
+                'match': 'active',
+                'enabled': True,
+                'timeout_seconds': 7,
+            }
+        ]
+        mapped = [
+            {'index': 1, 'name': self.target_name, 'vmid': 101, 'node': 'node1'},
+            {'index': 2, 'name': f"{vm.name}{self.project.tag}2", 'vmid': 102, 'node': 'node1'},
+            {'index': 3, 'name': f"{vm.name}{self.project.tag}3", 'vmid': 103, 'node': 'node1'},
+        ]
+
+        captured = {}
+
+        def _executor_factory(*args, **kwargs):
+            if 'max_workers' in kwargs:
+                captured['max_workers'] = kwargs.get('max_workers')
+            elif args:
+                captured['max_workers'] = args[0]
+            else:
+                captured['max_workers'] = None
+            return concurrent.futures.ThreadPoolExecutor(*args, **kwargs)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(self.project)))
+            stack.enter_context(patch('app.routes.api._resolve_targets_to_vm_info', return_value=(mapped, [], [])))
+            stack.enter_context(patch('app.routes.api._start_job'))
+            stack.enter_context(patch('app.routes.api._end_job'))
+            stack.enter_context(patch('app.routes.api._job_emit_batch_progress'))
+            stack.enter_context(patch('app.routes.api._pool_workers_for', return_value=2))
+            stack.enter_context(patch('app.routes.api.ThreadPoolExecutor', side_effect=_executor_factory))
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.agent_exec.return_value = {'exitcode': 0, 'stdout': 'active', 'stderr': ''}
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}, {'index': 2, 'name': mapped[1]['name']}, {'index': 3, 'name': mapped[2]['name']}],
+                    'validateOnly': True,
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json()
+            ran = payload.get('ran') or []
+            self.assertEqual(len(ran), 3)
+            self.assertEqual(captured.get('max_workers'), 2)
+            self.assertEqual(mock_client.agent_exec.call_count, 3)
+            self.assertEqual(payload.get('errors'), [])
+            self.assertEqual(payload.get('skipped'), [])
 
 
 if __name__ == '__main__':

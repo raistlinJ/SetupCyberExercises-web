@@ -4942,10 +4942,10 @@ def instances_start(pid: str):
         st = (m.get('status') or '').lower()
         if st == 'suspended':
             upid = client.resume_qemu(node=m['node'], vmid=m['vmid'])
-            client._wait_task(m['node'], upid, timeout=600)
+            client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['running'])
             return ('resumed', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
         upid = client.start_qemu(node=m['node'], vmid=m['vmid'])
-        client._wait_task(m['node'], upid, timeout=600)
+        client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['running'])
         return ('started', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
@@ -8207,9 +8207,329 @@ def instances_run_stored_cmds(pid: str):
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
     runtime_store = _runtime_store()
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+    total_mapped_targets = len(mapped)
     ran = []
     zip_entries: List[Dict[str, Any]] = []
-    for m in mapped:
+    if validate_only and mapped:
+        preview_limit = 1000
+
+        def _make_preview(raw_value: Any) -> Tuple[str, bool]:
+            text = ''
+            trimmed = False
+            try:
+                if raw_value is None:
+                    text = ''
+                elif isinstance(raw_value, str):
+                    text = raw_value
+                else:
+                    text = str(raw_value)
+            except Exception:
+                text = ''
+            if len(text) > preview_limit:
+                trimmed = True
+                text = text[:preview_limit] + f"... [trimmed to {preview_limit} chars; see ZIP for full output]"
+            return text, trimmed
+
+        def _validate_target(position: int, m: Dict[str, Any]) -> Dict[str, Any]:
+            if _is_cancelled(pid):
+                return {'position': position, 'cancelled': True, 'errors': [], 'zip_entries': []}
+
+            local_errors: List[Dict[str, Any]] = []
+            local_zip_entries: List[Dict[str, Any]] = []
+
+            base = m['name']
+            try:
+                idx = m['index']
+                tag = str(proj.tag or '').strip()
+                suf = f"{tag}{idx}"
+                if base.endswith(suf):
+                    base = base[:len(base)-len(suf)]
+            except Exception:
+                pass
+
+            vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
+            active_validation_commands = _extract_validation_commands(vcfg)
+            if not active_validation_commands:
+                return {
+                    'position': position,
+                    'cancelled': False,
+                    'skipped': {'index': m['index'], 'name': m['name'], 'reason': 'no validation commands configured'},
+                    'errors': local_errors,
+                    'zip_entries': local_zip_entries,
+                }
+
+            validation_results: List[Dict[str, Any]] = []
+            validation_all_passed = True
+
+            for vpos, vcmd in enumerate(active_validation_commands, start=1):
+                if _is_cancelled(pid):
+                    return {'position': position, 'cancelled': True, 'errors': local_errors, 'zip_entries': local_zip_entries}
+
+                v_command = str(vcmd.get('command') or '').strip()
+                v_match = str(vcmd.get('match') or '').strip()
+                v_timeout = _coerce_timeout(vcmd.get('timeout_seconds'))
+
+                try:
+                    _update_job_detail(
+                        pid,
+                        phase='validation',
+                        current=_format_vm_label(m),
+                        step=vpos,
+                        total_steps=len(active_validation_commands),
+                        message=(
+                            f"Running on {position + 1}/{total_mapped_targets} VM(s): "
+                            f"validating command {vpos}/{len(active_validation_commands)} on {_format_vm_label(m)}"
+                        ),
+                        detail={
+                            'kind': 'validation',
+                            'running_on': {'current': position + 1, 'total': total_mapped_targets},
+                            'vm': _format_vm_label(m),
+                            'step': vpos,
+                            'command_number': vpos,
+                            'command_total': len(active_validation_commands),
+                            'command': _shorten_command_text(v_command),
+                            'match': v_match,
+                            'timeout_seconds': v_timeout,
+                        },
+                    )
+                except Exception:
+                    pass
+
+                regex, compile_err = _compile_validation_regex(v_match)
+                if compile_err:
+                    validation_all_passed = False
+                    reason = f"validation regex error ({v_command}): {compile_err}"
+                    local_errors.append({
+                        'index': m['index'],
+                        'name': m['name'],
+                        'command': v_command,
+                        'reason': reason,
+                    })
+                    validation_results.append({
+                        'order': vcmd.get('order'),
+                        'command': v_command,
+                        'match': v_match,
+                        'timeout_seconds': v_timeout,
+                        'passed': False,
+                        'reason': compile_err,
+                        'timed_out': False,
+                        'exitcode': None,
+                        'stdout_preview': '',
+                        'stderr_preview': '',
+                    })
+                    local_zip_entries.append({
+                        'vm_name': m.get('name'),
+                        'vm_index': m.get('index'),
+                        'node': m.get('node'),
+                        'vmid': m.get('vmid'),
+                        'step': 1,
+                        'command_index': vpos,
+                        'delay': 0.0,
+                        'command': v_command,
+                        'exitcode': None,
+                        'stdout': '',
+                        'stderr': compile_err,
+                        'error': f"validation regex error: {compile_err}",
+                        'timeout_seconds': v_timeout,
+                        'long_running': False,
+                    })
+                    continue
+
+                try:
+                    res = client.agent_exec(
+                        node=m['node'],
+                        vmid=m['vmid'],
+                        command=v_command,
+                        timeout=v_timeout,
+                        return_partial_on_timeout=True,
+                    )
+                except Exception as exc:
+                    err_text = str(exc)
+                    validation_all_passed = False
+                    reason = f"validation command error ({v_command}): {exc}"
+                    local_errors.append({
+                        'index': m['index'],
+                        'name': m['name'],
+                        'command': v_command,
+                        'reason': reason,
+                    })
+                    validation_results.append({
+                        'order': vcmd.get('order'),
+                        'command': v_command,
+                        'match': v_match,
+                        'timeout_seconds': v_timeout,
+                        'passed': False,
+                        'reason': err_text,
+                        'timed_out': False,
+                        'exitcode': None,
+                        'stdout_preview': '',
+                        'stderr_preview': err_text,
+                    })
+                    local_zip_entries.append({
+                        'vm_name': m.get('name'),
+                        'vm_index': m.get('index'),
+                        'node': m.get('node'),
+                        'vmid': m.get('vmid'),
+                        'step': 1,
+                        'command_index': vpos,
+                        'delay': 0.0,
+                        'command': v_command,
+                        'exitcode': None,
+                        'stdout': '',
+                        'stderr': err_text,
+                        'error': f"validation command error: {exc}",
+                        'timeout_seconds': v_timeout,
+                        'long_running': False,
+                    })
+                    continue
+
+                stdout_text = res.get('stdout', '') or ''
+                stderr_text = res.get('stderr', '') or ''
+                merged = f"{stdout_text}\n{stderr_text}".strip('\n')
+                matched = bool(regex.search(merged if isinstance(merged, str) else str(merged))) if regex else False
+                timed_out = bool(res.get('timed_out'))
+                out_preview, _ = _make_preview(stdout_text)
+                err_preview, _ = _make_preview(stderr_text)
+                if not matched:
+                    validation_all_passed = False
+                    if timed_out:
+                        reason = f"validation regex did not match before timeout ({v_command})"
+                    else:
+                        reason = f"validation regex did not match output ({v_command})"
+                    local_errors.append({
+                        'index': m['index'],
+                        'name': m['name'],
+                        'command': v_command,
+                        'reason': reason,
+                    })
+                validation_results.append({
+                    'order': vcmd.get('order'),
+                    'command': v_command,
+                    'match': v_match,
+                    'timeout_seconds': v_timeout,
+                    'passed': matched,
+                    'timed_out': timed_out,
+                    'exitcode': res.get('exitcode'),
+                    'stdout_preview': out_preview,
+                    'stderr_preview': err_preview,
+                })
+                validation_err = None
+                if not matched:
+                    validation_err = 'validation regex did not match output'
+                    if timed_out:
+                        validation_err = 'validation regex did not match before timeout'
+                local_zip_entries.append({
+                    'vm_name': m.get('name'),
+                    'vm_index': m.get('index'),
+                    'node': m.get('node'),
+                    'vmid': m.get('vmid'),
+                    'step': 1,
+                    'command_index': vpos,
+                    'delay': 0.0,
+                    'command': v_command,
+                    'exitcode': res.get('exitcode'),
+                    'stdout': stdout_text,
+                    'stderr': stderr_text,
+                    'error': validation_err,
+                    'timeout_seconds': v_timeout,
+                    'long_running': False,
+                })
+
+            try:
+                runtime_store.set_vm_validation_state(
+                    proj.id,
+                    m.get('name'),
+                    bool(validation_all_passed),
+                    vmid=m.get('vmid'),
+                    node=m.get('node'),
+                )
+            except Exception as exc:
+                LOG.warning(
+                    "Could not persist validation state for %s/%s (%s): %s",
+                    m.get('node'),
+                    m.get('vmid'),
+                    m.get('name'),
+                    exc,
+                )
+
+            ran_entry = {
+                'index': m['index'],
+                'name': m['name'],
+                'vmid': m['vmid'],
+                'node': m['node'],
+                'steps': 0,
+                'count': 0,
+                'planned_count': 0,
+                'cmds': [],
+                'validation': {
+                    'configured_count': len(active_validation_commands),
+                    'all_passed': bool(validation_all_passed),
+                    'results': validation_results,
+                },
+                'validate_only': True,
+            }
+            return {
+                'position': position,
+                'cancelled': False,
+                'ran': ran_entry,
+                'errors': local_errors,
+                'zip_entries': local_zip_entries,
+            }
+
+        total_mapped = len(mapped)
+        _job_emit_batch_progress(pid, 'validation', 'Validating', 0, total_mapped, message=f'Running on 0/{total_mapped} VM(s)')
+        pool_workers = _pool_workers_for(proj, len(mapped))
+        done_count = 0
+        outcomes: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+            future_map = {pool.submit(_validate_target, pos, m): (pos, m) for pos, m in enumerate(mapped)}
+            for fut in as_completed(future_map):
+                pos, m = future_map[fut]
+                try:
+                    outcome = fut.result()
+                except Exception as exc:
+                    outcome = {
+                        'position': pos,
+                        'cancelled': False,
+                        'errors': [{
+                            'index': m.get('index'),
+                            'name': m.get('name'),
+                            'reason': f'validation failed: {exc}',
+                        }],
+                        'zip_entries': [],
+                    }
+                outcomes.append(outcome)
+                done_count += 1
+                _job_emit_batch_progress(
+                    pid,
+                    'validation',
+                    'Validating',
+                    done_count,
+                    total_mapped,
+                    current=str(m.get('name') or ''),
+                    message=f'Running on {done_count}/{total_mapped} VM(s)',
+                )
+
+        outcomes.sort(key=lambda item: int(item.get('position', 0)))
+        for outcome in outcomes:
+            if outcome.get('cancelled'):
+                errors.append({'reason': 'cancelled'})
+                break
+            skipped_entry = outcome.get('skipped')
+            if skipped_entry:
+                skipped.append(skipped_entry)
+            local_errors = outcome.get('errors') or []
+            if local_errors:
+                errors.extend(local_errors)
+            local_zip_entries = outcome.get('zip_entries') or []
+            if local_zip_entries:
+                zip_entries.extend(local_zip_entries)
+            ran_entry = outcome.get('ran')
+            if ran_entry:
+                ran.append(ran_entry)
+        mapped = []
+
+    for vm_position, m in enumerate(mapped, start=1):
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
             break
@@ -8537,11 +8857,13 @@ def instances_run_stored_cmds(pid: str):
                     step=vpos,
                     total_steps=total_validation_commands,
                     message=(
-                        f"Validating command {vpos}/{total_validation_commands} on {_format_vm_label(m)}: "
+                        f"Running on {vm_position}/{total_mapped_targets} VM(s) - "
+                        f"validating command {vpos}/{total_validation_commands} on {_format_vm_label(m)}: "
                         f"{_shorten_command_text(v_command)} (timeout {v_timeout}s, match /{v_match or '.*'}/)"
                     ),
                     detail={
                         'kind': 'validation',
+                        'running_on': {'current': vm_position, 'total': total_mapped_targets},
                         'vm': _format_vm_label(m),
                         'step': vpos,
                         'command_number': vpos,
@@ -8592,11 +8914,13 @@ def instances_run_stored_cmds(pid: str):
                         step=vpos,
                         total_steps=total_validation_commands,
                         message=(
-                            f"Validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
+                            f"Running on {vm_position}/{total_mapped_targets} VM(s) - "
+                            f"validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
                             f"regex error - {compile_err}"
                         ),
                         detail={
                             'kind': 'validation',
+                            'running_on': {'current': vm_position, 'total': total_mapped_targets},
                             'vm': _format_vm_label(m),
                             'step': vpos,
                             'command_number': vpos,
@@ -8658,11 +8982,13 @@ def instances_run_stored_cmds(pid: str):
                         step=vpos,
                         total_steps=total_validation_commands,
                         message=(
-                            f"Validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
+                            f"Running on {vm_position}/{total_mapped_targets} VM(s) - "
+                            f"validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
                             f"command error - {exc}"
                         ),
                         detail={
                             'kind': 'validation',
+                            'running_on': {'current': vm_position, 'total': total_mapped_targets},
                             'vm': _format_vm_label(m),
                             'step': vpos,
                             'command_number': vpos,
@@ -8726,7 +9052,10 @@ def instances_run_stored_cmds(pid: str):
             )
             try:
                 result_label = 'passed' if matched else 'failed'
-                msg_bits = [f"Validation {vpos}/{total_validation_commands} {result_label} on {_format_vm_label(m)}"]
+                msg_bits = [
+                    f"Running on {vm_position}/{total_mapped_targets} VM(s)",
+                    f"Validation {vpos}/{total_validation_commands} {result_label} on {_format_vm_label(m)}",
+                ]
                 if timed_out:
                     msg_bits.append('(timed out)')
                 preview_for_status = out_preview or err_preview
@@ -8741,6 +9070,7 @@ def instances_run_stored_cmds(pid: str):
                     message=' '.join(msg_bits),
                     detail={
                         'kind': 'validation',
+                        'running_on': {'current': vm_position, 'total': total_mapped_targets},
                         'vm': _format_vm_label(m),
                         'step': vpos,
                         'command_number': vpos,
