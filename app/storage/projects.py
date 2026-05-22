@@ -320,6 +320,7 @@ def sanitize_validation_commands(value: Any) -> List[Dict[str, Any]]:
 class VMConfig:
     name: str
     vmid: Optional[int] = None
+    vm_type: str = "qemu"  # 'qemu' or 'lxc'
     viewable_to_user: bool = True
     start_commands: List[StartCommandStep] = field(default_factory=list)
     stored_commands: List[StartCommandStep] = field(default_factory=list)
@@ -1059,6 +1060,7 @@ class ProjectStore:
                     "skip_post_clone_snapshot",
                     "vm_user",
                     "vm_pass",
+                    "vm_type",
                 ]:
                     if k in fields:
                         if k == "start_commands":
@@ -1099,6 +1101,7 @@ class ProjectStore:
             if vm.name == old_name:
                 proj.vms[i] = VMConfig(name=new_name,
                                        vmid=vm.vmid,
+                                       vm_type=getattr(vm, 'vm_type', 'qemu'),
                                        viewable_to_user=vm.viewable_to_user,
                                        start_commands=sanitize_start_command_steps(vm.start_commands),
                                        stored_commands=sanitize_start_command_steps(vm.stored_commands),

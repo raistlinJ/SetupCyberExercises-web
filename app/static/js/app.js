@@ -4934,8 +4934,11 @@ async function autoSaveVm(pid, idx) {
   if (passEl && passEl.value.trim() !== '') {
     vm_pass = passEl.value.trim();
   }
+  const typeEl = document.getElementById(`vm-${pid}-${idx}-type`);
+  const vm_type = typeEl ? typeEl.value : 'qemu';
   const payload = {
     vmid: vmid,
+    vm_type: vm_type,
     vm_user: vm_user,
     vm_pass: vm_pass,
     start_commands: startCommands,
@@ -4953,6 +4956,7 @@ async function autoSaveVm(pid, idx) {
           list[vmIdx] = {
             ...list[vmIdx],
             vmid: payload.vmid,
+            vm_type: payload.vm_type,
             start_commands: payload.start_commands,
             stored_commands: payload.stored_commands,
             validation_commands: payload.validation_commands,
@@ -5955,6 +5959,13 @@ function renderProjectCard(p) {
           <label class="form-label" title="Optional explicit VMID for the template">VM ID (optional)</label>
           <input type="number" min="0" id="vm-${p.id}-${i}-vmid" class="form-control form-control-sm" value="${(v.vmid ?? '')}" placeholder="e.g., 101" title="Explicit VMID to clone from (optional)" aria-label="VM ID" oninput="debounceVmSave('${p.id}', ${i})" />
         </div>
+        <div class="col-md-3">
+          <label class="form-label" title="Type of the VM">Type</label>
+          <select id="vm-${p.id}-${i}-type" class="form-select form-select-sm" onchange="debounceVmSave('${p.id}', ${i})">
+            <option value="qemu" ${v.vm_type === 'qemu' || !v.vm_type ? 'selected' : ''}>QEMU</option>
+            <option value="lxc" ${v.vm_type === 'lxc' ? 'selected' : ''}>LXC</option>
+          </select>
+        </div>
         ${(function () {
       const startSteps = normalizeStartCommandSteps(v.start_commands || []);
       const startSummary = formatStartCommandsSummary(startSteps);
@@ -6712,6 +6723,7 @@ async function fetchTemplatesForAFS() {
           node: String(t?.node || ''),
           vmid: Number(t?.vmid || 0),
           name: String(t?.name || ''),
+          type: String(t?.type || 'qemu'),
           bridges: Array.isArray(t?.bridges) ? t.bridges.map(b => String(b || '')) : [],
           qemu_agent_enabled: !!t?.qemu_agent_enabled,
         }));
@@ -6799,6 +6811,8 @@ function renderAFSList() {
     const nodeBadgeCls = disableRow ? 'badge bg-light text-dark border' : 'badge bg-secondary';
     const trailingBits = [];
     const agentEnabled = !!t.qemu_agent_enabled;
+    const typeLabel = (t.type || 'qemu').toUpperCase();
+    trailingBits.push(`<span class="badge bg-secondary">${escHtml(typeLabel)}</span>`);
     if (agentEnabled) {
       trailingBits.push('<span class="d-inline-flex align-items-center text-success" title="QEMU Guest Agent enabled"><i class="bi bi-robot"></i></span>');
     }
@@ -6867,6 +6881,10 @@ async function addSelectedTemplates() {
     }
     try {
       const patch = { vmid };
+      const t = (AFS_CTX.templates || []).find(x => x.node === node && x.vmid === vmid && x.name === name);
+      if (t && t.type) {
+        patch.vm_type = t.type;
+      }
       if (adaptorByName[name] && adaptorByName[name].length) {
         // Support both naming variants during patch creation
         patch.internal_network_adaptors = adaptorByName[name];

@@ -507,6 +507,178 @@ class ProxmoxClient:
             })
         return out
 
+    def list_qemu_snapshots(self, node: str, vmid: int) -> List[Dict[str, Any]]:
+        return self.list_snapshots_qemu(node, vmid)
+
+    def list_lxc_vms(self, node: str) -> List[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc"
+        resp = s.get(url, timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        return data.get("data", [])
+
+    def get_lxc_config(self, node: str, vmid: int) -> Dict[str, Any]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/config"
+        resp = s.get(url, timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        return data.get("data", {})
+
+    def get_lxc_status_current(self, node: str, vmid: int) -> Dict[str, Any]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/status/current"
+        resp = s.get(url, timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        return data.get("data", {})
+
+    def clone_lxc(self, node: str, vmid: int, newid: int, name: str, storage: Optional[str] = None, full: bool = True, target: Optional[str] = None) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/clone"
+        payload: Dict[str, Any] = { 'newid': newid, 'hostname': name, 'full': 1 if full else 0 }
+        if storage: payload['storage'] = storage
+        if target: payload['target'] = target
+        r = s.post(url, data=payload, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox clone error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def set_lxc_nets(self, node: str, vmid: int, nets: List[str], delete_keys: Optional[List[str]] = None):
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/config"
+        data: Dict[str, Any] = {}
+        if delete_keys:
+            data['delete'] = ','.join(delete_keys)
+        for i, spec in enumerate(nets):
+            data[f'net{i}'] = spec
+        r = s.put(url, data=data, timeout=30)
+        if r.status_code in (405, 501):
+            r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox set lxc net error {r.status_code}: {r.text}")
+        return r.json().get('data', '')
+
+    def set_lxc_options(self, node: str, vmid: int, options: Dict[str, Any]):
+        """Generic LXC config setter (e.g., set 'pool' or other options)."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/config"
+        r = s.put(url, data=options or {}, timeout=30)
+        if r.status_code in (405, 501):
+            r = s.post(url, data=options or {}, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox set LXC options error {r.status_code}: {r.text}")
+        return r.json().get('data', '')
+
+    def delete_lxc_options(self, node: str, vmid: int, keys: List[str]):
+        """Delete one or more LXC config options via the 'delete' parameter."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/config"
+        data = { 'delete': ','.join(list(keys or [])) }
+        r = s.put(url, data=data, timeout=30)
+        if r.status_code in (405, 501):
+            r = s.post(url, data=data, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox delete LXC options error {r.status_code}: {r.text}")
+        return r.json().get('data', '')
+
+    def snapshot_lxc(self, node: str, vmid: int, snapname: str, description: Optional[str] = None) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/snapshot"
+        payload: Dict[str, Any] = { 'snapname': snapname }
+        if description: payload['description'] = description
+        r = s.post(url, data=payload, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox lxc snapshot error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def delete_lxc(self, node: str, vmid: int, purge: bool = True, destroy_unreferenced_disks: bool = True) -> str:
+        """Delete (destroy) an LXC container. Returns UPID."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}"
+        params: Dict[str, Any] = {}
+        if purge:
+            params['purge'] = 1
+        if destroy_unreferenced_disks:
+            params['destroy-unreferenced-disks'] = 1
+        r = s.delete(url, params=params, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox delete LXC error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def _lxc_status_action(self, node: str, vmid: int, action: str, data: Optional[Dict[str, Any]] = None, timeout: int = 60) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/status/{action}"
+        r = s.post(url, data=(data or {}), timeout=timeout)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox lxc {action} error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def start_lxc(self, node: str, vmid: int) -> str:
+        return self._lxc_status_action(node, vmid, 'start')
+
+    def unlock_lxc(self, node: str, vmid: int) -> str:
+        # Note: Proxmox API doesn't officially expose /status/unlock for LXC like it does for QEMU in all versions.
+        # But we'll map it to 'unlock' here to match QEMU. If it fails, API routes can handle or ignore.
+        return self._lxc_status_action(node, vmid, 'unlock')
+
+    def stop_lxc(self, node: str, vmid: int) -> str:
+        return self._lxc_status_action(node, vmid, 'stop')
+
+    def shutdown_lxc(self, node: str, vmid: int, timeout: Optional[int] = None) -> str:
+        data = {}
+        if timeout is not None:
+            data['timeout'] = int(timeout)
+        return self._lxc_status_action(node, vmid, 'shutdown', data=data)
+
+    def reboot_lxc(self, node: str, vmid: int) -> str:
+        return self._lxc_status_action(node, vmid, 'reboot')
+
+    def resume_lxc(self, node: str, vmid: int) -> str:
+        return self._lxc_status_action(node, vmid, 'resume')
+
+    def suspend_lxc(self, node: str, vmid: int) -> str:
+        return self._lxc_status_action(node, vmid, 'suspend')
+
+    def restore_snapshot_lxc(self, node: str, vmid: int, snapname: str, start_after: bool = False) -> str:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/snapshot/{requests.utils.quote(snapname, safe='')}/rollback"
+        data: Dict[str, Any] = {}
+        if start_after:
+            data['start'] = 1
+        r = s.post(url, data=data, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox lxc snapshot rollback error {r.status_code}: {r.text}")
+        return r.json().get('data', '')  # UPID
+
+    def list_snapshots_lxc(self, node: str, vmid: int) -> List[Dict[str, Any]]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc/{vmid}/snapshot"
+        r = s.get(url, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Proxmox list lxc snapshots error {r.status_code}: {r.text}")
+        data = r.json().get('data', [])
+        out: List[Dict[str, Any]] = []
+        for d in data:
+            try:
+                st = d.get('snaptime')
+                st = int(st) if st is not None else None
+            except Exception:
+                st = None
+            out.append({
+                'name': d.get('name'),
+                'snaptime': st,
+                'description': d.get('description')
+            })
+        return out
+
+    def list_lxc_snapshots(self, node: str, vmid: int) -> List[Dict[str, Any]]:
+        return self.list_snapshots_lxc(node, vmid)
+
     # --- QEMU Guest Agent helpers ---
     def agent_exec(
         self,

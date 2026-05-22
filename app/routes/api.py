@@ -473,9 +473,22 @@ def _execute_delete_bridge_cleanup(project_snapshot: Dict[str, Any], client: Pro
                         live_name_map[name.lower()] = {
                             'node': node,
                             'vmid': int(ent.get('vmid')) if ent.get('vmid') is not None else None,
+                            'type': 'qemu'
                         }
             except Exception:
-                live_name_map = {}
+                pass
+            try:
+                if hasattr(client, 'list_lxc_vms'):
+                    for ent in client.list_lxc_vms(node) or []:
+                        name = str((ent or {}).get('name') or ent.get('hostname') or '')
+                        if name:
+                            live_name_map[name.lower()] = {
+                                'node': node,
+                                'vmid': int(ent.get('vmid')) if ent.get('vmid') is not None else None,
+                                'type': 'lxc'
+                            }
+            except Exception:
+                pass
 
             unknown_entries: List[Dict[str, Any]] = []
             seen_bridge: Set[str] = set()
@@ -2297,10 +2310,22 @@ def instances_create(pid: str):
                     'node': node,
                     'name': str(q.get('name') or ''),
                     'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None,
-                    'template': q.get('template')
+                    'template': q.get('template'),
+                    'type': 'qemu'
                 })
         except Exception:
-            continue
+            pass
+        try:
+            for c in client.list_lxc_vms(node):
+                cluster.append({
+                    'node': node,
+                    'name': str(c.get('name') or c.get('hostname') or ''),
+                    'vmid': int(c.get('vmid')) if c.get('vmid') is not None else None,
+                    'template': c.get('template'),
+                    'type': 'lxc'
+                })
+        except Exception:
+            pass
     name_bucket = {}
     by_id = {}
     existing_names_lc = set()
@@ -2466,25 +2491,44 @@ def instances_create(pid: str):
             raw_template_flag = bool(src.get('template') in (1, '1', True, 'true'))
         except Exception:
             raw_template_flag = False
+        is_lxc = getattr(cfg, 'vm_type', 'qemu') == 'lxc' or (src and src.get('type') == 'lxc')
         snapshots_present = False
         linked_like_disk = False
         if use_linked:
-            try:
-                snaps = client.list_qemu_snapshots(node=node, vmid=src_vmid) or []
-                snapshots_present = len(snaps) > 0
-            except Exception:
-                snapshots_present = False
-            try:
-                cfg_src_full = client.get_qemu_config(node=node, vmid=src_vmid) or {}
-                for k,v in (cfg_src_full or {}).items():
-                    ks = str(k)
-                    if ks.startswith(('scsi','ide','sata','virtio')):
-                        val = str(v)
-                        if 'base-' in val or re.search(r"\bvm-\d+-disk-\d+\.qcow2", val):
-                            linked_like_disk = True
-                            break
-            except Exception:
-                pass
+            if is_lxc:
+                try:
+                    snaps = client.list_lxc_snapshots(node=node, vmid=src_vmid) or []
+                    snapshots_present = len(snaps) > 0
+                except Exception:
+                    snapshots_present = False
+                try:
+                    cfg_src_full = client.get_lxc_config(node=node, vmid=src_vmid) or {}
+                    for k,v in (cfg_src_full or {}).items():
+                        ks = str(k)
+                        if ks.startswith(('rootfs', 'mp')):
+                            val = str(v)
+                            if 'base-' in val or 'subvol-' in val:
+                                linked_like_disk = True
+                                break
+                except Exception:
+                    pass
+            else:
+                try:
+                    snaps = client.list_qemu_snapshots(node=node, vmid=src_vmid) or []
+                    snapshots_present = len(snaps) > 0
+                except Exception:
+                    snapshots_present = False
+                try:
+                    cfg_src_full = client.get_qemu_config(node=node, vmid=src_vmid) or {}
+                    for k,v in (cfg_src_full or {}).items():
+                        ks = str(k)
+                        if ks.startswith(('scsi','ide','sata','virtio')):
+                            val = str(v)
+                            if 'base-' in val or re.search(r"\bvm-\d+-disk-\d+\.qcow2", val):
+                                linked_like_disk = True
+                                break
+                except Exception:
+                    pass
         src_is_effective_template = raw_template_flag or snapshots_present or linked_like_disk
         if use_linked and not src_is_effective_template:
             # Allow Proxmox to make the final decision, but never downgrade to a full clone silently.
@@ -2495,6 +2539,8 @@ def instances_create(pid: str):
         storage_vol = getattr(cfg, 'storage_volume', None) or getattr(proj, 'proxmox_storage_volume', None)
         timeout_sec = int(getattr(cfg, 'clone_timeout_sec', None) or getattr(proj, 'proxmox_clone_timeout_seconds', 1800))
         def do_clone_with_id(chosen_id: int, full_clone: bool):
+            if is_lxc:
+                return client.clone_lxc(node=node, vmid=src_vmid, newid=chosen_id, name=newname, storage=(None if not full_clone else (storage_vol or None)), full=(1 if full_clone else 0) or bool(full_clone))
             return client.clone_qemu(node=node, vmid=src_vmid, newid=chosen_id, name=newname, storage=(None if not full_clone else (storage_vol or None)), full=(1 if full_clone else 0) or bool(full_clone))
         attempts = []
         vmid_attempts = attempts
@@ -2597,7 +2643,10 @@ def instances_create(pid: str):
                     notes_payload["Pass"] = cfg_pass
 
                 json_notes = json.dumps(notes_payload, indent=4)
-                ex_cfg = client.get_qemu_config(node=node, vmid=int(newid)) or {}
+                if is_lxc:
+                    ex_cfg = client.get_lxc_config(node=node, vmid=int(newid)) or {}
+                else:
+                    ex_cfg = client.get_qemu_config(node=node, vmid=int(newid)) or {}
                 old_desc = ex_cfg.get('description', '')
 
                 if old_desc:
@@ -2605,7 +2654,10 @@ def instances_create(pid: str):
                 else:
                     new_desc = json_notes
 
-                client.set_qemu_options(node=node, vmid=int(newid), options={'description': new_desc})
+                if is_lxc:
+                    client.set_lxc_options(node=node, vmid=int(newid), options={'description': new_desc})
+                else:
+                    client.set_qemu_options(node=node, vmid=int(newid), options={'description': new_desc})
                 debug_msgs.append(f"Successfully appended scenario credentials to VM Notes for vmid={newid}")
             except Exception as notes_err:
                 debug_msgs.append(f"Failed to append scenario credentials to VM Notes: {notes_err}")
@@ -2666,16 +2718,19 @@ def instances_create(pid: str):
                                     msg2 = str(e2)
                                     if ' 501' in msg2 or 'not implemented' in msg2.lower():
                                         try:
-                                            client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
+                                            if is_lxc:
+                                                client.set_lxc_options(node=node, vmid=int(newid), options={ 'pool': poolid })
+                                            else:
+                                                client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
                                             assignment_info['pool'] = poolid
                                             assignment_info['pool_member_added'] = True
                                             try:
-                                                debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> success")
+                                                debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> success")
                                             except Exception:
                                                 pass
                                         except Exception as e3:
                                             try:
-                                                debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
+                                                debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
                                             except Exception:
                                                 pass
                                             post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
@@ -2688,16 +2743,19 @@ def instances_create(pid: str):
                             else:
                                 if ' 501' in msg or 'not implemented' in msg.lower():
                                     try:
-                                        client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
+                                        if is_lxc:
+                                            client.set_lxc_options(node=node, vmid=int(newid), options={ 'pool': poolid })
+                                        else:
+                                            client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
                                         assignment_info['pool'] = poolid
                                         assignment_info['pool_member_added'] = True
                                         try:
-                                            debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> success")
+                                            debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> success")
                                         except Exception:
                                             pass
                                     except Exception as e3:
                                         try:
-                                            debug_msgs.append(f"fallback:set_qemu_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
+                                            debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
                                         except Exception:
                                             pass
                                         post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
@@ -2786,10 +2844,10 @@ def instances_create(pid: str):
                 post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool/acl assignment failed: {e}' })
         # Finalize
         if post_errors:
-            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal }
+            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal, 'type': 'lxc' if is_lxc else 'qemu' }
             payload.update(assignment_info)
             return ('post', payload, post_errors)
-        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal }
+        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal, 'type': 'lxc' if is_lxc else 'qemu' }
         payload.update(assignment_info)
         return ('ok', payload, None)
 
@@ -3175,18 +3233,40 @@ def instances_create(pid: str):
                         progress=_network_progress(ordinal, bridge_pos / max(len(expected), 1)),
                         message=f'Assigning adaptor for {progress_label}: bridge {bridge_name} {bridge_pos}/{len(expected)}…',
                     )
-                netspecs = [f"e1000,bridge={b}" for b in expected]
-                try:
-                    existing_cfg = client.get_qemu_config(node=node, vmid=vmid)
-                except Exception:
-                    existing_cfg = {}
-                delete_keys = [k for k in (existing_cfg or {}).keys() if str(k).startswith('net')]
-                if delete_keys:
+                vm_type = r.get('type', 'qemu')
+                if vm_type == 'lxc':
+                    netspecs = [f"name=eth{i},bridge={b}" for i, b in enumerate(expected)]
                     try:
-                        client.set_qemu_nets(node=node, vmid=vmid, nets=[], delete_keys=delete_keys)
+                        existing_cfg = client.get_lxc_config(node=node, vmid=vmid)
                     except Exception:
-                        pass
-                client.set_qemu_nets(node=node, vmid=vmid, nets=netspecs, delete_keys=None)
+                        existing_cfg = {}
+                else:
+                    netspecs = [f"e1000,bridge={b}" for b in expected]
+                    try:
+                        existing_cfg = client.get_qemu_config(node=node, vmid=vmid)
+                    except Exception:
+                        existing_cfg = {}
+                
+                new_net_keys = [f"net{i}" for i in range(len(netspecs))]
+                existing_net_keys = [k for k in (existing_cfg or {}).keys() if str(k).startswith('net')]
+                delete_keys = [k for k in existing_net_keys if k not in new_net_keys]
+                
+                if delete_keys:
+                    if vm_type == 'lxc':
+                        try:
+                            client.set_lxc_nets(node=node, vmid=vmid, nets=[], delete_keys=delete_keys)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            client.set_qemu_nets(node=node, vmid=vmid, nets=[], delete_keys=delete_keys)
+                        except Exception:
+                            pass
+                
+                if vm_type == 'lxc':
+                    client.set_lxc_nets(node=node, vmid=vmid, nets=netspecs, delete_keys=None)
+                else:
+                    client.set_qemu_nets(node=node, vmid=vmid, nets=netspecs, delete_keys=None)
             except Exception as e:
                 errors.append({'reason': f'set nets failed post-clone: {e}'})
 
@@ -3214,7 +3294,11 @@ def instances_create(pid: str):
                         message=f'Creating snapshot for {progress_label}…',
                     )
                     # Timeout matching the original logic (900s)
-                    supid = client.snapshot_qemu(node=item['node'], vmid=item['vmid'], snapname='post-clone', description='Auto snapshot after clone')
+                    is_lxc = item.get('type', 'qemu') == 'lxc'
+                    if is_lxc:
+                        supid = client.snapshot_lxc(node=item['node'], vmid=item['vmid'], snapname='post-clone', description='Auto snapshot after clone')
+                    else:
+                        supid = client.snapshot_qemu(node=item['node'], vmid=item['vmid'], snapname='post-clone', description='Auto snapshot after clone')
                     client._wait_task(item['node'], supid, timeout=900)
                     return {
                         'name': item.get('name') or '',
@@ -3396,7 +3480,10 @@ def instances_create(pid: str):
                 nets_ok = True
                 nets_retries = 0
                 try:
-                    cfg_now = client.get_qemu_config(node=node, vmid=vmid) or {}
+                    if getattr(cfg, 'vm_type', 'qemu') == 'lxc':
+                        cfg_now = client.get_lxc_config(node=node, vmid=vmid) or {}
+                    else:
+                        cfg_now = client.get_qemu_config(node=node, vmid=vmid) or {}
                     for k, v in (cfg_now or {}).items():
                         ks = str(k)
                         if not ks.startswith('net'):
@@ -3414,7 +3501,10 @@ def instances_create(pid: str):
                             nets_retries += 1
                             _safe_sleep(1.0)
                             try:
-                                cfg_now = client.get_qemu_config(node=node, vmid=vmid) or {}
+                                if getattr(cfg, 'vm_type', 'qemu') == 'lxc':
+                                    cfg_now = client.get_lxc_config(node=node, vmid=vmid) or {}
+                                else:
+                                    cfg_now = client.get_qemu_config(node=node, vmid=vmid) or {}
                                 actual_bridges = set()
                                 for k, v in (cfg_now or {}).items():
                                     ks = str(k)
@@ -3739,9 +3829,18 @@ def instances_create_preflight(pid: str):
                 vmid = int(q.get('vmid')) if q.get('vmid') is not None else None
                 key = nm.lower() if nm else ''
                 if key and vmid is not None:
-                    name_bucket.setdefault(key, []).append({ 'node': node, 'name': nm, 'vmid': vmid })
+                    name_bucket.setdefault(key, []).append({ 'node': node, 'name': nm, 'vmid': vmid, 'template': q.get('template'), 'type': 'qemu' })
         except Exception:
-            continue
+            pass
+        try:
+            for c in client.list_lxc_vms(node):
+                nm = str(c.get('name') or c.get('hostname') or '')
+                vmid = int(c.get('vmid')) if c.get('vmid') is not None else None
+                key = nm.lower() if nm else ''
+                if key and vmid is not None:
+                    name_bucket.setdefault(key, []).append({ 'node': node, 'name': nm, 'vmid': vmid, 'template': c.get('template'), 'type': 'lxc' })
+        except Exception:
+            pass
 
     # For incoming targets, figure out the base template name as create would, and find ambiguous ones
     group = {}
@@ -3825,29 +3924,53 @@ def instances_create_preflight(pid: str):
                         else:
                             use_linked_eff = bool(use_linked_eff)
                         if use_linked_eff and src:
+                            is_lxc = getattr(cfg, 'vm_type', 'qemu') == 'lxc' or (src and src.get('type') == 'lxc')
                             is_tmpl = bool(src.get('template') in (1, '1', True, 'true'))
-                            # Fetch extra metadata to improve accuracy
-                            try:
-                                cfg_full = client.get_qemu_config(node=src.get('node'), vmid=vmid_explicit)
-                            except Exception:
-                                cfg_full = {}
-                            # Snapshot heuristic
                             has_snapshots = False
-                            try:
-                                snaps = client.list_qemu_snapshots(node=src.get('node'), vmid=vmid_explicit) or []
-                                has_snapshots = len(snaps) > 0
-                            except Exception:
-                                pass
-                            # Disk heuristic: base image pattern
                             linked_like = False
-                            try:
-                                for k,v in (cfg_full or {}).items():
-                                    if str(k).startswith('scsi') or str(k).startswith('ide') or str(k).startswith('sata') or str(k).startswith('virtio'):
-                                        val = str(v)
-                                        if 'base-' in val or re.search(r"\bvm-\d+-disk-\d+\.qcow2", val):
-                                            linked_like = True; break
-                            except Exception:
-                                pass
+                            if is_lxc:
+                                # Fetch extra metadata to improve accuracy
+                                try:
+                                    cfg_full = client.get_lxc_config(node=src.get('node'), vmid=vmid_explicit)
+                                except Exception:
+                                    cfg_full = {}
+                                # Snapshot heuristic
+                                try:
+                                    snaps = client.list_lxc_snapshots(node=src.get('node'), vmid=vmid_explicit) or []
+                                    has_snapshots = len(snaps) > 0
+                                except Exception:
+                                    pass
+                                # Disk heuristic
+                                try:
+                                    for k,v in (cfg_full or {}).items():
+                                        ks = str(k)
+                                        if ks.startswith(('rootfs', 'mp')):
+                                            val = str(v)
+                                            if 'base-' in val or 'subvol-' in val:
+                                                linked_like = True; break
+                                except Exception:
+                                    pass
+                            else:
+                                # Fetch extra metadata to improve accuracy
+                                try:
+                                    cfg_full = client.get_qemu_config(node=src.get('node'), vmid=vmid_explicit)
+                                except Exception:
+                                    cfg_full = {}
+                                # Snapshot heuristic
+                                try:
+                                    snaps = client.list_qemu_snapshots(node=src.get('node'), vmid=vmid_explicit) or []
+                                    has_snapshots = len(snaps) > 0
+                                except Exception:
+                                    pass
+                                # Disk heuristic
+                                try:
+                                    for k,v in (cfg_full or {}).items():
+                                        if str(k).startswith('scsi') or str(k).startswith('ide') or str(k).startswith('sata') or str(k).startswith('virtio'):
+                                            val = str(v)
+                                            if 'base-' in val or re.search(r"\bvm-\d+-disk-\d+\.qcow2", val):
+                                                linked_like = True; break
+                                except Exception:
+                                    pass
                             if not (is_tmpl or has_snapshots or linked_like):
                                 non_template_linked.append({ 'name': base_name, 'vmid': vmid_explicit, 'node': src.get('node') if src else None })
                 except Exception:
@@ -3863,29 +3986,51 @@ def instances_create_preflight(pid: str):
                 else:
                     use_linked_eff = bool(use_linked_eff)
                 if use_linked_eff and src:
+                    is_lxc = getattr(cfg, 'vm_type', 'qemu') == 'lxc' or (src and src.get('type') == 'lxc')
                     is_tmpl = bool(src.get('template') in (1, '1', True, 'true'))
                     vmid_src = src.get('vmid')
                     node_src = src.get('node')
-                    # Extended heuristics for template detection
-                    try:
-                        cfg_full = client.get_qemu_config(node=node_src, vmid=vmid_src)
-                    except Exception:
-                        cfg_full = {}
                     has_snapshots = False
-                    try:
-                        snaps = client.list_qemu_snapshots(node=node_src, vmid=vmid_src) or []
-                        has_snapshots = len(snaps) > 0
-                    except Exception:
-                        pass
                     linked_like = False
-                    try:
-                        for k,v in (cfg_full or {}).items():
-                            if str(k).startswith('scsi') or str(k).startswith('ide') or str(k).startswith('sata') or str(k).startswith('virtio'):
-                                val = str(v)
-                                if 'base-' in val or re.search(r"\bvm-\d+-disk-\d+\.qcow2", val):
-                                    linked_like = True; break
-                    except Exception:
-                        pass
+                    if is_lxc:
+                        # Extended heuristics for template detection
+                        try:
+                            cfg_full = client.get_lxc_config(node=node_src, vmid=vmid_src)
+                        except Exception:
+                            cfg_full = {}
+                        try:
+                            snaps = client.list_lxc_snapshots(node=node_src, vmid=vmid_src) or []
+                            has_snapshots = len(snaps) > 0
+                        except Exception:
+                            pass
+                        try:
+                            for k,v in (cfg_full or {}).items():
+                                ks = str(k)
+                                if ks.startswith(('rootfs', 'mp')):
+                                    val = str(v)
+                                    if 'base-' in val or 'subvol-' in val:
+                                        linked_like = True; break
+                        except Exception:
+                            pass
+                    else:
+                        # Extended heuristics for template detection
+                        try:
+                            cfg_full = client.get_qemu_config(node=node_src, vmid=vmid_src)
+                        except Exception:
+                            cfg_full = {}
+                        try:
+                            snaps = client.list_qemu_snapshots(node=node_src, vmid=vmid_src) or []
+                            has_snapshots = len(snaps) > 0
+                        except Exception:
+                            pass
+                        try:
+                            for k,v in (cfg_full or {}).items():
+                                if str(k).startswith('scsi') or str(k).startswith('ide') or str(k).startswith('sata') or str(k).startswith('virtio'):
+                                    val = str(v)
+                                    if 'base-' in val or re.search(r"\bvm-\d+-disk-\d+\.qcow2", val):
+                                        linked_like = True; break
+                        except Exception:
+                            pass
                     if not (is_tmpl or has_snapshots or linked_like):
                         non_template_linked.append({ 'name': base_name, 'vmid': vmid_src, 'node': node_src })
     except Exception:
@@ -4198,7 +4343,11 @@ def instances_delete(pid: str):
             for q in client.list_qemu_vms(node):
                 nm = str(q.get('name') or '')
                 if nm:
-                    name_to_info[nm.lower()] = { 'node': node, 'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None, 'name': nm }
+                    name_to_info[nm.lower()] = { 'node': node, 'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None, 'name': nm, 'type': 'qemu' }
+            for c in client.list_lxc_vms(node):
+                nm = str(c.get('name') or c.get('hostname') or '')
+                if nm:
+                    name_to_info[nm.lower()] = { 'node': node, 'vmid': int(c.get('vmid')) if c.get('vmid') is not None else None, 'name': nm, 'type': 'lxc' }
         except Exception:
             continue
 
@@ -4242,8 +4391,9 @@ def instances_delete(pid: str):
             return ('skip', { 'index': idx, 'name': gen_name, 'reason': 'not found' })
         node = info['node']
         vmid = info['vmid']
+        vtype = info.get('type', 'qemu')
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
-        return ('ok', { 'index': idx, 'gen_name': gen_name, 'node': node, 'vmid': vmid, 'adaptors': adaptors })
+        return ('ok', { 'index': idx, 'gen_name': gen_name, 'node': node, 'vmid': vmid, 'type': vtype, 'adaptors': adaptors })
 
     prepared = [prepare_target(t) for t in targets]
     # Accumulate pre-known skips/errors
@@ -4276,8 +4426,12 @@ def instances_delete(pid: str):
         gen_name = task['gen_name']
         node = task['node']
         vmid = task['vmid']
+        is_lxc = task.get('type') == 'lxc'
         adaptors = task['adaptors']
-        upid = client.delete_qemu(node=node, vmid=vmid, purge=True, destroy_unreferenced_disks=True)
+        if is_lxc:
+            upid = client.delete_lxc(node=node, vmid=vmid, purge=True, destroy_unreferenced_disks=True)
+        else:
+            upid = client.delete_qemu(node=node, vmid=vmid, purge=True, destroy_unreferenced_disks=True)
         client._wait_task(node, upid, timeout=1200)
         # Record bridges for later deletion (post all deletions) to avoid race conditions and repeated node reloads
         for a in adaptors:
@@ -4592,7 +4746,7 @@ def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str
             node = (node_info or {}).get('node') or (node_info or {}).get('id') or ''
             node = str(node)
             if not node:
-                return (None, [], None)
+                return (None, [], [], None)
             try:
                 thread_client = ProxmoxClient(
                     base_url=client.base_url,
@@ -4602,15 +4756,21 @@ def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str
                     verify=client.verify,
                 )
                 qemus = thread_client.list_qemu_vms(node) or []
-                return (node, qemus, None)
+                lxcs = []
+                try:
+                    if hasattr(thread_client, 'list_lxc_vms'):
+                        lxcs = thread_client.list_lxc_vms(node) or []
+                except Exception:
+                    pass
+                return (node, qemus, lxcs, None)
             except Exception as e:
-                return (node, [], e)
+                return (node, [], [], e)
 
         max_workers = min(len(nodes) or 1, 8)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_fetch_node_vms, n) for n in nodes]
             for fut in as_completed(futures):
-                node, qemus, err = fut.result()
+                node, qemus, lxcs, err = fut.result()
                 if err or not node:
                     continue
                 for q in qemus:
@@ -4621,9 +4781,23 @@ def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str
                         'node': node,
                         'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None,
                         'name': nm,
+                        'type': 'qemu',
                         'status': str(q.get('status') or q.get('qmpstatus') or '').lower(),
                         'power_status': str(q.get('status') or '').lower(),
                         'qmp_status': str(q.get('qmpstatus') or '').lower(),
+                    }
+                for l in lxcs:
+                    nm = str((l or {}).get('name') or (l or {}).get('hostname') or '')
+                    if not nm:
+                        continue
+                    name_to_info[nm.lower()] = {
+                        'node': node,
+                        'vmid': int(l.get('vmid')) if l.get('vmid') is not None else None,
+                        'name': nm,
+                        'type': 'lxc',
+                        'status': str(l.get('status') or '').lower(),
+                        'power_status': str(l.get('status') or '').lower(),
+                        'qmp_status': '',
                     }
     except Exception as e:
         import traceback
@@ -4755,6 +4929,7 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
             'name': gen_name,
             'node': info['node'],
             'vmid': info['vmid'],
+            'type': info.get('type', 'qemu'),
             'status': info.get('status', ''),
             'power_status': info.get('power_status', ''),
             'qmp_status': info.get('qmp_status', ''),
@@ -4940,11 +5115,18 @@ def instances_start(pid: str):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         st = (m.get('status') or '').lower()
+        is_lxc = m.get('type') == 'lxc'
         if st == 'suspended':
-            upid = client.resume_qemu(node=m['node'], vmid=m['vmid'])
+            if is_lxc:
+                upid = client.resume_lxc(node=m['node'], vmid=m['vmid'])
+            else:
+                upid = client.resume_qemu(node=m['node'], vmid=m['vmid'])
             client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['running'])
             return ('resumed', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
-        upid = client.start_qemu(node=m['node'], vmid=m['vmid'])
+        if is_lxc:
+            upid = client.start_lxc(node=m['node'], vmid=m['vmid'])
+        else:
+            upid = client.start_qemu(node=m['node'], vmid=m['vmid'])
         client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['running'])
         return ('started', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
@@ -5065,7 +5247,11 @@ def instances_apply_scenario(pid: str):
         json_notes = json.dumps(notes_payload, indent=4)
         
         # Fetch existing config to preserve old notes while replacing previous JSON payload
-        ex_cfg = client.get_qemu_config(node=node, vmid=int(vmid)) or {}
+        is_lxc = m.get('type') == 'lxc'
+        if is_lxc:
+            ex_cfg = client.get_lxc_config(node=node, vmid=int(vmid)) or {}
+        else:
+            ex_cfg = client.get_qemu_config(node=node, vmid=int(vmid)) or {}
         old_desc = ex_cfg.get('description', '')
         
         if old_desc:
@@ -5081,7 +5267,10 @@ def instances_apply_scenario(pid: str):
         else:
             new_desc = json_notes
             
-        client.set_qemu_options(node=node, vmid=int(vmid), options={'description': new_desc})
+        if is_lxc:
+            client.set_lxc_options(node=node, vmid=int(vmid), options={'description': new_desc})
+        else:
+            client.set_qemu_options(node=node, vmid=int(vmid), options={'description': new_desc})
         return ('applied', { 'index': m['index'], 'name': m['name'], 'vmid': vmid, 'node': node })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
@@ -5156,16 +5345,21 @@ def instances_suspend(pid: str):
     def do_suspend(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
-        upid = client.suspend_qemu(node=m['node'], vmid=m['vmid'])
-        client._wait_task(m['node'], upid, timeout=600)
-        return { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] }
+        is_lxc = m.get('type') == 'lxc'
+        if is_lxc:
+            upid = client.suspend_lxc(node=m['node'], vmid=m['vmid'])
+        else:
+            upid = client.suspend_qemu(node=m['node'], vmid=m['vmid'])
+        client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['suspended', 'stopped'])
+        return ('suspended', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_suspend, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
             try:
-                suspended.append(fut.result())
+                kind, payload = fut.result()
+                suspended.append(payload)
             except Exception as e:
                 if str(e) == 'cancelled':
                     errors.append({ 'reason': 'cancelled' })
@@ -5225,16 +5419,21 @@ def instances_unlock(pid: str):
     def do_unlock(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
-        upid = client.unlock_qemu(node=m['node'], vmid=m['vmid'])
+        is_lxc = m.get('type') == 'lxc'
+        if is_lxc:
+            upid = client.unlock_lxc(node=m['node'], vmid=m['vmid'])
+        else:
+            upid = client.unlock_qemu(node=m['node'], vmid=m['vmid'])
         client._wait_task(m['node'], upid, timeout=600)
-        return { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] }
+        return ('unlocked', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_unlock, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
             try:
-                unlocked.append(fut.result())
+                kind, payload = fut.result()
+                unlocked.append(payload)
             except Exception as e:
                 if str(e) == 'cancelled':
                     errors.append({ 'reason': 'cancelled' })
@@ -5293,16 +5492,21 @@ def instances_poweroff(pid: str):
     def do_poweroff(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
-        upid = client.stop_qemu(node=m['node'], vmid=m['vmid'])
-        client._wait_task(m['node'], upid, timeout=600)
-        return { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] }
+        is_lxc = m.get('type') == 'lxc'
+        if is_lxc:
+            upid = client.stop_lxc(node=m['node'], vmid=m['vmid'])
+        else:
+            upid = client.stop_qemu(node=m['node'], vmid=m['vmid'])
+        client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['stopped'])
+        return ('stopped', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_poweroff, m): m for m in mapped }
         for fut in as_completed(future_map):
             m = future_map[fut]
             try:
-                powered_off.append(fut.result())
+                kind, payload = fut.result()
+                powered_off.append(payload)
             except Exception as e:
                 if str(e) == 'cancelled':
                     errors.append({ 'reason': 'cancelled' })
@@ -5367,9 +5571,13 @@ def instances_snapshot(pid: str):
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
             break
+        is_lxc = m.get('type') == 'lxc'
         try:
-            upid = client.snapshot_qemu(node=m['node'], vmid=m['vmid'], snapname=snapname, description=f'User snapshot for {m["name"]}')
-            client._wait_task(m['node'], upid, timeout=900)
+            if is_lxc:
+                upid = client.snapshot_lxc(node=m['node'], vmid=m['vmid'], snapname=snapname, description=f'User snapshot for {m["name"]}')
+            else:
+                upid = client.snapshot_qemu(node=m['node'], vmid=m['vmid'], snapname=snapname, description=f'User snapshot for {m["name"]}')
+            client._wait_task(m['node'], upid, timeout=600)
             snapshotted.append({ 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'], 'snapname': snapname })
         except Exception as e:
             errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'snapshot failed: {e}' })
@@ -5434,13 +5642,20 @@ def instances_restore(pid: str):
     def do_restore(m):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
-        snaps = client.list_snapshots_qemu(node=m['node'], vmid=m['vmid'])
+        is_lxc = m.get('type') == 'lxc'
+        if is_lxc:
+            snaps = client.list_snapshots_lxc(node=m['node'], vmid=m['vmid'])
+        else:
+            snaps = client.list_snapshots_qemu(node=m['node'], vmid=m['vmid'])
         snaps = [s for s in snaps if s.get('name') and s.get('name') != 'current']
         if not snaps:
             return ('skipped', { 'index': m['index'], 'name': m['name'], 'reason': 'no snapshots found' })
         snaps_sorted = sorted(snaps, key=lambda s: (s.get('snaptime') or 0), reverse=True)
         snapname = snaps_sorted[0].get('name')
-        upid = client.restore_snapshot_qemu(node=m['node'], vmid=m['vmid'], snapname=snapname, start_after=start_after)
+        if is_lxc:
+            upid = client.restore_snapshot_lxc(node=m['node'], vmid=m['vmid'], snapname=snapname, start_after=start_after)
+        else:
+            upid = client.restore_snapshot_qemu(node=m['node'], vmid=m['vmid'], snapname=snapname, start_after=start_after)
         client._wait_task(m['node'], upid, timeout=900)
         return ('restored', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'], 'snapname': snapname, 'started': start_after, 'latest': True })
 
@@ -5679,8 +5894,12 @@ def instances_nets_set(pid: str):
             netspecs.append(f"e1000,bridge={bname}")
         try:
             thread_client = _make_thread_client()
+            is_lxc = m.get('type') == 'lxc'
             try:
-                existing_cfg = thread_client.get_qemu_config(node=node, vmid=vmid) or {}
+                if is_lxc:
+                    existing_cfg = thread_client.get_lxc_config(node=node, vmid=vmid) or {}
+                else:
+                    existing_cfg = thread_client.get_qemu_config(node=node, vmid=vmid) or {}
             except Exception:
                 existing_cfg = {}
 
@@ -5707,7 +5926,10 @@ def instances_nets_set(pid: str):
                 payload['delete'] = ','.join([str(k) for k in delete_keys])
             for k, v in to_set.items():
                 payload[str(k)] = str(v)
-            thread_client.set_qemu_options(node=node, vmid=vmid, options=payload)
+            if is_lxc:
+                thread_client.set_lxc_options(node=node, vmid=vmid, options=payload)
+            else:
+                thread_client.set_qemu_options(node=node, vmid=vmid, options=payload)
             return ('ok', { 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node, 'changed': changed, 'deleted': delete_keys })
         except Exception as e:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': f'set nets failed: {e}' })
@@ -5945,7 +6167,15 @@ def instances_users_create(pid: str):
                         nm = str(q.get('name') or '')
                         if not nm:
                             continue
-                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm })
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm, 'type': 'qemu' })
+                    except Exception:
+                        continue
+                for c in client.list_lxc_vms(node_name) or []:
+                    try:
+                        nm = str(c.get('name') or c.get('hostname') or '')
+                        if not nm:
+                            continue
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': c.get('vmid'), 'name': nm, 'type': 'lxc' })
                     except Exception:
                         continue
             except Exception:
@@ -6046,7 +6276,8 @@ def instances_users_create(pid: str):
                      pass
                 # Assign to pool
                 if poolid:
-                    client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
+                    if client.get_role('AcostaPowerRollback'):
+                        client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
             except Exception as e:
                 # Log but don't fail the whole batch, it's an enhancement
                 try:
@@ -6316,7 +6547,15 @@ def instances_users_perms(pid: str):
                         nm = str(q.get('name') or '')
                         if not nm:
                             continue
-                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm })
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm, 'type': 'qemu' })
+                    except Exception:
+                        continue
+                for c in client.list_lxc_vms(node_name) or []:
+                    try:
+                        nm = str(c.get('name') or c.get('hostname') or '')
+                        if not nm:
+                            continue
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': c.get('vmid'), 'name': nm, 'type': 'lxc' })
                     except Exception:
                         continue
             except Exception:
@@ -6412,7 +6651,8 @@ def instances_users_perms(pid: str):
                 except Exception:
                     pass
                 if poolid:
-                    client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
+                    if client.get_role('AcostaPowerRollback'):
+                        client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
             except Exception as e:
                 try:
                     current_app.logger.warning(f"Failed to set pool-level power permissions for {userid} on {poolid}: {e}")
@@ -6814,7 +7054,15 @@ def instances_users_creds_set(pid: str):
                         nm = str(q.get('name') or '')
                         if not nm:
                             continue
-                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm })
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': q.get('vmid'), 'name': nm, 'type': 'qemu' })
+                    except Exception:
+                        continue
+                for c in client.list_lxc_vms(node_name) or []:
+                    try:
+                        nm = str(c.get('name') or c.get('hostname') or '')
+                        if not nm:
+                            continue
+                        existing_vms_by_name.setdefault(nm.lower(), []).append({ 'node': node_name, 'vmid': c.get('vmid'), 'name': nm, 'type': 'lxc' })
                     except Exception:
                         continue
             except Exception:
@@ -6934,8 +7182,10 @@ def instances_users_creds_set(pid: str):
                 continue
 
             try:
-                _ensure_proxmox_role(client, 'AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
-                client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
+                if poolid:
+                    _ensure_proxmox_role(client, 'AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
+                    if client.get_role('AcostaPowerRollback'):
+                        client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
             except Exception as e:
                 _add_notice_once({ 'index': idx, 'reason': f'pool power permissions sync failed for {userid}: {e}' })
 
@@ -12198,7 +12448,7 @@ def import_project_start():
                                             n for n in zf.namelist()
                                             if n.startswith('backups/')
                                             and not n.endswith('/')
-                                            and n.lower().endswith(('.vma.zst', '.vma.lzo', '.vma.gz'))
+                                            and n.lower().endswith(('.vma.zst', '.vma.lzo', '.vma.gz', '.tar.zst', '.tar.lzo', '.tar.gz', '.tar'))
                                         ]
                                         _emit_import(job, f"[INFO] found {len(backups)} backup archive(s) (.vma.zst/.lzo/.gz); skipping .log files")
                                         if not backups:
@@ -12266,7 +12516,11 @@ def import_project_start():
                                                     # crude fallback
                                                     vmid = int(time.time()) % 100000
                                                 # Restore with streaming logs from remote command (helper)
-                                                cmd = f"{getattr(project, 'proxmox_qmrestore_path', 'qmrestore')} {remote_path} {vmid} --unique 1"
+                                                is_lxc = any(zname.lower().endswith(ext) for ext in ('.tar.zst', '.tar.lzo', '.tar.gz', '.tar'))
+                                                if is_lxc:
+                                                    cmd = f"{getattr(project, 'proxmox_pctrestore_path', 'pct restore')} {vmid} {remote_path} --unique 1"
+                                                else:
+                                                    cmd = f"{getattr(project, 'proxmox_qmrestore_path', 'qmrestore')} {remote_path} {vmid} --unique 1"
                                                 if storage: cmd += f" --storage {storage}"
                                                 def _on_qmrestore_line(txt, vm=vm_name):
                                                     try:
@@ -12286,7 +12540,10 @@ def import_project_start():
                                                 )
                                                 # Optionally set name after restore, with basic logging
                                                 try:
-                                                    setname = f"qm set {vmid} --name {vm_name}"
+                                                    if is_lxc:
+                                                        setname = f"pct set {vmid} --hostname {vm_name}"
+                                                    else:
+                                                        setname = f"qm set {vmid} --name {vm_name}"
                                                     _ssh_run_stream(
                                                         c,
                                                         setname,
@@ -12300,7 +12557,10 @@ def import_project_start():
                                                 if import_as_templates:
                                                     try:
                                                         _emit_import(job, f"[TEMPLATE] converting {vm_name} ({vmid}) to template")
-                                                        tmpl = f"qm template {vmid}"
+                                                        if is_lxc:
+                                                            tmpl = f"pct template {vmid} 2>/dev/null || true"
+                                                        else:
+                                                            tmpl = f"qm template {vmid} 2>/dev/null || true"
                                                         _ssh_run_stream(
                                                             c,
                                                             tmpl,
@@ -12778,9 +13038,14 @@ def export_project_start(pid: str):
                 if not node_name:
                     continue
                 try:
-                    vms = client.list_qemu_vms(node_name)
+                    vms = client.list_qemu_vms(node_name) or []
                 except Exception:
-                    continue
+                    vms = []
+                try:
+                    if hasattr(client, 'list_lxc_vms'):
+                        vms.extend(client.list_lxc_vms(node_name) or [])
+                except Exception:
+                    pass
                 for vm in vms or []:
                     info = {
                         'node': node_name,
@@ -13013,12 +13278,31 @@ def export_project_start(pid: str):
                         parts = [p for p in ln.split() if p]
                         if len(parts) >= 2:
                             try:
-                                vmid = int(parts[0])
-                                name = parts[1]
-                                name_to_id[name] = vmid
+                                name_to_id[parts[1]] = int(parts[0])
                             except Exception:
                                 pass
-                    _emit(f"[OUT] qm list parsed {len(name_to_id)} entries")
+                except Exception:
+                    pass
+                try:
+                    _emit("[CMD] pct list")
+                    out, err = _ssh_run_cmd(c, "pct list", sudo=use_sudo, sudo_password=password)
+                    lines = _to_text(out.read()).splitlines()
+                    for ln in lines[1:]:
+                        parts = [p for p in ln.split() if p]
+                        if len(parts) >= 2:
+                            try:
+                                # pct list output format: VMID       STATUS     NAME
+                                # We need to handle potential status column
+                                vmid_val = int(parts[0])
+                                # Usually Name is the last or 3rd column, but let's just grab the last string if there's a status
+                                # Let's be safer, Proxmox `pct list` usually has 3 columns.
+                                if len(parts) >= 3:
+                                    name_to_id[parts[2]] = vmid_val
+                                else:
+                                    name_to_id[parts[1]] = vmid_val
+                            except Exception:
+                                pass
+                    _emit(f"[OUT] list parsed {len(name_to_id)} entries total")
                 except Exception:
                     pass
 
@@ -13050,8 +13334,9 @@ def export_project_start(pid: str):
                     vmrec['status'] = 'dumping'
                     _emit(f"[CMD] mkdir -p {base_remote}/{vm_name}")
                     _ssh_run_cmd(c, f"mkdir -p {base_remote}/{vm_name}", sudo=use_sudo, sudo_password=password)
+                    _ssh_run_cmd(c, f"chmod 777 {base_remote}/{vm_name}", sudo=use_sudo, sudo_password=password)
                     # Run vzdump with streaming; dumpdir is absolute
-                    cmd = f"vzdump {int(vmid)} --compress zstd --mode snapshot --remove 0 --zstd 0 --tmpdir /root/ --dumpdir {base_remote}/{vm_name}"
+                    cmd = f"vzdump {int(vmid)} --compress zstd --mode snapshot --remove 0 --zstd 0 --tmpdir {base_remote}/{vm_name} --dumpdir {base_remote}/{vm_name}"
                     def _run_vzdump_operation():
                         def on_line(_txt):
                             try:
@@ -13857,37 +14142,49 @@ def proxmox_templates():
                 node_name = n.get('node') or n.get('id') or n.get('name')
                 if not node_name:
                     continue
-                vms = client.list_qemu_vms(str(node_name)) or []
-                for vm in vms:
-                    try:
-                        is_tmpl = vm.get('template') in (1, True, '1', 'true')
-                        if not is_tmpl:
-                            continue
-                        vmid = vm.get('vmid')
-                        name = vm.get('name') or vm.get('vmname') or ''
-                        if vmid is None:
-                            continue
+                qemu_vms = client.list_qemu_vms(str(node_name)) or []
+                lxc_vms = []
+                try:
+                    if hasattr(client, 'list_lxc_vms'):
+                        lxc_vms = client.list_lxc_vms(str(node_name)) or []
+                except Exception:
+                    pass
+
+                for vm_type, vms in [('qemu', qemu_vms), ('lxc', lxc_vms)]:
+                    for vm in vms:
                         try:
-                            vmid = int(vmid)
-                        except Exception:
-                            continue
-                        # Best-effort: fetch config to discover assigned bridges for this template
-                        bridges = []
-                        cfg = {}
-                        try:
-                            cfg = client.get_qemu_config(str(node_name), int(vmid)) or {}
-                            bridges = _extract_bridges(cfg)
-                        except Exception:
+                            is_tmpl = vm.get('template') in (1, True, '1', 'true')
+                            if not is_tmpl:
+                                continue
+                            vmid = vm.get('vmid')
+                            name = vm.get('name') or vm.get('vmname') or vm.get('hostname') or ''
+                            if vmid is None:
+                                continue
+                            try:
+                                vmid = int(vmid)
+                            except Exception:
+                                continue
+                            # Best-effort: fetch config to discover assigned bridges for this template
                             bridges = []
-                        out.append({
-                            'node': str(node_name),
-                            'vmid': vmid,
-                            'name': str(name),
-                            'bridges': bridges,
-                            'qemu_agent_enabled': _qemu_agent_enabled(cfg),
-                        })
-                    except Exception:
-                        continue
+                            cfg = {}
+                            try:
+                                if vm_type == 'qemu':
+                                    cfg = client.get_qemu_config(str(node_name), int(vmid)) or {}
+                                else:
+                                    cfg = client.get_lxc_config(str(node_name), int(vmid)) or {}
+                                bridges = _extract_bridges(cfg)
+                            except Exception:
+                                bridges = []
+                            out.append({
+                                'node': str(node_name),
+                                'vmid': vmid,
+                                'name': str(name),
+                                'bridges': bridges,
+                                'type': vm_type,
+                                'qemu_agent_enabled': _qemu_agent_enabled(cfg) if vm_type == 'qemu' else False,
+                            })
+                        except Exception:
+                            continue
             except Exception:
                 continue
         # Optional: sort by name then vmid
