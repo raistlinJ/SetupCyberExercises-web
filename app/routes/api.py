@@ -13786,8 +13786,11 @@ def add_vm(pid: str):
         return jsonify({"error": "Missing VM name"}), 400
     if not _is_valid_vm_name(name):
         return jsonify({"error": "Invalid VM name. Use letters, numbers, and internal dashes only; no leading or trailing dashes."}), 400
+    vm_type = str(data.get("vm_type") or "").strip().lower()
+    if vm_type not in ["qemu", "lxc"]:
+        vm_type = "qemu"
     try:
-        proj = _store().add_vm(pid, name)
+        proj = _store().add_vm(pid, name, vm_type=vm_type)
         d = _project_to_json(proj)
         return jsonify(d)
     except KeyError:
@@ -13827,6 +13830,11 @@ def update_vm(pid: str, name: str):
                     "error": "Invalid adaptor names: letters only, max 8 characters",
                     "invalid": bad,
                 }), 400
+    if "vm_type" in data:
+        val = str(data.get("vm_type") or "").strip().lower()
+        if val not in ["qemu", "lxc"]:
+            val = "qemu"
+        data["vm_type"] = val
     try:
         # Only update fields explicitly provided in the payload to avoid accidental clearing
         fields = {}
@@ -13846,6 +13854,8 @@ def update_vm(pid: str, name: str):
             fields["vm_user"] = data.get("vm_user")
         if "vm_pass" in data:
             fields["vm_pass"] = data.get("vm_pass")
+        if "vm_type" in data:
+            fields["vm_type"] = data.get("vm_type")
 
         proj = _store().update_vm(
             pid,

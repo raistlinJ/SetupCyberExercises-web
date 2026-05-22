@@ -1020,13 +1020,13 @@ class ProjectStore:
         self._write_all(allp)
         return True
 
-    def add_vm(self, pid: str, vm_name: str) -> Project:
+    def add_vm(self, pid: str, vm_name: str, vm_type: str = "qemu") -> Project:
         proj = self.get(pid)
         if not proj:
             raise KeyError("Project not found")
         exists = any(vm.name == vm_name for vm in proj.vms)
         if not exists:
-            proj.vms.append(VMConfig(name=vm_name))
+            proj.vms.append(VMConfig(name=vm_name, vm_type=vm_type))
             self.upsert(proj)
         return proj
 
