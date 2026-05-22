@@ -789,7 +789,7 @@ def _invalidate_vm_config_cache_entries(entries: "Iterable[tuple[str, int]]") ->
     except Exception:
         return
 
-def _get_cached_vm_config(client, node: str, vmid: int, force_refresh: bool = False):
+def _get_cached_vm_config(client, node: str, vmid: int, force_refresh: bool = False, is_lxc: bool = False):
     """Get VM config with caching for performance"""
     cache_key = f"{node}:{vmid}"
     now = datetime.now()
@@ -800,7 +800,10 @@ def _get_cached_vm_config(client, node: str, vmid: int, force_refresh: bool = Fa
             return cached_cfg
     
     # Fetch fresh from Proxmox
-    cfg = client.get_qemu_config(node=node, vmid=int(vmid))
+    if is_lxc:
+        cfg = client.get_lxc_config(node=node, vmid=int(vmid))
+    else:
+        cfg = client.get_qemu_config(node=node, vmid=int(vmid))
     _VM_CONFIG_CACHE[cache_key] = (now, cfg)
     return cfg
 
@@ -849,6 +852,7 @@ def _prefetch_vm_configs_parallel(
     *,
     force_refresh: bool,
     client_factory,
+    vm_types: Optional[Dict[Tuple[str, int], str]] = None,
 ) -> Dict[Tuple[str, int], Dict[str, Any]]:
     """Fetch VM configs in parallel for refresh-heavy endpoints.
 
@@ -875,7 +879,10 @@ def _prefetch_vm_configs_parallel(
     def _fetch_one(ref: Tuple[str, int]):
         node, vmid = ref
         thread_client = client_factory()
-        cfg = _get_cached_vm_config(thread_client, node, vmid, force_refresh=force_refresh) or {}
+        is_lxc = False
+        if vm_types and vm_types.get(ref) == 'lxc':
+            is_lxc = True
+        cfg = _get_cached_vm_config(thread_client, node, vmid, force_refresh=force_refresh, is_lxc=is_lxc) or {}
         return ref, cfg
 
     workers = _pool_workers_for(proj, len(unique_refs), hard_cap=8)
@@ -1697,20 +1704,33 @@ def instances_refresh_vm(pid: str):
         lower_name_to_canon = {}
         running_vm_refs: Set[Tuple[str, int]] = set()
         agent_hint_by_ref: Dict[Tuple[str, int], Any] = {}
+        vm_ref_types: Dict[Tuple[str, int], str] = {}
         
-        # PERFORMANCE OPTIMIZATION: Fetch VMs from all nodes in parallel
+        # PERFORMANCE OPTIMIZATION: Fetch VMs and LXCs from all nodes in parallel
         def _fetch_node_vms(node_info):
-            """Helper to fetch VMs from a single node (for parallel execution)"""
+            """Helper to fetch VMs and LXCs from a single node (for parallel execution)"""
             node = node_info.get('node') or node_info.get('id') or ''
             if not node:
-                return (node, [], None)
+                return (node, [], [], None)
+            qemus = []
+            lxcs = []
+            err = None
             try:
                 # Create a new client instance for thread safety (sessions aren't thread-safe)
                 thread_client = ProxmoxClient(base_url=base_url, token=token or None, username=username, password=password, verify=verify)
-                qemus = thread_client.list_qemu_vms(node)
-                return (node, qemus, None)
+                try:
+                    qemus = thread_client.list_qemu_vms(node) or []
+                except Exception as e:
+                    err = e
+                try:
+                    if hasattr(thread_client, 'list_lxc_vms'):
+                        lxcs = thread_client.list_lxc_vms(node) or []
+                except Exception as e:
+                    if err is None:
+                        err = e
+                return (node, qemus, lxcs, err)
             except Exception as e:
-                return (node, [], e)
+                return (node, [], [], e)
         
         # Execute node fetching in parallel (typically 2-4 nodes, but can be more)
         processed_nodes = 0
@@ -1718,7 +1738,7 @@ def instances_refresh_vm(pid: str):
             futures = [executor.submit(_fetch_node_vms, n) for n in nodes]
             
             for future in as_completed(futures):
-                node, qemus, error = future.result()
+                node, qemus, lxcs, error = future.result()
                 processed_nodes += 1
                 try:
                     _update_job_detail(
@@ -1733,8 +1753,8 @@ def instances_refresh_vm(pid: str):
                     )
                 except Exception:
                     pass
-                if error:
-                    logging.warning(f"Could not list VMs on node {node}: {error}")
+                if error and not qemus and not lxcs:
+                    logging.warning(f"Could not list VMs or LXCs on node {node}: {error}")
                     continue
                 
                 # Build maps (same logic as before, now with parallel-fetched data)
@@ -1753,10 +1773,12 @@ def instances_refresh_vm(pid: str):
                         'power_state': q.get('status') or '',
                         'qmp_state': q.get('qmpstatus') or '',
                         'agent_hint': q.get('agent'),
+                        'type': 'qemu',
                     }
                     lower_name_to_canon[canon.lower()] = canon
                     try:
                         if vmid_val is not None:
+                            vm_ref_types[(str(node), int(vmid_val))] = 'qemu'
                             agent_hint_by_ref[(str(node), int(vmid_val))] = q.get('agent')
                             power_state = str(q.get('status') or '').strip().lower()
                             qmp_state = str(q.get('qmpstatus') or '').strip().lower()
@@ -1764,11 +1786,38 @@ def instances_refresh_vm(pid: str):
                                 running_vm_refs.add((str(node), int(vmid_val)))
                     except Exception:
                         pass
+
+                for l in lxcs:
+                    name = (l.get('name') or l.get('hostname') or l.get('vmid'))
+                    if not name:
+                        continue
+                    vmid_val = int(l.get('vmid')) if l.get('vmid') is not None else None
+                    if vmid_val is not None:
+                        id_map[vmid_val] = str(l.get('name') or l.get('hostname') or vmid_val)
+                    canon = str(name)
+                    name_map[canon] = {
+                        'node': node,
+                        'vmid': vmid_val,
+                        'state': l.get('status') or '',
+                        'power_state': l.get('status') or '',
+                        'qmp_state': '',
+                        'agent_hint': None,
+                        'type': 'lxc',
+                    }
+                    lower_name_to_canon[canon.lower()] = canon
+                    try:
+                        if vmid_val is not None:
+                            vm_ref_types[(str(node), int(vmid_val))] = 'lxc'
+                            power_state = str(l.get('status') or '').strip().lower()
+                            if power_state == 'running':
+                                running_vm_refs.add((str(node), int(vmid_val)))
+                    except Exception:
+                        pass
         
         t_fetch = time.time()
-        logging.info(f"VM refresh: node fetching took {(t_fetch-t_start)*1000:.0f}ms for {len(nodes)} nodes")
+        logging.info(f"VM/LXC refresh: node fetching took {(t_fetch-t_start)*1000:.0f}ms for {len(nodes)} nodes")
     except Exception as e:
-        _update_job_detail(pid, phase='error', progress=100, message=f'VM refresh failed: {e}')
+        _update_job_detail(pid, phase='error', progress=100, message=f'VM/LXC refresh failed: {e}')
         _end_job(pid, status='error')
         return jsonify({"error": f"Proxmox: {e}"}), 502
 
@@ -1821,6 +1870,7 @@ def instances_refresh_vm(pid: str):
             password=password,
             verify=verify,
         ),
+        vm_types=vm_ref_types,
     )
 
     runtime_store = _runtime_store()
@@ -2054,6 +2104,7 @@ def instances_refresh_vm(pid: str):
                 found_details.append({
                     'name': canon_name,
                     'vmid': vmid,
+                    'type': matched.get('type') or 'qemu',
                     'state': matched.get('state') or '',
                     'power_state': matched.get('power_state') or matched.get('state') or '',
                     'qmp_state': matched.get('qmp_state') or '',
@@ -2062,7 +2113,7 @@ def instances_refresh_vm(pid: str):
                     'template_id': tmpl_id,
                     'template_name': tmpl_name,
                     'validation_commands_configured': bool(spec.get('validation_configured')),
-                    'qemu_agent_enabled': _qemu_agent_enabled_from_cfg_or_hint(cfg if isinstance(cfg, dict) else {}, agent_hint_raw),
+                    'qemu_agent_enabled': _qemu_agent_enabled_from_cfg_or_hint(cfg if isinstance(cfg, dict) else {}, agent_hint_raw) if matched.get('type') == 'qemu' else False,
                     'qemu_agent_validated': False,
                     'qemu_agent_validation_state': 'unknown',
                     'lock': str(cfg.get('lock') or '').strip() if isinstance(cfg, dict) else '',
