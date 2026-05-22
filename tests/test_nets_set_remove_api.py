@@ -28,8 +28,8 @@ class NetsSetRemoveApiTests(unittest.TestCase):
         self.project = Project(id='proj-nets', name='Nets Project', tag='-lab-', vms=[vm])
         self.target_name = f"{vm.name}{self.project.tag}1"
 
-    def _common_patches(self):
-        mapped = [{'index': 1, 'name': self.target_name, 'vmid': 101, 'node': 'node1'}]
+    def _common_patches(self, is_lxc=False):
+        mapped = [{'index': 1, 'name': self.target_name, 'vmid': 101, 'node': 'node1', 'type': 'lxc' if is_lxc else 'qemu'}]
         return [
             patch('app.routes.api._store', return_value=_StoreStub(self.project)),
             patch('app.routes.api._resolve_targets_to_vm_info', return_value=(mapped, [], [])),
@@ -149,3 +149,50 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertEqual(unlocked[0]['name'], self.target_name)
             prox.unlock_qemu.assert_called_once_with(node='node1', vmid=101)
             prox._wait_task.assert_called_once_with('node1', 'UPID:node1:unlock', timeout=600)
+
+    def test_nets_set_for_lxc_applies_correct_format(self):
+        # Set project VM Config to lxc type too
+        self.project.vms[0].vm_type = 'lxc'
+
+        existing_cfg = {
+            'net0': 'name=eth0,bridge=lab1,hwaddr=AA:BB:CC:DD:EE:FF,ip=dhcp',
+            'net1': 'name=eth1,bridge=wrong,hwaddr=11:22:33:44:55:66,ip=dhcp',
+            'net2': 'name=eth2,bridge=extra0',
+        }
+
+        with ExitStack() as stack:
+            for ctx in self._common_patches(is_lxc=True):
+                stack.enter_context(ctx)
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_network.return_value = [{'iface': 'lab1'}]
+            prox.get_lxc_config.return_value = existing_cfg
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/nets_set',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.get_json() or {}
+            updated = payload.get('updated') or []
+            self.assertEqual(len(updated), 1)
+
+            # verify LXC options are called (instead of QEMU options)
+            calls = prox.set_lxc_options.call_args_list
+            self.assertEqual(len(calls), 1)
+            options = calls[0].kwargs.get('options') or {}
+            self.assertEqual(options.get('delete'), 'net2')
+            self.assertNotIn('net0', options)
+            self.assertIn('net1', options)
+            self.assertIn('bridge=dmz1', options['net1'])
+            self.assertTrue(options['net1'].startswith('name=eth1,'), options['net1'])
+            self.assertIn('hwaddr=11:22:33:44:55:66', options['net1'])

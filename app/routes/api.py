@@ -5939,13 +5939,16 @@ def instances_nets_set(pid: str):
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
         if not adaptors:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'no adaptors configured' })
+        is_lxc = (m.get('type') == 'lxc') or (getattr(cfg, 'vm_type', 'qemu') == 'lxc')
         netspecs = []
-        for a in adaptors:
+        for i, a in enumerate(adaptors):
             bname = _bridge_iface_name(idx, a)
-            netspecs.append(f"e1000,bridge={bname}")
+            if is_lxc:
+                netspecs.append(f"name=eth{i},bridge={bname}")
+            else:
+                netspecs.append(f"e1000,bridge={bname}")
         try:
             thread_client = _make_thread_client()
-            is_lxc = m.get('type') == 'lxc'
             try:
                 if is_lxc:
                     existing_cfg = thread_client.get_lxc_config(node=node, vmid=vmid) or {}
