@@ -196,3 +196,53 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertIn('bridge=dmz1', options['net1'])
             self.assertTrue(options['net1'].startswith('name=eth1,'), options['net1'])
             self.assertIn('hwaddr=11:22:33:44:55:66', options['net1'])
+
+    def test_nets_set_reloads_network_before_configuring_vms(self):
+        existing_cfg = {
+            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=lab1',
+        }
+
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            # Mock list_network to show lab1 exists but dmz1 is missing, so it needs to be created and reloaded.
+            prox.list_network.return_value = [{'iface': 'lab1'}]
+            prox.get_qemu_config.return_value = existing_cfg
+
+            # Attach parent mock to trace call order
+            parent = MagicMock()
+            prox.create_bridge = parent.create_bridge
+            prox.reload_network = parent.reload_network
+            prox.set_qemu_options = parent.set_qemu_options
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/nets_set',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+
+            # We expect the call order to be: create_bridge -> reload_network -> set_qemu_options
+            # Filter the calls on the parent mock to find when they were invoked
+            call_names = [call[0] for call in parent.mock_calls if call[0] in ('create_bridge', 'reload_network', 'set_qemu_options')]
+            
+            self.assertIn('create_bridge', call_names)
+            self.assertIn('reload_network', call_names)
+            self.assertIn('set_qemu_options', call_names)
+
+            idx_create = call_names.index('create_bridge')
+            idx_reload = call_names.index('reload_network')
+            idx_set_opts = call_names.index('set_qemu_options')
+
+            self.assertTrue(idx_create < idx_reload, "create_bridge must occur before reload_network")
+            self.assertTrue(idx_reload < idx_set_opts, "reload_network must occur before set_qemu_options")

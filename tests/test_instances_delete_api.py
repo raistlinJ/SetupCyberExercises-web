@@ -186,3 +186,51 @@ class InstancesDeleteApiTests(unittest.TestCase):
 
             prox.delete_pool.assert_not_called()
             prox.delete_user.assert_not_called()
+
+    def test_delete_stops_running_lxc_and_qemu_before_destroying(self):
+        vm = VMConfig(name='alpha', vm_type='lxc')
+        project = Project(id='proj-delete-running', name='Delete Running Project', tag='-lab-', vms=[vm])
+        target_name = f"{vm.name}{project.tag}1"
+
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(project)))
+            stack.enter_context(patch('app.routes.api._start_job'))
+            stack.enter_context(patch('app.routes.api._end_job'))
+            stack.enter_context(patch('app.routes.api._clear_vm_cache'))
+            stack.enter_context(patch('app.routes.api._is_cancelled', return_value=False))
+            stack.enter_context(patch('app.routes.api._schedule_delete_bridge_cleanup', return_value=True))
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_nodes.return_value = [{'node': 'node1'}]
+            # Mark the discovered LXC container as running
+            prox.list_lxc_vms.return_value = [{'name': target_name, 'vmid': 101, 'status': 'running'}]
+            prox.list_qemu_vms.return_value = []
+            
+            prox.stop_lxc.return_value = 'UPID:node1:stop'
+            prox.delete_lxc.return_value = 'UPID:node1:delete'
+            prox._wait_task.return_value = {'status': 'stopped', 'exitstatus': 'OK'}
+
+            # Attach parent mock to trace call order
+            parent = MagicMock()
+            prox.stop_lxc = parent.stop_lxc
+            prox.delete_lxc = parent.delete_lxc
+
+            resp = self.client.post(
+                f'/api/projects/{project.id}/instances/actions/delete',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'verifyCleanup': False,
+                    'targets': [{'index': 1, 'name': 'alpha'}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            
+            # Assert stop_lxc is called before delete_lxc
+            call_names = [call[0] for call in parent.mock_calls if call[0] in ('stop_lxc', 'delete_lxc')]
+            self.assertEqual(call_names, ['stop_lxc', 'delete_lxc'])

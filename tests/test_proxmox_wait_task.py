@@ -62,6 +62,21 @@ class ProxmoxWaitTaskTests(unittest.TestCase):
         self.assertEqual(result.get('completed_via'), 'vm_state')
         self.assertEqual(result.get('vm_status'), 'running')
 
+    def test_reload_network_waits_for_upid_when_returned(self):
+        client = ProxmoxClient(base_url='https://proxmox.local', token='abc', verify=False)
+        session = MagicMock()
+        # Mocking session.put for reload_network and session.get for _wait_task
+        session.put.return_value = _Response(status_code=200, data='UPID:node1:00000002')
+        session.get.return_value = _Response(status_code=200, data={'status': 'stopped', 'exitstatus': 'OK'})
+
+        with patch.object(client, '_ensure_session', return_value=session):
+            with patch('app.connectors.proxmox.time.sleep'):
+                res = client.reload_network('node1')
+
+        self.assertTrue(res)
+        session.put.assert_called_once()
+        session.get.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

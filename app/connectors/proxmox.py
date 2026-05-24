@@ -395,6 +395,17 @@ class ProxmoxClient:
             # Some Proxmox versions/roles return 501 for unsupported reload; treat as non-fatal
             if r.status_code != 501:
                 raise RuntimeError(f"Proxmox network reload error {r.status_code}: {r.text}")
+        else:
+            try:
+                res_data = r.json()
+            except Exception:
+                res_data = {}
+            upid = res_data.get('data')
+            if upid and isinstance(upid, str) and upid.startswith('UPID:'):
+                try:
+                    self._wait_task(node, upid, timeout=120)
+                except Exception as e:
+                    raise RuntimeError(f"Proxmox network reload task failed: {e}")
         return True
 
     def snapshot_qemu(self, node: str, vmid: int, snapname: str, description: Optional[str] = None) -> str:

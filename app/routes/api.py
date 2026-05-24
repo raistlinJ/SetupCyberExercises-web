@@ -1989,7 +1989,7 @@ def instances_refresh_vm(pid: str):
                     parts = [p.strip() for p in v.split(',') if p]
                     name = next((p.split('=',1)[1] for p in parts if p.startswith('name=')), '')
                     bridge = next((p.split('=',1)[1] for p in parts if p.startswith('bridge=')), '')
-                    label = name or bridge or ''
+                    label = bridge or name or ''
                 nets.append(f"{ks}({label})" if label else ks)
         except Exception:
             pass
@@ -2468,6 +2468,7 @@ def instances_create(pid: str):
         return node_name or _api_host_for_ssh or ''
     # Helper: process a single target clone (used by thread pool)
     def process_target(t):
+        debug_msgs = []
         # Parse input
         try:
             idx = int(t.get('index'))
@@ -2651,8 +2652,38 @@ def instances_create(pid: str):
             existing_names_lc.add(newname.lower())
         except Exception:
             pass
+
+        # Clear inherited LXC network interfaces right after cloning if we are going to assign new ones
+        if is_lxc and set_network_interfaces:
+            try:
+                cloned_cfg = client.get_lxc_config(node=node, vmid=int(newid)) or {}
+                net_keys = [k for k in cloned_cfg.keys() if str(k).startswith('net')]
+                if net_keys:
+                    try:
+                        client.set_lxc_nets(node=node, vmid=int(newid), nets=[], delete_keys=net_keys)
+                        debug_msgs.append(f"Cleared inherited LXC network interfaces to prevent validation errors: {net_keys}")
+                    except Exception as api_err:
+                        # Fallback to SSH sed if API rejects deletion due to strict bridge validation
+                        ssh_user = (username or '').split('@')[0] if (username or '') else ''
+                        ssh_pass = password or ''
+                        host = _resolve_host_for_node(node)
+                        if ssh_user and ssh_pass and host:
+                            import paramiko, shlex  # type: ignore
+                            c = paramiko.SSHClient()
+                            c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                            c.connect(hostname=host, port=int(getattr(proj, 'proxmox_ssh_port', 22) or 22), username=ssh_user, password=ssh_pass, timeout=10, allow_agent=False, look_for_keys=False)
+                            cmd = f"sed -i '/^net[0-9]*:/d' /etc/pve/lxc/{newid}.conf"
+                            cmd_wrapped = f"sh -lc {shlex.quote(cmd)}"
+                            use_sudo = (str(ssh_user).strip().lower() != 'root')
+                            _ssh_run_cmd(c, cmd_wrapped, sudo=use_sudo, sudo_password=ssh_pass)
+                            c.close()
+                            debug_msgs.append(f"API clear failed ({api_err}); successfully cleared inherited LXC networks via SSH")
+                        else:
+                            raise RuntimeError(f"API clear failed and no SSH creds for fallback: {api_err}")
+            except Exception as e:
+                debug_msgs.append(f"Notice: failed to clear inherited LXC network interfaces (non-fatal): {e}")
+
         # Networking deferred: only record expected bridge names; creation & NIC assignment happen post-clone
-        debug_msgs = []
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if set_network_interfaces else []
         expected_bridges_for_vm = []
         for i, a in enumerate(adaptors):
@@ -3265,6 +3296,17 @@ def instances_create(pid: str):
                             continue
                         errors.append({ 'reason': f'ageing batch insert failed node={node}: {e}' })
                         break
+        # Reload network immediately on nodes where bridges were created, so they exist in the active kernel
+        # when VM / LXC network options are configured in step 4.
+        if bridges_to_reload:
+            _safe_sleep(5)
+        for node in sorted(bridges_to_reload):
+            try:
+                client.reload_network(node)
+                network_applied_nodes.append(node)
+            except Exception as e:
+                network_apply_errors.append({ 'node': node, 'reason': f'initial network reload failed: {e}' })
+
         # 4) Assign NICs to each VM now that bridges exist
         for r in results:
             try:
@@ -3458,9 +3500,11 @@ def instances_create(pid: str):
                         network_apply_errors.append({ 'node': node, 'reason': f'ageing verify failed: {ve}' })
             except Exception:
                 pass
-        if bridges_to_reload:
+        # Reload network for any nodes that were not successfully reloaded yet.
+        nodes_to_reload = set(bridges_to_reload) - set(network_applied_nodes)
+        if nodes_to_reload:
             _safe_sleep(5)
-        for node in bridges_to_reload:
+        for node in sorted(nodes_to_reload):
             try:
                 client.reload_network(node)
                 network_applied_nodes.append(node)
@@ -4394,11 +4438,11 @@ def instances_delete(pid: str):
             for q in client.list_qemu_vms(node):
                 nm = str(q.get('name') or '')
                 if nm:
-                    name_to_info[nm.lower()] = { 'node': node, 'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None, 'name': nm, 'type': 'qemu' }
+                    name_to_info[nm.lower()] = { 'node': node, 'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None, 'name': nm, 'type': 'qemu', 'status': q.get('status') }
             for c in client.list_lxc_vms(node):
                 nm = str(c.get('name') or c.get('hostname') or '')
                 if nm:
-                    name_to_info[nm.lower()] = { 'node': node, 'vmid': int(c.get('vmid')) if c.get('vmid') is not None else None, 'name': nm, 'type': 'lxc' }
+                    name_to_info[nm.lower()] = { 'node': node, 'vmid': int(c.get('vmid')) if c.get('vmid') is not None else None, 'name': nm, 'type': 'lxc', 'status': c.get('status') }
         except Exception:
             continue
 
@@ -4443,8 +4487,9 @@ def instances_delete(pid: str):
         node = info['node']
         vmid = info['vmid']
         vtype = info.get('type', 'qemu')
+        vstatus = info.get('status', 'stopped')
         adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
-        return ('ok', { 'index': idx, 'gen_name': gen_name, 'node': node, 'vmid': vmid, 'type': vtype, 'adaptors': adaptors })
+        return ('ok', { 'index': idx, 'gen_name': gen_name, 'node': node, 'vmid': vmid, 'type': vtype, 'status': vstatus, 'adaptors': adaptors })
 
     prepared = [prepare_target(t) for t in targets]
     # Accumulate pre-known skips/errors
@@ -4462,13 +4507,7 @@ def instances_delete(pid: str):
 
     def _record_bridge_for_cleanup(node: str, idx: int, adaptor_name: str, gen_name: str):
         bname = _bridge_iface_name(idx, adaptor_name)
-        bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'adaptor': _normalize_bridge_adaptor_name(adaptor_name), 'legacy': False })
-        # Legacy hashed bridge variant
-        try:
-            old_bname = _bridge_legacy_iface_name(tag, idx, adaptor_name)
-            bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': old_bname, 'index': idx, 'name': gen_name, 'adaptor': _normalize_bridge_adaptor_name(adaptor_name), 'legacy': True })
-        except Exception:
-            pass
+        bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'adaptor': _normalize_bridge_adaptor_name(adaptor_name) })
 
     def do_delete(task):
         if _is_cancelled(pid):
@@ -4478,7 +4517,17 @@ def instances_delete(pid: str):
         node = task['node']
         vmid = task['vmid']
         is_lxc = task.get('type') == 'lxc'
+        is_running = (task.get('status') == 'running')
         adaptors = task['adaptors']
+        if is_running:
+            try:
+                if is_lxc:
+                    upid_stop = client.stop_lxc(node=node, vmid=vmid)
+                else:
+                    upid_stop = client.stop_qemu(node=node, vmid=vmid)
+                client._wait_task(node, upid_stop, timeout=300, vmid=vmid, completed_vm_statuses=['stopped'])
+            except Exception:
+                pass
         if is_lxc:
             upid = client.delete_lxc(node=node, vmid=vmid, purge=True, destroy_unreferenced_disks=True)
         else:
@@ -5906,6 +5955,15 @@ def instances_nets_set(pid: str):
             except Exception as e:
                 errors.append({ 'node': node, 'reason': f'bridge create failed for {b}: {e}' })
 
+    # Reload network immediately on nodes where bridges were created, so they exist in the active kernel
+    # when VM / LXC network options are configured in the thread pool.
+    for node in sorted(bridges_to_reload):
+        try:
+            client.reload_network(node)
+            network_applied_nodes.append(node)
+        except Exception as e:
+            network_apply_errors.append({ 'node': node, 'reason': f'initial network reload failed: {e}' })
+
     def _base_from_generated(gen_name: str, idx: int) -> str:
         try:
             suf = f"{tag}{idx}"
@@ -6009,11 +6067,11 @@ def instances_nets_set(pid: str):
             except Exception as e:
                 errors.append({ 'reason': f'network assign failed: {e}' })
 
-    # 2) Apply node network reload once after the batch.
+    # 2) Apply node network reload once after the batch for any node not already reloaded successfully.
     # We reload if either:
     #   - we created bridges on the node, or
     #   - we changed VM netX config on the node (per user request to "apply" after enable/disable).
-    nodes_to_reload = set(bridges_to_reload) | set(nodes_with_vm_changes)
+    nodes_to_reload = (set(bridges_to_reload) | set(nodes_with_vm_changes)) - set(network_applied_nodes)
     for node in sorted(nodes_to_reload):
         try:
             client.reload_network(node)
