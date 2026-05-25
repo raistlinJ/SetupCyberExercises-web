@@ -442,7 +442,30 @@ def _scan_bridges_in_use(node: str, candidate_bridges: List[str], client: Proxmo
             except Exception:
                 continue
     except Exception:
-        return in_use
+        pass
+        
+    try:
+        if in_use < wanted and hasattr(client, 'list_lxc_vms'):
+            for ent in client.list_lxc_vms(node) or []:
+                try:
+                    r_vmid = ent.get('vmid')
+                    if r_vmid is None:
+                        continue
+                    cfg_other = client.get_lxc_config(node=node, vmid=int(r_vmid)) or {}
+                    for key, value in (cfg_other or {}).items():
+                        if not str(key).startswith('net') or not isinstance(value, str):
+                            continue
+                        parts = [p.strip() for p in value.split(',') if p]
+                        bridge = next((p.split('=', 1)[1] for p in parts if p.startswith('bridge=')), '')
+                        if bridge in wanted:
+                            in_use.add(bridge)
+                    if in_use >= wanted:
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     return in_use
 
 
@@ -1145,6 +1168,13 @@ def _vm_is_in_project_notes(client: ProxmoxClient, proj: Optional[Project], node
     try:
         cfg = client.get_qemu_config(node_name, vmid_int) or {}
     except Exception:
+        cfg = {}
+    if not cfg:
+        try:
+            cfg = client.get_lxc_config(node_name, vmid_int) or {}
+        except Exception:
+            cfg = {}
+    if not cfg:
         return False
     return _vm_description_matches_project(proj, cfg.get('description'))
 
@@ -2663,23 +2693,57 @@ def instances_create(pid: str):
                         client.set_lxc_nets(node=node, vmid=int(newid), nets=[], delete_keys=net_keys)
                         debug_msgs.append(f"Cleared inherited LXC network interfaces to prevent validation errors: {net_keys}")
                     except Exception as api_err:
-                        # Fallback to SSH sed if API rejects deletion due to strict bridge validation
-                        ssh_user = (username or '').split('@')[0] if (username or '') else ''
-                        ssh_pass = password or ''
-                        host = _resolve_host_for_node(node)
-                        if ssh_user and ssh_pass and host:
-                            import paramiko, shlex  # type: ignore
-                            c = paramiko.SSHClient()
-                            c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                            c.connect(hostname=host, port=int(getattr(proj, 'proxmox_ssh_port', 22) or 22), username=ssh_user, password=ssh_pass, timeout=10, allow_agent=False, look_for_keys=False)
-                            cmd = f"sed -i '/^net[0-9]*:/d' /etc/pve/lxc/{newid}.conf"
-                            cmd_wrapped = f"sh -lc {shlex.quote(cmd)}"
-                            use_sudo = (str(ssh_user).strip().lower() != 'root')
-                            _ssh_run_cmd(c, cmd_wrapped, sudo=use_sudo, sudo_password=ssh_pass)
-                            c.close()
-                            debug_msgs.append(f"API clear failed ({api_err}); successfully cleared inherited LXC networks via SSH")
-                        else:
-                            raise RuntimeError(f"API clear failed and no SSH creds for fallback: {api_err}")
+                        import re
+                        err_str = str(api_err)
+                        temp_bridges = []
+                        success = False
+                        attempts = 0
+                        while attempts < 5:
+                            match = re.search(r"bridge '([^']+)' does not exist", err_str)
+                            if match:
+                                missing_bridge = match.group(1)
+                                try:
+                                    client.create_bridge(node=node, iface=missing_bridge, autostart=True, ports=None, comments="temp validation bypass")
+                                    temp_bridges.append(missing_bridge)
+                                    try:
+                                        client.set_lxc_nets(node=node, vmid=int(newid), nets=[], delete_keys=net_keys)
+                                        success = True
+                                        debug_msgs.append(f"Cleared inherited LXC network interfaces by temporarily creating missing bridges: {temp_bridges}")
+                                        break
+                                    except Exception as retry_err:
+                                        err_str = str(retry_err)
+                                        attempts += 1
+                                        continue
+                                except Exception as bridge_err:
+                                    raise RuntimeError(f"Failed to create temporary bridge {missing_bridge} for validation bypass: {bridge_err}")
+                            else:
+                                break
+                        
+                        # Cleanup temp bridges
+                        for tb in temp_bridges:
+                            try:
+                                client.delete_bridge(node=node, iface=tb)
+                            except Exception:
+                                pass
+                        
+                        if not success:
+                            # Original fallback to SSH sed if API still rejects deletion
+                            ssh_user = (username or '').split('@')[0] if (username or '') else ''
+                            ssh_pass = password or ''
+                            host = _resolve_ssh_host(node)
+                            if ssh_user and ssh_pass and host:
+                                import paramiko, shlex  # type: ignore
+                                c = paramiko.SSHClient()
+                                c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                                c.connect(hostname=host, port=int(getattr(proj, 'proxmox_ssh_port', 22) or 22), username=ssh_user, password=ssh_pass, timeout=10, allow_agent=False, look_for_keys=False)
+                                cmd = f"sed -i '/^net[0-9]*:/d' /etc/pve/lxc/{newid}.conf"
+                                cmd_wrapped = f"sh -lc {shlex.quote(cmd)}"
+                                use_sudo = (str(ssh_user).strip().lower() != 'root')
+                                _ssh_run_cmd(c, cmd_wrapped, sudo=use_sudo, sudo_password=ssh_pass)
+                                c.close()
+                                debug_msgs.append(f"API clear failed ({api_err}); successfully cleared inherited LXC networks via SSH")
+                            else:
+                                raise RuntimeError(f"API clear failed and no SSH creds for fallback: {api_err}")
             except Exception as e:
                 debug_msgs.append(f"Notice: failed to clear inherited LXC network interfaces (non-fatal): {e}")
 
@@ -2761,69 +2825,67 @@ def instances_create(pid: str):
                 if uname:
                     poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
                     userid = f"{uname}@pve"
-                    pool_exists = False
+                    
                     try:
-                        pool_exists = bool(client.get_pool(poolid) is not None)
+                        if not client.get_pool(poolid):
+                            client.create_pool(poolid, comment=f"Auto-created for {userid}")
                     except Exception as e:
-                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool lookup failed: {e}' })
-                    if pool_exists:
+                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool create/lookup failed: {e}' })
+                        
+                    try:
+                        user_rec = client.get_user(userid)
+                        if user_rec is None:
+                            upass = (urec or {}).get('password') or None
+                            client.create_user(userid, password=upass, enable=True, comment=f"Auto-created for instance {idx}")
+                            user_rec = client.get_user(userid)
+                    except Exception as e:
+                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'user create failed: {e}' })
+                        user_rec = None
+
+                    try:
                         try:
-                            debug_msgs.append(f"add_pool_member: attempting pool={poolid} vmid={int(newid)}")
+                            client.create_role('AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
                         except Exception:
                             pass
+                        client.set_acl_user_pool(userid, poolid, roles='AcostaPowerRollback', propagate=True)
+                    except Exception as e:
                         try:
-                            client.add_pool_member(poolid, int(newid))
-                            assignment_info['pool'] = poolid
-                            assignment_info['pool_member_added'] = True
+                            current_app.logger.warning(f"Failed to set pool-level power permissions for {userid} on {poolid}: {e}")
+                        except Exception:
+                            pass
+
+                    try:
+                        debug_msgs.append(f"add_pool_member: attempting pool={poolid} vmid={int(newid)}")
+                    except Exception:
+                        pass
+                    try:
+                        client.add_pool_member(poolid, int(newid))
+                        assignment_info['pool'] = poolid
+                        assignment_info['pool_member_added'] = True
+                        try:
+                            debug_msgs.append(f"add_pool_member: success pool={poolid} vmid={int(newid)}")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        msg = str(e)
+                        do_retry = ('not found' in msg.lower()) or ('no such' in msg.lower()) or ('does not exist' in msg.lower())
+                        if do_retry:
                             try:
-                                debug_msgs.append(f"add_pool_member: success pool={poolid} vmid={int(newid)}")
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            msg = str(e)
-                            do_retry = ('not found' in msg.lower()) or ('no such' in msg.lower()) or ('does not exist' in msg.lower())
-                            if do_retry:
+                                _safe_sleep(2)
                                 try:
-                                    _safe_sleep(2)
-                                    try:
-                                        debug_msgs.append(f"add_pool_member: retrying pool={poolid} vmid={int(newid)} after transient error")
-                                    except Exception:
-                                        pass
-                                    client.add_pool_member(poolid, int(newid))
-                                    assignment_info['pool'] = poolid
-                                    assignment_info['pool_member_added'] = True
-                                    try:
-                                        debug_msgs.append(f"add_pool_member: success (after retry) pool={poolid} vmid={int(newid)}")
-                                    except Exception:
-                                        pass
-                                except Exception as e2:
-                                    msg2 = str(e2)
-                                    if ' 501' in msg2 or 'not implemented' in msg2.lower():
-                                        try:
-                                            if is_lxc:
-                                                client.set_lxc_options(node=node, vmid=int(newid), options={ 'pool': poolid })
-                                            else:
-                                                client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
-                                            assignment_info['pool'] = poolid
-                                            assignment_info['pool_member_added'] = True
-                                            try:
-                                                debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> success")
-                                            except Exception:
-                                                pass
-                                        except Exception as e3:
-                                            try:
-                                                debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
-                                            except Exception:
-                                                pass
-                                            post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
-                                    else:
-                                        try:
-                                            debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e2}")
-                                        except Exception:
-                                            pass
-                                        post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e2}' })
-                            else:
-                                if ' 501' in msg or 'not implemented' in msg.lower():
+                                    debug_msgs.append(f"add_pool_member: retrying pool={poolid} vmid={int(newid)} after transient error")
+                                except Exception:
+                                    pass
+                                client.add_pool_member(poolid, int(newid))
+                                assignment_info['pool'] = poolid
+                                assignment_info['pool_member_added'] = True
+                                try:
+                                    debug_msgs.append(f"add_pool_member: success (after retry) pool={poolid} vmid={int(newid)}")
+                                except Exception:
+                                    pass
+                            except Exception as e2:
+                                msg2 = str(e2)
+                                if ' 501' in msg2 or 'not implemented' in msg2.lower():
                                     try:
                                         if is_lxc:
                                             client.set_lxc_options(node=node, vmid=int(newid), options={ 'pool': poolid })
@@ -2843,10 +2905,35 @@ def instances_create(pid: str):
                                         post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
                                 else:
                                     try:
-                                        debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e}")
+                                        debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e2}")
                                     except Exception:
                                         pass
-                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e}' })
+                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e2}' })
+                        else:
+                            if ' 501' in msg or 'not implemented' in msg.lower():
+                                try:
+                                    if is_lxc:
+                                        client.set_lxc_options(node=node, vmid=int(newid), options={ 'pool': poolid })
+                                    else:
+                                        client.set_qemu_options(node=node, vmid=int(newid), options={ 'pool': poolid })
+                                    assignment_info['pool'] = poolid
+                                    assignment_info['pool_member_added'] = True
+                                    try:
+                                        debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> success")
+                                    except Exception:
+                                        pass
+                                except Exception as e3:
+                                    try:
+                                        debug_msgs.append(f"fallback:set_options pool={poolid} vmid={int(newid)} -> failed: {e3}")
+                                    except Exception:
+                                        pass
+                                    post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool members endpoint unsupported and VM-config fallback failed: {e3}' })
+                            else:
+                                try:
+                                    debug_msgs.append(f"add_pool_member: failed pool={poolid} vmid={int(newid)}: {e}")
+                                except Exception:
+                                    pass
+                                post_errors.append({ 'index': idx, 'name': newname, 'reason': f'add pool member failed: {e}' })
                     try:
                         if uname:
                             try:
@@ -2854,7 +2941,6 @@ def instances_create(pid: str):
                                     current_app.logger.info(f"[create][ACL] reconciling user={userid} for vmid={newid} name={newname} accessible={viewable}")
                             except Exception:
                                 pass
-                            user_rec = client.get_user(userid)
                             if user_rec is not None:
                                 try:
                                     if current_app.config.get('ACL_DEBUG'):
@@ -6335,6 +6421,18 @@ def instances_users_create(pid: str):
         return False
     def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
         return _vm_is_in_project_notes(client, proj, node_str, vmid_int)
+    def _is_in_scenario(base_name: str) -> bool:
+        try:
+            for v in (proj.vms or []):
+                if isinstance(v, dict):
+                    if str(v.get('name') or '') == str(base_name or ''):
+                        return True
+                else:
+                    if str(getattr(v, 'name', '') or '') == str(base_name or ''):
+                        return True
+        except Exception:
+            return False
+        return False
 
     for idx in indices:
         mlist = by_index.get(idx, [])
@@ -6423,38 +6521,49 @@ def instances_users_create(pid: str):
                         # Treat legacy 501 (not implemented) as a notice, and try VM-config fallback to set pool
                         msg = str(e)
                         if ' 501' in msg or 'not implemented' in msg.lower():
-                            # Determine node for this VM to set pool option
-                            vm_node = None
-                            try:
-                                # Best-effort: scan nodes to find matching VMID
-                                nodes = client.list_nodes()
-                                for n in nodes:
-                                    try:
-                                        nn = n.get('node') or n.get('name') or ''
-                                        lst = client.list_qemu_vms(nn)
-                                        for ent in lst:
-                                            if int(ent.get('vmid')) == int(m['vmid']):
-                                                vm_node = nn
-                                                raise StopIteration
-                                    except StopIteration:
-                                        break
-                                    except Exception:
-                                        continue
-                            except Exception:
-                                vm_node = None
+                            vm_node = m.get('node')
+                            vm_type = m.get('type', 'qemu')
+                            if not vm_node:
+                                try:
+                                    # Best-effort: scan nodes to find matching VMID
+                                    nodes = client.list_nodes()
+                                    for n in nodes:
+                                        try:
+                                            nn = n.get('node') or n.get('name') or ''
+                                            lst = client.list_qemu_vms(nn)
+                                            for ent in lst:
+                                                if int(ent.get('vmid')) == int(m['vmid']):
+                                                    vm_node = nn
+                                                    vm_type = 'qemu'
+                                                    raise StopIteration
+                                            lst_lxc = client.list_lxc_vms(nn)
+                                            for ent in lst_lxc:
+                                                if int(ent.get('vmid')) == int(m['vmid']):
+                                                    vm_node = nn
+                                                    vm_type = 'lxc'
+                                                    raise StopIteration
+                                        except StopIteration:
+                                            break
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    vm_node = None
                             if vm_node:
                                 try:
-                                    client.set_qemu_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
-                                    added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'], 'via': 'vm-config', 'debug': dbg + [f"fallback:set_qemu_options pool={poolid} vmid={int(m['vmid'])} -> success"] })
+                                    if vm_type == 'lxc':
+                                        client.set_lxc_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
+                                    else:
+                                        client.set_qemu_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
+                                    added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'], 'via': 'vm-config', 'debug': dbg + [f"fallback:set_options pool={poolid} vmid={int(m['vmid'])} -> success"] })
                                     notices.append({ 'index': idx, 'reason': f'pool members endpoint unsupported; set VM {m.get("vmid")} pool via config' })
                                     try:
-                                        current_app.logger.debug(f"fallback:set_qemu_options pool={poolid} vmid={int(m['vmid'])} -> success")
+                                        current_app.logger.debug(f"fallback:set_options pool={poolid} vmid={int(m['vmid'])} -> success")
                                     except Exception:
                                         pass
                                 except Exception as e2:
                                     notices.append({ 'index': idx, 'reason': f'pool members endpoint unsupported; VM-config fallback failed for VM {m.get("vmid")}: {e2}' })
                                     try:
-                                        current_app.logger.debug(f"fallback:set_qemu_options pool={poolid} vmid={int(m['vmid'])} -> failed: {e2}")
+                                        current_app.logger.debug(f"fallback:set_options pool={poolid} vmid={int(m['vmid'])} -> failed: {e2}")
                                     except Exception:
                                         pass
                             else:
@@ -6496,7 +6605,7 @@ def instances_users_create(pid: str):
                                     ent = ent_list[0]
                                     if ent.get('vmid') is None or ent.get('node') is None:
                                         continue
-                                    acl_targets.append({ 'index': idx, 'name': gen_name_full, 'vmid': ent.get('vmid'), 'node': ent.get('node') })
+                                    acl_targets.append({ 'index': idx, 'name': gen_name_full, 'vmid': ent.get('vmid'), 'node': ent.get('node'), 'type': ent.get('type', 'qemu') })
                                     existing_names_set.add(gen_name_full)
                                 except Exception:
                                     continue
@@ -6781,28 +6890,40 @@ def instances_users_perms(pid: str):
                     except Exception as e:
                         msg = str(e)
                         if ' 501' in msg or 'not implemented' in msg.lower():
-                            vm_node = None
-                            try:
-                                nodes = client.list_nodes()
-                                for n in nodes:
-                                    try:
-                                        nn = n.get('node') or n.get('name') or ''
-                                        lst = client.list_qemu_vms(nn)
-                                        for ent in lst:
-                                            if int(ent.get('vmid')) == int(m['vmid']):
-                                                vm_node = nn
-                                                raise StopIteration
-                                    except StopIteration:
-                                        break
-                                    except Exception:
-                                        continue
-                            except Exception:
-                                vm_node = None
-                                
+                            vm_node = m.get('node')
+                            vm_type = m.get('type', 'qemu')
+                            if not vm_node:
+                                try:
+                                    nodes = client.list_nodes()
+                                    for n in nodes:
+                                        try:
+                                            nn = n.get('node') or n.get('name') or ''
+                                            lst = client.list_qemu_vms(nn)
+                                            for ent in lst:
+                                                if int(ent.get('vmid')) == int(m['vmid']):
+                                                    vm_node = nn
+                                                    vm_type = 'qemu'
+                                                    raise StopIteration
+                                            lst_lxc = client.list_lxc_vms(nn)
+                                            for ent in lst_lxc:
+                                                if int(ent.get('vmid')) == int(m['vmid']):
+                                                    vm_node = nn
+                                                    vm_type = 'lxc'
+                                                    raise StopIteration
+                                        except StopIteration:
+                                            break
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    vm_node = None
+                                    
                             if vm_node:
                                 try:
-                                    client.set_qemu_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
-                                    added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'], 'via': 'vm-config', 'debug': dbg + [f"fallback:set_qemu_options pool={poolid} vmid={int(m['vmid'])} -> success"] })
+                                    if vm_type == 'lxc':
+                                        client.set_lxc_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
+                                    else:
+                                        client.set_qemu_options(node=vm_node, vmid=int(m['vmid']), options={ 'pool': poolid })
+                                    added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'], 'via': 'vm-config', 'debug': dbg + [f"fallback:set_options pool={poolid} vmid={int(m['vmid'])} -> success"] })
                                     notices.append({ 'index': idx, 'reason': f'pool members endpoint unsupported; set VM {m.get("vmid")} pool via config' })
                                 except Exception as e2:
                                     notices.append({ 'index': idx, 'reason': f'pool members endpoint unsupported; VM-config fallback failed for VM {m.get("vmid")}: {e2}' })
@@ -6837,7 +6958,7 @@ def instances_users_perms(pid: str):
                             ent = ent_list[0]
                             if ent.get('vmid') is None or ent.get('node') is None:
                                 continue
-                            acl_targets.append({ 'index': idx, 'name': gen_name_full, 'vmid': ent.get('vmid'), 'node': ent.get('node') })
+                            acl_targets.append({ 'index': idx, 'name': gen_name_full, 'vmid': ent.get('vmid'), 'node': ent.get('node'), 'type': ent.get('type', 'qemu') })
                             existing_names_set.add(gen_name_full)
                         except Exception:
                             continue
