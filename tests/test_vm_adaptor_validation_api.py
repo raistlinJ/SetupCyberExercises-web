@@ -50,19 +50,35 @@ class VmAdaptorValidationApiTests(unittest.TestCase):
         self.assertIsNotNone(vm)
         self.assertEqual(vm.get('internal_network_adaptors') or [], ['lab', 'DMZ'])
 
-    def test_update_vm_rejects_digit_suffixed_adaptors(self):
+    def test_update_vm_accepts_digit_suffixed_adaptors(self):
         pid = self._create_project()
         add_resp = self.client.post(f'/api/projects/{pid}/vms', json={'name': 'web'})
         self.assertEqual(add_resp.status_code, 200)
 
         resp = self.client.patch(f'/api/projects/{pid}/vms/web', json={
-            'internal_network_adaptors': ['netA', 'net1'],
+            'internal_network_adaptors': ['netA', 'net1', 'dmz12'],
+        })
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.get_json() or {}
+        vms = payload.get('vms') or []
+        vm = next((item for item in vms if (item or {}).get('name') == 'web'), None)
+        self.assertIsNotNone(vm)
+        self.assertEqual(vm.get('internal_network_adaptors') or [], ['netA', 'net1', 'dmz12'])
+
+    def test_update_vm_rejects_digits_not_at_end(self):
+        pid = self._create_project()
+        add_resp = self.client.post(f'/api/projects/{pid}/vms', json={'name': 'web'})
+        self.assertEqual(add_resp.status_code, 200)
+
+        resp = self.client.patch(f'/api/projects/{pid}/vms/web', json={
+            'internal_network_adaptors': ['net1a', '1net'],
         })
 
         self.assertEqual(resp.status_code, 400)
         payload = resp.get_json() or {}
-        self.assertIn('letters only, max 8 characters', payload.get('error') or '')
-        self.assertEqual(payload.get('invalid') or [], ['net1'])
+        self.assertIn('letters with optional trailing numbers, max 8 characters', payload.get('error') or '')
+        self.assertEqual(payload.get('invalid') or [], ['net1a', '1net'])
 
     def test_update_vm_accepts_literal_bridge_when_internet_connected(self):
         pid = self._create_project()

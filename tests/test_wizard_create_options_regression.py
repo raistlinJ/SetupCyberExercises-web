@@ -252,6 +252,123 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
 
         self._run_node_regression(harness)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
+    def test_add_interface_internet_toggle_waits_for_input(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              const input = document.getElementById('vm-proj-0-nets-input');
+              const internetToggle = document.getElementById('vm-proj-0-nets-internet');
+              const addButton = document.getElementById('btn-add-net-proj-0');
+
+              input.value = '';
+              internetToggle.checked = true;
+              internetToggle.disabled = false;
+              onAdaptorInput('proj', 0, input);
+              assert(internetToggle.disabled === true, 'Internet toggle should be disabled with empty input');
+              assert(internetToggle.checked === false, 'Internet toggle should clear when input is empty');
+              assert(addButton.disabled === true, 'Add button should stay disabled with empty input');
+
+              input.value = 'n';
+              onAdaptorInput('proj', 0, input);
+              assert(internetToggle.disabled === false, 'Internet toggle should enable after a valid interface-name character');
+              assert(addButton.disabled === false, 'Add button should enable for a valid internal adaptor name');
+
+              input.value = 'enp0s3';
+              internetToggle.checked = false;
+              onAdaptorInput('proj', 0, input);
+              assert(internetToggle.disabled === false, 'Internet toggle should stay available for an internet-style name');
+              assert(addButton.disabled === true, 'Add button should reject internet-style names until Internet is selected');
+
+              internetToggle.checked = true;
+              onAdaptorInput('proj', 0, input);
+              assert(addButton.disabled === false, 'Add button should enable after selecting Internet for a valid interface name');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
+    def test_internet_toggle_saves_vm_network_state_immediately(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+              const wait = () => new Promise(resolve => setTimeout(resolve, 20));
+              const makeHarnessElement = (id) => ({
+                id: String(id || ''),
+                value: '',
+                checked: false,
+                textContent: '',
+                classList: { add() {}, remove() {}, toggle() {} },
+                querySelector() { return null; },
+                querySelectorAll() { return []; },
+                closest() { return null; },
+                matches() { return false; },
+              });
+
+              document.getElementById('vm-name-display-proj-0').textContent = 'web';
+              document.getElementById('vm-proj-0-vmid').value = '';
+              document.getElementById('vm-proj-0-type').value = 'qemu';
+              document.getElementById('vm-proj-0-user').value = '';
+              document.getElementById('vm-proj-0-pass').value = '';
+
+              const textInput = makeHarnessElement('network-input');
+              textInput.value = 'vmbr0';
+              const internetToggle = makeHarnessElement('network-internet-toggle');
+              internetToggle.checked = true;
+              internetToggle.matches = (selector) => selector === '[data-net-internet]';
+              const row = makeHarnessElement('network-row');
+              row.querySelector = (selector) => {
+                if (selector === 'input.form-control') return textInput;
+                if (selector === '[data-net-internet]') return internetToggle;
+                return null;
+              };
+              textInput.closest = () => row;
+              internetToggle.closest = () => row;
+              document.querySelectorAll = (selector) => {
+                if (selector === '#vm-proj-0-nets-list li') return [row];
+                return [];
+              };
+
+              window.PROJ_CACHE = {
+                proj: {
+                  vms: [{
+                    name: 'web',
+                    internal_network_adaptors: ['vmbr0'],
+                    internet_connected_adaptors: [],
+                  }],
+                },
+              };
+
+              const calls = [];
+              http = async (method, url, body) => {
+                calls.push({ method, url, body });
+                return { ok: true };
+              };
+
+              onListItemEdit('vm-proj-0-nets-list', internetToggle);
+              await wait();
+
+              assert(calls.length === 1, `Expected an immediate PATCH, got ${calls.length} calls`);
+              assert(calls[0].method === 'PATCH', 'Internet toggle should PATCH the VM');
+              assert(calls[0].url === '/api/projects/proj/vms/web', `Unexpected URL: ${calls[0].url}`);
+              assert(JSON.stringify(calls[0].body.internal_network_adaptors) === JSON.stringify(['vmbr0']), 'Internal adaptor list should include vmbr0');
+              assert(JSON.stringify(calls[0].body.internet_connected_adaptors) === JSON.stringify(['vmbr0']), 'Internet adaptor list should include vmbr0');
+              assert(JSON.stringify(window.PROJ_CACHE.proj.vms[0].internet_connected_adaptors) === JSON.stringify(['vmbr0']), 'Project cache should reflect the internet toggle immediately');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
 
 if __name__ == '__main__':
     unittest.main()

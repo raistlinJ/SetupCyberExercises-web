@@ -71,7 +71,7 @@ python -m app
 
 ## VM Network Interface Modes
 
-- Internal adapters use letters-only names up to 8 characters. During clone creation, the instance index is appended to create per-clone bridges.
+- Internal adapters use letters with optional trailing numbers, up to 8 characters. During clone creation, the instance index is appended to create per-clone bridges.
 - Internet-connected adapters use literal Linux bridge/interface names up to 15 characters, such as `vmbr0`. During clone creation, the name is assigned unchanged for every clone and the app does not create, age, or delete that bridge.
 
 ## Tips

@@ -1817,13 +1817,30 @@ async function vmRefresh(opts) {
 
 function _vmExpectedBridgeName(adaptorLabel, idx) {
   try {
-    const base = String(adaptorLabel || '').replace(/[^A-Za-z]/g, '').slice(0, 8);
+    const raw = String(adaptorLabel || '').trim();
+    const alphaBase = raw.replace(/[^A-Za-z]/g, '');
+    const digitMatch = raw.match(/(\d+)$/);
+    const suffix = digitMatch ? _vmAdaptorNumericSuffixLetters(digitMatch[1]) : '';
+    const allowedBase = suffix ? Math.max(0, 8 - suffix.length) : 8;
+    const base = suffix ? `${alphaBase.slice(0, allowedBase)}${suffix}`.slice(0, 8) : alphaBase.slice(0, 8);
     let name = base ? `${base}${idx}` : `br${idx}`;
     if (name.length > 15) name = name.slice(0, 15);
     return name;
   } catch {
     return `br${idx}`;
   }
+}
+
+function _vmAdaptorNumericSuffixLetters(value) {
+  let num = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(num) || num < 0) return '';
+  let out = '';
+  for (;;) {
+    out = String.fromCharCode(65 + (num % 26)) + out;
+    num = Math.floor(num / 26) - 1;
+    if (num < 0) break;
+  }
+  return out;
 }
 
 function _vmInternetConnectedAdaptorSet(vmCfg) {

@@ -10982,9 +10982,9 @@ def _is_valid_url(url: str) -> bool:
 
 
 def _is_valid_adaptor_name(name: str) -> bool:
-    # Letters only, 1-8 chars
+    # Letters with optional trailing numbers, 1-8 chars.
     try:
-        return bool(re.fullmatch(r"[A-Za-z]{1,8}", str(name or "")))
+        return bool(re.fullmatch(r"(?=.{1,8}$)[A-Za-z]+[0-9]*", str(name or "")))
     except Exception:
         return False
 
@@ -14133,7 +14133,7 @@ def update_vm(pid: str, name: str):
                     bad.append(a)
             if bad:
                 return jsonify({
-                    "error": "Invalid adaptor names: letters only, max 8 characters",
+                    "error": "Invalid adaptor names: letters with optional trailing numbers, max 8 characters",
                     "invalid": bad,
                 }), 400
     if "vm_type" in data:

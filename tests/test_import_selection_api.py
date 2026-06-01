@@ -125,7 +125,7 @@ class ImportSelectionApiTests(unittest.TestCase):
             'id': 'orig-1',
             'name': 'ImportSelectionTestUnchecked',
             'credentials': [{'username': 'user1', 'password': '12345678'}],
-            'vms': [{'name': 'vmA', 'vmid': 100, 'internal_network_adaptors': ['LAN', 'BAD-ADAPTOR', 'DMZ']}],
+            'vms': [{'name': 'vmA', 'vmid': 100, 'internal_network_adaptors': ['LAN', 'LAN1', 'BAD-ADAPTOR', 'DMZ']}],
         }
         zip_buf = self._make_zip(project)
         job = self._start_import_job(zip_buf, include_creds=False, include_vms=False)
@@ -145,7 +145,7 @@ class ImportSelectionApiTests(unittest.TestCase):
         # vmid should not be imported when VMs are unchecked
         self.assertTrue(('vmid' not in vms[0]) or (vms[0].get('vmid') in (None, '', 0)))
         # adaptor names should be preserved (and invalid ones filtered)
-        self.assertEqual(vms[0].get('internal_network_adaptors') or [], ['LAN', 'DMZ'])
+        self.assertEqual(vms[0].get('internal_network_adaptors') or [], ['LAN', 'LAN1', 'DMZ'])
 
     def test_import_includes_checked_items(self):
         project = {

@@ -12,7 +12,23 @@ const STORED_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: []
 const VALIDATION_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', commands: [] };
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 300;
 const DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS = 10;
+const INTERNET_TOGGLE_TOOLTIP = 'Use this for an existing internet or uplink bridge, such as vmbr0. Clones keep this interface name unchanged, and the app will not create, age, or delete it.';
 
+function initBootstrapTooltips(root = document) {
+  try {
+    if (!(window.bootstrap && window.bootstrap.Tooltip)) return;
+    const scope = root || document;
+    const elements = [];
+    if (scope.matches && scope.matches('[data-bs-toggle="tooltip"]')) elements.push(scope);
+    if (scope.querySelectorAll) elements.push(...scope.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    elements.forEach(el => {
+      try {
+        if (window.bootstrap.Tooltip.getOrCreateInstance) window.bootstrap.Tooltip.getOrCreateInstance(el);
+        else window.bootstrap.Tooltip.getInstance(el) || new window.bootstrap.Tooltip(el);
+      } catch { }
+    });
+  } catch { }
+}
 function normalizeCommandTimeout(rawValue, defaultValue = DEFAULT_COMMAND_TIMEOUT_SECONDS) {
   if (rawValue === undefined || rawValue === null || rawValue === '') {
     return defaultValue;
@@ -2747,6 +2763,7 @@ async function loadProjects() {
     try { (window.shell && shell.logSuccess) ? shell.logSuccess(`Config: loaded ${(data.projects || []).length} project(s)`) : console.log('Config: projects loaded'); } catch { }
     // Ensure any dynamically rendered controls get remote-mode disabling.
     try { if (window.shell && shell.applyRemoteModeUI) shell.applyRemoteModeUI(container); } catch { }
+    try { initBootstrapTooltips(container); } catch { }
   } catch (e) {
     container.innerHTML = `<div class="text-danger">Error: ${e.message}</div>`;
     try { (window.shell && shell.logError) ? shell.logError('Config: load projects failed: ' + e.message) : console.error('Config load failed:', e); } catch { }
@@ -3064,7 +3081,13 @@ window.checkWizCsvFile = async function() {
   }
 
   function isWizardInternalAdapterName(value) {
-    return /^[A-Za-z]{1,8}$/.test(String(value || '').trim());
+    return /^(?=.{1,8}$)[A-Za-z]+[0-9]*$/.test(String(value || '').trim());
+  }
+
+  function sanitizeWizardInternalAdapterName(value) {
+    const cleaned = String(value || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+    const match = cleaned.match(/^([A-Za-z]+)([0-9]*)/);
+    return match ? `${match[1]}${match[2]}`.slice(0, 8) : '';
   }
 
   function fallbackInternalAdapterName(adapter) {
@@ -3082,6 +3105,7 @@ window.checkWizCsvFile = async function() {
   function mountPopover(div, focusSelector) {
     document.body.appendChild(div);
     activePopover = div;
+    try { initBootstrapTooltips(div); } catch { }
     div.addEventListener('keydown', (ev) => {
       if (!ev || ev.defaultPrevented || ev.key !== 'Enter') return;
       if (ev.isComposing || ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -3139,7 +3163,7 @@ window.checkWizCsvFile = async function() {
         <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${linkObj.color};"></span>
         Adapter: <code>${linkObj.adapter}</code>
       </div>
-      <div class="form-check form-switch mb-2">
+      <div class="form-check form-switch mb-2" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-container="body" title="${escHtml(INTERNET_TOGGLE_TOOLTIP)}">
         <input class="form-check-input" type="checkbox" role="switch" id="wiz-pop-internet" ${internetConnected ? 'checked' : ''}>
         <label class="form-check-label small" for="wiz-pop-internet">Internet-connected</label>
       </div>
@@ -3169,7 +3193,7 @@ window.checkWizCsvFile = async function() {
         if (adapter) adapter.internet_connected = true;
         linkObj.adapter = rawName;
       } else {
-        let internalName = rawName.replace(/[^A-Za-z]/g, '').slice(0, 8);
+        let internalName = sanitizeWizardInternalAdapterName(rawName);
         if (!isWizardInternalAdapterName(internalName)) internalName = fallbackInternalAdapterName(adapter);
         if (!renameAdapter(linkObj.adapter, internalName)) {
           try { showToast('An adapter with that name already exists.', 'warning'); } catch { }
@@ -5000,6 +5024,55 @@ async function processVmAutoSave(pid, idx, key) {
   }
 }
 
+function saveVmImmediately(pid, idx) {
+  const key = `${pid}:${idx}`;
+  _vmSavePending[key] = true;
+  if (_pendingVmSaveTimers[key]) {
+    clearTimeout(_pendingVmSaveTimers[key]);
+    delete _pendingVmSaveTimers[key];
+  }
+  setVmStatus(pid, idx, 'Saving…', 'text-muted');
+  processVmAutoSave(pid, idx, key);
+}
+
+function collectVmNetworkRows(pid, idx) {
+  const rows = Array.from(document.querySelectorAll(`#vm-${pid}-${idx}-nets-list li`));
+  const adaptors = [];
+  const internetConnectedAdaptors = [];
+  rows.forEach(row => {
+    const input = row.querySelector('input.form-control');
+    const internetToggle = row.querySelector('[data-net-internet]');
+    const internetConnected = !!(internetToggle && internetToggle.checked);
+    const raw = (input && input.value ? input.value.trim() : '');
+    const clean = internetConnected
+      ? raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 15)
+      : sanitizeInternalNetworkAdaptorName(raw);
+    if (!clean) return;
+    adaptors.push(clean);
+    if (internetConnected) internetConnectedAdaptors.push(clean);
+  });
+  return { adaptors, internetConnectedAdaptors };
+}
+
+function updateVmNetworkCacheFromDom(pid, idx, vmName) {
+  try {
+    if (!window.PROJ_CACHE || !window.PROJ_CACHE[pid] || !Array.isArray(window.PROJ_CACHE[pid].vms)) return;
+    const list = window.PROJ_CACHE[pid].vms;
+    const name = vmName || (document.getElementById(`vm-name-display-${pid}-${idx}`)?.textContent || '').trim();
+    let vmIdx = Number.isInteger(idx) ? idx : Number(idx);
+    if (!Number.isInteger(vmIdx) || !list[vmIdx] || (name && list[vmIdx].name !== name)) {
+      vmIdx = name ? list.findIndex(v => v && v.name === name) : -1;
+    }
+    if (vmIdx < 0 || !list[vmIdx]) return;
+    const networkRows = collectVmNetworkRows(pid, idx);
+    list[vmIdx] = {
+      ...list[vmIdx],
+      internal_network_adaptors: networkRows.adaptors,
+      internet_connected_adaptors: networkRows.internetConnectedAdaptors
+    };
+  } catch { }
+}
+
 function debounceProjectSave(pid, field, delay = 600) {
   const key = pid + ':' + field;
   if (_pendingSaveTimers[key]) clearTimeout(_pendingSaveTimers[key]);
@@ -5208,30 +5281,12 @@ async function autoSaveVm(pid, idx) {
     }
   }
   const collectValues = (selector) => Array.from(document.querySelectorAll(selector)).map(input => (input.value || '').trim()).filter(v => v !== '');
-  const collectNetworkRows = () => {
-    const rows = Array.from(document.querySelectorAll(`#vm-${pid}-${idx}-nets-list li`));
-    const adaptors = [];
-    const internetConnectedAdaptors = [];
-    rows.forEach(row => {
-      const input = row.querySelector('input.form-control');
-      const internetToggle = row.querySelector('[data-net-internet]');
-      const internetConnected = !!(internetToggle && internetToggle.checked);
-      const raw = (input && input.value ? input.value.trim() : '');
-      const clean = internetConnected
-        ? raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 15)
-        : raw.replace(/[^A-Za-z]/g, '').slice(0, 8);
-      if (!clean) return;
-      adaptors.push(clean);
-      if (internetConnected) internetConnectedAdaptors.push(clean);
-    });
-    return { adaptors, internetConnectedAdaptors };
-  };
   const startSteps = getStartCommandsFromDom(pid, idx);
   const startCommands = stepsToServerPayload(startSteps);
   const storedSteps = getStoredCommandsFromDom(pid, idx);
   const storedCommands = stepsToServerPayload(storedSteps);
   const validationCommands = validationCommandsToServerPayload(getValidationCommandsFromDom(pid, idx));
-  const networkRows = collectNetworkRows();
+  const networkRows = collectVmNetworkRows(pid, idx);
   if (userEl && userEl.value.trim() !== '') {
     vm_user = userEl.value.trim();
   }
@@ -5252,7 +5307,7 @@ async function autoSaveVm(pid, idx) {
     internet_connected_adaptors: networkRows.internetConnectedAdaptors
   };
   try {
-    await saveVM(pid, name, payload, { silent: true });
+    await saveVM(pid, name, payload, { silent: true, rethrow: true });
     try {
       if (window.PROJ_CACHE && window.PROJ_CACHE[pid] && Array.isArray(window.PROJ_CACHE[pid].vms)) {
         const list = window.PROJ_CACHE[pid].vms;
@@ -6334,9 +6389,9 @@ function renderProjectCard(p) {
     <div class="col-md-4">
           <label class="form-label">Network Interfaces</label>
           <div class="d-flex gap-2 mb-2 align-items-center flex-wrap">
-            <input class="form-control form-control-sm flex-grow-1" id="vm-${p.id}-${i}-nets-input" placeholder="Add interface" title="Internal adapters use letters only; internet-connected interfaces can use bridge names like vmbr0" oninput="onAdaptorInput('${p.id}', ${i}, this)" onkeydown="onAdaptorKeydown('${p.id}', ${i}, event)" />
-            <div class="form-check form-switch mb-0">
-              <input class="form-check-input" type="checkbox" role="switch" id="vm-${p.id}-${i}-nets-internet" onchange="onAdaptorInput('${p.id}', ${i})">
+            <input class="form-control form-control-sm flex-grow-1" id="vm-${p.id}-${i}-nets-input" placeholder="Add interface" title="Internal adapters use letters with optional trailing numbers; internet-connected interfaces can use bridge names like vmbr0" oninput="onAdaptorInput('${p.id}', ${i}, this)" onkeydown="onAdaptorKeydown('${p.id}', ${i}, event)" />
+            <div class="form-check form-switch mb-0" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-container="body" title="${escHtml(INTERNET_TOGGLE_TOOLTIP)}">
+              <input class="form-check-input" type="checkbox" role="switch" id="vm-${p.id}-${i}-nets-internet" onchange="onAdaptorInput('${p.id}', ${i})" disabled>
               <label class="form-check-label small" for="vm-${p.id}-${i}-nets-internet">Internet</label>
             </div>
             <button id="btn-add-net-${p.id}-${i}" class="btn btn-sm btn-outline-primary" onclick="addListItem('vm-${p.id}-${i}-nets-list','vm-${p.id}-${i}-nets-input')" disabled>Add</button>
@@ -7169,8 +7224,7 @@ async function addSelectedTemplates() {
   // For each selection, add a VM using the template name and set vmid
   // We will batch sequentially to keep API simple
   const sanitizeAdaptor = (s) => {
-    // Letters only, up to 8 chars per UI rules
-    try { return (String(s || '').replace(/[^A-Za-z]/g, '').slice(0, 8)); } catch { return ''; }
+    try { return sanitizeInternalNetworkAdaptorName(s); } catch { return ''; }
   };
   // collect a mapping from name->sanitized adaptors derived from bridges
   const adaptorByName = {};
@@ -7315,7 +7369,17 @@ function formatPreviewAdaptor(vm, adaptor, suffix) {
 
 function isValidNetworkAdaptorName(value, internetConnected) {
   const text = String(value || '').trim();
-  return internetConnected ? /^[A-Za-z0-9_-]{1,15}$/.test(text) : /^[A-Za-z]{1,8}$/.test(text);
+  return internetConnected ? /^[A-Za-z0-9_-]{1,15}$/.test(text) : /^(?=.{1,8}$)[A-Za-z]+[0-9]*$/.test(text);
+}
+
+function hasNetworkInterfaceNameCharacter(value) {
+  return /[A-Za-z0-9_-]/.test(String(value || ''));
+}
+
+function sanitizeInternalNetworkAdaptorName(value) {
+  const cleaned = String(value || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+  const match = cleaned.match(/^([A-Za-z]+)([0-9]*)/);
+  return match ? `${match[1]}${match[2]}`.slice(0, 8) : '';
 }
 
 function badgeForStatus(name, value) {
@@ -7333,8 +7397,9 @@ function listItemTemplate(listId, value, idx, options = {}) {
   const safe = escHtml(value ?? '');
   const isNetList = String(listId).includes('-nets-list');
   const internetChecked = options && options.internetConnected ? ' checked' : '';
+  const internetTitle = escHtml(INTERNET_TOGGLE_TOOLTIP);
   const internetControl = isNetList ? `
-    <div class="form-check form-switch mb-0 me-2 flex-shrink-0">
+    <div class="form-check form-switch mb-0 me-2 flex-shrink-0" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-container="body" title="${internetTitle}">
       <input class="form-check-input" type="checkbox" role="switch" data-net-internet${internetChecked} onchange="onListItemEdit('${listId}', this)">
       <label class="form-check-label small">Internet</label>
     </div>` : '';
@@ -7346,9 +7411,12 @@ function listItemTemplate(listId, value, idx, options = {}) {
 }
 
 function onListItemEdit(listId, inputEl) {
+  const listIdText = String(listId);
+  const isNetworkList = listIdText.includes('-nets-list');
+  const isInternetToggleEdit = !!(inputEl && inputEl.matches && inputEl.matches('[data-net-internet]'));
   // Live validation for adaptor names list
   try {
-    if (String(listId).includes('-nets-list')) {
+    if (isNetworkList) {
       const row = inputEl && inputEl.closest ? inputEl.closest('li') : null;
       const textInput = row ? row.querySelector('input.form-control') : inputEl;
       const internetToggle = row ? row.querySelector('[data-net-internet]') : null;
@@ -7356,25 +7424,42 @@ function onListItemEdit(listId, inputEl) {
       const v = (textInput && textInput.value || '').trim();
       const valid = !v || isValidNetworkAdaptorName(v, internetConnected);
       if (textInput) textInput.classList.toggle('is-invalid', !valid);
-      if (!valid) showToast(internetConnected ? 'Invalid interface name: letters, numbers, underscores, or dashes; up to 15 characters.' : 'Invalid adaptor name: letters only, up to 8 characters.', 'danger');
+      if (!valid) showToast(internetConnected ? 'Invalid interface name: letters, numbers, underscores, or dashes; up to 15 characters.' : 'Invalid adaptor name: letters with optional trailing numbers, up to 8 characters.', 'danger');
     }
   } catch { }
-  // Auto-save after edits (debounced)
+  // Auto-save after edits. Internet mode changes are discrete, so flush them immediately.
   try {
-    const m = String(listId).match(/^vm-(.+)-(\d+)-/);
-    if (m) debounceVmSave(m[1], Number(m[2]), 600);
+    const m = listIdText.match(/^vm-(.+)-(\d+)-/);
+    if (m) {
+      const pid = m[1];
+      const idx = Number(m[2]);
+      if (isNetworkList) updateVmNetworkCacheFromDom(pid, idx);
+      if (isInternetToggleEdit) saveVmImmediately(pid, idx);
+      else debounceVmSave(pid, idx, 600);
+    }
   } catch { }
 }
 
 // Handle Remove button clicks for dynamic lists
 function removeListItem(listId, btnEl) {
+  const listIdText = String(listId);
+  const isNetworkList = listIdText.includes('-nets-list');
   try {
     const li = btnEl && (btnEl.closest ? btnEl.closest('li') : null);
     if (li) li.remove();
   } catch { }
   try {
-    const m = String(listId).match(/^vm-(.+)-(\d+)-/);
-    if (m) debounceVmSave(m[1], Number(m[2]), 200);
+    const m = listIdText.match(/^vm-(.+)-(\d+)-/);
+    if (m) {
+      const pid = m[1];
+      const idx = Number(m[2]);
+      if (isNetworkList) {
+        updateVmNetworkCacheFromDom(pid, idx);
+        saveVmImmediately(pid, idx);
+      } else {
+        debounceVmSave(pid, idx, 200);
+      }
+    }
   } catch { }
 }
 
@@ -7394,8 +7479,13 @@ function onAdaptorInput(pid, idx, el) {
     const input = el || document.getElementById(`vm-${pid}-${idx}-nets-input`);
     const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
     const internetToggle = document.getElementById(`vm-${pid}-${idx}-nets-internet`);
-    const internetConnected = !!(internetToggle && internetToggle.checked);
     const v = (input?.value || '').trim();
+    const canToggleInternet = hasNetworkInterfaceNameCharacter(v);
+    if (internetToggle) {
+      internetToggle.disabled = !canToggleInternet;
+      if (!canToggleInternet) internetToggle.checked = false;
+    }
+    const internetConnected = !!(internetToggle && internetToggle.checked);
     const ok = isValidNetworkAdaptorName(v, internetConnected);
     if (input) input.classList.toggle('is-invalid', !ok && v.length > 0);
     if (btn) btn.disabled = !ok;
@@ -7430,7 +7520,7 @@ function addListItem(listId, inputId) {
     internetConnected = !!(internetToggle && internetToggle.checked);
     if (!isValidNetworkAdaptorName(val, internetConnected)) {
       input.classList.add('is-invalid');
-      const msg = internetConnected ? 'Invalid interface name: letters, numbers, underscores, or dashes; up to 15 characters.' : 'Invalid adaptor name: letters only, up to 8 characters.';
+      const msg = internetConnected ? 'Invalid interface name: letters, numbers, underscores, or dashes; up to 15 characters.' : 'Invalid adaptor name: letters with optional trailing numbers, up to 8 characters.';
       try { showToast(msg, 'danger'); } catch { alert(msg); }
       return;
     }
@@ -7442,22 +7532,37 @@ function addListItem(listId, inputId) {
       if (pid && idx) {
         const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
         if (btn) btn.disabled = true;
+        const internetToggle = document.getElementById(`vm-${pid}-${idx}-nets-internet`);
+        if (internetToggle) {
+          internetToggle.checked = false;
+          internetToggle.disabled = true;
+        }
       }
       return;
     }
   }
   list.insertAdjacentHTML('beforeend', listItemTemplate(listId, val, list.children.length, { internetConnected }));
+  try { initBootstrapTooltips(list.lastElementChild); } catch { }
   input.value = '';
   input.classList.remove('is-invalid');
   try {
     const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
     const internetToggle = pid && idx ? document.getElementById(`vm-${pid}-${idx}-nets-internet`) : null;
-    if (internetToggle) internetToggle.checked = false;
+    if (internetToggle) {
+      internetToggle.checked = false;
+      internetToggle.disabled = true;
+    }
   } catch { }
   // Debounce save for VM lists
   try {
     const m = String(listId).match(/^vm-(.+)-(\d+)-/);
-    if (m) debounceVmSave(m[1], Number(m[2]), 300);
+    if (m) {
+      const pid = m[1];
+      const idx = Number(m[2]);
+      updateVmNetworkCacheFromDom(pid, idx);
+      if (internetConnected) saveVmImmediately(pid, idx);
+      else debounceVmSave(pid, idx, 300);
+    }
   } catch { }
   // Disable Add button until next valid input
   try {
@@ -7466,6 +7571,11 @@ function addListItem(listId, inputId) {
       if (pid && idx) {
         const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
         if (btn) btn.disabled = true;
+        const internetToggle = document.getElementById(`vm-${pid}-${idx}-nets-internet`);
+        if (internetToggle) {
+          internetToggle.checked = false;
+          internetToggle.disabled = true;
+        }
       }
     }
   } catch { }
@@ -7678,9 +7788,6 @@ function stageMaterialSelection(pid) {
       });
     }
   } catch { }
-  if (inputs.files) {
-    try { inputs.files.value = ''; } catch { }
-  }
   if (inputs.folder) {
     try { inputs.folder.value = ''; } catch { }
   }
