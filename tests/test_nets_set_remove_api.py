@@ -85,6 +85,41 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertTrue(options['net1'].startswith('e1000='), options['net1'])
             self.assertIn('firewall=1', options['net1'])
 
+    def test_nets_set_keeps_internet_connected_bridge_literal(self):
+        self.project.vms[0].internal_network_adaptors = ['lab', 'vmbr0']
+        self.project.vms[0].internet_connected_adaptors = ['vmbr0']
+        existing_cfg = {
+            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=wrong',
+            'net1': 'e1000=11:22:33:44:55:66,bridge=wrong',
+        }
+
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_network.return_value = []
+            prox.get_qemu_config.return_value = existing_cfg
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/nets_set',
+                json={
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'baseUrl': 'https://proxmox.local',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                },
+            )
+
+            self.assertEqual(resp.status_code, 200)
+            prox.create_bridge.assert_called_once_with(node='node1', iface='lab1', autostart=True, ports=None, comments='SCE-BRIDGE pid=proj-nets idx=1 adaptor=lab source=nets_set')
+            options = prox.set_qemu_options.call_args.kwargs.get('options') or {}
+            self.assertIn('bridge=lab1', options.get('net0') or '')
+            self.assertIn('bridge=vmbr0', options.get('net1') or '')
+
     def test_nets_remove_deletes_all_net_keys(self):
         existing_cfg = {
             'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=lab1',

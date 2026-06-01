@@ -1318,19 +1318,35 @@
 
               <div id="wiz-act-vm" class="mb-3">
                 <h6 class="border-bottom pb-1 border-secondary">Proxmox Lifecycle</h6>
-                <div class="form-check mb-1">
+                <div class="form-check form-switch mb-2">
                   <input class="form-check-input" type="checkbox" id="wiz-act-vm-create" checked
                     onchange="window.wizToggleVmActions && window.wizToggleVmActions()">
                   <label class="form-check-label small" for="wiz-act-vm-create">Create VMs (Clone Templates)</label>
                 </div>
                 <div class="ms-4" id="wiz-act-vm-deps">
-                  <div class="form-check mb-1">
-                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-start" checked>
-                    <label class="form-check-label small" for="wiz-act-vm-start">Start VMs (Power On)</label>
+                  <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-users" checked>
+                    <label class="form-check-label small" for="wiz-act-vm-users">Create users/pools and set permissions</label>
                   </div>
-                  <div class="form-check mb-1">
-                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-users" checked>
-                    <label class="form-check-label small" for="wiz-act-vm-users">Create & Sync External Users</label>
+                  <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-accessibility" checked>
+                    <label class="form-check-label small" for="wiz-act-vm-accessibility">Apply user accessibility</label>
+                  </div>
+                  <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-scenario" checked>
+                    <label class="form-check-label small" for="wiz-act-vm-scenario">Apply scenario name to VMs</label>
+                  </div>
+                  <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-network" checked>
+                    <label class="form-check-label small" for="wiz-act-vm-network">Set network interfaces</label>
+                  </div>
+                  <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-snapshot" checked>
+                    <label class="form-check-label small" for="wiz-act-vm-snapshot">Take post-clone snapshot</label>
+                  </div>
+                  <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-start">
+                    <label class="form-check-label small" for="wiz-act-vm-start">Start VMs</label>
                   </div>
                 </div>
               </div>

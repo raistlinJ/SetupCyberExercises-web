@@ -90,7 +90,12 @@ function renderTable(proj) {
   for (let i = 1; i <= inst; i++) {
     const suffix = `${tag}${i}`;
     const names = vms.map(v => `${v.name}${suffix}`);
-  const adaptors = (vms.flatMap(v => (v.internal_network_adaptors||[]).map(a => `${String(a||'')}${suffix}`)));
+  const adaptors = (vms.flatMap(v => (v.internal_network_adaptors||[]).map(a => {
+    const rawInternet = v && (v.internet_connected_adaptors || v.internet_connected_adapters || v.internet_connected_interfaces) || [];
+    const internetSet = new Set((Array.isArray(rawInternet) ? rawInternet : []).map(item => String(item || '').trim()).filter(Boolean));
+    const value = String(a || '').trim();
+    return internetSet.has(value) ? value : `${value}${suffix}`;
+  })));
     const st = statusMap.get(i) || {};
     const mgr = st.managers || {};
     const mgrBadges = ['vm','guacamole','pools','keycloak','rocketchat','ctfd'].map(m => badgeForStatus(m, mgr[m])).join(' ');

@@ -3038,8 +3038,38 @@ window.checkWizCsvFile = async function() {
       `<span class="me-2 d-inline-flex align-items-center gap-1">
          <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${a.color};"></span>
          <span>${a.name}</span>
+         ${a.internet_connected ? '<span class="badge bg-info text-dark">Internet</span>' : ''}
        </span>`
     ).join('');
+  }
+
+  function findAdapter(adapterName) {
+    return adapters.find(a => a && a.name === adapterName) || null;
+  }
+
+  function renameAdapter(oldName, newName) {
+    const next = String(newName || '').trim();
+    if (!oldName || !next) return false;
+    if (oldName === next) return true;
+    const existing = findAdapter(next);
+    if (existing && existing.name !== oldName) return false;
+    const adapter = findAdapter(oldName);
+    if (adapter) adapter.name = next;
+    links.forEach(l => { if (l.adapter === oldName) l.adapter = next; });
+    return true;
+  }
+
+  function isWizardInterfaceName(value) {
+    return /^[A-Za-z0-9_-]{1,15}$/.test(String(value || '').trim());
+  }
+
+  function isWizardInternalAdapterName(value) {
+    return /^[A-Za-z]{1,8}$/.test(String(value || '').trim());
+  }
+
+  function fallbackInternalAdapterName(adapter) {
+    const suffix = getAdapterSuffix(adapter);
+    return (getWizardAdapterBase() + (suffix || '')).slice(0, 8) || 'netA';
   }
 
   function dismissPopover() {
@@ -3093,6 +3123,8 @@ window.checkWizCsvFile = async function() {
   function showLinkPopover(linkObj, svgMx, svgMy) {
     dismissPopover();
     if (svgEl) svgEl.style.pointerEvents = 'none';
+    const adapterMeta = findAdapter(linkObj.adapter) || {};
+    const internetConnected = !!adapterMeta.internet_connected;
     const svgRect = svgEl.getBoundingClientRect();
     const px = svgRect.left + svgMx;
     const py = svgRect.top + svgMy;
@@ -3107,7 +3139,55 @@ window.checkWizCsvFile = async function() {
         <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${linkObj.color};"></span>
         Adapter: <code>${linkObj.adapter}</code>
       </div>
+      <div class="form-check form-switch mb-2">
+        <input class="form-check-input" type="checkbox" role="switch" id="wiz-pop-internet" ${internetConnected ? 'checked' : ''}>
+        <label class="form-check-label small" for="wiz-pop-internet">Internet-connected</label>
+      </div>
+      <div class="input-group input-group-sm mb-2">
+        <span class="input-group-text">Interface</span>
+        <input type="text" class="form-control" id="wiz-pop-iface" value="${escHtml(linkObj.adapter)}">
+        <button class="btn btn-outline-primary" id="wiz-pop-apply" type="button">Apply</button>
+      </div>
       <button class="btn btn-sm btn-danger w-100" id="wiz-pop-del" type="button"><i class="bi bi-trash me-1"></i>Delete</button>`;
+    const internetInput = div.querySelector('#wiz-pop-internet');
+    const ifaceInput = div.querySelector('#wiz-pop-iface');
+    const applyBtn = div.querySelector('#wiz-pop-apply');
+    const applyAdapterSettings = () => {
+      const adapter = findAdapter(linkObj.adapter) || adapterMeta;
+      const checked = !!(internetInput && internetInput.checked);
+      const rawName = String(ifaceInput && ifaceInput.value || '').trim();
+      if (checked) {
+        if (!isWizardInterfaceName(rawName)) {
+          ifaceInput && ifaceInput.classList.add('is-invalid');
+          try { showToast('Invalid interface name: letters, numbers, underscores, or dashes; up to 15 characters.', 'danger'); } catch { }
+          return;
+        }
+        if (!renameAdapter(linkObj.adapter, rawName)) {
+          try { showToast('An adapter with that name already exists.', 'warning'); } catch { }
+          return;
+        }
+        if (adapter) adapter.internet_connected = true;
+        linkObj.adapter = rawName;
+      } else {
+        let internalName = rawName.replace(/[^A-Za-z]/g, '').slice(0, 8);
+        if (!isWizardInternalAdapterName(internalName)) internalName = fallbackInternalAdapterName(adapter);
+        if (!renameAdapter(linkObj.adapter, internalName)) {
+          try { showToast('An adapter with that name already exists.', 'warning'); } catch { }
+          return;
+        }
+        if (adapter) adapter.internet_connected = false;
+        linkObj.adapter = internalName;
+        if (ifaceInput) ifaceInput.value = internalName;
+      }
+      if (ifaceInput) ifaceInput.classList.remove('is-invalid');
+      dismissPopover();
+      renderAll();
+      if (selectedNode) updateSettingsPanel();
+    };
+    if (applyBtn) applyBtn.addEventListener('click', applyAdapterSettings);
+    if (internetInput) internetInput.addEventListener('change', () => {
+      if (ifaceInput) ifaceInput.classList.remove('is-invalid');
+    });
     div.querySelector('#wiz-pop-del').addEventListener('click', () => {
       const deletedName = linkObj.adapter;
       links = links.filter(x => x.id !== linkObj.id);
@@ -3435,6 +3515,10 @@ window.checkWizCsvFile = async function() {
       }
       const sorted = Object.keys(ifaceMap).map(Number).sort((a, b) => a - b);
       t.nets = sorted.map(i => ifaceMap[i]);
+      t.internet_connected_adaptors = t.nets.filter(name => {
+        const adapter = findAdapter(name);
+        return !!(adapter && adapter.internet_connected);
+      });
     }
   }
 
@@ -3447,6 +3531,7 @@ window.checkWizCsvFile = async function() {
     if (!newBase) return;
     const baseInp = document.getElementById('wiz-adapter-base');
     adapters.forEach(a => {
+      if (a.internet_connected) return;
       const suffix = getAdapterSuffix(a);
       if (!suffix) return;
       const oldName = a.name;
@@ -3522,8 +3607,12 @@ function resetWizard() {
     document.getElementById('wiz-ctfd-verify').checked = true;
     
     document.getElementById('wiz-act-vm-create').checked = true;
-    document.getElementById('wiz-act-vm-start').checked = true;
     document.getElementById('wiz-act-vm-users').checked = true;
+    document.getElementById('wiz-act-vm-accessibility').checked = true;
+    document.getElementById('wiz-act-vm-scenario').checked = true;
+    document.getElementById('wiz-act-vm-network').checked = true;
+    document.getElementById('wiz-act-vm-snapshot').checked = true;
+    document.getElementById('wiz-act-vm-start').checked = false;
     document.getElementById('wiz-act-ctfd-users').checked = true;
     window.wizToggleVmActions && window.wizToggleVmActions();
   } catch {}
@@ -3829,7 +3918,8 @@ window.wizardNext = async function() {
          user_accessible: accEl ? accEl.checked : true,
          vm_user: creds.username,
          vm_pass: creds.password,
-         nets: []
+         nets: [],
+         internet_connected_adaptors: []
        });
      });
      
@@ -4090,13 +4180,124 @@ function wizardFinishQueue(ok, summary, detail) {
   wizardRenderRunState();
 }
 
+const WIZARD_VM_CREATE_OPTION_DEFAULTS = Object.freeze({
+  createUsersAndPerms: true,
+  enableUserAccessibility: true,
+  applyScenario: true,
+  setNetworkInterfaces: true,
+  takeSnapshot: true,
+  startVm: false,
+});
+
+function wizardCoerceEnabled(value, fallback = true) {
+  if (value === undefined || value === null) return !!fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return !!fallback;
+    if (['false', '0', 'no', 'off', 'disabled'].includes(normalized)) return false;
+    if (['true', '1', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+  }
+  return !!value;
+}
+
+function wizardNormalizeVmCreateOptions(options = {}) {
+  const source = (options && typeof options === 'object') ? options : {};
+  return {
+    createUsersAndPerms: wizardCoerceEnabled(source.createUsersAndPerms, WIZARD_VM_CREATE_OPTION_DEFAULTS.createUsersAndPerms),
+    enableUserAccessibility: wizardCoerceEnabled(source.enableUserAccessibility, WIZARD_VM_CREATE_OPTION_DEFAULTS.enableUserAccessibility),
+    applyScenario: wizardCoerceEnabled(source.applyScenario, WIZARD_VM_CREATE_OPTION_DEFAULTS.applyScenario),
+    setNetworkInterfaces: wizardCoerceEnabled(source.setNetworkInterfaces, WIZARD_VM_CREATE_OPTION_DEFAULTS.setNetworkInterfaces),
+    takeSnapshot: wizardCoerceEnabled(source.takeSnapshot, WIZARD_VM_CREATE_OPTION_DEFAULTS.takeSnapshot),
+    startVm: wizardCoerceEnabled(source.startVm, WIZARD_VM_CREATE_OPTION_DEFAULTS.startVm),
+  };
+}
+
+function wizardMergeActionResult(baseResp, extraResp) {
+  const merged = { ...(baseResp || {}) };
+  const source = extraResp || {};
+  Object.keys(source).forEach(key => {
+    const value = source[key];
+    if (Array.isArray(value)) {
+      const existing = Array.isArray(merged[key]) ? merged[key] : [];
+      merged[key] = [...existing, ...value];
+    } else if (merged[key] === undefined) {
+      merged[key] = value;
+    }
+  });
+  return merged;
+}
+
+function wizardBuildUserAccessibilityPlan(project, targets) {
+  const vms = Array.isArray(project?.vms) ? project.vms : [];
+  const baseNameSet = new Set(vms.map(vm => String(vm?.name || '')).filter(Boolean));
+  const tag = String(project?.tag || '').trim();
+  const bases = new Set();
+  const indices = new Set();
+  const skipped = [];
+  (Array.isArray(targets) ? targets : []).forEach(target => {
+    const index = Number(target?.index);
+    const name = String(target?.name || '').trim();
+    if (Number.isFinite(index) && index > 0) indices.add(index);
+    let baseName = name;
+    const suffix = `${tag}${Number.isFinite(index) ? index : ''}`;
+    if (suffix && baseName.endsWith(suffix)) baseName = baseName.slice(0, baseName.length - suffix.length);
+    if (!baseNameSet.has(baseName)) {
+      const match = vms.find(vm => `${String(vm?.name || '')}${suffix}` === name);
+      if (match) baseName = String(match.name || '');
+    }
+    if (!baseName || !baseNameSet.has(baseName)) {
+      skipped.push({ name: name || String(index || ''), reason: 'template not found in project configuration' });
+      return;
+    }
+    bases.add(baseName);
+  });
+  return { bases: Array.from(bases), indices: Array.from(indices), skipped };
+}
+
+async function wizardRunUserAccessibilityFollowUp({ pid, project, targets, baseBody, syncAccess = true, enable = true }) {
+  const plan = wizardBuildUserAccessibilityPlan(project, targets);
+  let result = { infos: [], skipped: [...plan.skipped], errors: [] };
+  if (!pid || !plan.bases.length) return result;
+  for (const baseName of plan.bases) {
+    try {
+      await http('PATCH', `/api/projects/${encodeURIComponent(pid)}/vms/${encodeURIComponent(baseName)}`, { viewable_to_user: !!enable });
+      const vmCfg = (project?.vms || []).find(vm => String(vm?.name || '') === baseName);
+      if (vmCfg) vmCfg.viewable_to_user = !!enable;
+      result.infos.push({ name: baseName, reason: `set viewable_to_user=${enable ? 'true' : 'false'}` });
+    } catch (err) {
+      result.errors.push({ name: baseName, reason: `set viewable_to_user failed: ${err?.message || err}` });
+    }
+  }
+  if (!syncAccess || !plan.indices.length) return result;
+  try {
+    const syncResp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/users_access_sync`, {
+      ...(baseBody || {}),
+      templates: plan.bases,
+      indices: plan.indices,
+      enable: !!enable,
+    });
+    result = wizardMergeActionResult(result, syncResp);
+  } catch (err) {
+    result = wizardMergeActionResult(result, {
+      errors: [{ reason: `User accessibility sync failed: ${err?.message || err}` }],
+    });
+  }
+  return result;
+}
+
 function wizardBuildRunItems(options) {
   const opts = options || {};
+  const createOptions = wizardNormalizeVmCreateOptions(opts.createOptions);
   const items = [{ key: 'project-create', label: 'Create scenario', status: 'pending', detail: 'Waiting to submit the project.' }];
   if (opts.hasSecrets) items.push({ key: 'save-secrets', label: 'Save manager credentials', status: 'pending', detail: 'Will persist credentials for later manager refreshes.', blocking: false });
   if (opts.createVms) items.push({ key: 'vm-create', label: 'Create VMs', status: 'pending', detail: 'Templates will be cloned into scenario instances.' });
-  if (opts.startVms) items.push({ key: 'vm-start', label: 'Start VMs', status: 'pending', detail: 'Created instances will be powered on.' });
-  if (opts.syncUsers) items.push({ key: 'user-sync', label: opts.syncLabel || 'Sync external users', status: 'pending', detail: 'Selected user integrations will be synchronized.' });
+  if (opts.createVms && createOptions.enableUserAccessibility) items.push({ key: 'vm-accessibility', label: 'Apply user accessibility', status: 'pending', detail: 'Selected templates will be marked user-accessible and access will be synchronized when needed.' });
+  if (opts.createVms && createOptions.createUsersAndPerms) items.push({ key: 'vm-users', label: 'Create users/pools', status: 'pending', detail: 'Proxmox users, pools, memberships, and permissions will be created.' });
+  if (opts.createVms && createOptions.applyScenario) items.push({ key: 'vm-scenario', label: 'Apply scenario', status: 'pending', detail: 'Scenario metadata will be applied to the cloned VMs.' });
+  if (opts.createVms && createOptions.startVm) items.push({ key: 'vm-start', label: 'Start VMs', status: 'pending', detail: 'Created instances will be powered on.' });
+  if (opts.createCtfdUsers) items.push({ key: 'ctfd-users', label: 'Create CTFd users', status: 'pending', detail: 'CTFd users will be created or updated from the credential list.' });
   return items;
 }
 
@@ -4126,6 +4327,40 @@ function wizardSummarizeActionResult(action, result) {
     if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
     return bits.join(', ');
   }
+  if (action === 'apply_scenario') {
+    const applied = wizardCountEntries(res.applied);
+    const errors = wizardCountEntries(res.errors);
+    const bits = [`Applied scenario to ${applied} VM${applied === 1 ? '' : 's'}`];
+    if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
+    return bits.join(', ');
+  }
+  if (action === 'user_accessibility') {
+    const infos = wizardCountEntries(res.infos);
+    const applied = wizardCountEntries(res.applied);
+    const unchanged = wizardCountEntries(res.unchanged);
+    const skipped = wizardCountEntries(res.skipped);
+    const errors = wizardCountEntries(res.errors);
+    const bits = [`Updated ${infos} template${infos === 1 ? '' : 's'}`];
+    if (applied) bits.push(`${applied} access change${applied === 1 ? '' : 's'}`);
+    if (unchanged) bits.push(`${unchanged} unchanged`);
+    if (skipped) bits.push(`${skipped} skipped`);
+    if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
+    return bits.join(', ');
+  }
+  if (action === 'users_create') {
+    const createdUsers = wizardCountEntries(res.created_users);
+    const updatedUsers = wizardCountEntries(res.updated_users);
+    const createdPools = wizardCountEntries(res.created_pools);
+    const addedMembers = wizardCountEntries(res.added_members);
+    const skipped = wizardCountEntries(res.skipped);
+    const errors = wizardCountEntries(res.errors);
+    const bits = [`Users ${createdUsers + updatedUsers}`];
+    if (createdPools) bits.push(`${createdPools} pool${createdPools === 1 ? '' : 's'}`);
+    if (addedMembers) bits.push(`${addedMembers} member${addedMembers === 1 ? '' : 's'}`);
+    if (skipped) bits.push(`${skipped} skipped`);
+    if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
+    return bits.join(', ');
+  }
   if (action === 'users_access_sync') {
     const applied = wizardCountEntries(res.applied);
     const unchanged = wizardCountEntries(res.unchanged);
@@ -4133,6 +4368,17 @@ function wizardSummarizeActionResult(action, result) {
     const bits = [`Applied ${applied} change${applied === 1 ? '' : 's'}`];
     if (unchanged) bits.push(`${unchanged} unchanged`);
     if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
+    return bits.join(', ');
+  }
+  if (action === 'ctfd_users_create') {
+    const created = wizardCountEntries(res.created);
+    const updated = wizardCountEntries(res.updated);
+    const skipped = wizardCountEntries(res.skipped);
+    const results = Array.isArray(res.results) ? res.results : [];
+    const resultErrors = results.filter(item => item && item.error).length;
+    const bits = [`Created ${created}, updated ${updated}`];
+    if (skipped) bits.push(`${skipped} skipped`);
+    if (resultErrors) bits.push(`${resultErrors} issue${resultErrors === 1 ? '' : 's'}`);
     return bits.join(', ');
   }
   return 'Completed';
@@ -4180,12 +4426,23 @@ function wizardCollectActionIssues(action, result) {
     });
     return issues;
   }
-  if (action === 'start' || action === 'users_access_sync') {
+  if (action === 'start' || action === 'users_access_sync' || action === 'apply_scenario' || action === 'users_create' || action === 'user_accessibility') {
     (Array.isArray(res.errors) ? res.errors : []).forEach(entry => {
       if (!entry) return;
       const name = String(entry.name || entry.index || '').trim();
       const reason = String(entry.reason || entry.error || '').trim();
       if (name && reason) issues.push(`${name}: ${reason}`);
+      else if (reason) issues.push(reason);
+    });
+    return issues;
+  }
+  if (action === 'ctfd_users_create') {
+    if (res.error) issues.push(String(res.error));
+    (Array.isArray(res.results) ? res.results : []).forEach(entry => {
+      if (!entry || !entry.error) return;
+      const username = String(entry.username || '').trim();
+      const reason = String(entry.error || '').trim();
+      if (username && reason) issues.push(`${username}: ${reason}`);
       else if (reason) issues.push(reason);
     });
     return issues;
@@ -4218,8 +4475,12 @@ function wizardActionHasErrors(action, result) {
   if (action === 'create') {
     return wizardCountEntries(res.errors) > 0 || wizardCountEntries(res.network_apply_errors) > 0 || wizardCountEntries(res?.verify?.issues) > 0;
   }
-  if (action === 'start' || action === 'users_access_sync') {
+  if (action === 'start' || action === 'users_access_sync' || action === 'apply_scenario' || action === 'users_create' || action === 'user_accessibility') {
     return wizardCountEntries(res.errors) > 0;
+  }
+  if (action === 'ctfd_users_create') {
+    const resultErrors = (Array.isArray(res.results) ? res.results : []).filter(item => item && item.error).length;
+    return !!res.error || resultErrors > 0;
   }
   return false;
 }
@@ -4453,23 +4714,27 @@ window.submitProjectCreation = async function(mode) {
         viewable_to_user: t.user_accessible,
         vm_user: t.vm_user || null,
         vm_pass: t.vm_pass || null,
-        internal_network_adaptors: Array.isArray(t.nets) && t.nets.length > 0 ? t.nets : []
+        internal_network_adaptors: Array.isArray(t.nets) && t.nets.length > 0 ? t.nets : [],
+        internet_connected_adaptors: Array.isArray(t.internet_connected_adaptors) && t.internet_connected_adaptors.length > 0 ? t.internet_connected_adaptors : []
       }));
     }
     
-    const isCreate = !!document.getElementById('wiz-act-vm-create')?.checked;
-    const isStart = !!document.getElementById('wiz-act-vm-start')?.checked;
-    const isUsersVm = !!document.getElementById('wiz-act-vm-users')?.checked;
-    const isUsersCtfd = !!document.getElementById('wiz-act-ctfd-users')?.checked;
-    const syncUsers = isUsersVm || isUsersCtfd;
-    const syncLabel = isUsersVm && isUsersCtfd
-      ? 'Sync Proxmox and CTFd users'
-      : (isUsersCtfd ? 'Sync CTFd users' : 'Sync external users');
+    const hasVmFeature = !!document.getElementById('wiz-feat-vm')?.checked;
+    const hasCtfdFeature = !!document.getElementById('wiz-feat-ctfd')?.checked;
+    const isCreate = hasVmFeature && !!document.getElementById('wiz-act-vm-create')?.checked;
+    const createOptions = wizardNormalizeVmCreateOptions({
+      createUsersAndPerms: !!document.getElementById('wiz-act-vm-users')?.checked,
+      enableUserAccessibility: !!document.getElementById('wiz-act-vm-accessibility')?.checked,
+      applyScenario: !!document.getElementById('wiz-act-vm-scenario')?.checked,
+      setNetworkInterfaces: !!document.getElementById('wiz-act-vm-network')?.checked,
+      takeSnapshot: !!document.getElementById('wiz-act-vm-snapshot')?.checked,
+      startVm: !!document.getElementById('wiz-act-vm-start')?.checked,
+    });
+    const isUsersCtfd = hasCtfdFeature && !!document.getElementById('wiz-act-ctfd-users')?.checked;
     wizardRunOptions = {
       createVms: isCreate,
-      startVms: isCreate && isStart,
-      syncUsers,
-      syncLabel,
+      createOptions,
+      createCtfdUsers: isUsersCtfd,
       hasSecrets: !!(vmUser || vmPass || ctfdToken)
     };
     wizardStartQueue(
@@ -4557,6 +4822,13 @@ window.submitProjectCreation = async function(mode) {
     }
 
     if (mode === 'wizard' && pid) {
+      const projectForFollowUps = {
+        ...(res && typeof res === 'object' ? res : {}),
+        id: pid,
+        name: (res && res.name) || payload.name || name,
+        tag: (res && res.tag !== undefined) ? res.tag : (payload.tag || ''),
+        vms: Array.isArray(res?.vms) ? res.vms : (Array.isArray(payload.vms) ? payload.vms : []),
+      };
       const proxmoxActionBody = {
         username: vmUser || undefined,
         password: vmPass || undefined,
@@ -4573,37 +4845,51 @@ window.submitProjectCreation = async function(mode) {
           targets.push({ index, name });
         });
       }
-      const indices = Array.from({ length: instanceCount }, (_, idx) => idx + 1);
-      const createStartBody = { ...proxmoxActionBody, targets };
+      const createOptions = wizardNormalizeVmCreateOptions(wizardRunOptions?.createOptions);
+      const createBody = {
+        ...proxmoxActionBody,
+        targets,
+        applyScenario: false,
+        syncUserAccess: false,
+        setNetworkInterfaces: createOptions.setNetworkInterfaces,
+        takeSnapshot: createOptions.takeSnapshot,
+      };
+      const followUpBody = { ...proxmoxActionBody, targets };
       try {
         if (wizardRunOptions?.createVms) {
           wizardSetRunState('Running selected operations...', 'Creating the selected VMs for the new scenario.');
-          await wizardRunTrackedAction(pid, 'vm-create', 'create', () => http('POST', `/api/projects/${pid}/instances/actions/create`, createStartBody));
-        } else if (wizardFindRunItem('vm-create')) {
-          wizardUpdateRunItem('vm-create', { status: 'skipped', progress: 100, detail: 'VM creation was not selected.' });
+          await wizardRunTrackedAction(pid, 'vm-create', 'create', () => http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/create`, createBody));
         }
-        if (wizardRunOptions?.startVms) {
-          wizardSetRunState('Running selected operations...', 'Starting the created VMs.');
-          await wizardRunTrackedAction(pid, 'vm-start', 'start', () => http('POST', `/api/projects/${pid}/instances/actions/start`, createStartBody));
-        } else if (wizardFindRunItem('vm-start')) {
-          wizardUpdateRunItem('vm-start', { status: 'skipped', progress: 100, detail: 'VM start was not selected.' });
-        }
-        if (wizardRunOptions?.syncUsers && templateNames.length > 0 && indices.length > 0) {
-          wizardSetRunState('Running selected operations...', 'Synchronizing the selected user integrations.');
-          await wizardRunTrackedAction(pid, 'user-sync', 'users_access_sync', () => http('POST', `/api/projects/${pid}/instances/actions/users_access_sync`, {
-            ...proxmoxActionBody,
-            templates: templateNames,
-            indices,
+        if (wizardRunOptions?.createVms && createOptions.enableUserAccessibility) {
+          wizardSetRunState('Running selected operations...', 'Applying user accessibility settings.');
+          await wizardRunTrackedAction(pid, 'vm-accessibility', 'user_accessibility', () => wizardRunUserAccessibilityFollowUp({
+            pid,
+            project: projectForFollowUps,
+            targets,
+            baseBody: proxmoxActionBody,
+            syncAccess: !createOptions.createUsersAndPerms,
             enable: true,
           }));
-        } else if (wizardFindRunItem('user-sync')) {
-          wizardUpdateRunItem('user-sync', {
-            status: 'skipped',
-            progress: 100,
-            detail: wizardRunOptions?.syncUsers
-              ? 'No VM templates were available to synchronize.'
-              : 'User synchronization was not selected.'
-          });
+        }
+        if (wizardRunOptions?.createVms && createOptions.createUsersAndPerms) {
+          wizardSetRunState('Running selected operations...', 'Creating Proxmox users, pools, and permissions.');
+          await wizardRunTrackedAction(pid, 'vm-users', 'users_create', () => http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/users_create`, followUpBody));
+        }
+        if (wizardRunOptions?.createVms && createOptions.applyScenario) {
+          wizardSetRunState('Running selected operations...', 'Applying scenario metadata to the created VMs.');
+          await wizardRunTrackedAction(pid, 'vm-scenario', 'apply_scenario', () => http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/apply_scenario`, followUpBody));
+        }
+        if (wizardRunOptions?.createVms && createOptions.startVm) {
+          wizardSetRunState('Running selected operations...', 'Starting the created VMs.');
+          await wizardRunTrackedAction(pid, 'vm-start', 'start', () => http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/start`, followUpBody));
+        }
+        if (wizardRunOptions?.createCtfdUsers) {
+          wizardSetRunState('Running selected operations...', 'Creating CTFd users from the scenario credentials.');
+          await wizardRunTrackedAction(pid, 'ctfd-users', 'ctfd_users_create', () => http('POST', `/api/projects/${encodeURIComponent(pid)}/ctfd/users_create`, {
+            baseUrl: payload.challenge_url || undefined,
+            token: ctfdToken || undefined,
+            verifySSL: payload.challenge_verify_ssl !== false,
+          }));
         }
       } finally {
         // Redundant vmRefresh call removed; redirect handles refresh.
@@ -4922,12 +5208,30 @@ async function autoSaveVm(pid, idx) {
     }
   }
   const collectValues = (selector) => Array.from(document.querySelectorAll(selector)).map(input => (input.value || '').trim()).filter(v => v !== '');
+  const collectNetworkRows = () => {
+    const rows = Array.from(document.querySelectorAll(`#vm-${pid}-${idx}-nets-list li`));
+    const adaptors = [];
+    const internetConnectedAdaptors = [];
+    rows.forEach(row => {
+      const input = row.querySelector('input.form-control');
+      const internetToggle = row.querySelector('[data-net-internet]');
+      const internetConnected = !!(internetToggle && internetToggle.checked);
+      const raw = (input && input.value ? input.value.trim() : '');
+      const clean = internetConnected
+        ? raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 15)
+        : raw.replace(/[^A-Za-z]/g, '').slice(0, 8);
+      if (!clean) return;
+      adaptors.push(clean);
+      if (internetConnected) internetConnectedAdaptors.push(clean);
+    });
+    return { adaptors, internetConnectedAdaptors };
+  };
   const startSteps = getStartCommandsFromDom(pid, idx);
   const startCommands = stepsToServerPayload(startSteps);
   const storedSteps = getStoredCommandsFromDom(pid, idx);
   const storedCommands = stepsToServerPayload(storedSteps);
   const validationCommands = validationCommandsToServerPayload(getValidationCommandsFromDom(pid, idx));
-  const adaptors = collectValues(`#vm-${pid}-${idx}-nets-list input`).map(val => val.replace(/[^A-Za-z]/g, '').slice(0, 8)).filter(Boolean);
+  const networkRows = collectNetworkRows();
   if (userEl && userEl.value.trim() !== '') {
     vm_user = userEl.value.trim();
   }
@@ -4944,7 +5248,8 @@ async function autoSaveVm(pid, idx) {
     start_commands: startCommands,
     stored_commands: storedCommands,
     validation_commands: validationCommands,
-    internal_network_adaptors: adaptors
+    internal_network_adaptors: networkRows.adaptors,
+    internet_connected_adaptors: networkRows.internetConnectedAdaptors
   };
   try {
     await saveVM(pid, name, payload, { silent: true });
@@ -4961,6 +5266,7 @@ async function autoSaveVm(pid, idx) {
             stored_commands: payload.stored_commands,
             validation_commands: payload.validation_commands,
             internal_network_adaptors: payload.internal_network_adaptors,
+            internet_connected_adaptors: payload.internet_connected_adaptors,
             vm_user: payload.vm_user,
             vm_pass: payload.vm_pass
           };
@@ -6026,13 +6332,20 @@ function renderProjectCard(p) {
     })()}
         </div>
     <div class="col-md-4">
-          <label class="form-label">Internal Network Adaptors</label>
-          <div class="d-flex gap-2 mb-2">
-            <input class="form-control form-control-sm" id="vm-${p.id}-${i}-nets-input" placeholder="Add adaptor" title="Internal network adaptor base name" oninput="onAdaptorInput('${p.id}', ${i}, this)" onkeydown="onAdaptorKeydown('${p.id}', ${i}, event)" />
+          <label class="form-label">Network Interfaces</label>
+          <div class="d-flex gap-2 mb-2 align-items-center flex-wrap">
+            <input class="form-control form-control-sm flex-grow-1" id="vm-${p.id}-${i}-nets-input" placeholder="Add interface" title="Internal adapters use letters only; internet-connected interfaces can use bridge names like vmbr0" oninput="onAdaptorInput('${p.id}', ${i}, this)" onkeydown="onAdaptorKeydown('${p.id}', ${i}, event)" />
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" role="switch" id="vm-${p.id}-${i}-nets-internet" onchange="onAdaptorInput('${p.id}', ${i})">
+              <label class="form-check-label small" for="vm-${p.id}-${i}-nets-internet">Internet</label>
+            </div>
             <button id="btn-add-net-${p.id}-${i}" class="btn btn-sm btn-outline-primary" onclick="addListItem('vm-${p.id}-${i}-nets-list','vm-${p.id}-${i}-nets-input')" disabled>Add</button>
           </div>
           <ul class="list-group list-group-sm" id="vm-${p.id}-${i}-nets-list">
-            ${(v.internal_network_adaptors || v.internal_network_adapters || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx)).join('')}
+            ${(function () {
+      const internetSet = getInternetConnectedAdaptors(v);
+      return (v.internal_network_adaptors || v.internal_network_adapters || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx, { internetConnected: internetSet.has(String(c || '').trim()) })).join('');
+    })()}
           </ul>
         </div>
   <div class="col-12"><div class="small text-muted" id="vm-save-status-${p.id}-${i}"></div></div>
@@ -6978,7 +7291,7 @@ function renderInstancesPreview(p) {
   for (let i = 1; i <= inst; i++) {
     const suffix = `${tag}${i}`;
     const names = vms.map(v => `${v.name}${suffix}`);
-    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors || v.internal_network_adapters || []).map(a => `${a}${suffix}`)));
+    const adaptors = (vms.flatMap(v => (v.internal_network_adaptors || v.internal_network_adapters || []).map(a => formatPreviewAdaptor(v, a, suffix))));
     const st = statusMap.get(i) || {};
     const mgr = st.managers || {};
     const mgrBadges = managers.map(m => badgeForStatus(m, mgr[m])).join(' ');
@@ -6987,6 +7300,22 @@ function renderInstancesPreview(p) {
   html += '</tbody></table></div>';
   html += '<div class="text-muted small">Names are concatenated with the Tag and an incremental number to ensure uniqueness per instance.</div>';
   return html;
+}
+
+function getInternetConnectedAdaptors(vm) {
+  const raw = vm && (vm.internet_connected_adaptors || vm.internet_connected_adapters || vm.internet_connected_interfaces) || [];
+  return new Set((Array.isArray(raw) ? raw : []).map(item => String(item || '').trim()).filter(Boolean));
+}
+
+function formatPreviewAdaptor(vm, adaptor, suffix) {
+  const value = String(adaptor || '').trim();
+  if (!value) return '';
+  return getInternetConnectedAdaptors(vm).has(value) ? value : `${value}${suffix}`;
+}
+
+function isValidNetworkAdaptorName(value, internetConnected) {
+  const text = String(value || '').trim();
+  return internetConnected ? /^[A-Za-z0-9_-]{1,15}$/.test(text) : /^[A-Za-z]{1,8}$/.test(text);
 }
 
 function badgeForStatus(name, value) {
@@ -7000,10 +7329,18 @@ function badgeForStatus(name, value) {
 }
 
 // Helpers for dynamic list add/remove within VM sections
-function listItemTemplate(listId, value, idx) {
+function listItemTemplate(listId, value, idx, options = {}) {
   const safe = escHtml(value ?? '');
+  const isNetList = String(listId).includes('-nets-list');
+  const internetChecked = options && options.internetConnected ? ' checked' : '';
+  const internetControl = isNetList ? `
+    <div class="form-check form-switch mb-0 me-2 flex-shrink-0">
+      <input class="form-check-input" type="checkbox" role="switch" data-net-internet${internetChecked} onchange="onListItemEdit('${listId}', this)">
+      <label class="form-check-label small">Internet</label>
+    </div>` : '';
   return `<li class="list-group-item d-flex align-items-center justify-content-between" data-index="${idx}">
     <input class="form-control form-control-sm me-2" value="${safe}" oninput="onListItemEdit('${listId}', this)"/>
+    ${internetControl}
     <button class="btn btn-sm btn-outline-danger" onclick="removeListItem('${listId}', this)">Remove</button>
   </li>`;
 }
@@ -7012,10 +7349,14 @@ function onListItemEdit(listId, inputEl) {
   // Live validation for adaptor names list
   try {
     if (String(listId).includes('-nets-list')) {
-      const v = (inputEl.value || '').trim();
-      const valid = /^[A-Za-z]{0,8}$/.test(v);
-      inputEl.classList.toggle('is-invalid', !valid);
-      if (!valid) showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger');
+      const row = inputEl && inputEl.closest ? inputEl.closest('li') : null;
+      const textInput = row ? row.querySelector('input.form-control') : inputEl;
+      const internetToggle = row ? row.querySelector('[data-net-internet]') : null;
+      const internetConnected = !!(internetToggle && internetToggle.checked);
+      const v = (textInput && textInput.value || '').trim();
+      const valid = !v || isValidNetworkAdaptorName(v, internetConnected);
+      if (textInput) textInput.classList.toggle('is-invalid', !valid);
+      if (!valid) showToast(internetConnected ? 'Invalid interface name: letters, numbers, underscores, or dashes; up to 15 characters.' : 'Invalid adaptor name: letters only, up to 8 characters.', 'danger');
     }
   } catch { }
   // Auto-save after edits (debounced)
@@ -7052,8 +7393,10 @@ function onAdaptorInput(pid, idx, el) {
   try {
     const input = el || document.getElementById(`vm-${pid}-${idx}-nets-input`);
     const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
+    const internetToggle = document.getElementById(`vm-${pid}-${idx}-nets-internet`);
+    const internetConnected = !!(internetToggle && internetToggle.checked);
     const v = (input?.value || '').trim();
-    const ok = /^[A-Za-z]{1,8}$/.test(v);
+    const ok = isValidNetworkAdaptorName(v, internetConnected);
     if (input) input.classList.toggle('is-invalid', !ok && v.length > 0);
     if (btn) btn.disabled = !ok;
   } catch { }
@@ -7079,19 +7422,23 @@ function addListItem(listId, inputId) {
   if (!list || !input) return;
   const val = (input.value || '').trim();
   if (!val) return;
-  // If this is a nets list, enforce letters-only up to 8
+  // If this is a nets list, validate by interface mode.
+  let internetConnected = false;
   if (String(listId).includes('-nets-list')) {
-    if (!/^[A-Za-z]{1,8}$/.test(val)) {
+    const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
+    const internetToggle = pid && idx ? document.getElementById(`vm-${pid}-${idx}-nets-internet`) : null;
+    internetConnected = !!(internetToggle && internetToggle.checked);
+    if (!isValidNetworkAdaptorName(val, internetConnected)) {
       input.classList.add('is-invalid');
-      try { showToast('Invalid adaptor name: letters only, up to 8 characters.', 'danger'); } catch { alert('Invalid adaptor name: letters only, up to 8 characters.'); }
+      const msg = internetConnected ? 'Invalid interface name: letters, numbers, underscores, or dashes; up to 15 characters.' : 'Invalid adaptor name: letters only, up to 8 characters.';
+      try { showToast(msg, 'danger'); } catch { alert(msg); }
       return;
     }
     // Prevent duplicates (case-insensitive) within the same VM list
-    const existing = Array.from(list.querySelectorAll('input')).map(i => (i.value || '').trim().toLowerCase());
+    const existing = Array.from(list.querySelectorAll('input.form-control')).map(i => (i.value || '').trim().toLowerCase());
     if (existing.includes(val.toLowerCase())) {
       try { showToast('Adaptor already added for this VM.', 'warning'); } catch { }
       input.value = '';
-      const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
       if (pid && idx) {
         const btn = document.getElementById(`btn-add-net-${pid}-${idx}`);
         if (btn) btn.disabled = true;
@@ -7099,12 +7446,14 @@ function addListItem(listId, inputId) {
       return;
     }
   }
-  const li = document.createElement('li');
-  li.className = 'list-group-item d-flex align-items-center justify-content-between';
-  li.innerHTML = `<input class="form-control form-control-sm me-2" value="${escHtml(val)}" oninput="onListItemEdit('${listId}', this)"/><button class="btn btn-sm btn-outline-danger" onclick="removeListItem('${listId}', this)">Remove</button>`;
-  list.appendChild(li);
+  list.insertAdjacentHTML('beforeend', listItemTemplate(listId, val, list.children.length, { internetConnected }));
   input.value = '';
   input.classList.remove('is-invalid');
+  try {
+    const [_, pid, idx] = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/) || [];
+    const internetToggle = pid && idx ? document.getElementById(`vm-${pid}-${idx}-nets-internet`) : null;
+    if (internetToggle) internetToggle.checked = false;
+  } catch { }
   // Debounce save for VM lists
   try {
     const m = String(listId).match(/^vm-(.+)-(\d+)-/);

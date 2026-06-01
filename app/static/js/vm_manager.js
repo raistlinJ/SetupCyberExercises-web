@@ -1826,6 +1826,11 @@ function _vmExpectedBridgeName(adaptorLabel, idx) {
   }
 }
 
+function _vmInternetConnectedAdaptorSet(vmCfg) {
+  const raw = vmCfg && (vmCfg.internet_connected_adaptors || vmCfg.internet_connected_adapters || vmCfg.internet_connected_interfaces) || [];
+  return new Set((Array.isArray(raw) ? raw : []).map(item => String(item || '').trim()).filter(Boolean));
+}
+
 function _vmExpectedNetLabelsForGeneratedName(proj, genName, idx) {
   try {
     const tag = String(proj?.tag || '').trim();
@@ -1834,10 +1839,12 @@ function _vmExpectedNetLabelsForGeneratedName(proj, genName, idx) {
     if (suffix && baseName.endsWith(suffix)) baseName = baseName.slice(0, baseName.length - suffix.length);
     const vmCfg = (proj?.vms || []).find(v => String(v?.name || '') === baseName) || null;
     const adaptors = Array.isArray(vmCfg?.internal_network_adaptors) ? vmCfg.internal_network_adaptors : [];
+    const internetSet = _vmInternetConnectedAdaptorSet(vmCfg);
     if (!adaptors.length) return null;
     const nets = [];
     for (let i = 0; i < adaptors.length; i++) {
-      const bridge = _vmExpectedBridgeName(adaptors[i], idx);
+      const value = String(adaptors[i] || '').trim();
+      const bridge = internetSet.has(value) ? value : _vmExpectedBridgeName(value, idx);
       nets.push(`net${i}(${bridge})`);
     }
     return nets;

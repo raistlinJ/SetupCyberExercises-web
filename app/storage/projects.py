@@ -326,6 +326,7 @@ class VMConfig:
     stored_commands: List[StartCommandStep] = field(default_factory=list)
     validation_commands: List[Dict[str, Any]] = field(default_factory=list)
     internal_network_adaptors: Optional[List[str]] = None
+    internet_connected_adaptors: Optional[List[str]] = None
     # Advanced per-VM clone options
     use_linked_clone: Optional[bool] = None  # override project default
     clone_timeout_sec: Optional[int] = None  # override project timeout
@@ -804,6 +805,8 @@ class ProjectStore:
                 # Canonicalize spelling variant
                 if k == "internal_network_adapters" and "internal_network_adaptors" not in v:
                     k = "internal_network_adaptors"
+                if k in ("internet_connected_adapters", "internet_connected_interfaces") and "internet_connected_adaptors" not in v:
+                    k = "internet_connected_adaptors"
                 if k in base:
                     base[k] = val
             # Ensure viewable_to_user is a real bool (older data may store strings)
@@ -1054,6 +1057,7 @@ class ProjectStore:
                     "stored_commands",
                     "validation_commands",
                     "internal_network_adaptors",
+                    "internet_connected_adaptors",
                     "use_linked_clone",
                     "clone_timeout_sec",
                     "storage_volume",
@@ -1107,6 +1111,7 @@ class ProjectStore:
                                        stored_commands=sanitize_start_command_steps(vm.stored_commands),
                                        validation_commands=sanitize_validation_commands(getattr(vm, 'validation_commands', [])),
                                        internal_network_adaptors=vm.internal_network_adaptors,
+                                       internet_connected_adaptors=vm.internet_connected_adaptors,
                                        use_linked_clone=vm.use_linked_clone,
                                        clone_timeout_sec=vm.clone_timeout_sec,
                                        storage_volume=vm.storage_volume,

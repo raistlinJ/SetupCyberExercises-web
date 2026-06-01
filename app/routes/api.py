@@ -317,6 +317,76 @@ def _bridge_iface_name(idx: Any, adaptor_name: Any) -> str:
     return name or f"br{index}"
 
 
+def _vm_field(cfg: Any, key: str, default: Any = None) -> Any:
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _coerce_list_field(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _vm_internet_connected_adaptor_set(cfg: Any) -> Set[str]:
+    raw = _vm_field(cfg, 'internet_connected_adaptors', None)
+    if raw is None:
+        raw = _vm_field(cfg, 'internet_connected_adapters', None)
+    if raw is None:
+        raw = _vm_field(cfg, 'internet_connected_interfaces', None)
+    out: Set[str] = set()
+    for item in _coerce_list_field(raw):
+        try:
+            text = str(item or '').strip()
+        except Exception:
+            text = ''
+        if text:
+            out.add(text)
+    return out
+
+
+def _is_vm_internet_connected_adaptor(cfg: Any, adaptor_name: Any) -> bool:
+    try:
+        return str(adaptor_name or '').strip() in _vm_internet_connected_adaptor_set(cfg)
+    except Exception:
+        return False
+
+
+def _bridge_iface_for_vm_adaptor(idx: Any, cfg: Any, adaptor_name: Any) -> str:
+    if _is_vm_internet_connected_adaptor(cfg, adaptor_name):
+        return _validate_iface(str(adaptor_name or '').strip())
+    return _bridge_iface_name(idx, adaptor_name)
+
+
+def _bridge_specs_for_vm(idx: Any, cfg: Any) -> List[Dict[str, Any]]:
+    specs: List[Dict[str, Any]] = []
+    for adaptor in _coerce_list_field(_vm_field(cfg, 'internal_network_adaptors', None)):
+        try:
+            adaptor_text = str(adaptor or '').strip()
+        except Exception:
+            adaptor_text = ''
+        if not adaptor_text:
+            continue
+        internet_connected = _is_vm_internet_connected_adaptor(cfg, adaptor_text)
+        try:
+            bridge = _validate_iface(adaptor_text) if internet_connected else _bridge_iface_name(idx, adaptor_text)
+        except Exception:
+            continue
+        if not bridge:
+            continue
+        specs.append({
+            'adaptor': adaptor_text,
+            'bridge': bridge,
+            'internet_connected': internet_connected,
+        })
+    return specs
+
+
 def _bridge_legacy_iface_name(tag: str, idx: Any, adaptor_name: Any) -> str:
     try:
         index = int(idx)
@@ -376,7 +446,10 @@ def _build_bridge_project_snapshot(proj: Project, tag: str) -> Dict[str, Any]:
         if not name:
             continue
         adaptors = []
+        internet_adaptors = _vm_internet_connected_adaptor_set(vm)
         for adaptor in list(getattr(vm, 'internal_network_adaptors', []) or []):
+            if str(adaptor or '').strip() in internet_adaptors:
+                continue
             normalized = _normalize_bridge_adaptor_name(adaptor)
             if normalized:
                 adaptors.append(normalized)
@@ -2748,11 +2821,10 @@ def instances_create(pid: str):
                 debug_msgs.append(f"Notice: failed to clear inherited LXC network interfaces (non-fatal): {e}")
 
         # Networking deferred: only record expected bridge names; creation & NIC assignment happen post-clone
-        adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if set_network_interfaces else []
-        expected_bridges_for_vm = []
-        for i, a in enumerate(adaptors):
-            bname = _bridge_iface_name(idx, a)
-            expected_bridges_for_vm.append(bname)
+        bridge_specs_for_vm = _bridge_specs_for_vm(idx, cfg) if set_network_interfaces else []
+        expected_bridges_for_vm = [spec['bridge'] for spec in bridge_specs_for_vm]
+        managed_expected_bridges_for_vm = [spec['bridge'] for spec in bridge_specs_for_vm if not spec.get('internet_connected')]
+        internet_connected_bridges_for_vm = [spec['bridge'] for spec in bridge_specs_for_vm if spec.get('internet_connected')]
         try:
             _update_job_detail(
                 pid,
@@ -3012,10 +3084,10 @@ def instances_create(pid: str):
                 post_errors.append({ 'index': idx, 'name': newname, 'reason': f'pool/acl assignment failed: {e}' })
         # Finalize
         if post_errors:
-            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal, 'type': 'lxc' if is_lxc else 'qemu' }
+            payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'managed_expected_bridges': managed_expected_bridges_for_vm, 'internet_connected_bridges': internet_connected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal, 'type': 'lxc' if is_lxc else 'qemu' }
             payload.update(assignment_info)
             return ('post', payload, post_errors)
-        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal, 'type': 'lxc' if is_lxc else 'qemu' }
+        payload = { 'index': idx, 'name': newname, 'vmid': newid, 'node': node, 'vmid_attempts': vmid_attempts, 'debug': debug_msgs, 'expected_bridges': expected_bridges_for_vm, 'managed_expected_bridges': managed_expected_bridges_for_vm, 'internet_connected_bridges': internet_connected_bridges_for_vm, 'fallback_full_clone': fallback_full_used, 'skip_post_clone_snapshot': bool(skip_snap), '_ordinal': ordinal, 'type': 'lxc' if is_lxc else 'qemu' }
         payload.update(assignment_info)
         return ('ok', payload, None)
 
@@ -3166,7 +3238,7 @@ def instances_create(pid: str):
                 node = r.get('node')
                 if not node:
                     continue
-                expected_bridges = list(r.get('expected_bridges') or [])
+                expected_bridges = list(r.get('managed_expected_bridges') or r.get('expected_bridges') or [])
                 for bridge_pos, b in enumerate(expected_bridges, start=1):
                     if b:
                         bridges_needed.setdefault(node, set()).add(b)
@@ -3657,6 +3729,7 @@ def instances_create(pid: str):
                         has_snap = False
                 # 2) NICs match expected bridges?
                 expected_bridges = set([str(b) for b in (r.get('expected_bridges') or [])])
+                managed_expected_bridges = set([str(b) for b in (r.get('managed_expected_bridges') or r.get('expected_bridges') or [])])
                 actual_bridges = set()
                 nets_ok = True
                 nets_retries = 0
@@ -3711,13 +3784,13 @@ def instances_create(pid: str):
                     ssh_pass = password or ''
                     ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
                     host = _resolve_ssh_host(node)
-                    if host and ssh_user and ssh_pass and expected_bridges:
+                    if host and ssh_user and ssh_pass and managed_expected_bridges:
                         import paramiko  # type: ignore
                         c = paramiko.SSHClient()
                         c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                         c.connect(hostname=host, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=10, allow_agent=False, look_for_keys=False)
                         try:
-                            for b in expected_bridges:
+                            for b in managed_expected_bridges:
                                 try:
                                     import shlex
                                     check_cmd = ("TARGET=/etc/network/interfaces; "
@@ -3746,7 +3819,7 @@ def instances_create(pid: str):
                                 pass
                 except Exception:
                     # If SSH unavailable, mark unknown ageing results as missing to allow retry option
-                    ageing_missing = list(expected_bridges)
+                    ageing_missing = list(managed_expected_bridges)
                 if (not has_snap) or (not nets_ok) or (ageing_missing):
                     issue_payload = {
                         'index': idx,
@@ -4348,16 +4421,8 @@ def instances_fix_ageing(pid: str):
             for v in proj.vms or []:
                 if getattr(v, 'name', '') == base_name:
                     cfg = v; break
-            adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if cfg else []
-            for a in adaptors:
-                try:
-                    base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                    bname = f"{base}{idx}" if base else f"br{idx}"
-                    if len(bname) > 15:
-                        bname = bname[:15]
-                except Exception:
-                    bname = f"br{idx}"
-                expected.append(bname)
+            specs = _bridge_specs_for_vm(idx, cfg) if cfg else []
+            expected = [spec['bridge'] for spec in specs if not spec.get('internet_connected')]
         except Exception:
             expected = []
         if not expected:
@@ -4574,8 +4639,8 @@ def instances_delete(pid: str):
         vmid = info['vmid']
         vtype = info.get('type', 'qemu')
         vstatus = info.get('status', 'stopped')
-        adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
-        return ('ok', { 'index': idx, 'gen_name': gen_name, 'node': node, 'vmid': vmid, 'type': vtype, 'status': vstatus, 'adaptors': adaptors })
+        bridge_specs = _bridge_specs_for_vm(idx, cfg)
+        return ('ok', { 'index': idx, 'gen_name': gen_name, 'node': node, 'vmid': vmid, 'type': vtype, 'status': vstatus, 'bridge_specs': bridge_specs })
 
     prepared = [prepare_target(t) for t in targets]
     # Accumulate pre-known skips/errors
@@ -4591,8 +4656,8 @@ def instances_delete(pid: str):
     # Collect bridge deletion intents per node for bulk processing after all VM deletions
     bulk_bridge_deletions = {}
 
-    def _record_bridge_for_cleanup(node: str, idx: int, adaptor_name: str, gen_name: str):
-        bname = _bridge_iface_name(idx, adaptor_name)
+    def _record_bridge_for_cleanup(node: str, idx: int, adaptor_name: str, gen_name: str, bridge_name: Optional[str] = None):
+        bname = str(bridge_name or '').strip() or _bridge_iface_name(idx, adaptor_name)
         bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'adaptor': _normalize_bridge_adaptor_name(adaptor_name) })
 
     def do_delete(task):
@@ -4604,7 +4669,7 @@ def instances_delete(pid: str):
         vmid = task['vmid']
         is_lxc = task.get('type') == 'lxc'
         is_running = (task.get('status') == 'running')
-        adaptors = task['adaptors']
+        bridge_specs = list(task.get('bridge_specs') or [])
         if is_running:
             try:
                 if is_lxc:
@@ -4620,8 +4685,10 @@ def instances_delete(pid: str):
             upid = client.delete_qemu(node=node, vmid=vmid, purge=True, destroy_unreferenced_disks=True)
         client._wait_task(node, upid, timeout=1200)
         # Record bridges for later deletion (post all deletions) to avoid race conditions and repeated node reloads
-        for a in adaptors:
-            _record_bridge_for_cleanup(node, idx, a, gen_name)
+        for spec in bridge_specs:
+            if spec.get('internet_connected'):
+                continue
+            _record_bridge_for_cleanup(node, idx, spec.get('adaptor') or '', gen_name, spec.get('bridge') or None)
         return ({ 'index': idx, 'name': gen_name, 'vmid': vmid, 'node': node })
 
     pool_workers = _pool_workers_for(proj, len(tasks))
@@ -4704,24 +4771,14 @@ def instances_delete(pid: str):
                 # 1) NICs: VM is gone, but we also removed bridges earlier; nothing in VM config remains. We still check bridges missing from node list to be safe.
                 try:
                     # Verify bridges no longer exist for this index based on configured adaptors
-                    adaptors = []
+                    bridges_expected = []
                     try:
                         cfg = cfg_map.get(name[:-len(f"{tag}{idx}")]) if name.endswith(f"{tag}{idx}") else None
                         if not cfg:
                             cfg = cfg_map_lc.get((name[:-len(f"{tag}{idx}")]).lower()) if name.endswith(f"{tag}{idx}") else None
-                        adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or []) if cfg else []
+                        bridges_expected = [spec['bridge'] for spec in (_bridge_specs_for_vm(idx, cfg) if cfg else []) if not spec.get('internet_connected')]
                     except Exception:
-                        adaptors = []
-                    bridges_expected = []
-                    for a in adaptors:
-                        try:
-                            base = re.sub(r"[^A-Za-z]", "", str(a or ""))[:8]
-                            bname = f"{base}{idx}" if base else f"br{idx}"
-                            if len(bname) > 15:
-                                bname = bname[:15]
-                        except Exception:
-                            bname = f"br{idx}"
-                        bridges_expected.append(bname)
+                        bridges_expected = []
                     lingering_nets = []
                     try:
                         nets = client.list_network(node)
@@ -6010,9 +6067,10 @@ def instances_nets_set(pid: str):
             cfg = cfg_map.get(base_name) or cfg_map_lc.get(base_name.lower())
             if not cfg:
                 continue
-            adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
-            for a in adaptors:
-                bname = _bridge_iface_name(idx, a)
+            for spec in _bridge_specs_for_vm(idx, cfg):
+                if spec.get('internet_connected'):
+                    continue
+                bname = spec.get('bridge') or ''
                 if bname:
                     bridges_needed.setdefault(node, set()).add(bname)
                     bridge_owners.setdefault(node, {}).setdefault(bname, idx)
@@ -6080,13 +6138,13 @@ def instances_nets_set(pid: str):
         if not cfg:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'unknown base name for nets retry' })
         # Build expected netspecs from configured adaptors
-        adaptors = list(getattr(cfg, 'internal_network_adaptors', []) or [])
-        if not adaptors:
+        bridge_specs = _bridge_specs_for_vm(idx, cfg)
+        if not bridge_specs:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'no adaptors configured' })
         is_lxc = (m.get('type') == 'lxc') or (getattr(cfg, 'vm_type', 'qemu') == 'lxc')
         netspecs = []
-        for i, a in enumerate(adaptors):
-            bname = _bridge_iface_name(idx, a)
+        for i, spec in enumerate(bridge_specs):
+            bname = spec.get('bridge') or ''
             if is_lxc:
                 netspecs.append(f"name=eth{i},bridge={bname}")
             else:
@@ -10930,6 +10988,14 @@ def _is_valid_adaptor_name(name: str) -> bool:
     except Exception:
         return False
 
+
+def _is_valid_internet_connected_adaptor_name(name: str) -> bool:
+    try:
+        _validate_iface(str(name or '').strip())
+        return True
+    except Exception:
+        return False
+
 def _is_valid_tag(tag: str) -> bool:
     try:
         return bool(re.fullmatch(r"[A-Za-z-]*", str(tag or "")))
@@ -10978,6 +11044,7 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
         'stored_commands',
         'validation_commands',
         'internal_network_adaptors',
+        'internet_connected_adaptors',
         'use_linked_clone',
         'clone_timeout_sec',
         'storage_volume',
@@ -11000,6 +11067,11 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
             continue
         clean = {'name': nm}
 
+        if 'internet_connected_adapters' in rec and 'internet_connected_adaptors' not in rec:
+            rec['internet_connected_adaptors'] = rec.get('internet_connected_adapters')
+        if 'internet_connected_interfaces' in rec and 'internet_connected_adaptors' not in rec:
+            rec['internet_connected_adaptors'] = rec.get('internet_connected_interfaces')
+
         for k in allowed_keys:
             if k in ('name', 'vmid'):
                 continue
@@ -11009,17 +11081,28 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
         if keep_vmid and ('vmid' in rec):
             clean['vmid'] = rec.get('vmid')
 
-        # Adaptor names: keep only valid names
+        # Adaptor names: keep only valid names. Internal adaptors retain their
+        # legacy letters-only rule; internet-connected interfaces use Linux
+        # interface names such as vmbr0.
         try:
+            raw_internet = clean.get('internet_connected_adaptors')
+            if not isinstance(raw_internet, list):
+                raw_internet = []
+            clean['internet_connected_adaptors'] = [
+                str(a).strip() for a in raw_internet if _is_valid_internet_connected_adaptor_name(a)
+            ]
+            internet_set = set(clean.get('internet_connected_adaptors') or [])
             if 'internal_network_adaptors' in clean:
                 raw = clean.get('internal_network_adaptors')
                 if not isinstance(raw, list):
                     raw = []
                 clean['internal_network_adaptors'] = [
-                    str(a).strip() for a in raw if _is_valid_adaptor_name(a)
+                    str(a).strip() for a in raw
+                    if (_is_valid_adaptor_name(a) or (str(a).strip() in internet_set and _is_valid_internet_connected_adaptor_name(a)))
                 ]
         except Exception:
             clean['internal_network_adaptors'] = []
+            clean['internet_connected_adaptors'] = []
 
         out.append(clean)
     return out
@@ -12638,17 +12721,35 @@ def import_project_start():
                                                         or vm.get('internalNetworkAdaptors')
                                                         or vm.get('internalNetworkAdapters')
                                                     )
+                                                    raw_internet = (
+                                                        vm.get('internet_connected_adaptors')
+                                                        or vm.get('internet_connected_adapters')
+                                                        or vm.get('internet_connected_interfaces')
+                                                        or vm.get('internetConnectedAdaptors')
+                                                        or vm.get('internetConnectedAdapters')
+                                                        or vm.get('internetConnectedInterfaces')
+                                                    )
                                                 else:
                                                     raw = getattr(vm, 'internal_network_adaptors', None)
+                                                    raw_internet = getattr(vm, 'internet_connected_adaptors', None)
                                                 if not raw:
                                                     continue
+                                                internet_set = {
+                                                    str(item or '').strip()
+                                                    for item in (_coerce_list_field(raw_internet) if raw_internet else [])
+                                                    if str(item or '').strip()
+                                                }
                                                 if isinstance(raw, (list, tuple, set)):
                                                     for b in raw:
+                                                        if str(b or '').strip() in internet_set:
+                                                            continue
                                                         try:
                                                             bridges_needed.add(_validate_iface(str(b)))
                                                         except Exception:
                                                             continue
                                                 else:
+                                                    if str(raw or '').strip() in internet_set:
+                                                        continue
                                                     try:
                                                         bridges_needed.add(_validate_iface(str(raw)))
                                                     except Exception:
@@ -13995,18 +14096,41 @@ def remove_vm(pid: str, name: str):
 def update_vm(pid: str, name: str):
     data = request.get_json(force=True) or {}
     # basic type normalization
-    for k in ["start_commands", "stored_commands", "validation_commands", "internal_network_adaptors"]:
+    if "internet_connected_adapters" in data and "internet_connected_adaptors" not in data:
+        data["internet_connected_adaptors"] = data.get("internet_connected_adapters")
+    if "internet_connected_interfaces" in data and "internet_connected_adaptors" not in data:
+        data["internet_connected_adaptors"] = data.get("internet_connected_interfaces")
+    for k in ["start_commands", "stored_commands", "validation_commands", "internal_network_adaptors", "internet_connected_adaptors"]:
         if k in data and isinstance(data[k], str):
             data[k] = [s.strip() for s in data[k].splitlines() if s.strip()]
     if "validation_commands" in data:
         data["validation_commands"] = sanitize_validation_commands(data.get("validation_commands"))
-    # Validate internal_network_adaptors when provided: letters only, max 8 chars
+    # Validate network adaptors. Internal adaptors stay letters-only; adapters
+    # marked internet-connected can be literal Linux bridge/interface names.
+    internet_adaptors = data.get("internet_connected_adaptors") if "internet_connected_adaptors" in data else []
+    if internet_adaptors is not None:
+        if not isinstance(internet_adaptors, list):
+            return jsonify({"error": "internet_connected_adaptors must be a list of interface names"}), 400
+        bad_internet = [a for a in internet_adaptors if not _is_valid_internet_connected_adaptor_name(a)]
+        if bad_internet:
+            return jsonify({
+                "error": "Invalid internet-connected interface names: letters, numbers, underscores, or dashes only; max 15 characters",
+                "invalid": bad_internet,
+            }), 400
+    internet_set = {str(a or '').strip() for a in (internet_adaptors or []) if str(a or '').strip()}
     if "internal_network_adaptors" in data:
         adaptors = data.get("internal_network_adaptors")
         if adaptors is not None:
             if not isinstance(adaptors, list):
                 return jsonify({"error": "internal_network_adaptors must be a list of names"}), 400
-            bad = [a for a in adaptors if not _is_valid_adaptor_name(a)]
+            bad = []
+            for a in adaptors:
+                text = str(a or '').strip()
+                if text in internet_set:
+                    if not _is_valid_internet_connected_adaptor_name(text):
+                        bad.append(a)
+                elif not _is_valid_adaptor_name(a):
+                    bad.append(a)
             if bad:
                 return jsonify({
                     "error": "Invalid adaptor names: letters only, max 8 characters",
@@ -14032,6 +14156,8 @@ def update_vm(pid: str, name: str):
             fields["validation_commands"] = data.get("validation_commands")
         if "internal_network_adaptors" in data:
             fields["internal_network_adaptors"] = data.get("internal_network_adaptors")
+        if "internet_connected_adaptors" in data:
+            fields["internet_connected_adaptors"] = data.get("internet_connected_adaptors")
         if "vm_user" in data:
             fields["vm_user"] = data.get("vm_user")
         if "vm_pass" in data:
