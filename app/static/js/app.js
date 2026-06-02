@@ -2925,8 +2925,11 @@ window.checkWizCsvFile = async function() {
   ];
 
   const NODE_W = 164, NODE_H = 78, NODE_R = 18;
+  const INTERNET_NODE_ID = '__wiz_internet__';
+  const INTERNET_DEFAULT_IFACE = 'vmbr0';
+  const INTERNET_ADAPTER_COLOR = '#0dcaf0';
 
-  let nodes    = [];   // { id, vmid, name, finalName, user_accessible, x, y, el }
+  let nodes    = [];   // { id, type, vmid, name, finalName, user_accessible, x, y, el }
   let links    = [];   // { id, a, b, adapter, color, el }
   let adapters = [];   // { name, color }
   let dragSrc  = null;
@@ -2936,6 +2939,33 @@ window.checkWizCsvFile = async function() {
   let activePopover = null;
 
   function svgNS() { return 'http://www.w3.org/2000/svg'; }
+
+  function isInternetNodeId(nodeId) {
+    return String(nodeId || '') === INTERNET_NODE_ID;
+  }
+
+  function isInternetNode(node) {
+    return !!(node && isInternetNodeId(node.id));
+  }
+
+  function isInternetLink(link) {
+    return !!(link && (isInternetNodeId(link.a) || isInternetNodeId(link.b)));
+  }
+
+  function getInternetLinkVmId(link) {
+    if (!isInternetLink(link)) return '';
+    return isInternetNodeId(link.a) ? link.b : link.a;
+  }
+
+  function getOrCreateInternetAdapter() {
+    let adapter = adapters.find(a => a && a.internet_connected && a.name === INTERNET_DEFAULT_IFACE);
+    if (adapter) return adapter;
+    adapter = adapters.find(a => a && a.internet_connected);
+    if (adapter) return adapter;
+    adapter = { name: INTERNET_DEFAULT_IFACE, color: INTERNET_ADAPTER_COLOR, internet_connected: true, internet_default: true };
+    adapters.push(adapter);
+    return adapter;
+  }
 
   function getAdapterForPair(aId, bId) {
     return links.find(l => (l.a === aId && l.b === bId) || (l.a === bId && l.b === aId)) || null;
@@ -3148,7 +3178,8 @@ window.checkWizCsvFile = async function() {
     dismissPopover();
     if (svgEl) svgEl.style.pointerEvents = 'none';
     const adapterMeta = findAdapter(linkObj.adapter) || {};
-    const internetConnected = !!adapterMeta.internet_connected;
+    const internetConnected = isInternetLink(linkObj) || !!adapterMeta.internet_connected;
+    const internetLocked = isInternetLink(linkObj);
     const svgRect = svgEl.getBoundingClientRect();
     const px = svgRect.left + svgMx;
     const py = svgRect.top + svgMy;
@@ -3164,7 +3195,7 @@ window.checkWizCsvFile = async function() {
         Adapter: <code>${linkObj.adapter}</code>
       </div>
       <div class="form-check form-switch mb-2" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-container="body" title="${escHtml(INTERNET_TOGGLE_TOOLTIP)}">
-        <input class="form-check-input" type="checkbox" role="switch" id="wiz-pop-internet" ${internetConnected ? 'checked' : ''}>
+        <input class="form-check-input" type="checkbox" role="switch" id="wiz-pop-internet" ${internetConnected ? 'checked' : ''} ${internetLocked ? 'disabled' : ''}>
         <label class="form-check-label small" for="wiz-pop-internet">Internet-connected</label>
       </div>
       <div class="input-group input-group-sm mb-2">
@@ -3178,7 +3209,7 @@ window.checkWizCsvFile = async function() {
     const applyBtn = div.querySelector('#wiz-pop-apply');
     const applyAdapterSettings = () => {
       const adapter = findAdapter(linkObj.adapter) || adapterMeta;
-      const checked = !!(internetInput && internetInput.checked);
+      const checked = internetLocked || !!(internetInput && internetInput.checked);
       const rawName = String(ifaceInput && ifaceInput.value || '').trim();
       if (checked) {
         if (!isWizardInterfaceName(rawName)) {
@@ -3307,7 +3338,8 @@ window.checkWizCsvFile = async function() {
       hit.addEventListener('click', (e) => { e.stopPropagation(); showLinkPopover(capturedL, mx, my); });
       linksG.appendChild(line); linksG.appendChild(hit); linksG.appendChild(text);
       // ── Port nodes at each VM edge ──
-      [[epA, l.ifaceA, true], [epB, l.ifaceB, false]].forEach(([ep, iface, isA]) => {
+      [[epA, l.ifaceA, true, na], [epB, l.ifaceB, false, nb]].forEach(([ep, iface, isA, endpointNode]) => {
+        if (isInternetNode(endpointNode)) return;
         const PORT_R = 12;
         // Hit target
         const portHit = document.createElementNS(svgNS(), 'circle');
@@ -3345,9 +3377,10 @@ window.checkWizCsvFile = async function() {
       const g = document.createElementNS(svgNS(), 'g');
       g.style.cursor = 'cell';
       g.setAttribute('transform', `translate(${n.x},${n.y})`);
+      const internetNode = isInternetNode(n);
       const hw = NODE_W / 2, hh = NODE_H / 2;
       // Selection ring
-      if (selectedNode && selectedNode.id === n.id) {
+      if (!internetNode && selectedNode && selectedNode.id === n.id) {
         const ring = document.createElementNS(svgNS(), 'rect');
         ring.setAttribute('x', -(hw + 4)); ring.setAttribute('y', -(hh + 4));
         ring.setAttribute('width', NODE_W + 8); ring.setAttribute('height', NODE_H + 8);
@@ -3362,7 +3395,7 @@ window.checkWizCsvFile = async function() {
       rect.setAttribute('x', -hw); rect.setAttribute('y', -hh);
       rect.setAttribute('width', NODE_W); rect.setAttribute('height', NODE_H);
       rect.setAttribute('rx', NODE_R); rect.setAttribute('ry', NODE_R);
-      rect.setAttribute('fill', n.user_accessible ? '#0d6efd' : '#6c757d');
+      rect.setAttribute('fill', internetNode ? '#0f766e' : (n.user_accessible ? '#0d6efd' : '#6c757d'));
       rect.setAttribute('stroke', '#fff'); rect.setAttribute('stroke-width', '2');
       g.appendChild(rect);
       // Name label
@@ -3372,12 +3405,12 @@ window.checkWizCsvFile = async function() {
       label.setAttribute('fill', '#fff'); label.setAttribute('pointer-events', 'none');
       label.textContent = (n.finalName || n.name || '').slice(0, 18);
       g.appendChild(label);
-      // VMID sub-label
+      // VMID/status sub-label
       const sublabel = document.createElementNS(svgNS(), 'text');
       sublabel.setAttribute('text-anchor', 'middle'); sublabel.setAttribute('dy', '20');
       sublabel.setAttribute('font-size', '13'); sublabel.setAttribute('font-weight', '600');
       sublabel.setAttribute('fill', 'rgba(255,255,255,0.88)');
-      sublabel.setAttribute('pointer-events', 'none'); sublabel.textContent = 'ID:' + n.vmid;
+      sublabel.setAttribute('pointer-events', 'none'); sublabel.textContent = internetNode ? 'uplink bridge' : ('ID:' + n.vmid);
       g.appendChild(sublabel);
       // No extra adapter dots — ports on link edges show that info
 
@@ -3394,6 +3427,12 @@ window.checkWizCsvFile = async function() {
       // Click = select
       g.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (internetNode) {
+          selectedNode = null;
+          updateSettingsPanel();
+          renderNodes();
+          return;
+        }
         selectedNode = (selectedNode && selectedNode.id === n.id) ? null : n;
         updateSettingsPanel();
         renderNodes();
@@ -3462,8 +3501,10 @@ window.checkWizCsvFile = async function() {
     adapterCounter = 0; dragSrc = null; selectedNode = null;
 
     // Layout nodes in a circle
-    const cx = svgEl.clientWidth / 2 || 320;
-    const cy = Math.max((svgEl.clientHeight || 560) / 2, 240);
+    const svgWidth = svgEl.clientWidth || 640;
+    const svgHeight = svgEl.clientHeight || 560;
+    const cx = svgWidth / 2 || 320;
+    const cy = Math.max(svgHeight / 2, 240);
     const r  = Math.min(cx - 100, cy - 90, 220);
     templates.forEach((t, i) => {
       const angle = (i / templates.length) * 2 * Math.PI - Math.PI / 2;
@@ -3477,6 +3518,17 @@ window.checkWizCsvFile = async function() {
         y: Math.round(cy + r * Math.sin(angle)),
         el: null
       });
+    });
+    nodes.push({
+      id: INTERNET_NODE_ID,
+      type: 'internet',
+      vmid: '',
+      name: 'Internet',
+      finalName: 'Internet',
+      user_accessible: false,
+      x: Math.max((NODE_W / 2) + 24, svgWidth - (NODE_W / 2) - 24),
+      y: (NODE_H / 2) + 34,
+      el: null
     });
 
     // SVG mouse events
@@ -3514,9 +3566,16 @@ window.checkWizCsvFile = async function() {
     });
 
     if (target) {
-      const adapter = allocateAdapter();
-      const ifaceA  = getNextIface(dragSrc.id, null);
-      const ifaceB  = getNextIface(target.id, null);
+      const internetLink = isInternetNode(dragSrc) || isInternetNode(target);
+      const vmEndpoint = internetLink ? (isInternetNode(dragSrc) ? target : dragSrc) : null;
+      if (internetLink && links.some(l => isInternetLink(l) && getInternetLinkVmId(l) === vmEndpoint.id)) {
+        try { showToast('This VM is already connected to the Internet node.', 'info'); } catch { }
+        dragSrc = null;
+        return;
+      }
+      const adapter = internetLink ? getOrCreateInternetAdapter() : allocateAdapter();
+      const ifaceA  = isInternetNode(dragSrc) ? null : getNextIface(dragSrc.id, null);
+      const ifaceB  = isInternetNode(target) ? null : getNextIface(target.id, null);
       links.push({ id: Date.now() + Math.random(), a: dragSrc.id, b: target.id, adapter: adapter.name, color: adapter.color, ifaceA, ifaceB });
       renderAll();
       if (selectedNode) updateSettingsPanel();
@@ -3527,6 +3586,7 @@ window.checkWizCsvFile = async function() {
 
   function saveState() {
     for (const n of nodes) {
+      if (isInternetNode(n)) continue;
       const t = wizSelectedTemplates && wizSelectedTemplates.find(t => t._wizId === n.id);
       if (!t) continue;
       t.finalName = n.finalName || n.name;

@@ -252,6 +252,89 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
 
         self._run_node_regression(harness)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
+    def test_wizard_internet_node_creates_internet_connected_adapter(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              const makeSvgElement = (tagName) => {
+                const el = {
+                  tagName,
+                  attributes: {},
+                  children: [],
+                  listeners: {},
+                  style: {},
+                  textContent: '',
+                  innerHTML: '',
+                  setAttribute(name, value) { this.attributes[name] = String(value); },
+                  getAttribute(name) { return this.attributes[name] || ''; },
+                  appendChild(child) { this.children.push(child); return child; },
+                  addEventListener(type, handler) { this.listeners[type] = handler; },
+                  removeEventListener(type) { delete this.listeners[type]; },
+                };
+                if (tagName === 'g') svgGroups.push(el);
+                return el;
+              };
+
+              const installContainer = (el) => {
+                el.children = [];
+                el.listeners = {};
+                el.appendChild = function(child) { this.children.push(child); return child; };
+                el.addEventListener = function(type, handler) { this.listeners[type] = handler; };
+                el.removeEventListener = function(type) { delete this.listeners[type]; };
+                el.setAttribute = function(name, value) { this[name] = String(value); };
+                el.getAttribute = function(name) { return this[name] || ''; };
+              };
+
+              const svgGroups = [];
+              document.createElementNS = (ns, tagName) => makeSvgElement(tagName);
+
+              const svg = document.getElementById('wiz-net-canvas');
+              const linksG = document.getElementById('wiz-net-links');
+              const nodesG = document.getElementById('wiz-net-nodes');
+              const dragLine = document.getElementById('wiz-drag-line');
+              const legend = document.getElementById('wiz-net-legend');
+              [svg, linksG, nodesG, dragLine, legend].forEach(installContainer);
+              svg.clientWidth = 720;
+              svg.clientHeight = 560;
+              svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 720, height: 560 });
+              dragLine.style = {};
+
+              wizSelectedTemplates = [{
+                _wizId: 'vm-web',
+                vmid: 900,
+                name: 'web',
+                finalName: 'web',
+                user_accessible: true,
+                nets: [],
+                internet_connected_adaptors: [],
+              }];
+
+              window.wizNetGraph.init(wizSelectedTemplates);
+              assert(svgGroups.length >= 2, 'Graph should render a VM node and an Internet node');
+              const vmGroup = svgGroups[0];
+              const internetGroup = svgGroups[1];
+              const internetTransform = internetGroup.getAttribute('transform');
+              assert(internetTransform.includes('translate('), 'Internet node should have a position');
+              const coords = internetTransform.match(/translate\\(([-0-9.]+),([-0-9.]+)\\)/);
+              assert(coords, `Unexpected Internet node transform: ${internetTransform}`);
+
+              vmGroup.listeners.mousedown({ preventDefault() {}, button: 0 });
+              svg.listeners.mouseup({ clientX: Number(coords[1]), clientY: Number(coords[2]) });
+              window.wizNetGraph.saveState();
+
+              assert(JSON.stringify(wizSelectedTemplates[0].nets) === JSON.stringify(['vmbr0']), 'Internet node should add vmbr0 to VM nets');
+              assert(JSON.stringify(wizSelectedTemplates[0].internet_connected_adaptors) === JSON.stringify(['vmbr0']), 'Internet node link should persist vmbr0 as internet-connected');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
     @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
     def test_add_interface_internet_toggle_waits_for_input(self):
         harness = textwrap.dedent(
