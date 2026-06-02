@@ -352,7 +352,18 @@ def _vm_internet_connected_adaptor_set(cfg: Any) -> Set[str]:
 
 def _is_vm_internet_connected_adaptor(cfg: Any, adaptor_name: Any) -> bool:
     try:
-        return str(adaptor_name or '').strip() in _vm_internet_connected_adaptor_set(cfg)
+        adaptor_text = str(adaptor_name or '').strip()
+        if not adaptor_text:
+            return False
+        configured = _vm_internet_connected_adaptor_set(cfg)
+        if adaptor_text in configured:
+            return True
+        # Be lenient for legacy/case-drifted data where the same adaptor name may
+        # differ only by casing between the two adaptor lists.
+        lower = adaptor_text.lower()
+        if any(str(item or '').strip().lower() == lower for item in configured):
+            return True
+        return False
     except Exception:
         return False
 
@@ -446,9 +457,8 @@ def _build_bridge_project_snapshot(proj: Project, tag: str) -> Dict[str, Any]:
         if not name:
             continue
         adaptors = []
-        internet_adaptors = _vm_internet_connected_adaptor_set(vm)
         for adaptor in list(getattr(vm, 'internal_network_adaptors', []) or []):
-            if str(adaptor or '').strip() in internet_adaptors:
+            if _is_vm_internet_connected_adaptor(vm, adaptor):
                 continue
             normalized = _normalize_bridge_adaptor_name(adaptor)
             if normalized:

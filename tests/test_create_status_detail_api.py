@@ -163,6 +163,56 @@ class CreateStatusDetailApiTests(unittest.TestCase):
         nets = prox.set_qemu_nets.call_args.kwargs.get('nets') or []
         self.assertEqual(nets, ['e1000,bridge=lab1', 'e1000,bridge=vmbr0'])
 
+    def test_create_treats_marked_internet_adaptor_as_literal_bridge(self):
+        self.project.vms[0].internal_network_adaptors = ['lab', 'uplink']
+        # Simulate case drift from older/project-edited data while keeping the
+        # adaptor explicitly marked as internet-connected.
+        self.project.vms[0].internet_connected_adaptors = ['UPLINK']
+
+        with ExitStack() as stack:
+            stack.enter_context(patch('app.routes.api._store', return_value=_StoreStub(self.project)))
+            stack.enter_context(patch('app.routes.api.random.randint', return_value=10001))
+            stack.enter_context(patch('app.routes.api._safe_sleep', return_value=None))
+
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = MagicMock()
+            prox_cls.return_value = prox
+
+            prox.list_nodes.return_value = [{'node': 'node1'}]
+            prox.list_qemu_vms.return_value = [{'vmid': 900, 'name': 'alpha', 'template': 1}]
+            prox.clone_qemu.return_value = 'UPID:clone'
+            prox._wait_task.return_value = None
+            prox.list_qemu_snapshots.return_value = []
+            prox.get_qemu_config.return_value = {}
+            prox.set_qemu_options.return_value = None
+            prox.list_network.return_value = []
+            prox.create_bridge.return_value = None
+            prox.set_qemu_nets.return_value = None
+            prox.snapshot_qemu.return_value = 'UPID:snapshot'
+            prox.list_snapshots_qemu.return_value = [{'name': 'post-clone'}]
+            prox.reload_network.return_value = None
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/create',
+                json={
+                    'baseUrl': self.project.proxmox_url,
+                    'verifySSL': False,
+                    'targets': [{'index': 1, 'name': 'alpha'}],
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        prox.create_bridge.assert_called_once_with(
+            node='node1',
+            iface='lab1',
+            autostart=True,
+            ports=None,
+            comments='SCE-BRIDGE pid=proj-create-status idx=1 adaptor=lab source=post-clone',
+        )
+        prox.set_qemu_nets.assert_called_once()
+        nets = prox.set_qemu_nets.call_args.kwargs.get('nets') or []
+        self.assertEqual(nets, ['e1000,bridge=lab1', 'e1000,bridge=uplink'])
+
     def test_create_can_skip_network_and_snapshot_when_disabled(self):
         messages = []
 
