@@ -2789,6 +2789,54 @@ function wizardGetTemplateCreds(vmid) {
   };
 }
 
+window.wizardFilterTable = function() {
+  const textInput = document.getElementById('wiz-tpl-text-filter');
+  const nodeSelect = document.getElementById('wiz-tpl-node-filter');
+  
+  const filterValue = textInput ? textInput.value.toLowerCase() : '';
+  const nodeValue = nodeSelect ? nodeSelect.value : '';
+  
+  const tbody = document.getElementById('wiz-tpl-tbody');
+  if (!tbody) return;
+  
+  const rows = tbody.querySelectorAll('tr');
+  let visibleCount = 0;
+  
+  rows.forEach(row => {
+    // skip our own "no results" row
+    if (row.classList.contains('no-results-row')) return;
+
+    // get text content from all tds
+    const textContent = row.textContent.toLowerCase();
+    const rowNode = row.getAttribute('data-node') || '';
+    
+    const matchesText = !filterValue || textContent.includes(filterValue);
+    const matchesNode = !nodeValue || rowNode === nodeValue;
+    
+    if (matchesText && matchesNode) {
+      row.style.display = '';
+      visibleCount++;
+    } else {
+      row.style.display = 'none';
+    }
+  });
+  
+  // Show/hide no results msg
+  let noResultsRow = tbody.querySelector('.no-results-row');
+  if (visibleCount === 0) {
+    if (!noResultsRow) {
+      noResultsRow = document.createElement('tr');
+      noResultsRow.className = 'no-results-row';
+      noResultsRow.innerHTML = '<td colspan="10" class="text-center text-muted py-3">No templates match the filter.</td>';
+      tbody.appendChild(noResultsRow);
+    } else {
+      noResultsRow.style.display = '';
+    }
+  } else if (noResultsRow) {
+    noResultsRow.style.display = 'none';
+  }
+};
+
 function wizardHasTemplateCreds(vmid) {
   const creds = wizardGetTemplateCreds(vmid);
   return !!(creds.username && creds.password);
@@ -3136,6 +3184,7 @@ window.checkWizCsvFile = async function() {
     document.body.appendChild(div);
     activePopover = div;
     try { initBootstrapTooltips(div); } catch { }
+    div.addEventListener('mousedown', (ev) => ev.stopPropagation());
     div.addEventListener('keydown', (ev) => {
       if (!ev || ev.defaultPrevented || ev.key !== 'Enter') return;
       if (ev.isComposing || ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -3249,7 +3298,7 @@ window.checkWizCsvFile = async function() {
       pruneAdapter(deletedName);
       dismissPopover(); renderAll();
     });
-    mountPopover(div);
+    mountPopover(div, '#wiz-pop-iface');
   }
 
   function showIfacePopover(linkObj, isA, portX, portY) {
@@ -3278,8 +3327,6 @@ window.checkWizCsvFile = async function() {
         <input type="number" class="form-control" id="wiz-iface-inp" min="0" max="15" value="${current}" style="width:84px;">
         <button class="btn btn-outline-primary" id="wiz-iface-ok" type="button">Set</button>
       </div>`;
-    document.body.appendChild(div);
-    activePopover = div;
     div.querySelector('#wiz-iface-ok').addEventListener('click', () => {
       const val = parseInt(div.querySelector('#wiz-iface-inp').value);
       if (isNaN(val) || val < 0) return;
@@ -3895,15 +3942,19 @@ window.wizardNext = async function() {
          tplContainer.innerHTML = '<div class="text-muted text-center py-3">No templates found in Proxmox.</div>';
       } else {
          let filterNode = document.getElementById('wiz-proxmox-node')?.value?.trim();
-         if (!filterNode) {
-             filterNode = wizFetchedTemplates[0].node;
-             const nodeInput = document.getElementById('wiz-proxmox-node');
-             if (nodeInput) nodeInput.value = filterNode;
+         
+         const nodeFilterSelect = document.getElementById('wiz-tpl-node-filter');
+         if (nodeFilterSelect) {
+           const nodes = [...new Set(wizFetchedTemplates.map(t => t.node))];
+           nodes.sort();
+           nodeFilterSelect.innerHTML = '<option value="">All Nodes</option>' + 
+             nodes.map(node => 
+               `<option value="${escHtml(node)}"${(node === filterNode ? ' selected' : '')}>${escHtml(node)}</option>`
+             ).join('');
          }
          
-         const filtered = wizFetchedTemplates.filter(t => t.node === filterNode);
-         
-         tplContainer.innerHTML = `<div class="alert alert-info py-2 small mb-3">Only templates from Proxmox node <strong>${escHtml(filterNode)}</strong> are shown.</div>`;
+         // Do not restrict to one node immediately. Render all, let wizardFilterTable handle hiding.
+         const filtered = wizFetchedTemplates;
          
          if (filtered.length === 0) {
              tplContainer.insertAdjacentHTML('beforeend', '<div class="text-muted text-center py-3">No templates found on this node.</div>');
@@ -3931,6 +3982,7 @@ window.wizardNext = async function() {
                   ? '<span class="d-inline-flex align-items-center text-success" title="QEMU Guest Agent enabled"><i class="bi bi-robot"></i></span>'
                   : '';
                 const row = document.createElement('tr');
+                row.setAttribute('data-node', t.node);
                 row.innerHTML = `
                   <td class="align-middle">
                     <input class="form-check-input" type="checkbox" value="${t.vmid}" data-name="${escHtml(t.name)}" id="wiz-tpl-chk-${t.vmid}">
@@ -3969,6 +4021,8 @@ window.wizardNext = async function() {
                 }
                 tbody.appendChild(row);
              });
+             // Apply initial filters
+             wizardFilterTable();
          }
       }
       wizardGotoStep(3);
