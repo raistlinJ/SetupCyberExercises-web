@@ -2579,6 +2579,8 @@ def instances_create(pid: str):
             pass
         # 5) Last resort: return node name as-is (may fail)
         return node_name or _api_host_for_ssh or ''
+    import collections, threading
+    template_locks = collections.defaultdict(threading.Lock)
     # Helper: process a single target clone (used by thread pool)
     def process_target(t):
         debug_msgs = []
@@ -2723,7 +2725,7 @@ def instances_create(pid: str):
             )
         except Exception:
             pass
-        for _ in range(6):
+        for _ in range(30):
             if _is_cancelled(pid):
                 return ('error', None, { 'index': idx, 'name': newname, 'reason': 'cancelled' })
             candidate = random.randint(10000, 999999)
@@ -2732,18 +2734,28 @@ def instances_create(pid: str):
                 continue
             try:
                 # Attempt linked clone first if requested; rely on Proxmox to error if invalid
-                upid = do_clone_with_id(candidate, full_clone=(not use_linked))
-                client._wait_task(node, upid, timeout=timeout_sec)
+                if is_lxc and use_linked:
+                    with template_locks[src_vmid]:
+                        upid = do_clone_with_id(candidate, full_clone=(not use_linked))
+                        client._wait_task(node, upid, timeout=timeout_sec)
+                else:
+                    upid = do_clone_with_id(candidate, full_clone=(not use_linked))
+                    client._wait_task(node, upid, timeout=timeout_sec)
                 newid = candidate
                 break
             except Exception as e1:
+                msg = str(e1).lower()
+                # Proxmox locks LXC templates during linked clones. We can wait it out.
+                if 'is locked' in msg and 'disk' in msg:
+                    import time
+                    time.sleep(2.0)
+                    continue
                 if use_linked:
                     # Linked clone was explicitly requested; do not silently retry as a full clone.
                     try:
                         debug_msgs.append(f"linked clone attempt failed for {newname} vmid_candidate={candidate}: {e1}")
                     except Exception:
                         pass
-                    msg = str(e1).lower()
                     if ('already exist' in msg) or ('config' in msg and 'exists' in msg) or ('conflict' in msg):
                         continue
                     return ('error', None, {
@@ -2753,7 +2765,6 @@ def instances_create(pid: str):
                         'vmid_attempts': attempts,
                     })
                 else:
-                    msg = str(e1).lower()
                     if ('already exist' in msg) or ('config' in msg and 'exists' in msg) or ('conflict' in msg):
                         continue
                     return ('error', None, { 'index': idx, 'name': newname, 'reason': f'clone failed: {e1}', 'vmid_attempts': attempts })
@@ -8088,6 +8099,72 @@ def instances_users_access_sync(pid: str):
         'errors': errors,
         'infos': infos,
     })
+def _execute_instance_command(proj, base_url, password, client, m, command_text, timeout_value, return_partial_on_timeout=False):
+    import socket
+    import shlex
+    import time
+    from urllib.parse import urlparse
+    if m.get('type') == 'lxc':
+        ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
+        ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
+        node_name = m.get('node', '')
+        
+        ssh_host = node_name
+        override = getattr(proj, 'proxmox_ssh_host', '') or ''
+        if override:
+            ssh_host = str(override)
+        else:
+            mapping = dict(getattr(proj, 'proxmox_node_host_map', {}) or {})
+            if node_name and node_name in mapping and mapping[node_name]:
+                ssh_host = str(mapping[node_name])
+            else:
+                try:
+                    socket.getaddrinfo(node_name, None)
+                except Exception:
+                    api_host = ''
+                    try:
+                        api_host = urlparse(base_url).hostname or ''
+                    except Exception:
+                        pass
+                    if api_host:
+                        ssh_host = api_host
+        
+        c = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
+        try:
+            safe_cmd = shlex.quote(str(command_text))
+            pct_cmd = f"timeout {timeout_value} pct exec {m['vmid']} -- sh -c {safe_cmd}"
+            stdin, stdout, stderr = c.exec_command(pct_cmd, timeout=timeout_value + 10)
+            
+            start = time.time()
+            while not stdout.channel.exit_status_ready():
+                if time.time() - start > timeout_value + 5:
+                    if return_partial_on_timeout:
+                        out = stdout.channel.recv(4096).decode('utf-8', errors='ignore') if stdout.channel.recv_ready() else ''
+                        err = stderr.channel.recv(4096).decode('utf-8', errors='ignore') if stderr.channel.recv_ready() else ''
+                        return {'exitcode': None, 'stdout': out, 'stderr': err, 'timed_out': True}
+                    raise RuntimeError("agent exec timed out")
+                time.sleep(1)
+            
+            code = stdout.channel.recv_exit_status()
+            out = stdout.read().decode('utf-8', errors='ignore')
+            err = stderr.read().decode('utf-8', errors='ignore')
+            
+            if code == 124: # timeout exit code
+                if return_partial_on_timeout:
+                     return {'exitcode': None, 'stdout': out, 'stderr': err, 'timed_out': True}
+                raise RuntimeError("agent exec timed out")
+                
+            return {'exitcode': code, 'stdout': out, 'stderr': err}
+        finally:
+            c.close()
+    else:
+        return client.agent_exec(
+            node=m['node'],
+            vmid=m['vmid'],
+            command=str(command_text),
+            timeout=timeout_value,
+            return_partial_on_timeout=return_partial_on_timeout
+        )
 
 
 @api_bp.route("/projects/<pid>/instances/actions/run_startup_cmds", methods=["POST"])
@@ -8339,7 +8416,7 @@ def instances_run_startup_cmds(pid: str):
             timeout_value = _coerce_timeout(timeout_override)
             long_running_flag = bool(command_entry.get('long_running')) if isinstance(command_entry, dict) else False
             try:
-                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command_text), timeout=timeout_value)
+                res = _execute_instance_command(proj, base_url, password, client, m, str(command_text), timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
@@ -8887,12 +8964,15 @@ def instances_run_stored_cmds(pid: str):
                     continue
 
                 try:
-                    res = client.agent_exec(
-                        node=m['node'],
-                        vmid=m['vmid'],
-                        command=v_command,
-                        timeout=v_timeout,
-                        return_partial_on_timeout=True,
+                    res = _execute_instance_command(
+                        proj=proj,
+                        base_url=base_url,
+                        password=password,
+                        client=client,
+                        m=m,
+                        command_text=v_command,
+                        timeout_value=v_timeout,
+                        return_partial_on_timeout=True
                     )
                 except Exception as exc:
                     err_text = str(exc)
@@ -9248,7 +9328,7 @@ def instances_run_stored_cmds(pid: str):
             timeout_value = _coerce_timeout(timeout_override)
             long_running_flag = bool(command_entry.get('long_running')) if isinstance(command_entry, dict) else False
             try:
-                res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=str(command_text), timeout=timeout_value)
+                res = _execute_instance_command(proj, base_url, password, client, m, str(command_text), timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
@@ -9488,12 +9568,15 @@ def instances_run_stored_cmds(pid: str):
                     pass
                 continue
             try:
-                res = client.agent_exec(
-                    node=m['node'],
-                    vmid=m['vmid'],
-                    command=v_command,
-                    timeout=v_timeout,
-                    return_partial_on_timeout=True,
+                res = _execute_instance_command(
+                    proj=proj,
+                    base_url=base_url,
+                    password=password,
+                    client=client,
+                    m=m,
+                    command_text=v_command,
+                    timeout_value=v_timeout,
+                    return_partial_on_timeout=True
                 )
             except Exception as exc:
                 validation_all_passed = False

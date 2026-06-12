@@ -20,7 +20,20 @@
     const key = String(pid||'');
     if (!key) return null;
     if (!force && _secretsCache.has(key)) return _secretsCache.get(key);
-    let body = await _fetchJson(`/api/projects/${encodeURIComponent(key)}/secrets`, { method: 'GET' });
+    
+    let body = null;
+    let lastErr = null;
+    for (let i = 0; i < 3; i++) {
+      try {
+        body = await _fetchJson(`/api/projects/${encodeURIComponent(key)}/secrets`, { method: 'GET' });
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    if (lastErr && !body) throw lastErr;
 
     // One-time migration from legacy browser localStorage keys into server secrets.
     // We only do this if the server has no saved values yet.

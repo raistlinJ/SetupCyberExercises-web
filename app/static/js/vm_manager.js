@@ -654,7 +654,7 @@ function currentConnSnapshot(proj) {
     sshPort: Number(proj?.proxmox_ssh_port ?? 22) || 22,
   };
 }
-function sameConn(a, b) { return (a.url || '') === (b.url || '') && Number(a.apiPort || 0) === Number(b.apiPort || 0) && Number(a.sshPort || 0) === Number(b.sshPort || 0); }
+function sameConn(a, b) { return normalizeUrl(a.url || '') === normalizeUrl(b.url || '') && Number(a.apiPort || 0) === Number(b.apiPort || 0) && Number(a.sshPort || 0) === Number(b.sshPort || 0); }
 
 function enforceRefreshDisabledOnConnChange() {
   if (!PROJ) return;
@@ -3179,7 +3179,8 @@ function updateRefreshState() {
   const multiMode = vmIsMulti && vmIsMulti();
   // In multi mode, refresh can preflight auth per selected project and surface skipped projects.
   const loggedIn = multiMode ? hasAuthForAllSelected() : hasAuth();
-  const refreshEnabled = multiMode ? getActivePids().length > 1 : loggedIn;
+  const activeLen = multiMode ? getActivePids().length : 0;
+  const refreshEnabled = multiMode ? (activeLen > 1 || (activeLen === 1 && loggedIn)) : loggedIn;
   if (loginBtn) {
     loginBtn.setAttribute('title', multiMode ? 'Update Proxmox credentials for all selected projects' : 'Update Proxmox URL/ports and credentials');
   }
