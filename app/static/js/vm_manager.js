@@ -2222,18 +2222,21 @@ function renderVmTable(proj) {
         if (!hasValidationCommands) {
           return `${both || '—'}<div class="mt-1"><span class="d-inline-flex align-items-center gap-1 text-muted" title="Validation commands not configured"><i class="bi bi-robot"></i><i class="bi bi-dash-circle-fill small"></i></span></div>`;
         }
+        const isLxc = d && String(d.type).toLowerCase() === 'lxc';
         const agentEnabled = !!(d && d.qemu_agent_enabled);
+        const canExecute = isLxc || agentEnabled;
+        const execName = isLxc ? 'LXC SSH Execution' : 'QEMU Guest Agent';
         const validationState = String(d?.qemu_agent_validation_state || '').trim().toLowerCase();
         const agentValidated = validationState ? validationState === 'passed' : !!(d && d.qemu_agent_validated);
         let agentIcon = '';
-        if (!agentEnabled) {
-          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-secondary" title="QEMU Guest Agent off"><i class="bi bi-robot"></i><i class="bi bi-slash-circle-fill small"></i></span>';
+        if (!canExecute) {
+          agentIcon = `<span class="d-inline-flex align-items-center gap-1 text-secondary" title="${execName} off"><i class="bi bi-robot"></i><i class="bi bi-slash-circle-fill small"></i></span>`;
         } else if (agentValidated) {
-          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-success" title="QEMU Guest Agent on and validated"><i class="bi bi-robot"></i><i class="bi bi-check-circle-fill small"></i></span>';
+          agentIcon = `<span class="d-inline-flex align-items-center gap-1 text-success" title="${execName} ready and validated"><i class="bi bi-robot"></i><i class="bi bi-check-circle-fill small"></i></span>`;
         } else if (validationState === 'failed') {
-          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-danger" title="QEMU guest agent on, validation failed"><i class="bi bi-robot"></i><i class="bi bi-x-circle-fill small"></i></span>';
+          agentIcon = `<span class="d-inline-flex align-items-center gap-1 text-danger" title="${execName} ready, validation failed"><i class="bi bi-robot"></i><i class="bi bi-x-circle-fill small"></i></span>`;
         } else {
-          agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-warning" title="QEMU Guest Agent on, not validated"><i class="bi bi-robot"></i><i class="bi bi-exclamation-circle-fill small"></i></span>';
+          agentIcon = `<span class="d-inline-flex align-items-center gap-1 text-warning" title="${execName} ready, not validated"><i class="bi bi-robot"></i><i class="bi bi-exclamation-circle-fill small"></i></span>`;
         }
         return `${both || '—'}<div class="mt-1">${agentIcon}</div>`;
       })();
