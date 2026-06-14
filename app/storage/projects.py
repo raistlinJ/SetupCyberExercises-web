@@ -286,10 +286,14 @@ def sanitize_validation_commands(value: Any) -> List[Dict[str, Any]]:
                     if entry.get(alt) is not None:
                         timeout_hint = entry.get(alt)
                         break
+            is_regex_hint = entry.get("is_regex")
+            if is_regex_hint is None:
+                is_regex_hint = entry.get("isRegex")
             commands.append({
                 "command": command_text,
                 "enabled": _coerce_enabled(enabled_hint, True),
                 "match": _coerce_match(match_hint),
+                "is_regex": _coerce_enabled(is_regex_hint, True),
                 "timeout_seconds": _coerce_timeout(timeout_hint, default=DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
             })
             return
@@ -304,6 +308,7 @@ def sanitize_validation_commands(value: Any) -> List[Dict[str, Any]]:
             "command": command_text,
             "enabled": True,
             "match": "",
+            "is_regex": True,
             "timeout_seconds": DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS,
         })
 

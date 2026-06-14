@@ -3996,11 +3996,13 @@ def instances_create_preflight(pid: str):
             if not enabled:
                 continue
             match_expr = str(entry.get('match') or '').strip()
+            is_regex = _coerce_bool_flag(entry.get('is_regex'), True)
             timeout_seconds = _coerce_timeout(entry.get('timeout_seconds'), default=DEFAULT_VALIDATION_TIMEOUT)
             out.append({
                 'order': order,
                 'command': cmd_text,
                 'match': match_expr,
+                'is_regex': is_regex,
                 'timeout_seconds': timeout_seconds,
             })
         return out
@@ -8785,11 +8787,13 @@ def instances_run_stored_cmds(pid: str):
             if not enabled:
                 continue
             match_expr = str(entry.get('match') or '').strip()
+            is_regex = _coerce_bool_flag(entry.get('is_regex'), True)
             timeout_seconds = _coerce_timeout(entry.get('timeout_seconds'), default=DEFAULT_VALIDATION_TIMEOUT)
             out.append({
                 'order': order,
                 'command': cmd_text,
                 'match': match_expr,
+                'is_regex': is_regex,
                 'timeout_seconds': timeout_seconds,
             })
         return out
@@ -8923,45 +8927,49 @@ def instances_run_stored_cmds(pid: str):
                 except Exception:
                     pass
 
-                regex, compile_err = _compile_validation_regex(v_match)
-                if compile_err:
-                    validation_all_passed = False
-                    reason = f"validation regex error ({v_command}): {compile_err}"
-                    local_errors.append({
-                        'index': m['index'],
-                        'name': m['name'],
-                        'command': v_command,
-                        'reason': reason,
-                    })
-                    validation_results.append({
-                        'order': vcmd.get('order'),
-                        'command': v_command,
-                        'match': v_match,
-                        'timeout_seconds': v_timeout,
-                        'passed': False,
-                        'reason': compile_err,
-                        'timed_out': False,
-                        'exitcode': None,
-                        'stdout_preview': '',
-                        'stderr_preview': '',
-                    })
-                    local_zip_entries.append({
-                        'vm_name': m.get('name'),
-                        'vm_index': m.get('index'),
-                        'node': m.get('node'),
-                        'vmid': m.get('vmid'),
-                        'step': 1,
-                        'command_index': vpos,
-                        'delay': 0.0,
-                        'command': v_command,
-                        'exitcode': None,
-                        'stdout': '',
-                        'stderr': compile_err,
-                        'error': f"validation regex error: {compile_err}",
-                        'timeout_seconds': v_timeout,
-                        'long_running': False,
-                    })
-                    continue
+                v_is_regex = vcmd.get('is_regex', True)
+                regex = None
+                compile_err = None
+                if v_is_regex:
+                    regex, compile_err = _compile_validation_regex(v_match)
+                    if compile_err:
+                        validation_all_passed = False
+                        reason = f"validation regex error ({v_command}): {compile_err}"
+                        local_errors.append({
+                            'index': m['index'],
+                            'name': m['name'],
+                            'command': v_command,
+                            'reason': reason,
+                        })
+                        validation_results.append({
+                            'order': vcmd.get('order'),
+                            'command': v_command,
+                            'match': v_match,
+                            'timeout_seconds': v_timeout,
+                            'passed': False,
+                            'reason': compile_err,
+                            'timed_out': False,
+                            'exitcode': None,
+                            'stdout_preview': '',
+                            'stderr_preview': '',
+                        })
+                        local_zip_entries.append({
+                            'vm_name': m.get('name'),
+                            'vm_index': m.get('index'),
+                            'node': m.get('node'),
+                            'vmid': m.get('vmid'),
+                            'step': 1,
+                            'command_index': vpos,
+                            'delay': 0.0,
+                            'command': v_command,
+                            'exitcode': None,
+                            'stdout': '',
+                            'stderr': compile_err,
+                            'error': f"validation regex error: {compile_err}",
+                            'timeout_seconds': v_timeout,
+                            'long_running': False,
+                        })
+                        continue
 
                 try:
                     res = _execute_instance_command(
@@ -9017,16 +9025,22 @@ def instances_run_stored_cmds(pid: str):
                 stdout_text = res.get('stdout', '') or ''
                 stderr_text = res.get('stderr', '') or ''
                 merged = f"{stdout_text}\n{stderr_text}".strip('\n')
-                matched = bool(regex.search(merged if isinstance(merged, str) else str(merged))) if regex else False
+                
+                merged_str = merged if isinstance(merged, str) else str(merged)
+                if v_is_regex:
+                    matched = bool(regex.search(merged_str)) if regex else False
+                else:
+                    matched = v_match in merged_str
+
                 timed_out = bool(res.get('timed_out'))
                 out_preview, _ = _make_preview(stdout_text)
                 err_preview, _ = _make_preview(stderr_text)
                 if not matched:
                     validation_all_passed = False
                     if timed_out:
-                        reason = f"validation regex did not match before timeout ({v_command})"
+                        reason = f"validation {'regex' if v_is_regex else 'exact string'} did not match before timeout ({v_command})"
                     else:
-                        reason = f"validation regex did not match output ({v_command})"
+                        reason = f"validation {'regex' if v_is_regex else 'exact string'} did not match output ({v_command})"
                     local_errors.append({
                         'index': m['index'],
                         'name': m['name'],
@@ -9506,67 +9520,71 @@ def instances_run_stored_cmds(pid: str):
                 )
             except Exception:
                 pass
-            regex, compile_err = _compile_validation_regex(v_match)
-            if compile_err:
-                validation_all_passed = False
-                reason = f"validation regex error ({v_command}): {compile_err}"
-                errors.append({ 'index': m['index'], 'name': m['name'], 'command': v_command, 'reason': reason })
-                validation_results.append({
-                    'order': vcmd.get('order'),
-                    'command': v_command,
-                    'match': v_match,
-                    'timeout_seconds': v_timeout,
-                    'passed': False,
-                    'reason': compile_err,
-                    'timed_out': False,
-                    'exitcode': None,
-                    'stdout_preview': '',
-                    'stderr_preview': '',
-                })
-                record_zip_entry(
-                    validation_step_idx,
-                    vpos - 1,
-                    0.0,
-                    {
-                        'cmd': v_command,
-                        'exitcode': None,
-                        'stdout_full': '',
-                        'stderr_full': compile_err,
+
+            v_is_regex = vcmd.get('is_regex', True)
+            regex = None
+            compile_err = None
+            if v_is_regex:
+                regex, compile_err = _compile_validation_regex(v_match)
+                if compile_err:
+                    validation_all_passed = False
+                    reason = f"validation regex error ({v_command}): {compile_err}"
+                    errors.append({ 'index': m['index'], 'name': m['name'], 'command': v_command, 'reason': reason })
+                    validation_results.append({
+                        'order': vcmd.get('order'),
+                        'command': v_command,
+                        'match': v_match,
                         'timeout_seconds': v_timeout,
-                        'long_running': False,
-                    },
-                    f"validation regex error: {compile_err}",
-                )
-                try:
-                    _update_job_detail(
-                        pid,
-                        phase='validation',
-                        current=_format_vm_label(m),
-                        step=vpos,
-                        total_steps=total_validation_commands,
-                        message=(
-                            f"Running on {vm_position}/{total_mapped_targets} VM(s) - "
-                            f"validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
-                            f"regex error - {compile_err}"
-                        ),
-                        detail={
-                            'kind': 'validation',
-                            'running_on': {'current': vm_position, 'total': total_mapped_targets},
-                            'vm': _format_vm_label(m),
-                            'step': vpos,
-                            'command_number': vpos,
-                            'command_total': total_validation_commands,
-                            'command': _shorten_command_text(v_command),
-                            'match': v_match,
+                        'passed': False,
+                        'reason': compile_err,
+                        'timed_out': False,
+                        'exitcode': None,
+                        'stdout_preview': '',
+                        'stderr_preview': '',
+                    })
+                    record_zip_entry(
+                        validation_step_idx,
+                        vpos - 1,
+                        0.0,
+                        {
+                            'cmd': v_command,
+                            'exitcode': None,
+                            'stdout_full': '',
+                            'stderr_full': compile_err,
                             'timeout_seconds': v_timeout,
-                            'result': 'failed',
-                            'reason': compile_err,
-                            'timed_out': False,
+                            'long_running': False,
                         },
+                        f"validation regex error: {compile_err}",
                     )
-                except Exception:
-                    pass
-                continue
+                    try:
+                        _update_job_detail(
+                            pid,
+                            phase='validation',
+                            current=_format_vm_label(m),
+                            step=vpos,
+                            total_steps=total_validation_commands,
+                            message=(
+                                f"Running on {vm_position}/{total_mapped_targets} VM(s) - "
+                                f"validation {vpos}/{total_validation_commands} failed on {_format_vm_label(m)}: "
+                                f"regex error - {compile_err}"
+                            ),
+                            detail={
+                                'kind': 'validation',
+                                'running_on': {'current': vm_position, 'total': total_mapped_targets},
+                                'vm': _format_vm_label(m),
+                                'step': vpos,
+                                'command_number': vpos,
+                                'command_total': total_validation_commands,
+                                'command': _shorten_command_text(v_command),
+                                'match': v_match,
+                                'timeout_seconds': v_timeout,
+                                'result': 'failed',
+                                'reason': f"regex error: {compile_err}"
+                            },
+                        )
+                    except Exception:
+                        pass
+                    continue
             try:
                 res = _execute_instance_command(
                     proj=proj,
@@ -9643,16 +9661,22 @@ def instances_run_stored_cmds(pid: str):
             stdout_text = res.get('stdout', '') or ''
             stderr_text = res.get('stderr', '') or ''
             merged = f"{stdout_text}\n{stderr_text}".strip('\n')
-            matched = bool(regex.search(merged if isinstance(merged, str) else str(merged))) if regex else False
+            
+            merged_str = merged if isinstance(merged, str) else str(merged)
+            if v_is_regex:
+                matched = bool(regex.search(merged_str)) if regex else False
+            else:
+                matched = v_match in merged_str
+
             timed_out = bool(res.get('timed_out'))
             out_preview, _ = _make_preview(stdout_text)
             err_preview, _ = _make_preview(stderr_text)
             if not matched:
                 validation_all_passed = False
                 if timed_out:
-                    reason = f"validation regex did not match before timeout ({v_command})"
+                    reason = f"validation {'regex' if v_is_regex else 'exact string'} did not match before timeout ({v_command})"
                 else:
-                    reason = f"validation regex did not match output ({v_command})"
+                    reason = f"validation {'regex' if v_is_regex else 'exact string'} did not match output ({v_command})"
                 errors.append({ 'index': m['index'], 'name': m['name'], 'command': v_command, 'reason': reason })
             validation_results.append({
                 'order': vcmd.get('order'),
@@ -9667,9 +9691,9 @@ def instances_run_stored_cmds(pid: str):
             })
             validation_err = None
             if not matched:
-                validation_err = 'validation regex did not match output'
+                validation_err = f"validation {'regex' if v_is_regex else 'exact string'} did not match output"
                 if timed_out:
-                    validation_err = 'validation regex did not match before timeout'
+                    validation_err = f"validation {'regex' if v_is_regex else 'exact string'} did not match before timeout"
             record_zip_entry(
                 validation_step_idx,
                 vpos - 1,

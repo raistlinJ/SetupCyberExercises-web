@@ -623,7 +623,24 @@ async function hydrateProxCredsFromPersisted(pid) {
   const targetPid = String(pid || '').trim();
   if (!targetPid) return readProxCreds(targetPid) || {};
   let sess = readProxCreds(targetPid) || {};
-  if (sess.username && sess.password) return sess;
+
+  // Helper to ensure meta exists so enforceRefreshDisabledOnConnChange doesn't wipe valid credentials
+  const ensureMeta = () => {
+    try {
+      const existingMeta = readProxMeta(targetPid);
+      if (!existingMeta || !existingMeta.url) {
+        const p = (window.PROJ_CACHE && window.PROJ_CACHE[targetPid]) ? window.PROJ_CACHE[targetPid] : ((window.PROJ && window.PROJ.id === targetPid) ? window.PROJ : null);
+        if (p) {
+          writeProxMeta(targetPid, { url: normalizeUrl(p.proxmox_url || ''), apiPort: Number(p.proxmox_api_port || 8006), sshPort: Number(p.proxmox_ssh_port || 22) });
+        }
+      }
+    } catch {}
+  };
+
+  if (sess.username && sess.password) {
+    ensureMeta();
+    return sess;
+  }
   try {
     if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
       await CREDS.fetchProjectSecrets(targetPid);
@@ -633,6 +650,7 @@ async function hydrateProxCredsFromPersisted(pid) {
   if (persisted && persisted.username && persisted.password) {
     sess = { ...sess, username: persisted.username, password: persisted.password };
     writeProxCreds(targetPid, sess);
+    ensureMeta();
   }
   return sess;
 }

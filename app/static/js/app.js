@@ -5288,8 +5288,10 @@ function sanitizeValidationCommands(commands) {
     let enabled = entry.enabled;
     if (enabled === undefined && entry.disabled !== undefined) enabled = !entry.disabled;
     const match = String(entry.match ?? entry.regex ?? entry.pattern ?? entry.re ?? entry.match_regex ?? entry.matchRegex ?? '').trim();
+    let isRegex = entry.is_regex ?? entry.isRegex;
+    if (isRegex === undefined) isRegex = true;
     const timeoutSeconds = normalizeCommandTimeout(entry.timeoutSeconds ?? entry.timeout_seconds ?? entry.timeout, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS);
-    list.push({ command, enabled: toBool(enabled, true), match, timeoutSeconds });
+    list.push({ command, enabled: toBool(enabled, true), match, timeoutSeconds, is_regex: toBool(isRegex, true) });
   }
   return list;
 }
@@ -5299,6 +5301,7 @@ function validationCommandsToServerPayload(commands) {
     command: cmd.command,
     enabled: cmd.enabled !== false,
     match: cmd.match || '',
+    is_regex: cmd.is_regex !== false,
     timeout_seconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
   }));
 }
@@ -6203,8 +6206,9 @@ function renderValidationCommandsModal() {
   }
 
   const html = commands.map((cmd, idx) => {
-    const commandObj = cmd && typeof cmd === 'object' ? cmd : { command: cmd, enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS };
+    const commandObj = cmd && typeof cmd === 'object' ? cmd : { command: cmd, enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS, is_regex: true };
     const isEnabled = commandObj.enabled !== false;
+    const isRegex = commandObj.is_regex !== false;
     const timeoutValue = normalizeCommandTimeout(commandObj.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS);
     const inputClasses = ['form-control', 'form-control-sm'];
     if (!isEnabled) inputClasses.push('text-decoration-line-through', 'opacity-50');
@@ -6227,7 +6231,13 @@ function renderValidationCommandsModal() {
       </div>
       <div class="row g-2 align-items-center">
         <div class="col-md-8">
-          <label class="form-label small mb-1">Regex Match</label>
+          <div class="d-flex justify-content-between align-items-end mb-1">
+            <label class="form-label small mb-0">Match Pattern</label>
+            <div class="form-check form-switch m-0" title="Toggle between Regex and Exact Match">
+              <input class="form-check-input" type="checkbox" data-role="validation-regex-toggle" id="validation-regex-${idx}" ${isRegex ? 'checked' : ''}>
+              <label class="form-check-label small text-muted" for="validation-regex-${idx}">${isRegex ? 'Regex' : 'Exact'}</label>
+            </div>
+          </div>
           <input type="text" class="${matchClasses.join(' ')}" data-role="validation-match" placeholder="e.g. service\\s+active" value="${escHtml(String(commandObj.match || ''))}">
         </div>
         <div class="col-md-4">
@@ -6264,6 +6274,7 @@ function openValidationCommandsManager(pid, idx) {
     command: cmd.command,
     enabled: cmd.enabled !== false,
     match: cmd.match || '',
+    is_regex: cmd.is_regex !== false,
     timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
   }));
   renderValidationCommandsModal();
@@ -6294,6 +6305,7 @@ async function saveValidationCommandsFromModal() {
       command: cmd.command,
       enabled: cmd.enabled !== false,
       match: cmd.match || '',
+      is_regex: cmd.is_regex !== false,
       timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
     }));
     setVmStatus(pid, idx, 'Saved', 'text-success');
@@ -6327,7 +6339,7 @@ function wireValidationCommandsModal() {
   if (addBtn) {
     addBtn.addEventListener('click', () => {
       const list = VALIDATION_COMMAND_MODAL_STATE.commands;
-      list.push({ command: '', enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS });
+      list.push({ command: '', enabled: true, match: '', is_regex: true, timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS });
       renderValidationCommandsModal();
     });
   }
@@ -6355,13 +6367,21 @@ function wireValidationCommandsModal() {
 
     listEl.addEventListener('change', (ev) => {
       const target = ev.target;
-      if (!target || target.getAttribute('data-role') !== 'validation-toggle') return;
+      if (!target) return;
+      const role = target.getAttribute('data-role');
+      if (role !== 'validation-toggle' && role !== 'validation-regex-toggle') return;
       const row = target.closest && target.closest('[data-validation-index]');
       if (!row) return;
       const idx = Number(row.dataset.validationIndex);
       if (!Number.isFinite(idx) || !VALIDATION_COMMAND_MODAL_STATE.commands[idx]) return;
-      VALIDATION_COMMAND_MODAL_STATE.commands[idx].enabled = !!target.checked;
-      renderValidationCommandsModal();
+      if (role === 'validation-toggle') {
+        VALIDATION_COMMAND_MODAL_STATE.commands[idx].enabled = !!target.checked;
+        renderValidationCommandsModal();
+      } else if (role === 'validation-regex-toggle') {
+        VALIDATION_COMMAND_MODAL_STATE.commands[idx].is_regex = !!target.checked;
+        const label = target.nextElementSibling;
+        if (label) label.textContent = target.checked ? 'Regex' : 'Exact';
+      }
     });
 
     listEl.addEventListener('click', (ev) => {

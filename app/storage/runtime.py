@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 from typing import Any, Dict, Optional
 
 
@@ -11,6 +12,8 @@ class RuntimeStore:
       - runMode: 'local' (default) or 'remote'
             - vmValidation: { normalized_vm_key: bool }
     """
+    _lock = threading.Lock()
+
 
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
@@ -62,12 +65,13 @@ class RuntimeStore:
 
     def set_run_mode(self, mode: Any) -> str:
         normalized = self._normalize_run_mode(mode)
-        data = self._read_all()
-        if normalized == "local":
-            data.pop("runMode", None)
-        else:
-            data["runMode"] = "remote"
-        self._write_all(data)
+        with self._lock:
+            data = self._read_all()
+            if normalized == "local":
+                data.pop("runMode", None)
+            else:
+                data["runMode"] = "remote"
+            self._write_all(data)
         return normalized
 
     @staticmethod
@@ -140,22 +144,24 @@ class RuntimeStore:
         return bool(raw)
 
     def set_vm_validation_state(self, project_id: Any, vm_name: Any, passed: Any, vmid: Any = None, node: Any = None) -> bool:
-        data = self._read_all()
-        validation_map = data.get("vmValidation") if isinstance(data.get("vmValidation"), dict) else {}
-        key = self._normalize_vm_validation_key(project_id, vm_name, vmid, node)
-        validation_map[key] = bool(passed)
-        data["vmValidation"] = validation_map
-        self._write_all(data)
-        return bool(validation_map[key])
+        with self._lock:
+            data = self._read_all()
+            validation_map = data.get("vmValidation") if isinstance(data.get("vmValidation"), dict) else {}
+            key = self._normalize_vm_validation_key(project_id, vm_name, vmid, node)
+            validation_map[key] = bool(passed)
+            data["vmValidation"] = validation_map
+            self._write_all(data)
+            return bool(validation_map[key])
 
     def clear_vm_validation_state(self, project_id: Any, vm_name: Any, vmid: Any = None, node: Any = None) -> None:
-        data = self._read_all()
-        validation_map = data.get("vmValidation") if isinstance(data.get("vmValidation"), dict) else {}
-        key = self._normalize_vm_validation_key(project_id, vm_name, vmid, node)
-        if key in validation_map:
-            validation_map.pop(key, None)
-            if validation_map:
-                data["vmValidation"] = validation_map
-            else:
-                data.pop("vmValidation", None)
-            self._write_all(data)
+        with self._lock:
+            data = self._read_all()
+            validation_map = data.get("vmValidation") if isinstance(data.get("vmValidation"), dict) else {}
+            key = self._normalize_vm_validation_key(project_id, vm_name, vmid, node)
+            if key in validation_map:
+                validation_map.pop(key, None)
+                if validation_map:
+                    data["vmValidation"] = validation_map
+                else:
+                    data.pop("vmValidation", None)
+                self._write_all(data)
