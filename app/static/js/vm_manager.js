@@ -3612,24 +3612,6 @@ async function runVmCreateFollowUpActions({ proj, targets, baseBody, createOptio
     });
   };
 
-  if (normalizedOptions.applyScenario) {
-    try {
-      const scenarioResp = await runVmCreateActionFollowUp({
-        proj,
-        action: 'apply_scenario',
-        baseBody,
-        requestTargets,
-        setProgress,
-        progress: 92,
-        label: 'Scenario…',
-        detail: `Applying scenario notes${contextLabel ? ` in ${contextLabel}` : ''}…`,
-      });
-      mergedResp = mergeVmActionSummaryData(mergedResp, scenarioResp);
-    } catch (err) {
-      addFollowUpError('Scenario follow-up', err);
-    }
-  }
-
   if (normalizedOptions.enableUserAccessibility) {
     try {
       const accessibilityResp = await runVmCreateUserAccessibilityFollowUp({
@@ -3661,6 +3643,24 @@ async function runVmCreateFollowUpActions({ proj, targets, baseBody, createOptio
       mergedResp = mergeVmActionSummaryData(mergedResp, usersResp);
     } catch (err) {
       addFollowUpError('Users & Access follow-up', err);
+    }
+  }
+
+  if (normalizedOptions.applyScenario) {
+    try {
+      const scenarioResp = await runVmCreateActionFollowUp({
+        proj,
+        action: 'apply_scenario',
+        baseBody,
+        requestTargets,
+        setProgress,
+        progress: 92,
+        label: 'Scenario…',
+        detail: `Applying scenario notes${contextLabel ? ` in ${contextLabel}` : ''}…`,
+      });
+      mergedResp = mergeVmActionSummaryData(mergedResp, scenarioResp);
+    } catch (err) {
+      addFollowUpError('Scenario follow-up', err);
     }
   }
 

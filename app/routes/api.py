@@ -2787,7 +2787,6 @@ def instances_create(pid: str):
                         client.set_lxc_nets(node=node, vmid=int(newid), nets=[], delete_keys=net_keys)
                         debug_msgs.append(f"Cleared inherited LXC network interfaces to prevent validation errors: {net_keys}")
                     except Exception as api_err:
-                        import re
                         err_str = str(api_err)
                         temp_bridges = []
                         success = False
@@ -3507,15 +3506,30 @@ def instances_create(pid: str):
                     )
                 vm_type = r.get('type', 'qemu')
                 if vm_type == 'lxc':
-                    netspecs = [f"name=eth{i},bridge={b}" for i, b in enumerate(expected)]
                     try:
-                        existing_cfg = client.get_lxc_config(node=node, vmid=vmid)
+                        existing_cfg = client.get_lxc_config(node=node, vmid=vmid) or {}
                     except Exception:
                         existing_cfg = {}
+                    netspecs = []
+                    for i, b in enumerate(expected):
+                        existing = str(existing_cfg.get(f'net{i}') or '')
+                        if existing:
+                            parts = [p.strip() for p in existing.split(',') if p]
+                            new_parts = []
+                            for p in parts:
+                                if p.startswith('bridge='):
+                                    new_parts.append(f"bridge={b}")
+                                else:
+                                    new_parts.append(p)
+                            if not any(p.startswith('bridge=') for p in new_parts):
+                                new_parts.append(f"bridge={b}")
+                            netspecs.append(','.join(new_parts))
+                        else:
+                            netspecs.append(f"name=eth{i},bridge={b}")
                 else:
                     netspecs = [f"e1000,bridge={b}" for b in expected]
                     try:
-                        existing_cfg = client.get_qemu_config(node=node, vmid=vmid)
+                        existing_cfg = client.get_qemu_config(node=node, vmid=vmid) or {}
                     except Exception:
                         existing_cfg = {}
                 
@@ -3540,7 +3554,7 @@ def instances_create(pid: str):
                 else:
                     client.set_qemu_nets(node=node, vmid=vmid, nets=netspecs, delete_keys=None)
             except Exception as e:
-                errors.append({'reason': f'set nets failed post-clone: {e}'})
+                errors.append({'index': r.get('index'), 'name': r.get('name'), 'reason': f'set nets failed post-clone: {e}'})
 
         # 4b) Post-clone snapshot (deferred) - execute in parallel
         snapshot_tasks = []
@@ -3744,7 +3758,11 @@ def instances_create(pid: str):
                 has_snap = not should_have_snapshot
                 if should_have_snapshot:
                     try:
-                        snaps = client.list_snapshots_qemu(node=node, vmid=vmid) or []
+                        is_lxc_snap = r.get('type', 'qemu') == 'lxc'
+                        if is_lxc_snap:
+                            snaps = client.list_snapshots_lxc(node=node, vmid=vmid) or []
+                        else:
+                            snaps = client.list_snapshots_qemu(node=node, vmid=vmid) or []
                         has_snap = bool(snaps)
                     except Exception:
                         has_snap = False
@@ -3755,7 +3773,8 @@ def instances_create(pid: str):
                 nets_ok = True
                 nets_retries = 0
                 try:
-                    if getattr(cfg, 'vm_type', 'qemu') == 'lxc':
+                    is_lxc = r.get('type', 'qemu') == 'lxc'
+                    if is_lxc:
                         cfg_now = client.get_lxc_config(node=node, vmid=vmid) or {}
                     else:
                         cfg_now = client.get_qemu_config(node=node, vmid=vmid) or {}
@@ -3776,7 +3795,7 @@ def instances_create(pid: str):
                             nets_retries += 1
                             _safe_sleep(1.0)
                             try:
-                                if getattr(cfg, 'vm_type', 'qemu') == 'lxc':
+                                if is_lxc:
                                     cfg_now = client.get_lxc_config(node=node, vmid=vmid) or {}
                                 else:
                                     cfg_now = client.get_qemu_config(node=node, vmid=vmid) or {}
@@ -5521,7 +5540,6 @@ def instances_apply_scenario(pid: str):
         old_desc = ex_cfg.get('description', '')
         
         if old_desc:
-            import re
             # Remove previous Scenario JSON block if it exists
             # This regex looks for { followed by things, "Scenario":, things, and }
             clean_desc = re.sub(r'\{[^{}]*"Scenario"[^{}]*\}', '', old_desc, flags=re.DOTALL)

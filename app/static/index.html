@@ -502,6 +502,40 @@
         height: 460px;
       }
     }
+
+    /* High contrast custom checkboxes for Step 5: Final Scenario Orchestration */
+    #wiz-step-5 .form-check {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding-left: 0;
+    }
+
+    #wiz-step-5 .form-check-input[type="checkbox"] {
+      width: 1.25rem;
+      height: 1.25rem;
+      margin-left: 0;
+      margin-top: 0;
+      border-radius: 4px;
+      border: 2px solid #5a6268; /* Distinct high-contrast border when unchecked */
+      background-color: var(--bs-body-bg, #fff);
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background-color 0.15s ease-in-out, border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+    }
+
+    #wiz-step-5 .form-check-input[type="checkbox"]:checked {
+      background-color: #0d6efd;
+      border-color: #0d6efd;
+    }
+
+    #wiz-step-5 .form-check-label {
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.94rem;
+      font-weight: 500;
+      color: var(--bs-body-color, #212529);
+    }
   </style>
 </head>
 
@@ -1330,34 +1364,34 @@
 
               <div id="wiz-act-vm" class="mb-3">
                 <h6 class="border-bottom pb-1 border-secondary">Proxmox Lifecycle</h6>
-                <div class="form-check form-switch mb-2">
+                <div class="form-check mb-2">
                   <input class="form-check-input" type="checkbox" id="wiz-act-vm-create" checked
                     onchange="window.wizToggleVmActions && window.wizToggleVmActions()">
                   <label class="form-check-label small" for="wiz-act-vm-create">Create VMs (Clone Templates)</label>
                 </div>
                 <div class="ms-4" id="wiz-act-vm-deps">
-                  <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-users" checked>
+                  <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-users" checked>
                     <label class="form-check-label small" for="wiz-act-vm-users">Create users/pools and set permissions</label>
                   </div>
-                  <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-accessibility" checked>
+                  <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-accessibility" checked>
                     <label class="form-check-label small" for="wiz-act-vm-accessibility">Apply user accessibility</label>
                   </div>
-                  <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-scenario" checked>
+                  <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-scenario" checked>
                     <label class="form-check-label small" for="wiz-act-vm-scenario">Apply scenario name to VMs</label>
                   </div>
-                  <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-network" checked>
+                  <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-network" checked>
                     <label class="form-check-label small" for="wiz-act-vm-network">Set network interfaces</label>
                   </div>
-                  <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-snapshot" checked>
+                  <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-snapshot" checked>
                     <label class="form-check-label small" for="wiz-act-vm-snapshot">Take post-clone snapshot</label>
                   </div>
-                  <div class="form-check form-switch mb-1">
-                    <input class="form-check-input" type="checkbox" role="switch" id="wiz-act-vm-start">
+                  <div class="form-check mb-1">
+                    <input class="form-check-input" type="checkbox" id="wiz-act-vm-start">
                     <label class="form-check-label small" for="wiz-act-vm-start">Start VMs</label>
                   </div>
                 </div>
