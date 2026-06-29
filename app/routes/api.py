@@ -5206,9 +5206,19 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
             continue
         info = name_to_info.get(gen_name.lower())
         if not info or info.get('vmid') is None:
-            skipped.append({ 'index': idx, 'name': gen_name, 'reason': 'not found' })
-            continue
-        # Append each resolved VM info to the mapped list (fix: ensure inside loop)
+            if t.get('vmid') is not None and t.get('node'):
+                info = {
+                    'vmid': int(t.get('vmid')),
+                    'node': str(t.get('node')),
+                    'type': str(t.get('type') or 'qemu'),
+                    'status': 'unknown',
+                    'power_status': 'unknown',
+                    'qmp_status': 'unknown'
+                }
+            else:
+                skipped.append({ 'index': idx, 'name': gen_name, 'reason': 'not found' })
+                continue
+        # Append each resolved VM info to the mapped list
         mapped.append({
             'index': idx,
             'name': gen_name,
@@ -6682,6 +6692,9 @@ def instances_users_create(pid: str):
                         unsupported = False
                         # Build full ACL target list: mapped + any other existing user-accessible VMs for this index
                         acl_targets = list(mlist or [])
+                        for mt in acl_targets:
+                            mt['explicit_target'] = True
+
                         try:
                             existing_names_set = { str(m.get('name') or '') for m in acl_targets }
                             for v in (proj.vms or []):
@@ -6714,7 +6727,9 @@ def instances_users_create(pid: str):
                             try:
                                 gen_name = str(m.get('name') or '')
                                 base_name = _base_from_generated(gen_name, idx)
-                                if not _is_in_scenario(base_name) or not _is_vm_in_project_notes(m.get('node'), m.get('vmid')):
+                                if not _is_in_scenario(base_name):
+                                    continue
+                                if not m.get('explicit_target') and not _is_vm_in_project_notes(m.get('node'), m.get('vmid')):
                                     continue
                                 is_accessible = _is_user_accessible(base_name)
                                 try:
