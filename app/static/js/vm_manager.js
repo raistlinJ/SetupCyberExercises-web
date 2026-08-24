@@ -604,11 +604,30 @@ function vmMigrateSelectedToAssoc(basePid) {
   } catch { }
 }
 
-// Proxmox session creds and connection meta
-function proxCredKey(pid) { return `toolhub.vm.mgr.proxCred.${pid}`; }
-function proxMetaKey(pid) { return `toolhub.vm.mgr.proxMeta.${pid}`; }
-function readProxCreds(pid) { try { return JSON.parse(sessionStorage.getItem(proxCredKey(pid)) || '{}') || {}; } catch { return {}; } }
-function writeProxCreds(pid, obj) { try { sessionStorage.setItem(proxCredKey(pid), JSON.stringify(obj || {})); } catch { } }
+// Proxmox session creds and connection meta. Use the same keys as Configuration
+// so one successful login remains available across page navigation for this tab.
+function proxCredKey(pid) { return `toolhub.session.proxmox.${pid}`; }
+function proxMetaKey(pid) { return `toolhub.session.proxmox.meta.${pid}`; }
+function legacyVmProxCredKey(pid) { return `toolhub.vm.mgr.proxCred.${pid}`; }
+function legacyVmProxMetaKey(pid) { return `toolhub.vm.mgr.proxMeta.${pid}`; }
+function readProxCreds(pid) {
+  try {
+    const current = sessionStorage.getItem(proxCredKey(pid));
+    if (current) return JSON.parse(current) || {};
+    const legacy = sessionStorage.getItem(legacyVmProxCredKey(pid));
+    if (!legacy) return {};
+    const parsed = JSON.parse(legacy) || {};
+    sessionStorage.setItem(proxCredKey(pid), JSON.stringify(parsed));
+    sessionStorage.removeItem(legacyVmProxCredKey(pid));
+    return parsed;
+  } catch { return {}; }
+}
+function writeProxCreds(pid, obj) {
+  try {
+    sessionStorage.setItem(proxCredKey(pid), JSON.stringify(obj || {}));
+    sessionStorage.removeItem(legacyVmProxCredKey(pid));
+  } catch { }
+}
 
 function readPersistedProxCreds(pid) {
   try {
@@ -629,7 +648,9 @@ async function hydrateProxCredsFromPersisted(pid) {
     try {
       const existingMeta = readProxMeta(targetPid);
       if (!existingMeta || !existingMeta.url) {
-        const p = (window.PROJ_CACHE && window.PROJ_CACHE[targetPid]) ? window.PROJ_CACHE[targetPid] : ((window.PROJ && window.PROJ.id === targetPid) ? window.PROJ : null);
+        const p = (window.PROJ_CACHE && window.PROJ_CACHE[targetPid])
+          ? window.PROJ_CACHE[targetPid]
+          : ((PROJ && canonicalPid(PROJ.id) === canonicalPid(targetPid)) ? PROJ : null);
         if (p) {
           writeProxMeta(targetPid, { url: normalizeUrl(p.proxmox_url || ''), apiPort: Number(p.proxmox_api_port || 8006), sshPort: Number(p.proxmox_ssh_port || 22) });
         }
@@ -656,15 +677,47 @@ async function hydrateProxCredsFromPersisted(pid) {
 }
 
 // Utility helpers for conn/meta
-function readProxMeta(pid) { try { return JSON.parse(sessionStorage.getItem(proxMetaKey(pid)) || '{}'); } catch { return {}; } }
-function writeProxMeta(pid, obj) { try { sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj || {})); } catch { } }
+function readProxMeta(pid) {
+  try {
+    const current = sessionStorage.getItem(proxMetaKey(pid));
+    if (current) return JSON.parse(current) || {};
+    const legacy = sessionStorage.getItem(legacyVmProxMetaKey(pid));
+    if (!legacy) return {};
+    const parsed = JSON.parse(legacy) || {};
+    sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(parsed));
+    sessionStorage.removeItem(legacyVmProxMetaKey(pid));
+    return parsed;
+  } catch { return {}; }
+}
+function writeProxMeta(pid, obj) {
+  try {
+    sessionStorage.setItem(proxMetaKey(pid), JSON.stringify(obj || {}));
+    sessionStorage.removeItem(legacyVmProxMetaKey(pid));
+  } catch { }
+}
 function clearProxSession(pid) {
-  try { sessionStorage.removeItem(proxCredKey(pid)); sessionStorage.removeItem(proxMetaKey(pid)); } catch { }
+  try {
+    sessionStorage.removeItem(proxCredKey(pid));
+    sessionStorage.removeItem(proxMetaKey(pid));
+    sessionStorage.removeItem(legacyVmProxCredKey(pid));
+    sessionStorage.removeItem(legacyVmProxMetaKey(pid));
+  } catch { }
   vmClearLiveRefreshed(pid);
 }
 
 // Normalize Proxmox URL to guarantee a scheme for consistent comparisons
-function normalizeUrl(s) { if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
+function normalizeUrl(s) {
+  if (!s) return '';
+  const raw = /^https?:\/\//i.test(String(s).trim()) ? String(s).trim() : `https://${String(s).trim()}`;
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    parsed.search = '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return raw.replace(/\/+$/, '');
+  }
+}
 function currentConnSnapshot(proj) {
   return {
     url: normalizeUrl(proj?.proxmox_url || ''),
@@ -678,6 +731,13 @@ function enforceRefreshDisabledOnConnChange() {
   if (!PROJ) return;
   const snap = currentConnSnapshot(PROJ);
   const meta = readProxMeta(PROJ.id);
+  // Credentials entered on Configuration predate VM Manager's connection meta.
+  // Adopt the current project snapshot instead of treating absent meta as a
+  // connection change and deleting a valid application-session login.
+  if (!meta || !Object.keys(meta).length) {
+    if (hasSessionCreds()) writeProxMeta(PROJ.id, snap);
+    return;
+  }
   if (!sameConn(snap, meta)) {
     // Invalidate session creds and meta; disable Refresh
     clearProxSession(PROJ.id);

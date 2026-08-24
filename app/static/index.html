@@ -1033,7 +1033,7 @@
   <script src="/static/js/creds.js"></script>
   <script src="/static/js/auth.js"></script>
   <script src="/static/js/shell.js"></script>
-  <script src="/static/js/app.js?v=20260508b"></script>
+  <script src="/static/js/app.js?v=20260824a"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
     document.addEventListener('DOMContentLoaded', async () => {
@@ -1176,11 +1176,9 @@
                 </div>
 
                 <div class="ms-4 mt-1 d-none" id="wiz-cap-csv-container">
-                  <input type="file" class="form-control form-control-sm w-100" id="wiz-csv-file" accept=".csv"
+                  <input type="file" class="form-control form-control-sm w-100" id="wiz-csv-file" accept=".csv,.txt,text/csv,text/plain"
                     onchange="window.checkWizCsvFile && window.checkWizCsvFile()">
-                  <small id="wiz-csv-feedback" class="text-muted d-block mt-1" style="font-size: 0.75rem;">CSV should
-                    not
-                    have a header row. Format: username,password</small>
+                  <small id="wiz-csv-feedback" class="text-muted d-block mt-1" style="font-size: 0.75rem;">Each row must contain username and password, separated by a comma or whitespace.</small>
                 </div>
               </div>
 

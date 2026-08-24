@@ -280,6 +280,62 @@ class ManagerProjectSwitchRegressionTests(unittest.TestCase):
 
         self._run_node_regression('app/static/js/vm_manager.js', harness, 'vm_manager.bundle.js')
 
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend VM Manager regression checks')
+    def test_vm_manager_reuses_configuration_session_credentials_without_meta(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              PROJ = {
+                id: 'project-a',
+                proxmox_url: 'https://prox.example/',
+                proxmox_api_port: 8006,
+                proxmox_ssh_port: 22,
+              };
+              sessionStorage.setItem(
+                'toolhub.session.proxmox.project-a',
+                JSON.stringify({ username: 'root@pam', password: 'secret' })
+              );
+
+              enforceRefreshDisabledOnConnChange();
+
+              const creds = readProxCreds('project-a');
+              const meta = readProxMeta('project-a');
+              assert(creds.username === 'root@pam' && creds.password === 'secret', 'Configuration credentials should survive VM Manager load');
+              assert(meta.url === 'https://prox.example', 'Missing metadata should initialize from the current project');
+              assert(Number(meta.apiPort) === 8006 && Number(meta.sshPort) === 22, 'Connection ports should be captured');
+            })();
+            """
+        )
+
+        self._run_node_regression('app/static/js/vm_manager.js', harness, 'vm_manager.auth_session.bundle.js')
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend VM Manager regression checks')
+    def test_vm_manager_migrates_legacy_session_credentials(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              const legacyKey = 'toolhub.vm.mgr.proxCred.project-a';
+              const sharedKey = 'toolhub.session.proxmox.project-a';
+              sessionStorage.setItem(legacyKey, JSON.stringify({ username: 'root@pam', password: 'secret' }));
+
+              const creds = readProxCreds('project-a');
+              assert(creds.username === 'root@pam', 'Legacy credentials should remain readable');
+              assert(sessionStorage.getItem(sharedKey), 'Legacy credentials should migrate to the shared session key');
+              assert(sessionStorage.getItem(legacyKey) === null, 'Legacy credentials should be removed after migration');
+            })();
+            """
+        )
+
+        self._run_node_regression('app/static/js/vm_manager.js', harness, 'vm_manager.auth_migration.bundle.js')
+
     @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend project-switch regression checks')
     def test_ctfd_load_stops_before_users_check_when_selection_changes(self):
         harness = textwrap.dedent(

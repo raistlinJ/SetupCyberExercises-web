@@ -29,6 +29,19 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               }};
             }}
 
+            function makeStorage() {{
+              const store = new Map();
+              return {{
+                getItem(key) {{
+                  const value = store.get(String(key));
+                  return value === undefined ? null : value;
+                }},
+                setItem(key, value) {{ store.set(String(key), String(value)); }},
+                removeItem(key) {{ store.delete(String(key)); }},
+                clear() {{ store.clear(); }},
+              }};
+            }}
+
             function makeElement(id) {{
               return {{
                 id: String(id || ''),
@@ -90,9 +103,13 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               applyRemoteModeUI() {{}},
             }};
 
+            const sessionStorage = makeStorage();
+            const localStorage = makeStorage();
             const windowObj = {{
               document,
               shell,
+              sessionStorage,
+              localStorage,
               PROJ_CACHE: {{}},
               MATERIAL_PENDING: {{}},
               bootstrap: null,
@@ -105,6 +122,8 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
 
             const context = {{
               console,
+              sessionStorage,
+              localStorage,
               document,
               window: windowObj,
               shell,
@@ -246,6 +265,104 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               assert(!urls.includes('/api/projects/proj-wizard/instances/actions/users_access_sync'), 'Users create should replace redundant access sync when selected');
               assert(!urls.includes('/api/projects/proj-wizard/instances/actions/start'), 'Start should not run when the VM Manager-style default is off');
               assert(!urls.includes('/api/projects/proj-wizard/ctfd/users_create'), 'Hidden CTFd option should not run when CTFd feature is disabled');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
+    def test_wizard_credentials_parser_accepts_commas_and_whitespace(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              const parsed = parseWizardCredentialsText([
+                'username,password',
+                'cealvarez2 80734677',
+                'student02,PASSWORD2',
+                'student03, PASSWORD3',
+                'student04,\\tPASSWORD4',
+                'student05,, \\t PASSWORD5',
+                'student06     PASSWORD6',
+              ].join('\\n'));
+
+              assert(parsed.valid, 'Comma- and whitespace-delimited rows should be valid');
+              assert(parsed.credentials.length === 6, 'Optional header should not become a credential');
+              assert(parsed.credentials[0].username === 'cealvarez2', 'Whitespace-delimited username should be isolated');
+              assert(parsed.credentials[0].password === '80734677', 'Whitespace-delimited password should be isolated');
+              assert(parsed.credentials[2].password === 'PASSWORD3', 'Whitespace around a comma should be ignored');
+              assert(parsed.credentials[3].password === 'PASSWORD4', 'Comma-tab delimiters should be accepted');
+              assert(parsed.credentials[4].password === 'PASSWORD5', 'Mixed repeated delimiters should collapse to one');
+              assert(parsed.credentials[5].password === 'PASSWORD6', 'Repeated whitespace should collapse to one');
+
+              const missingPassword = parseWizardCredentialsText('student07,,,');
+              assert(!missingPassword.valid, 'Repeated trailing delimiters must not hide a missing password');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
+    def test_wizard_blocks_invalid_credentials_rows(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              document.querySelector = (selector) => {
+                if (selector === 'input[name="wiz-cap-mode"]:checked') return { value: 'csv' };
+                return null;
+              };
+              document.getElementById('wiz-csv-file').files = [{
+                text: async () => 'alice,password1\\nbob,password2,unexpected',
+              }];
+              document.getElementById('wiz-scenario-tag').value = '-lab-';
+              currentWizardStep = 1;
+
+              let toast = '';
+              showToast = (message) => { toast = String(message || ''); };
+              await window.wizardNext();
+
+              assert(currentWizardStep === 1, 'Wizard should remain on the capacity step');
+              assert(toast.includes('Line 2:'), 'Wizard should identify the invalid row number');
+              assert(document.getElementById('wiz-csv-feedback').className.includes('text-danger'), 'Inline validation should show an error');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
+    def test_configured_vmid_change_invalidates_only_that_project_session(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              window.PROJ_CACHE = {
+                'project-a': { id: 'project-a', vms: [{ name: 'web', vmid: 101 }] },
+              };
+              const credKey = 'toolhub.session.proxmox.project-a';
+              const metaKey = 'toolhub.session.proxmox.meta.project-a';
+              sessionStorage.setItem(credKey, JSON.stringify({ username: 'root@pam', password: 'secret' }));
+              sessionStorage.setItem(metaKey, JSON.stringify({ url: 'https://prox.example', apiPort: 8006, sshPort: 22 }));
+              http = async () => ({ ok: true });
+
+              await saveVM('project-a', 'web', { vmid: 101 }, { silent: true, rethrow: true });
+              assert(sessionStorage.getItem(credKey), 'Saving the same VM ID should preserve authentication');
+
+              await saveVM('project-a', 'web', { vmid: 102 }, { silent: true, rethrow: true });
+              assert(sessionStorage.getItem(credKey) === null, 'Changing the configured VM ID should invalidate authentication');
+              assert(sessionStorage.getItem(metaKey) === null, 'Changing the configured VM ID should clear connection metadata');
             })();
             """
         )

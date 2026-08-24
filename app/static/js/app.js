@@ -2912,53 +2912,97 @@ window.toggleWizCapMode = function() {
   if (csvCont) csvCont.classList.toggle('d-none', mode !== 'csv');
 };
 
+function parseWizardCredentialsText(rawText) {
+  const credentials = [];
+  const errors = [];
+  const lines = String(rawText ?? '').split(/\r?\n/);
+  let firstRecord = true;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = String(lines[i] ?? '');
+    if (i === 0 && line.charCodeAt(0) === 0xFEFF) line = line.slice(1);
+    line = line.trim();
+    if (!line) continue;
+
+    // Treat any run or mixture of commas and whitespace as one delimiter, so
+    // comma-space, tabs, repeated commas, and repeated spaces behave alike.
+    const parts = line.split(/[,\s]+/);
+    const username = (parts[0] || '').trim();
+    const password = (parts[1] || '').trim();
+    const isHeader = firstRecord
+      && /^(?:username|user)$/i.test(username)
+      && /^(?:password|pass)$/i.test(password)
+      && parts.length === 2;
+    firstRecord = false;
+    if (isHeader) continue;
+
+    if (parts.length !== 2) {
+      errors.push({
+        line: i + 1,
+        reason: 'expected exactly two fields: username and password, separated by a comma or whitespace'
+      });
+      continue;
+    }
+    if (!username || !password) {
+      errors.push({ line: i + 1, reason: 'username and password are both required' });
+      continue;
+    }
+    if (password.length < 8) {
+      errors.push({ line: i + 1, reason: 'password must be at least 8 characters' });
+      continue;
+    }
+    credentials.push({ username, password });
+  }
+
+  if (!credentials.length && !errors.length) {
+    errors.push({ line: null, reason: 'no username/password rows were found' });
+  }
+  return { credentials, errors, valid: errors.length === 0 && credentials.length > 0 };
+}
+
+async function readWizardCredentialsFile(file) {
+  if (file && typeof file.text === 'function') return file.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = e => reject(e);
+    reader.readAsText(file);
+  });
+}
+
+function wizardCredentialErrorText(result) {
+  const error = result?.errors?.[0];
+  if (!error) return 'The credentials file is invalid.';
+  return `${error.line ? `Line ${error.line}: ` : ''}${error.reason}.`;
+}
+
 window.checkWizCsvFile = async function() {
   const fileIn = document.getElementById('wiz-csv-file');
   const feedback = document.getElementById('wiz-csv-feedback');
-  if (!fileIn || !feedback) return;
+  if (!fileIn || !feedback) return { credentials: [], errors: [{ line: null, reason: 'credentials file input is unavailable' }], valid: false };
 
   if (!fileIn.files || fileIn.files.length === 0) {
-    feedback.innerHTML = 'CSV should not have a header row. Format: username,password';
+    feedback.innerHTML = 'Each row must contain username and password, separated by a comma or whitespace.';
     feedback.className = 'text-muted d-block mt-1';
-    return;
+    return { credentials: [], errors: [{ line: null, reason: 'no credentials file was selected' }], valid: false };
   }
 
   try {
-    const fileContent = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = e => resolve(e.target.result);
-      reader.onerror = e => reject(e);
-      reader.readAsText(fileIn.files[0]);
-    });
-    
-    let validCount = 0;
-    const lines = fileContent.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const parts = line.split(',');
-        let a = (parts[0] || '').trim();
-        let b = (parts[1] || '').trim();
-        
-        const isHeader = (x, y) => {
-          if (!y) return false;
-          return x.toLowerCase() === 'username' || x.toLowerCase() === 'user' || y.toLowerCase() === 'password' || y.toLowerCase() === 'pass';
-        };
-        if (i === 0 && isHeader(a, b)) continue; // skip header
-        if (!a && !b) continue;
-        validCount++;
-    }
-
-    if (validCount > 0) {
-      feedback.innerHTML = `<i class="bi bi-check-circle text-success pe-1"></i> Successfully read <strong>${validCount}</strong> user${validCount === 1 ? '' : 's'}.`;
+    const fileContent = await readWizardCredentialsFile(fileIn.files[0]);
+    const result = parseWizardCredentialsText(fileContent);
+    if (result.valid) {
+      const validCount = result.credentials.length;
+      feedback.innerHTML = `<i class="bi bi-check-circle text-success pe-1"></i> Successfully validated <strong>${validCount}</strong> user${validCount === 1 ? '' : 's'}.`;
       feedback.className = 'text-success d-block mt-1';
     } else {
-      feedback.innerHTML = `<i class="bi bi-exclamation-triangle-fill text-warning pe-1"></i> No pairs found.`;
-      feedback.className = 'text-warning d-block mt-1';
+      feedback.innerHTML = `<i class="bi bi-exclamation-triangle-fill text-danger pe-1"></i> ${escHtml(wizardCredentialErrorText(result))}`;
+      feedback.className = 'text-danger d-block mt-1';
     }
+    return result;
   } catch (e) {
-    feedback.innerHTML = `<i class="bi bi-exclamation-triangle-fill text-danger pe-1"></i> Failed to read.`;
+    feedback.innerHTML = `<i class="bi bi-exclamation-triangle-fill text-danger pe-1"></i> Failed to read the credentials file.`;
     feedback.className = 'text-danger d-block mt-1';
+    return { credentials: [], errors: [{ line: null, reason: 'failed to read the credentials file' }], valid: false };
   }
 };
 
@@ -3717,7 +3761,7 @@ function resetWizard() {
     
     const feedback = document.getElementById('wiz-csv-feedback');
     if (feedback) {
-       feedback.innerHTML = 'CSV should not have a header row. Format: username,password';
+       feedback.innerHTML = 'Each row must contain username and password, separated by a comma or whitespace.';
        feedback.className = 'text-muted d-block mt-1';
     }
     
@@ -3862,6 +3906,10 @@ window.wizardNext = async function() {
       const csvFile = document.getElementById('wiz-csv-file');
       if (!csvFile || !csvFile.files || csvFile.files.length === 0) {
         return showToast('Please select a CSV file to upload.', 'warning');
+      }
+      const validation = await window.checkWizCsvFile();
+      if (!validation?.valid) {
+        return showToast(wizardCredentialErrorText(validation), 'danger');
       }
     }
 
@@ -4783,45 +4831,23 @@ window.submitProjectCreation = async function(mode) {
     } else {
       const fileIn = document.getElementById('wiz-csv-file');
       if (fileIn && fileIn.files && fileIn.files.length > 0) {
-        let fileContent = '';
+        let parsedCredentials;
         try {
-          fileContent = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = e => resolve(e.target.result);
-            reader.onerror = e => reject(e);
-            reader.readAsText(fileIn.files[0]);
-          });
+          const fileContent = await readWizardCredentialsFile(fileIn.files[0]);
+          parsedCredentials = parseWizardCredentialsText(fileContent);
         } catch (e) {
-          showToast('Failed to read CSV file: ' + e, 'danger');
+          showToast('Failed to read credentials file: ' + e, 'danger');
           return;
         }
-        
-        let creds = [];
-        const lines = fileContent.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          const parts = line.split(',');
-          let a = (parts[0] || '').trim();
-          let b = (parts[1] || '').trim();
-          
-          const isHeader = (x, y) => {
-            if (!y) return false;
-            return x.toLowerCase() === 'username' || x.toLowerCase() === 'user' || y.toLowerCase() === 'password' || y.toLowerCase() === 'pass';
-          };
-          if (i === 0 && isHeader(a, b)) continue; // skip header
-          if (!a && !b) continue;
-          creds.push({ username: a, password: b });
+
+        if (!parsedCredentials.valid) {
+          showToast(wizardCredentialErrorText(parsedCredentials), 'danger');
+          return;
         }
-        
-        if (creds.length > 0) {
-          payload.credentials = creds;
-          payload.instances = creds.length;
-        } else {
-          payload.instances = 0;
-        }
+        payload.credentials = parsedCredentials.credentials;
+        payload.instances = parsedCredentials.credentials.length;
       } else {
-        showToast('Please select a CSV file.', 'warning');
+        showToast('Please select a credentials file.', 'warning');
         return;
       }
     }
@@ -7759,12 +7785,40 @@ async function removeVM(id, name) {
   catch (e) { alert('Error removing VM: ' + e.message); try { (window.shell && shell.logError) ? shell.logError('Config: remove VM failed: ' + e.message) : console.error('Remove VM failed:', e); } catch { } }
 }
 
+function normalizeConfiguredVmid(value) {
+  if (value === null || value === undefined || String(value).trim() === '') return '';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? String(numeric) : String(value).trim();
+}
+
+function clearProxmoxApplicationSession(pid) {
+  const projectId = String(pid || '').trim();
+  if (!projectId) return;
+  try {
+    [
+      `toolhub.session.proxmox.${projectId}`,
+      `toolhub.session.proxmox.meta.${projectId}`,
+      `toolhub.vm.mgr.proxCred.${projectId}`,
+      `toolhub.vm.mgr.proxMeta.${projectId}`,
+    ].forEach(key => sessionStorage.removeItem(key));
+  } catch { }
+}
+
 async function saveVM(id, name, fields, opts = {}) {
   const silent = !!opts.silent;
   const rethrow = !!opts.rethrow;
+  let configuredVmidChanged = false;
+  try {
+    if (fields && Object.prototype.hasOwnProperty.call(fields, 'vmid')) {
+      const project = (window.PROJ_CACHE || {})[id];
+      const vm = Array.isArray(project?.vms) ? project.vms.find(item => item && item.name === name) : null;
+      if (vm) configuredVmidChanged = normalizeConfiguredVmid(vm.vmid) !== normalizeConfiguredVmid(fields.vmid);
+    }
+  } catch { }
   try {
     if (!silent) { try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: saving VM ${name}`) : console.log('Saving VM', name); } catch { } }
     await http('PATCH', `/api/projects/${id}/vms/${encodeURIComponent(name)}`, fields);
+    if (configuredVmidChanged) clearProxmoxApplicationSession(id);
     if (!silent) {
       loadProjects();
       try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }

@@ -902,9 +902,11 @@ class ProxmoxClient:
         r = s.get(url, timeout=15)
         if r.status_code == 404:
             return None
-        # Some Proxmox versions/extensions can return 400/500 for non-existent users on the single-user endpoint.
-        # Fall back to listing users and filtering when that happens.
-        if r.status_code in (400, 500):
+        # The standard Proxmox API does not implement GET on the single-user
+        # endpoint on some versions (405/501). Fall back to the supported user
+        # listing endpoint and filter it, as we also do for version-specific
+        # 400/500 responses for a missing user.
+        if r.status_code in (400, 405, 500, 501):
             url_list = f"{self.base_url.rstrip('/')}/api2/json/access/users"
             rl = s.get(url_list, params={ 'full': 1 }, timeout=20)
             if rl.status_code >= 400:
