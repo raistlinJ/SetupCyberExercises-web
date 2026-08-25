@@ -5,7 +5,13 @@ DeployForge supports exporting Projects to a ZIP bundle and importing them back 
 ## Export
 
 - Export a single project from the project card in the UI, or via the API.
-- Exports include `project.json` plus optional materials under `materials/`.
+- Exports include the complete project configuration in `project.json`, including
+  startup, stored, and validation commands for every VM.
+- Project materials are included under `materials/<project_id>/`.
+- Uploaded notification audio is included both in the project manifest for
+  backward compatibility and as files under `audio/` with `audio/manifest.json`.
+- Proxmox VM backup exports include the same configuration, materials, and audio
+  content in addition to files under `backups/`.
 
 See also: `docs/api.md`.
 
@@ -15,7 +21,11 @@ See also: `docs/api.md`.
 
 - `project.json` with `schemaVersion: 1`
 - Optional materials under `materials/…`
+- Optional notification audio under `audio/…` with `audio/manifest.json`
 - Optional Proxmox backups under `backups/<vm_name>/...` when VM restore is included
+
+Import restores all persisted project and VM configuration fields. Audio can be
+restored from embedded data URLs or reconstructed from the audio files in the ZIP.
 
 ### UI options
 

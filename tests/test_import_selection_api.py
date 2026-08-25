@@ -152,7 +152,21 @@ class ImportSelectionApiTests(unittest.TestCase):
             'id': 'orig-2',
             'name': 'ImportSelectionTestChecked',
             'credentials': [{'username': 'user2', 'password': '12345678'}],
-            'vms': [{'name': 'vmB', 'vmid': 101, 'start_commands': []}],
+            'vms': [{
+                'name': 'vmB',
+                'vmid': 101,
+                'vm_type': 'lxc',
+                'start_commands': [],
+                'stored_commands': [{
+                    'delay_seconds': 1,
+                    'commands': [{'command': 'echo stored', 'enabled': False}],
+                }],
+                'validation_commands': [{
+                    'command': 'echo valid',
+                    'match': '^valid$',
+                    'timeout_seconds': 17,
+                }],
+            }],
         }
         zip_buf = self._make_zip(project)
         job = self._start_import_job(zip_buf, include_creds=True, include_vms=True)
@@ -166,6 +180,12 @@ class ImportSelectionApiTests(unittest.TestCase):
         self.assertIsNotNone(created)
         self.assertEqual(len(created.get('credentials') or []), 1)
         self.assertEqual(len(created.get('vms') or []), 1)
+        imported_vm = created['vms'][0]
+        self.assertEqual(imported_vm.get('vm_type'), 'lxc')
+        self.assertEqual(imported_vm['stored_commands'][0]['commands'][0]['command'], 'echo stored')
+        self.assertFalse(imported_vm['stored_commands'][0]['commands'][0]['enabled'])
+        self.assertEqual(imported_vm['validation_commands'][0]['command'], 'echo valid')
+        self.assertEqual(imported_vm['validation_commands'][0]['match'], '^valid$')
 
     def test_import_notify_audio_unchecked_drops_media_audio(self):
         # Minimal valid data URL (base64 for 'abc')

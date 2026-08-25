@@ -208,6 +208,20 @@ class ExportNotifyAudioOptionTests(unittest.TestCase):
             self.assertIn('event:challenge_solved', audio_map)
             self.assertIn('media:uploaded1', audio_map)
 
+    def test_selected_project_export_keeps_audio_when_materials_are_excluded(self):
+        pid = self._create_project()
+        self._seed_project_audio(pid)
+
+        resp = self.client.get(
+            f'/api/projects/export?ids={pid}&includeMaterials=false&includeNotifyAudio=true'
+        )
+        self.assertEqual(resp.status_code, 200)
+        with self._read_export_zip(resp.data) as zf:
+            names = zf.namelist()
+            self.assertIn('audio/manifest.json', names)
+            self.assertTrue(any(name.startswith('audio/') and name != 'audio/manifest.json' for name in names))
+            self.assertFalse(any(name.startswith('materials/') for name in names))
+
         def test_project_audio_meta_and_entry_endpoints(self):
             pid = self._create_project()
             self._seed_project_audio(pid)

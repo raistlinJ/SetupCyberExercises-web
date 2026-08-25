@@ -22,13 +22,14 @@ from werkzeug.utils import secure_filename
 from urllib.parse import urlsplit
 import threading
 from datetime import datetime, timedelta, timezone
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import time
 from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
 from ..storage.projects import (
     ProjectStore,
     Project,
+    VMConfig,
     sanitize_start_command_steps,
     sanitize_validation_commands,
     _coerce_enabled,
@@ -726,6 +727,7 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_p
         return 0
     manifest = {
         "generated": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "projectId": str(getattr(proj, 'id', '') or ''),
         "events": [],
     }
     total_written = 0
@@ -779,7 +781,9 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_p
                 ext = '.bin'
             clip_name = sound.get('name') or f"clip_{clip_idx}"
             clip_stem = secure_filename(str(clip_name)) or f"clip_{clip_idx}"
-            arc_path = f"audio/{safe_key}/{clip_stem}{ext}"
+            # Include the ordinal so clips with the same display name cannot
+            # overwrite one another inside the ZIP.
+            arc_path = f"audio/{idx}_{safe_key}/{clip_idx}_{clip_stem}{ext}"
             try:
                 zf.writestr(arc_path, raw_bytes)
             except Exception as exc:
@@ -807,6 +811,143 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_p
         except Exception as exc:
             LOG.warning("Failed to write audio manifest: %s", exc)
     return total_written
+
+
+def _hydrate_project_audio_from_zip(
+    zf: zipfile.ZipFile,
+    audio_value: Any,
+    *,
+    source_project_id: str = '',
+    allow_unscoped: bool = True,
+) -> Dict[str, Any]:
+    """Restore audio data URLs from audio/manifest.json + clip files.
+
+    Current exports retain data URLs in project.json for backward compatibility,
+    but the audio files are authoritative fallback content. This also lets us
+    import bundles whose manifest contains audio metadata without embedded base64.
+    """
+    audio_map = copy.deepcopy(audio_value) if isinstance(audio_value, dict) else {}
+    try:
+        raw_manifest = json.loads(zf.read('audio/manifest.json').decode('utf-8'))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError):
+        return audio_map
+    except Exception:
+        return audio_map
+
+    if not isinstance(raw_manifest, dict):
+        return audio_map
+    manifest_project_id = str(raw_manifest.get('projectId') or '').strip()
+    source_project_id = str(source_project_id or '').strip()
+    if manifest_project_id and source_project_id and manifest_project_id != source_project_id:
+        return audio_map
+    if not manifest_project_id and not allow_unscoped:
+        return audio_map
+
+    try:
+        archive_entries = set(zf.namelist())
+    except Exception:
+        archive_entries = set()
+    max_audio_bytes = int(getattr(ProjectStore, '_MAX_AUDIO_BYTES', 10 * 1024 * 1024))
+
+    for event in raw_manifest.get('events') or []:
+        if not isinstance(event, dict):
+            continue
+        event_key = str(event.get('key') or '').strip()
+        if not event_key:
+            continue
+        existing = audio_map.get(event_key)
+        entry = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+        sounds = list(entry.get('sounds') or []) if isinstance(entry.get('sounds'), list) else []
+        seen_hashes = set()
+        for sound in sounds:
+            if not isinstance(sound, dict):
+                continue
+            digest = str(sound.get('sha256') or '').strip().lower()
+            if not digest:
+                _mime, existing_bytes = ProjectStore._decode_data_url(sound.get('dataUrl'))
+                if existing_bytes:
+                    digest = hashlib.sha256(existing_bytes).hexdigest()
+            if digest:
+                seen_hashes.add(digest)
+
+        for clip in event.get('clips') or []:
+            if not isinstance(clip, dict):
+                continue
+            filename = str(clip.get('filename') or '').strip()
+            if not filename or filename not in archive_entries or not filename.startswith('audio/'):
+                continue
+            try:
+                info = zf.getinfo(filename)
+                if info.is_dir() or int(info.file_size or 0) <= 0 or int(info.file_size) > max_audio_bytes:
+                    continue
+                raw_bytes = zf.read(info)
+            except Exception:
+                continue
+            if not raw_bytes or len(raw_bytes) > max_audio_bytes:
+                continue
+            digest = hashlib.sha256(raw_bytes).hexdigest()
+            if digest in seen_hashes:
+                continue
+            mime = str(clip.get('mime') or '').strip() or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            sound = {
+                'dataUrl': f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}",
+                'sha256': digest,
+                'size': len(raw_bytes),
+            }
+            name = str(clip.get('name') or '').strip()
+            if name:
+                sound['name'] = name
+            sound['type'] = mime
+            if isinstance(clip.get('updated'), (int, float)):
+                sound['updated'] = int(clip.get('updated'))
+            sounds.append(sound)
+            seen_hashes.add(digest)
+
+        if sounds:
+            entry['sounds'] = sounds
+        if 'speakTemplates' not in entry and isinstance(event.get('speakTemplates'), list):
+            entry['speakTemplates'] = copy.deepcopy(event.get('speakTemplates'))
+        audio_map[event_key] = entry
+    return audio_map
+
+
+def _import_project_audio(
+    zf: zipfile.ZipFile,
+    project_data: Dict[str, Any],
+    *,
+    include_notify_audio: bool,
+    allow_unscoped_files: bool = True,
+) -> Dict[str, Any]:
+    audio_map = dict(project_data.get('audio') or {}) if isinstance(project_data.get('audio'), dict) else {}
+    if include_notify_audio:
+        audio_map = _hydrate_project_audio_from_zip(
+            zf,
+            audio_map,
+            source_project_id=str(project_data.get('id') or ''),
+            allow_unscoped=allow_unscoped_files,
+        )
+        audio_map = _dedupe_media_audio(audio_map)
+    else:
+        audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
+    return ProjectStore._sanitize_audio_map(audio_map)
+
+
+def _write_project_materials_to_zip(zf: zipfile.ZipFile, proj: Project, materials_dir: str) -> int:
+    """Write every existing project material once under a project-scoped path."""
+    written = 0
+    seen = set()
+    for stored_name in list(getattr(proj, 'materials', []) or []):
+        stored_name = str(stored_name or '')
+        basename = os.path.basename(stored_name)
+        if not basename or basename in seen:
+            continue
+        fpath = os.path.join(materials_dir, basename)
+        if not os.path.isfile(fpath):
+            continue
+        zf.write(fpath, arcname=f"materials/{proj.id}/{basename}")
+        seen.add(basename)
+        written += 1
+    return written
 
 # VM refresh performance caching
 _VM_CONFIG_CACHE = {}  # {f"{node}:{vmid}": (timestamp, config_dict)}
@@ -11180,28 +11321,16 @@ def _sanitize_vm_name(name: str) -> str:
         return 'vm'
 
 
-def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
+def _sanitize_import_vms(vms_value: object, keep_vmid: bool, include_creds: bool = True) -> list:
     """Sanitize VM entries from an imported manifest.
     When keep_vmid is False, vmid is dropped (config-only import).
     """
     if not isinstance(vms_value, list):
         return []
-    allowed_keys = {
-        'name',
-        'vmid',
-        'viewable_to_user',
-        'start_commands',
-        'stored_commands',
-        'validation_commands',
-        'internal_network_adaptors',
-        'internet_connected_adaptors',
-        'use_linked_clone',
-        'clone_timeout_sec',
-        'storage_volume',
-        'skip_post_clone_snapshot',
-        'vm_user',
-        'vm_pass',
-    }
+    # Derive this from the persisted VM schema so new configuration fields do
+    # not silently disappear during a future import. VMID remains controlled by
+    # the includeVms selection below.
+    allowed_keys = {field_def.name for field_def in fields(VMConfig)}
     out = []
     for vm in vms_value:
         rec = {}
@@ -11224,6 +11353,8 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
 
         for k in allowed_keys:
             if k in ('name', 'vmid'):
+                continue
+            if not include_creds and k in {'vm_user', 'vm_pass'}:
                 continue
             if k in rec:
                 clean[k] = rec.get(k)
@@ -11256,6 +11387,37 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool) -> list:
 
         out.append(clean)
     return out
+
+
+_NON_IMPORTABLE_PROJECT_FIELDS = {
+    'id',
+    'name',
+    'vms',
+    'materials',
+    'exports',
+    'audio',
+    'associated_projects',
+    # These legacy encrypted blobs are intentionally not part of an export.
+    'proxmox_username_enc',
+    'proxmox_password_enc',
+    'ctfd_token_enc',
+}
+
+
+def _apply_imported_project_fields(
+    project: Project,
+    project_data: Dict[str, Any],
+    *,
+    include_creds: bool,
+) -> None:
+    """Apply every persisted project setting that is safe to round-trip."""
+    for field_def in fields(Project):
+        key = field_def.name
+        if key in _NON_IMPORTABLE_PROJECT_FIELDS or key not in project_data:
+            continue
+        if not include_creds and key in {'credentials', 'proxmox_api_token'}:
+            continue
+        setattr(project, key, copy.deepcopy(project_data[key]))
 
 
 def _default_import_name(source_name: str) -> str:
@@ -11398,10 +11560,14 @@ def _project_to_json_filtered(p: Project, include_creds: bool = True, include_vm
         d.pop('associated_projects', None)
     except Exception:
         pass
+    # Export records contain machine-local paths to prior ZIPs, not project
+    # configuration, and should never be copied into another installation.
+    d.pop('exports', None)
 
     if not include_creds:
         # Remove project-level credentials if present
         d.pop("credentials", None)
+        d.pop("proxmox_api_token", None)
 
     # Process VMs list to apply selective stripping
     try:
@@ -12060,13 +12226,8 @@ def export_project(pid: str):
         }
         zf.writestr("project.json", json.dumps(manifest, indent=2))
         if include_notify_audio:
-            _write_project_audio_to_zip(zf, proj, include_prefixes=('media:',))
-        for fname in proj.materials:
-            fpath = os.path.join(mats_dir, fname)
-            if os.path.isfile(fpath):
-                # Also include under materials/<pid>/ for future compatibility
-                zf.write(fpath, arcname=f"materials/{fname}")
-                zf.write(fpath, arcname=f"materials/{pid}/{os.path.basename(fname)}")
+            _write_project_audio_to_zip(zf, proj)
+        _write_project_materials_to_zip(zf, proj, mats_dir)
     buf.seek(0)
     # Build friendly filename: <projectName>_YYYYMMDD_HHMMSS.zip
     try:
@@ -12187,7 +12348,9 @@ def import_project():
                     if not include_creds:
                         pdata2.pop('credentials', None)
                     # Always import VM configuration; when include_vms is False, drop vmid (config-only)
-                    pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                    pdata2['vms'] = _sanitize_import_vms(
+                        pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                    )
                     try:
                         vlist = pdata2.get('vms') or []
                         if isinstance(vlist, list):
@@ -12208,33 +12371,21 @@ def import_project():
                     src_id = str(pdata2.get('id', '') or '')
                     new_id = id_map.get(src_id) or str(uuid.uuid4())
                     proj = Project(id=new_id, name=pdata2.get('name', 'Imported'))
-                    for key in [
-                        "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
-                        "guacamole_url", "guacamole_port",
-                        "keycloak_url", "keycloak_port", "keycloak_nodename",
-                        "challenge_url", "challenge_port",
-                        "instances", "tag", "vnc_start_port", "credentials",
-                        "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
-                        "proxmox_qmrestore_path", "proxmox_storage_volume",
-                        "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
-                        "proxmox_update_delay_seconds",
-                    ]:
-                        if key in pdata2:
-                            setattr(proj, key, pdata2[key])
+                    _apply_imported_project_fields(proj, pdata2, include_creds=include_creds)
                     try:
-                        proj.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                        proj.vms = _sanitize_import_vms(
+                            pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                        )
                     except Exception:
                         proj.vms = []
 
-                    # Notifications config is always imported; uploaded media audio (media:*) is optional.
                     try:
-                        if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
-                            audio_map = dict(pdata2.get('audio') or {})
-                            if not include_notify_audio:
-                                audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
-                            else:
-                                audio_map = _dedupe_media_audio(audio_map)
-                            proj.audio = ProjectStore._sanitize_audio_map(audio_map)
+                        proj.audio = _import_project_audio(
+                            zf,
+                            pdata2,
+                            include_notify_audio=include_notify_audio,
+                            allow_unscoped_files=(len(orig_list) == 1),
+                        )
                     except Exception:
                         proj.audio = getattr(proj, 'audio', {}) or {}
                     # Defer persistence until the end (atomic import)
@@ -12301,7 +12452,9 @@ def import_project():
                 if not include_creds:
                     pdata2.pop('credentials', None)
                 # Always import VM configuration; when include_vms is False, drop vmid (config-only)
-                pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                pdata2['vms'] = _sanitize_import_vms(
+                    pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                )
                 try:
                     vlist = pdata2.get('vms') or []
                     if isinstance(vlist, list):
@@ -12315,21 +12468,11 @@ def import_project():
                     return jsonify({"errors": errs}), 400
                 new_id = str(uuid.uuid4())
                 project = Project(id=new_id, name=pdata2.get('name', 'Imported'))
-                for key in [
-                    "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
-                    "guacamole_url", "guacamole_port",
-                    "keycloak_url", "keycloak_port", "keycloak_nodename",
-                    "challenge_url", "challenge_port", "challenge_verify_ssl",
-                    "instances", "tag", "vnc_start_port", "credentials",
-                    "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
-                    "proxmox_qmrestore_path", "proxmox_storage_volume",
-                    "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
-                    "proxmox_update_delay_seconds",
-                ]:
-                    if key in pdata2:
-                        setattr(project, key, pdata2[key])
+                _apply_imported_project_fields(project, pdata2, include_creds=include_creds)
                 try:
-                    project.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                    project.vms = _sanitize_import_vms(
+                        pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                    )
                 except Exception:
                     project.vms = []
                 # For single-project import, drop associations (targets unknown)
@@ -12338,13 +12481,11 @@ def import_project():
                 except Exception:
                     pass
                 try:
-                    if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
-                        audio_map = dict(pdata2.get('audio') or {})
-                        if not include_notify_audio:
-                            audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
-                        else:
-                            audio_map = _dedupe_media_audio(audio_map)
-                        project.audio = ProjectStore._sanitize_audio_map(audio_map)
+                    project.audio = _import_project_audio(
+                        zf,
+                        pdata2,
+                        include_notify_audio=include_notify_audio,
+                    )
                 except Exception:
                     project.audio = getattr(project, 'audio', {}) or {}
 
@@ -12614,7 +12755,9 @@ def import_project_start():
                             if not include_creds:
                                 pdata2.pop('credentials', None)
                             # Always import VM configuration; when include_vms is False, drop vmid (config-only)
-                            pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                            pdata2['vms'] = _sanitize_import_vms(
+                                pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                            )
                             try:
                                 vlist = pdata2.get('vms') or []
                                 if isinstance(vlist, list):
@@ -12631,33 +12774,21 @@ def import_project_start():
                                 continue
                             new_id = str(uuid.uuid4())
                             proj = Project(id=new_id, name=pdata2.get('name', 'Imported'))
-                            for key_field in [
-                                "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
-                                "guacamole_url", "guacamole_url",
-                                "keycloak_url", "keycloak_port", "keycloak_nodename",
-                                "challenge_url", "challenge_port", "challenge_verify_ssl",
-                                "instances", "tag", "vnc_start_port", "credentials",
-                                "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
-                                "proxmox_qmrestore_path", "proxmox_storage_volume",
-                                "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
-                                "proxmox_update_delay_seconds",
-                            ]:
-                                if key_field in pdata2:
-                                    setattr(proj, key_field, pdata2[key_field])
+                            _apply_imported_project_fields(proj, pdata2, include_creds=include_creds)
                             # Preserve VM entries from manifest (names, adaptors, commands, etc.)
                             try:
-                                proj.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                                proj.vms = _sanitize_import_vms(
+                                    pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                                )
                             except Exception:
                                 proj.vms = []
                             try:
-                                if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
-                                    audio_map = dict(pdata2.get('audio') or {})
-                                    if not include_notify_audio:
-                                        audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
-                                    else:
-                                        # Dedupe duplicate uploaded sounds by hash (within this import).
-                                        audio_map = _dedupe_media_audio(audio_map)
-                                    proj.audio = ProjectStore._sanitize_audio_map(audio_map)
+                                proj.audio = _import_project_audio(
+                                    zf,
+                                    pdata2,
+                                    include_notify_audio=include_notify_audio,
+                                    allow_unscoped_files=(len(orig_list) == 1),
+                                )
                             except Exception:
                                 proj.audio = getattr(proj, 'audio', {}) or {}
                             # If user provided Proxmox connection in the dialog, store it on the project
@@ -12726,7 +12857,9 @@ def import_project_start():
                         if not include_creds:
                             pdata2.pop('credentials', None)
                         # Always import VM configuration; when include_vms is False, drop vmid (config-only)
-                        pdata2['vms'] = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                        pdata2['vms'] = _sanitize_import_vms(
+                            pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                        )
                         try:
                             vlist = pdata2.get('vms') or []
                             if isinstance(vlist, list):
@@ -12741,32 +12874,20 @@ def import_project_start():
                             raise RuntimeError(f"Invalid project manifest: {errs}")
                         new_id = str(uuid.uuid4())
                         project = Project(id=new_id, name=pdata2.get('name', 'Imported'))
-                        for key_field in [
-                            "proxmox_url", "proxmox_api_port", "proxmox_ssh_port",
-                            "guacamole_url", "guacamole_port",
-                            "keycloak_url", "keycloak_port", "keycloak_nodename",
-                            "challenge_url", "challenge_port", "challenge_verify_ssl",
-                            "instances", "tag", "vnc_start_port", "credentials",
-                            "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
-                            "proxmox_qmrestore_path", "proxmox_storage_volume",
-                            "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
-                            "proxmox_update_delay_seconds",
-                        ]:
-                            if key_field in pdata2:
-                                setattr(project, key_field, pdata2[key_field])
+                        _apply_imported_project_fields(project, pdata2, include_creds=include_creds)
                         # Preserve VM entries from manifest
                         try:
-                            project.vms = _sanitize_import_vms(pdata2.get('vms') or [], keep_vmid=include_vms)
+                            project.vms = _sanitize_import_vms(
+                                pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                            )
                         except Exception:
                             project.vms = []
                         try:
-                            if 'audio' in pdata2 and isinstance(pdata2.get('audio'), dict):
-                                audio_map = dict(pdata2.get('audio') or {})
-                                if not include_notify_audio:
-                                    audio_map = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
-                                else:
-                                    audio_map = _dedupe_media_audio(audio_map)
-                                project.audio = ProjectStore._sanitize_audio_map(audio_map)
+                            project.audio = _import_project_audio(
+                                zf,
+                                pdata2,
+                                include_notify_audio=include_notify_audio,
+                            )
                         except Exception:
                             project.audio = getattr(project, 'audio', {}) or {}
                         # If user provided Proxmox connection in the dialog, store it on the project
@@ -13297,14 +13418,10 @@ def export_projects():
             "projects": [project_dict],
         }
         zf.writestr("project.json", json.dumps(manifest, indent=2))
+        if include_notify_audio:
+            _write_project_audio_to_zip(zf, proj)
         if include_materials:
-            if include_notify_audio:
-                _write_project_audio_to_zip(zf, proj, include_prefixes=('media:',))
-            for fname in proj.materials:
-                fpath = os.path.join(mats_dir, fname)
-                if os.path.isfile(fpath):
-                    # Place under materials/<pid>/<basename>
-                    zf.write(fpath, arcname=f"materials/{proj.id}/{os.path.basename(fname)}")
+            _write_project_materials_to_zip(zf, proj, mats_dir)
     buf.seek(0)
     # Friendly filename using the project display name
     try:
@@ -14040,9 +14157,16 @@ def export_project_start(pid: str):
                     zf.writestr("project.json", manifest_bytes)
                     _emit(f"[PKG] wrote project.json ({len(manifest_bytes)} bytes)")
                     if include_notify_audio:
-                        audio_written = _write_project_audio_to_zip(zf, proj, include_prefixes=('media:',))
+                        audio_written = _write_project_audio_to_zip(zf, proj)
                         if audio_written:
                             _emit(f"[PKG] added {audio_written} audio clip(s)")
+                    materials_written = _write_project_materials_to_zip(
+                        zf,
+                        proj,
+                        os.path.join(app_obj.config['DATA_DIR'], 'materials'),
+                    )
+                    if materials_written:
+                        _emit(f"[PKG] added {materials_written} material file(s)")
 
                     # Add backup files with progress updates mapped to 90..99%
                     packed = 0
