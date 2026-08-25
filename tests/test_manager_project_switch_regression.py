@@ -281,6 +281,94 @@ class ManagerProjectSwitchRegressionTests(unittest.TestCase):
         self._run_node_regression('app/static/js/vm_manager.js', harness, 'vm_manager.bundle.js')
 
     @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend VM Manager regression checks')
+    def test_vm_manager_renders_and_refreshes_server_resource_usage(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              PROJ = {
+                id: 'project-a',
+                proxmox_url: 'https://prox.example',
+                proxmox_api_port: 8006,
+                proxmox_verify_ssl: true,
+                proxmox_node: 'pve1',
+              };
+              shell.getCurrentProjectId = () => 'project-a';
+              hydrateProxCredsFromPersisted = async (pid) => {
+                assert(pid === 'project-a', 'Resource refresh should use the selected project');
+                return { username: 'root@pam', password: 'secret' };
+              };
+
+              const gib = 1024 ** 3;
+              const calls = [];
+              http = async (method, url, body) => {
+                calls.push({ method, url, body });
+                return {
+                  server_resources: {
+                    node: 'pve1',
+                    space_used_bytes: 20 * gib,
+                    space_total_bytes: 100 * gib,
+                    memory_used_bytes: 8 * gib,
+                    memory_total_bytes: 32 * gib,
+                  },
+                };
+              };
+
+              await vmRefreshServerResources(PROJ);
+
+              assert(calls.length === 1, `Expected one resource refresh request, saw ${calls.length}`);
+              assert(calls[0].url === '/api/proxmox/nodes', 'Resource refresh should use the node inventory endpoint');
+              assert(calls[0].body.preferredNode === 'pve1', 'Configured node should scope the resource counters');
+              assert(Number(calls[0].body.apiPort) === 8006, 'Configured API port should be included');
+
+              const link = document.getElementById('nav-proxmox-link');
+              const serverLabel = document.getElementById('nav-proxmox-server-label');
+              const spaceLabel = document.getElementById('nav-proxmox-space-label');
+              const memoryLabel = document.getElementById('nav-proxmox-memory-label');
+              assert(serverLabel.textContent === 'Server: prox.example:8006', 'Server host and port should be displayed');
+              assert(spaceLabel.textContent === '20 / 100 GiB', 'Space usage should use the compact used / total format');
+              assert(memoryLabel.textContent === '8 / 32 GiB', 'Memory usage should use the compact used / total format');
+              assert(link.title.includes('(pve1)'), 'Resource tooltip should identify the configured node');
+
+              runQueued = async (_label, fn) => await fn();
+              showVmInlineProgress = () => {};
+              updateVmInlineProgress = () => {};
+              hideVmInlineProgress = () => {};
+              showActionProgress = () => {};
+              updateActionProgress = () => {};
+              hideActionProgress = () => {};
+              vmMarkLiveRefreshed = () => {};
+              renderVmTable = () => {};
+              startVmActionStatusPolling = () => () => {};
+              SELECTED_PIDS = null;
+              PROJ.instance_statuses = [];
+              http = async (_method, url) => {
+                assert(url === '/api/projects/project-a/instances/refresh/vm', 'VM refresh should use the project refresh endpoint');
+                return {
+                  instance_statuses: [],
+                  server_resources: {
+                    node: 'pve1',
+                    space_used_bytes: 25 * gib,
+                    space_total_bytes: 100 * gib,
+                    memory_used_bytes: 10 * gib,
+                    memory_total_bytes: 32 * gib,
+                  },
+                };
+              };
+
+              await vmRefresh({ showProgressDialog: false });
+              assert(spaceLabel.textContent === '25 / 100 GiB', 'VM operation refreshes should update space usage');
+              assert(memoryLabel.textContent === '10 / 32 GiB', 'VM operation refreshes should update memory usage');
+            })();
+            """
+        )
+
+        self._run_node_regression('app/static/js/vm_manager.js', harness, 'vm_manager.resources.bundle.js')
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend VM Manager regression checks')
     def test_vm_manager_reuses_configuration_session_credentials_without_meta(self):
         harness = textwrap.dedent(
             """

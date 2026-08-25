@@ -23,6 +23,9 @@ let FIX_CREDS_IN_PROGRESS = false;
 const VM_LIVE_REFRESHED_PIDS = new Set();
 let VM_LOAD_REQUEST_TOKEN = 0;
 const VM_MULTI_REFRESH_PROMISES = new Map();
+const VM_SERVER_RESOURCES_BY_PID = new Map();
+const VM_SERVER_RESOURCE_REQUESTS = new Map();
+let VM_SERVER_RESOURCE_REQUEST_ID = 0;
 
 function _coerceEnabled(value, def = true) {
   if (value === null || value === undefined) return def;
@@ -71,9 +74,52 @@ function _vmBuildProxmoxHref(proj) {
   }
 }
 
+function vmFormatResourceBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  const unitIndex = Math.max(0, Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024))));
+  const scaled = bytes / Math.pow(1024, unitIndex);
+  const digits = scaled >= 100 ? 0 : (scaled >= 10 ? 1 : 2);
+  const rendered = digits > 0 ? scaled.toFixed(digits).replace(/\.?0+$/, '') : scaled.toFixed(0);
+  return `${rendered} ${units[unitIndex]}`;
+}
+
+function vmFormatResourceUsage(resources, usedKey, totalKey) {
+  const used = Number(resources?.[usedKey]);
+  const total = Number(resources?.[totalKey]);
+  if (!Number.isFinite(total) || total <= 0) return '— / —';
+  const usedText = vmFormatResourceBytes(Math.max(0, used || 0));
+  const totalText = vmFormatResourceBytes(total);
+  const usedMatch = usedText.match(/^(.+?)\s+([A-Za-z]+)$/);
+  const totalMatch = totalText.match(/^(.+?)\s+([A-Za-z]+)$/);
+  if (usedMatch && totalMatch && usedMatch[2] === totalMatch[2]) {
+    return `${usedMatch[1]} / ${totalMatch[1]} ${totalMatch[2]}`;
+  }
+  return `${usedText} / ${totalText}`;
+}
+
+function vmCurrentServerResources(proj) {
+  const pid = canonicalPid(proj?.id);
+  return pid ? (VM_SERVER_RESOURCES_BY_PID.get(pid) || null) : null;
+}
+
 function vmUpdateProxmoxNavLinkForCurrent() {
   const link = document.getElementById('nav-proxmox-link');
   if (!link) return;
+  const serverLabel = document.getElementById('nav-proxmox-server-label');
+  const spaceLabel = document.getElementById('nav-proxmox-space-label');
+  const memoryLabel = document.getElementById('nav-proxmox-memory-label');
+  const setLabels = (server, space, memory) => {
+    if (serverLabel && spaceLabel && memoryLabel) {
+      serverLabel.textContent = `Server: ${server}`;
+      spaceLabel.textContent = space;
+      memoryLabel.textContent = memory;
+    } else {
+      link.textContent = `Server: ${server} • ${space} • ${memory}`;
+    }
+  };
   let proj = PROJ;
   try {
     const cur = getCurrentPid ? getCurrentPid() : '';
@@ -88,10 +134,17 @@ function vmUpdateProxmoxNavLinkForCurrent() {
     try {
       const u = new URL(href);
       const hostPort = u.host || href;
-      link.textContent = `Server: ${hostPort}`;
-      link.title = href;
+      const resources = vmCurrentServerResources(proj);
+      const space = vmFormatResourceUsage(resources, 'space_used_bytes', 'space_total_bytes');
+      const memory = vmFormatResourceUsage(resources, 'memory_used_bytes', 'memory_total_bytes');
+      setLabels(hostPort, space, memory);
+      const scope = resources?.node ? ` (${resources.node})` : '';
+      link.title = `${href}\nSpace${scope}: ${space}\nMemory${scope}: ${memory}`;
     } catch {
-      link.textContent = `Server: ${href}`;
+      const resources = vmCurrentServerResources(proj);
+      const space = vmFormatResourceUsage(resources, 'space_used_bytes', 'space_total_bytes');
+      const memory = vmFormatResourceUsage(resources, 'memory_used_bytes', 'memory_total_bytes');
+      setLabels(href, space, memory);
       link.title = href;
     }
     link.classList.remove('disabled');
@@ -103,7 +156,7 @@ function vmUpdateProxmoxNavLinkForCurrent() {
     link.removeAttribute('tabindex');
   } else {
     link.href = '#';
-    link.textContent = 'Server: —';
+    setLabels('—', '— / —', '— / —');
     try { link.classList.add('d-none'); } catch { }
     link.classList.add('disabled');
     try {
@@ -113,6 +166,53 @@ function vmUpdateProxmoxNavLinkForCurrent() {
     link.setAttribute('aria-disabled', 'true');
     link.setAttribute('tabindex', '-1');
   }
+}
+
+async function vmRefreshServerResources(projectOverride) {
+  const project = projectOverride && typeof projectOverride === 'object' ? { ...projectOverride } : (PROJ ? { ...PROJ } : null);
+  const pid = canonicalPid(project?.id);
+  if (!pid || !project?.proxmox_url) return null;
+  const requestId = ++VM_SERVER_RESOURCE_REQUEST_ID;
+  VM_SERVER_RESOURCE_REQUESTS.set(pid, requestId);
+  try {
+    const sess = await hydrateProxCredsFromPersisted(pid);
+    const hasSession = !!(sess?.username && sess?.password);
+    const token = !hasSession && typeof project.proxmox_api_token === 'string'
+      ? project.proxmox_api_token.trim()
+      : '';
+    if (!hasSession && !token) throw new Error('Proxmox credentials are unavailable');
+    const response = await http('POST', '/api/proxmox/nodes', {
+      baseUrl: project.proxmox_url,
+      apiPort: project.proxmox_api_port || undefined,
+      verifySSL: project.proxmox_verify_ssl !== false,
+      username: hasSession ? sess.username : undefined,
+      password: hasSession ? sess.password : undefined,
+      token: token || undefined,
+      preferredNode: project.proxmox_node || undefined,
+    });
+    if (VM_SERVER_RESOURCE_REQUESTS.get(pid) !== requestId) return null;
+    const resources = response?.server_resources && typeof response.server_resources === 'object'
+      ? { ...response.server_resources }
+      : null;
+    if (resources) VM_SERVER_RESOURCES_BY_PID.set(pid, resources);
+    else VM_SERVER_RESOURCES_BY_PID.delete(pid);
+    if (canonicalPid(PROJ?.id) === pid) vmUpdateProxmoxNavLinkForCurrent();
+    return resources;
+  } catch (error) {
+    if (VM_SERVER_RESOURCE_REQUESTS.get(pid) === requestId) {
+      VM_SERVER_RESOURCES_BY_PID.delete(pid);
+      if (canonicalPid(PROJ?.id) === pid) vmUpdateProxmoxNavLinkForCurrent();
+    }
+    try { (window.shell && shell.logWarn) ? shell.logWarn(`Server resources unavailable: ${error?.message || error}`) : console.warn('Server resources unavailable', error); } catch { }
+    return null;
+  }
+}
+
+function vmApplyServerResources(pid, resources) {
+  const projectId = canonicalPid(pid);
+  if (!projectId || !resources || typeof resources !== 'object') return;
+  VM_SERVER_RESOURCES_BY_PID.set(projectId, { ...resources });
+  if (canonicalPid(PROJ?.id) === projectId) vmUpdateProxmoxNavLinkForCurrent();
 }
 
 function vmRestoreScrollPosition() {
@@ -965,6 +1065,7 @@ async function vmLoadProjectById(pid) {
   try { vmUpdateProxmoxNavLinkForCurrent(); } catch { }
   try { await hydrateProxCredsFromPersisted(PROJ.id); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
+  try { Promise.resolve(vmRefreshServerResources(PROJ)).catch(() => { }); } catch { }
   try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   renderVmTable(proj);
@@ -1283,6 +1384,7 @@ async function refreshVmView(opts) {
           forceRefresh: forceRefresh || undefined,
         };
         const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
+        try { vmApplyServerResources(pid, resp?.server_resources); } catch { }
         vmMarkLiveRefreshed(pid);
         const statuses = resp.instance_statuses || [];
         const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
@@ -1855,6 +1957,7 @@ async function vmRefresh(opts) {
       }
       const resp = await http('POST', `/api/projects/${refreshPid}/instances/refresh/vm`, body);
       try { shell.step('HTTP response received'); } catch { }
+      try { vmApplyServerResources(refreshPid, resp?.server_resources); } catch { }
       vmMarkLiveRefreshed(refreshPid);
       // Only update if we're still viewing the same project
       if (PROJ && PROJ.id === refreshPid) {

@@ -82,7 +82,13 @@
             <li class="nav-item">
               <a class="nav-link vm-server-link d-none disabled fw-semibold border border-secondary rounded-pill px-2 py-1 text-nowrap"
                 id="nav-proxmox-link" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true"
-                tabindex="-1" title="Open this project's Proxmox UI">Server: —</a>
+                tabindex="-1" title="Open this project's Proxmox UI">
+                <span id="nav-proxmox-server-label">Server: —</span>
+                <span class="ms-1" title="Space"><i class="bi bi-device-hdd me-1" aria-hidden="true"></i><span
+                    class="visually-hidden">Space: </span><span id="nav-proxmox-space-label">— / —</span></span>
+                <span class="ms-1" title="Memory"><i class="bi bi-memory me-1" aria-hidden="true"></i><span
+                    class="visually-hidden">Memory: </span><span id="nav-proxmox-memory-label">— / —</span></span>
+              </a>
             </li>
           </ul>
           <div class="d-flex align-items-center gap-2">

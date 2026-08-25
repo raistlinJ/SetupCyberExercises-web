@@ -1762,6 +1762,51 @@ def debug_storage():
     return jsonify(meta)
 
 
+def _summarize_proxmox_node_resources(nodes_value: Any, *, preferred_node: str = '') -> Dict[str, Any]:
+    """Normalize Proxmox /nodes disk and memory counters for the UI."""
+    nodes = [dict(node) for node in (nodes_value or []) if isinstance(node, dict)]
+    preferred = str(preferred_node or '').strip().lower()
+    selected: List[Dict[str, Any]] = []
+    if preferred:
+        selected = [
+            node for node in nodes
+            if preferred in {
+                str(node.get('node') or '').strip().lower(),
+                str(node.get('id') or '').strip().lower(),
+                str(node.get('name') or '').strip().lower(),
+            }
+        ]
+    else:
+        online = [node for node in nodes if str(node.get('status') or '').strip().lower() == 'online']
+        selected = online or nodes
+
+    def _sum_counter(key: str) -> int:
+        total = 0
+        for node in selected:
+            try:
+                value = int(node.get(key) or 0)
+                if value > 0:
+                    total += value
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return total
+
+    node_names = [
+        str(node.get('node') or node.get('name') or node.get('id') or '').strip()
+        for node in selected
+    ]
+    node_names = [name for name in node_names if name]
+    return {
+        'node': node_names[0] if len(node_names) == 1 else ('cluster' if node_names else ''),
+        'nodes': node_names,
+        'node_count': len(selected),
+        'space_used_bytes': _sum_counter('disk'),
+        'space_total_bytes': _sum_counter('maxdisk'),
+        'memory_used_bytes': _sum_counter('mem'),
+        'memory_total_bytes': _sum_counter('maxmem'),
+    }
+
+
 @api_bp.route("/projects/<pid>/proxmox/verify", methods=["POST"])
 @_secure_route()
 def proxmox_verify(pid: str):
@@ -2463,7 +2508,13 @@ def instances_refresh_vm(pid: str):
     _update_job_detail(pid, phase='done', step=max(instances, 1), total_steps=max(instances, 1), progress=100, message=f'Refresh completed: {len(out)} instance status entr{"y" if len(out) == 1 else "ies"}')
     _end_job(pid)
     
-    return jsonify({ 'instance_statuses': out })
+    return jsonify({
+        'instance_statuses': out,
+        'server_resources': _summarize_proxmox_node_resources(
+            nodes,
+            preferred_node=str(getattr(proj, 'proxmox_node', '') or ''),
+        ),
+    })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/create", methods=["POST"])
@@ -14676,13 +14727,35 @@ def proxmox_nodes():
     username = data.get("username")
     password = data.get("password")
     token = data.get("token")
+    api_port = data.get("apiPort")
+    preferred_node = data.get("preferredNode")
     if not base_url or (not token and not (username and password)):
         return jsonify({"error": "Missing baseUrl and credentials (username/password or token)"}), 400
+
+    try:
+        if api_port is not None and str(api_port).strip() != '':
+            parsed = urlparse(base_url if '://' in str(base_url) else f'https://{base_url}')
+            hostname = parsed.hostname or ''
+            scheme = parsed.scheme or 'https'
+            netloc = hostname
+            if parsed.username:
+                auth = parsed.username
+                if parsed.password:
+                    auth += f":{parsed.password}"
+                netloc = f"{auth}@{netloc}"
+            if hostname:
+                netloc = f"{netloc}:{int(api_port)}"
+                base_url = urlunparse((scheme, netloc, parsed.path or '', parsed.params or '', parsed.query or '', parsed.fragment or ''))
+    except Exception:
+        pass
 
     client = ProxmoxClient(base_url=base_url, token=token or None, username=username or None, password=password or None, verify=verify)
     try:
         nodes = client.list_nodes()
-        return jsonify({"nodes": nodes})
+        return jsonify({
+            "nodes": nodes,
+            "server_resources": _summarize_proxmox_node_resources(nodes, preferred_node=preferred_node),
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
