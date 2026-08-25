@@ -59,6 +59,30 @@ class VmUserAccessibilityApiTests(unittest.TestCase):
         self.assertIsNotNone(vm2)
         self.assertFalse(bool(vm2.get('viewable_to_user')))
 
+    def test_project_creation_preserves_exact_accessible_vm_set(self):
+        response = self.client.post('/api/projects', json={
+            'name': 'Wizard Accessibility Project',
+            'vms': [
+                {'name': 'web', 'vmid': 900, 'viewable_to_user': True},
+                {'name': 'db', 'vmid': 901, 'viewable_to_user': False},
+                {'name': 'admin', 'vmid': 902, 'viewable_to_user': False},
+            ],
+        })
+        self.assertEqual(response.status_code, 201)
+        pid = (response.get_json() or {}).get('id')
+
+        projects = (self.client.get('/api/projects').get_json() or {}).get('projects') or []
+        project = next(item for item in projects if item.get('id') == pid)
+        accessibility = {
+            vm.get('name'): vm.get('viewable_to_user')
+            for vm in project.get('vms') or []
+        }
+        self.assertEqual(accessibility, {
+            'web': True,
+            'db': False,
+            'admin': False,
+        })
+
     def test_create_reconciles_non_viewable_vm_to_rollback_role(self):
         pid = self._create_project()
 

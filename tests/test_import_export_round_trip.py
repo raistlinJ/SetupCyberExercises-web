@@ -52,6 +52,7 @@ class ImportExportRoundTripTests(unittest.TestCase):
                 name='container-template',
                 vmid=321,
                 vm_type='lxc',
+                viewable_to_user=True,
                 start_commands=[
                     StartCommandStep(
                         delay_seconds=1.5,
@@ -80,7 +81,9 @@ class ImportExportRoundTripTests(unittest.TestCase):
                 }],
                 internal_network_adaptors=['LAN'],
                 internet_connected_adaptors=['vmbr0'],
-            )
+            ),
+            VMConfig(name='database-template', vmid=322, viewable_to_user=False),
+            VMConfig(name='admin-template', vmid=323, viewable_to_user=False),
         ]
         project.audio = ProjectStore._sanitize_audio_map({
             'event:test': {
@@ -143,6 +146,12 @@ class ImportExportRoundTripTests(unittest.TestCase):
             self.assertIn('validation_commands', vm_json)
             self.assertEqual(vm_json['vm_type'], 'lxc')
             self.assertNotIn('vmid', vm_json)
+            exported_access = {vm['name']: vm['viewable_to_user'] for vm in project_json['vms']}
+            self.assertEqual(exported_access, {
+                'container-template': True,
+                'database-template': False,
+                'admin-template': False,
+            })
 
         compact_bundle = self._remove_embedded_audio_data(response.data)
         imported = self.client.post(
@@ -177,6 +186,12 @@ class ImportExportRoundTripTests(unittest.TestCase):
         self.assertFalse(vm['stored_commands'][0]['commands'][0]['enabled'])
         self.assertEqual(vm['validation_commands'][0]['command'], 'systemctl is-active demo')
         self.assertEqual(vm['validation_commands'][0]['match'], '^active$')
+        restored_access = {vm_config['name']: vm_config['viewable_to_user'] for vm_config in restored['vms']}
+        self.assertEqual(restored_access, {
+            'container-template': True,
+            'database-template': False,
+            'admin-template': False,
+        })
 
         audio = self.client.get(f'/api/projects/{imported_pid}/audio').get_json()['audio']
         sounds = audio['media:test']['sounds']

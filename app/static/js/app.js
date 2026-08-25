@@ -4418,6 +4418,10 @@ function wizardMergeActionResult(baseResp, extraResp) {
 function wizardBuildUserAccessibilityPlan(project, targets) {
   const vms = Array.isArray(project?.vms) ? project.vms : [];
   const baseNameSet = new Set(vms.map(vm => String(vm?.name || '')).filter(Boolean));
+  const accessibilityByBase = new Map(vms.map(vm => [
+    String(vm?.name || ''),
+    wizardCoerceEnabled(vm?.viewable_to_user, true),
+  ]));
   const tag = String(project?.tag || '').trim();
   const bases = new Set();
   const indices = new Set();
@@ -4439,36 +4443,48 @@ function wizardBuildUserAccessibilityPlan(project, targets) {
     }
     bases.add(baseName);
   });
-  return { bases: Array.from(bases), indices: Array.from(indices), skipped };
+  return {
+    bases: Array.from(bases),
+    indices: Array.from(indices),
+    skipped,
+    accessibilityByBase,
+  };
 }
 
-async function wizardRunUserAccessibilityFollowUp({ pid, project, targets, baseBody, syncAccess = true, enable = true }) {
+async function wizardRunUserAccessibilityFollowUp({ pid, project, targets, baseBody, syncAccess = true }) {
   const plan = wizardBuildUserAccessibilityPlan(project, targets);
   let result = { infos: [], skipped: [...plan.skipped], errors: [] };
   if (!pid || !plan.bases.length) return result;
   for (const baseName of plan.bases) {
+    const accessible = plan.accessibilityByBase.get(baseName) === true;
     try {
-      await http('PATCH', `/api/projects/${encodeURIComponent(pid)}/vms/${encodeURIComponent(baseName)}`, { viewable_to_user: !!enable });
+      await http('PATCH', `/api/projects/${encodeURIComponent(pid)}/vms/${encodeURIComponent(baseName)}`, { viewable_to_user: accessible });
       const vmCfg = (project?.vms || []).find(vm => String(vm?.name || '') === baseName);
-      if (vmCfg) vmCfg.viewable_to_user = !!enable;
-      result.infos.push({ name: baseName, reason: `set viewable_to_user=${enable ? 'true' : 'false'}` });
+      if (vmCfg) vmCfg.viewable_to_user = accessible;
+      result.infos.push({ name: baseName, reason: `set viewable_to_user=${accessible ? 'true' : 'false'}` });
     } catch (err) {
       result.errors.push({ name: baseName, reason: `set viewable_to_user failed: ${err?.message || err}` });
     }
   }
   if (!syncAccess || !plan.indices.length) return result;
-  try {
-    const syncResp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/users_access_sync`, {
-      ...(baseBody || {}),
-      templates: plan.bases,
-      indices: plan.indices,
-      enable: !!enable,
-    });
-    result = wizardMergeActionResult(result, syncResp);
-  } catch (err) {
-    result = wizardMergeActionResult(result, {
-      errors: [{ reason: `User accessibility sync failed: ${err?.message || err}` }],
-    });
+  const syncGroups = [true, false].map(accessible => ({
+    accessible,
+    bases: plan.bases.filter(baseName => (plan.accessibilityByBase.get(baseName) === true) === accessible),
+  })).filter(group => group.bases.length > 0);
+  for (const group of syncGroups) {
+    try {
+      const syncResp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/users_access_sync`, {
+        ...(baseBody || {}),
+        templates: group.bases,
+        indices: plan.indices,
+        enable: group.accessible,
+      });
+      result = wizardMergeActionResult(result, syncResp);
+    } catch (err) {
+      result = wizardMergeActionResult(result, {
+        errors: [{ reason: `User accessibility sync failed for ${group.bases.join(', ')}: ${err?.message || err}` }],
+      });
+    }
   }
   return result;
 }
@@ -5032,7 +5048,6 @@ window.submitProjectCreation = async function(mode) {
             targets,
             baseBody: proxmoxActionBody,
             syncAccess: !createOptions.createUsersAndPerms,
-            enable: true,
           }));
         }
         if (wizardRunOptions?.createVms && createOptions.createUsersAndPerms) {

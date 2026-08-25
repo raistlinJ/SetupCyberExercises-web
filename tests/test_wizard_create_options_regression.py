@@ -211,16 +211,38 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               setChecked('wiz-act-ctfd-users', true);
 
               currentWizardStep = 5;
-              wizSelectedTemplates = [{
-                vmid: 900,
-                name: 'web',
-                finalName: 'web',
-                user_accessible: false,
-                vm_user: 'student',
-                vm_pass: 'password',
-                nets: ['lab'],
-                internet_connected_adaptors: [],
-              }];
+              wizSelectedTemplates = [
+                {
+                  vmid: 900,
+                  name: 'web',
+                  finalName: 'web',
+                  user_accessible: true,
+                  vm_user: 'student',
+                  vm_pass: 'password',
+                  nets: ['lab'],
+                  internet_connected_adaptors: [],
+                },
+                {
+                  vmid: 901,
+                  name: 'db',
+                  finalName: 'db',
+                  user_accessible: false,
+                  vm_user: 'operator',
+                  vm_pass: 'password',
+                  nets: ['lab'],
+                  internet_connected_adaptors: [],
+                },
+                {
+                  vmid: 902,
+                  name: 'admin',
+                  finalName: 'admin',
+                  user_accessible: false,
+                  vm_user: 'admin',
+                  vm_pass: 'password',
+                  nets: ['lab'],
+                  internet_connected_adaptors: [],
+                },
+              ];
 
               loadProjects = async () => {};
               startWizardJobStatusPolling = () => () => {};
@@ -236,16 +258,20 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
                     id: 'proj-wizard',
                     name: 'Wizard Lab',
                     tag: '-lab-',
-                    vms: [{ name: 'web', viewable_to_user: false }],
+                    vms: [
+                      { name: 'web', viewable_to_user: true },
+                      { name: 'db', viewable_to_user: false },
+                      { name: 'admin', viewable_to_user: false },
+                    ],
                   };
                 }
                 if (method === 'PUT' && url === '/api/projects/proj-wizard/secrets') return { ok: true };
-                if (method === 'POST' && url === '/api/projects/proj-wizard/instances/actions/create') return { created: [{ name: 'web-lab-1' }] };
-                if (method === 'PATCH' && url === '/api/projects/proj-wizard/vms/web') return { ok: true };
+                if (method === 'POST' && url === '/api/projects/proj-wizard/instances/actions/create') return { created: [{ name: 'web-lab-1' }, { name: 'db-lab-1' }, { name: 'admin-lab-1' }] };
+                if (method === 'PATCH' && url.startsWith('/api/projects/proj-wizard/vms/')) return { ok: true };
                 if (method === 'POST' && url === '/api/projects/proj-wizard/instances/actions/users_create') {
-                  return { created_users: [{ userid: 'user01@pve' }], created_pools: [{ pool: 'user01' }], added_members: [{ name: 'web-lab-1' }] };
+                  return { created_users: [{ userid: 'user01@pve' }], created_pools: [{ pool: 'user01' }], added_members: [{ name: 'web-lab-1' }, { name: 'db-lab-1' }, { name: 'admin-lab-1' }] };
                 }
-                if (method === 'POST' && url === '/api/projects/proj-wizard/instances/actions/apply_scenario') return { applied: [{ name: 'web-lab-1' }] };
+                if (method === 'POST' && url === '/api/projects/proj-wizard/instances/actions/apply_scenario') return { applied: [{ name: 'web-lab-1' }, { name: 'db-lab-1' }, { name: 'admin-lab-1' }] };
                 throw new Error(`Unexpected request: ${method} ${url}`);
               };
 
@@ -258,6 +284,19 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               assert(createCall.body.setNetworkInterfaces === true, 'Wizard create should pass the network option');
               assert(createCall.body.takeSnapshot === true, 'Wizard create should pass the snapshot option');
 
+              const projectCreateCall = calls.find(call => call.method === 'POST' && call.url === '/api/projects');
+              const configuredAccess = Object.fromEntries(projectCreateCall.body.vms.map(vm => [vm.name, vm.viewable_to_user]));
+              assert(configuredAccess.web === true, 'Wizard should persist the checked VM as user-accessible');
+              assert(configuredAccess.db === false, 'Wizard should persist an unchecked VM as not user-accessible');
+              assert(configuredAccess.admin === false, 'Wizard should not make any other VM user-accessible');
+
+              const accessPatches = calls.filter(call => call.method === 'PATCH' && call.url.startsWith('/api/projects/proj-wizard/vms/'));
+              assert(accessPatches.length === 3, 'Wizard should reconcile accessibility for each configured VM exactly once');
+              const patchedAccess = Object.fromEntries(accessPatches.map(call => [decodeURIComponent(call.url.split('/').pop()), call.body.viewable_to_user]));
+              assert(patchedAccess.web === true, 'Accessibility follow-up should keep the checked VM enabled');
+              assert(patchedAccess.db === false, 'Accessibility follow-up should keep the unchecked DB VM disabled');
+              assert(patchedAccess.admin === false, 'Accessibility follow-up should not enable the admin VM');
+
               const urls = calls.map(call => call.url);
               assert(urls.includes('/api/projects/proj-wizard/vms/web'), 'Wizard should apply user accessibility');
               assert(urls.includes('/api/projects/proj-wizard/instances/actions/users_create'), 'Wizard should create Proxmox users and pools');
@@ -265,6 +304,66 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               assert(!urls.includes('/api/projects/proj-wizard/instances/actions/users_access_sync'), 'Users create should replace redundant access sync when selected');
               assert(!urls.includes('/api/projects/proj-wizard/instances/actions/start'), 'Start should not run when the VM Manager-style default is off');
               assert(!urls.includes('/api/projects/proj-wizard/ctfd/users_create'), 'Hidden CTFd option should not run when CTFd feature is disabled');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
+    def test_wizard_accessibility_sync_preserves_the_exact_selected_set(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+              const calls = [];
+              http = async (method, url, body) => {
+                calls.push({ method, url, body });
+                if (method === 'PATCH') return { ok: true };
+                if (method === 'POST' && url.endsWith('/instances/actions/users_access_sync')) {
+                  return { applied: [], unchanged: [], errors: [] };
+                }
+                throw new Error(`Unexpected request: ${method} ${url}`);
+              };
+
+              const project = {
+                id: 'proj-access',
+                tag: '-lab-',
+                vms: [
+                  { name: 'web', viewable_to_user: true },
+                  { name: 'db', viewable_to_user: false },
+                  { name: 'admin', viewable_to_user: false },
+                ],
+              };
+              const targets = [
+                { index: 1, name: 'web' },
+                { index: 1, name: 'db' },
+                { index: 1, name: 'admin' },
+              ];
+
+              await wizardRunUserAccessibilityFollowUp({
+                pid: project.id,
+                project,
+                targets,
+                baseBody: { username: 'root@pam' },
+                syncAccess: true,
+              });
+
+              const patches = calls.filter(call => call.method === 'PATCH');
+              const patchedAccess = Object.fromEntries(patches.map(call => [decodeURIComponent(call.url.split('/').pop()), call.body.viewable_to_user]));
+              assert(patches.length === 3, 'Each configured VM should be reconciled once');
+              assert(patchedAccess.web === true, 'Only web should remain user-accessible');
+              assert(patchedAccess.db === false, 'DB should remain inaccessible');
+              assert(patchedAccess.admin === false, 'Admin should remain inaccessible');
+
+              const syncCalls = calls.filter(call => call.method === 'POST');
+              assert(syncCalls.length === 2, 'Enabled and disabled templates should be synced separately');
+              const enabledSync = syncCalls.find(call => call.body.enable === true);
+              const disabledSync = syncCalls.find(call => call.body.enable === false);
+              assert(JSON.stringify(enabledSync.body.templates) === JSON.stringify(['web']), 'Only web should receive user access');
+              assert(JSON.stringify(disabledSync.body.templates.sort()) === JSON.stringify(['admin', 'db']), 'All other templates should have user access revoked');
             })();
             """
         )
