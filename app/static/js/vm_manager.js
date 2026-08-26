@@ -2163,11 +2163,14 @@ function emitActionLogs(actionName, resp) {
     } else if (requestedList.length > 1) {
       try { shell.logInfo(`${name}: command filters (${requestedList.length}) — ${requestedList.join(', ')}`); } catch { }
     }
-    const outputsZip = resp?.outputs_zip;
-    if (outputsZip && outputsZip.filename) {
+    const outputArchives = Array.isArray(resp?.outputs_zips) && resp.outputs_zips.length
+      ? resp.outputs_zips
+      : (resp?.outputs_zip ? [resp.outputs_zip] : []);
+    outputArchives.forEach(outputsZip => {
+      if (!outputsZip?.filename) return;
       const sizeLabel = Number(outputsZip.size || 0) > 0 ? `${outputsZip.filename} (${outputsZip.size} bytes)` : outputsZip.filename;
       try { shell.logInfo(`${name}: output archive ready — ${sizeLabel}`); } catch { }
-    }
+    });
     const created = Array.isArray(resp?.created) ? resp.created : [];
     const deleted = Array.isArray(resp?.deleted) ? resp.deleted : [];
     const skipped = Array.isArray(resp?.skipped) ? resp.skipped : [];
@@ -2193,6 +2196,8 @@ function emitActionLogs(actionName, resp) {
     const infos = Array.isArray(resp?.infos) ? resp.infos : [];
     const applied = Array.isArray(resp?.applied) ? resp.applied : [];
     const unchanged = Array.isArray(resp?.unchanged) ? resp.unchanged : [];
+    const pushed = Array.isArray(resp?.pushed) ? resp.pushed : [];
+    const pulled = Array.isArray(resp?.pulled) ? resp.pulled : [];
     if (created.length) created.forEach(i => {
       try { shell.logSuccess(`${name}: created ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''} ${i?.node ? `on ${i.node}` : ''}`); } catch { }
       try {
@@ -2210,6 +2215,8 @@ function emitActionLogs(actionName, resp) {
     if (restored.length) restored.forEach(i => { try { shell.logSuccess(`${name}: restored ${i?.name || ''} ${i?.snapname ? `(${i.snapname})` : ''} ${i?.started ? '(started)' : ''}`); } catch { } });
     if (netsUpdated.length) netsUpdated.forEach(i => { try { shell.logSuccess(`${name}: network assigned ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''} ${i?.node ? `on ${i.node}` : ''}`); } catch { } });
     if (netsCleared.length) netsCleared.forEach(i => { try { shell.logSuccess(`${name}: network removed ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''} ${i?.node ? `on ${i.node}` : ''}`); } catch { } });
+    if (pushed.length) pushed.forEach(i => { try { shell.logSuccess(`${name}: pushed ${i?.item_count ?? i?.file_count ?? 0} item(s) to ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}${i?.destination ? ` at ${i.destination}` : ''}`); } catch { } });
+    if (pulled.length) pulled.forEach(i => { try { shell.logSuccess(`${name}: pulled ${i?.file_count || 0} file(s) from ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
     if (createdUsers.length) createdUsers.forEach(i => { try { shell.logSuccess(`${name}: user created ${i?.userid || ''}`); } catch { } });
     if (createdPools.length) createdPools.forEach(i => { try { shell.logSuccess(`${name}: pool created ${i?.pool || ''}${i?.index ? ` (instance ${i.index})` : ''}`); } catch { } });
     if (addedMembers.length) addedMembers.forEach(i => {
@@ -3390,6 +3397,16 @@ function updateRefreshState() {
     });
     const usersBtn = document.getElementById('act-users');
     if (usersBtn) usersBtn.disabled = disable;
+    const lxcEntries = getSelectedLxcEntries();
+    const lxcFilesBtn = document.getElementById('act-lxc-files');
+    if (lxcFilesBtn) {
+      const lxcAuthorized = lxcEntries.length > 0
+        && lxcEntries.every(entry => hasAuthForPid(entry.pid || PROJ?.id));
+      lxcFilesBtn.disabled = !lxcAuthorized;
+      lxcFilesBtn.title = lxcEntries.length
+        ? `Push or pull files for ${lxcEntries.length} selected LXC container${lxcEntries.length === 1 ? '' : 's'}`
+        : 'Select at least one existing LXC container (refresh states first)';
+    }
   } catch { }
   // Enable Cancel button only while an action is in flight
   try {
@@ -3480,6 +3497,188 @@ function getActionableSelections() {
   }
   return [];
 }
+
+function getSelectedLxcEntries() {
+  const selected = getActionableSelections();
+  const mergedRows = Array.isArray(window.__MERGED_ROWS__) ? window.__MERGED_ROWS__ : [];
+  return selected.filter(entry => {
+    try {
+      const merged = mergedRows.find(row => canonicalPid(row?.pid) === canonicalPid(entry?.pid)
+        && Number(row?.index) === Number(entry?.index)
+        && String(row?.vmName || '') === String(entry?.name || ''));
+      if (String(merged?.detail?.type || '').toLowerCase() === 'lxc') return true;
+      const proj = canonicalPid(PROJ?.id) === canonicalPid(entry?.pid)
+        ? PROJ
+        : (ALL_PROJECTS || []).find(item => canonicalPid(item?.id) === canonicalPid(entry?.pid));
+      const detail = _findVmDetailForTarget(proj, entry);
+      return String(detail?.type || '').toLowerCase() === 'lxc';
+    } catch {
+      return false;
+    }
+  });
+}
+
+function groupSelectedLxcEntriesByProject() {
+  const grouped = new Map();
+  getSelectedLxcEntries().forEach(entry => {
+    const pid = canonicalPid(entry?.pid || PROJ?.id);
+    if (!pid) return;
+    if (!grouped.has(pid)) grouped.set(pid, []);
+    grouped.get(pid).push({ index: Number(entry.index), name: String(entry.name || '') });
+  });
+  return grouped;
+}
+
+function lxcTransferProject(pid) {
+  const canonical = canonicalPid(pid);
+  if (canonicalPid(PROJ?.id) === canonical) return PROJ;
+  return (ALL_PROJECTS || []).find(item => canonicalPid(item?.id) === canonical) || null;
+}
+
+async function lxcTransferAuthPayload(pid) {
+  const proj = lxcTransferProject(pid);
+  if (!proj) throw new Error(`Project ${pid} is unavailable`);
+  try { await hydrateProxCredsFromPersisted(pid); } catch { }
+  const sess = readProxCreds(pid) || {};
+  if (!sess.password) throw new Error(`${proj.name || pid}: an SSH password is required`);
+  return {
+    username: sess.username || undefined,
+    password: sess.password,
+    baseUrl: proj.proxmox_url || undefined,
+    apiPort: proj.proxmox_api_port || undefined,
+    verifySSL: proj.proxmox_verify_ssl !== false,
+  };
+}
+
+function mergeLxcTransferResponses(responses) {
+  const merged = { pushed: [], pulled: [], skipped: [], errors: [], outputs_zips: [] };
+  (responses || []).forEach(({ project, response }) => {
+    const projectName = project?.name || project?.id || '';
+    ['pushed', 'pulled', 'skipped', 'errors'].forEach(key => {
+      const items = Array.isArray(response?.[key]) ? response[key] : [];
+      items.forEach(item => merged[key].push({ ...(item || {}), project: projectName }));
+    });
+    if (response?.outputs_zip?.base64) merged.outputs_zips.push(response.outputs_zip);
+  });
+  if (merged.outputs_zips.length === 1) merged.outputs_zip = merged.outputs_zips[0];
+  return merged;
+}
+
+async function runLxcTransfer(label, operation) {
+  const grouped = groupSelectedLxcEntriesByProject();
+  if (!grouped.size) {
+    alert('Select at least one existing LXC container. Refresh states first if needed.');
+    return;
+  }
+  const responses = [];
+  ACTION_IN_FLIGHT = true;
+  CURRENT_ACTION = label;
+  ACTION_RUN_ID += 1;
+  updateRefreshState();
+  try {
+    try { shell.beginActionContext(label); } catch { }
+    try { showActionProgress(`${label} in progress`, `Preparing ${getSelectedLxcEntries().length} LXC container(s)…`); } catch { }
+    let position = 0;
+    for (const [pid, targets] of grouped.entries()) {
+      position += 1;
+      const project = lxcTransferProject(pid);
+      const progress = Math.max(10, Math.round((position - 1) * 80 / grouped.size) + 10);
+      try { updateActionProgress(progress, label, `${project?.name || pid}: ${targets.length} LXC container(s)`); } catch { }
+      const auth = await lxcTransferAuthPayload(pid);
+      const response = await operation(pid, targets, auth);
+      responses.push({ project, response });
+    }
+    const merged = mergeLxcTransferResponses(responses);
+    try { updateActionProgress(100, 'Done', `${label} completed`); } catch { }
+    showActionSummary(label, merged);
+    emitActionLogs(label, merged);
+    try { shell.endActionContext((merged.errors || []).length === 0); } catch { }
+  } catch (error) {
+    const message = error?.message || String(error);
+    try { shell.logError(`${label}: ${message}`); } catch { }
+    try { shell.endActionContext(false); } catch { }
+    showActionSummary(label, { errors: [{ reason: message }] });
+  } finally {
+    ACTION_IN_FLIGHT = false;
+    CURRENT_ACTION = null;
+    updateRefreshState();
+    try { hideActionProgress(); } catch { }
+  }
+}
+
+function openLxcPushModal() {
+  const selected = getSelectedLxcEntries();
+  if (!selected.length) return alert('Select at least one existing LXC container. Refresh states first if needed.');
+  const summary = document.getElementById('lxc-push-summary');
+  if (summary) summary.textContent = `The selected content will be pushed to ${selected.length} LXC container${selected.length === 1 ? '' : 's'}.`;
+  const error = document.getElementById('lxc-push-error');
+  if (error) { error.textContent = ''; error.classList.add('d-none'); }
+  const modal = document.getElementById('lxcPushModal');
+  if (modal && window.bootstrap) bootstrap.Modal.getOrCreateInstance(modal).show();
+}
+
+function openLxcPullModal() {
+  const selected = getSelectedLxcEntries();
+  if (!selected.length) return alert('Select at least one existing LXC container. Refresh states first if needed.');
+  const summary = document.getElementById('lxc-pull-summary');
+  if (summary) summary.textContent = `The requested paths will be pulled from ${selected.length} LXC container${selected.length === 1 ? '' : 's'}.`;
+  const error = document.getElementById('lxc-pull-error');
+  if (error) { error.textContent = ''; error.classList.add('d-none'); }
+  const modal = document.getElementById('lxcPullModal');
+  if (modal && window.bootstrap) bootstrap.Modal.getOrCreateInstance(modal).show();
+}
+
+function wireLxcTransferModals() {
+  const pushButton = document.getElementById('lxc-push-confirm');
+  if (pushButton && !pushButton._lxcTransferBound) {
+    pushButton._lxcTransferBound = true;
+    pushButton.addEventListener('click', async () => {
+      const individual = Array.from(document.getElementById('lxc-push-files')?.files || []);
+      const folder = Array.from(document.getElementById('lxc-push-folder')?.files || []);
+      const files = individual.concat(folder);
+      const hostPaths = String(document.getElementById('lxc-push-host-paths')?.value || '')
+        .split(/\r?\n/).map(path => path.trim()).filter(Boolean);
+      const destination = String(document.getElementById('lxc-push-destination')?.value || '').trim();
+      const error = document.getElementById('lxc-push-error');
+      const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
+      if (!files.length && !hostPaths.length) return fail('Select content or enter at least one Proxmox host path.');
+      if (hostPaths.some(path => !path.startsWith('/'))) return fail('Every Proxmox host path must be absolute.');
+      if (!destination.startsWith('/')) return fail('Enter an absolute destination directory.');
+      const relativePaths = files.map(file => String(file.webkitRelativePath || file.name || ''));
+      const modal = document.getElementById('lxcPushModal');
+      try { bootstrap.Modal.getOrCreateInstance(modal).hide(); } catch { }
+      await runQueued(`Push Files (${getSelectedLxcEntries().length} LXC)`, async () => {
+        await runLxcTransfer('Push Files', async (pid, targets, auth) => {
+          const form = new FormData();
+          form.append('payload', JSON.stringify({ ...auth, targets, destination, relativePaths, hostPaths }));
+          files.forEach(file => form.append('files', file, file.name));
+          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/lxc_push`, form);
+        });
+      }, { projectId: PROJ?.id });
+    });
+  }
+  const pullButton = document.getElementById('lxc-pull-confirm');
+  if (pullButton && !pullButton._lxcTransferBound) {
+    pullButton._lxcTransferBound = true;
+    pullButton.addEventListener('click', async () => {
+      const raw = String(document.getElementById('lxc-pull-paths')?.value || '');
+      const paths = raw.split(/\r?\n/).map(path => path.trim()).filter(Boolean);
+      const error = document.getElementById('lxc-pull-error');
+      const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
+      if (!paths.length) return fail('Enter at least one container path.');
+      if (paths.some(path => !path.startsWith('/'))) return fail('Every container path must be absolute.');
+      const modal = document.getElementById('lxcPullModal');
+      try { bootstrap.Modal.getOrCreateInstance(modal).hide(); } catch { }
+      await runQueued(`Pull Files (${getSelectedLxcEntries().length} LXC)`, async () => {
+        await runLxcTransfer('Pull Files', async (pid, targets, auth) => {
+          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/lxc_pull`, { ...auth, targets, paths });
+        });
+      }, { projectId: PROJ?.id });
+    });
+  }
+}
+
+document.addEventListener('DOMContentLoaded', wireLxcTransferModals);
 
 function _findVmDetailForTarget(proj, target) {
   try {
@@ -7099,6 +7298,11 @@ function showActionSummary(actionName, resp) {
     const deletedPools = Array.isArray(resp.deleted_pools) ? resp.deleted_pools : [];
     const updatedUsers = Array.isArray(resp.updated_users) ? resp.updated_users : [];
     const outputsZipInfo = (resp.outputs_zip && resp.outputs_zip.base64) ? resp.outputs_zip : null;
+    const outputsZipInfos = Array.isArray(resp.outputs_zips) && resp.outputs_zips.length
+      ? resp.outputs_zips.filter(item => item && item.base64)
+      : (outputsZipInfo ? [outputsZipInfo] : []);
+    const pushed = Array.isArray(resp.pushed) ? resp.pushed : [];
+    const pulled = Array.isArray(resp.pulled) ? resp.pulled : [];
 
     const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
     const list = (items, fmt) => items && items.length ? `<ul class="small">${items.map(fmt).join('')}</ul>` : '<div class="text-muted small">None</div>';
@@ -7189,6 +7393,8 @@ function showActionSummary(actionName, resp) {
     };
     if (netsUpdated.length) sections.push(`<h6>Network Assigned</h6>${list(netsUpdated, i => `<li>${netActionIcon('enabled')}${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     if (netsCleared.length) sections.push(`<h6>Network Removed</h6>${list(netsCleared, i => `<li>${netActionIcon('disabled')}${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
+    if (pushed.length) sections.push(`<h6>Pushed</h6>${list(pushed, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} — ${esc(i.item_count ?? i.file_count ?? 0)} item(s) to <code>${esc(i.destination || '')}</code></li>`)}`);
+    if (pulled.length) sections.push(`<h6>Pulled</h6>${list(pulled, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} — ${esc(i.file_count || 0)} file(s)</li>`)}`);
     // Users / Pools sections
     if (createdUsers.length) sections.push(`<h6>Users Created</h6>${list(createdUsers, i => `<li>${esc(i.userid || '')}</li>`)}`);
     if (createdPools.length) sections.push(`<h6>Pools Created</h6>${list(createdPools, i => `<li>${esc(i.pool || '')} ${i.index ? `(instance ${esc(i.index)})` : ''}</li>`)}`);
@@ -7370,7 +7576,9 @@ function showActionSummary(actionName, resp) {
       netsUpdated.length ? `${netsUpdated.length} network assigned` : null,
       netsCleared.length ? `${netsCleared.length} network removed` : null,
       appliedNodes.length ? `network applied on ${appliedNodes.length} node(s)` : null,
-      applyErrors.length ? `${applyErrors.length} network apply errors` : null
+      applyErrors.length ? `${applyErrors.length} network apply errors` : null,
+      pushed.length ? `${pushed.length} LXC push passed` : null,
+      pulled.length ? `${pulled.length} LXC pull passed` : null
     ].filter(Boolean).join(' · ');
 
     const contentSections = leadSections.concat(sections);
@@ -7405,40 +7613,42 @@ function showActionSummary(actionName, resp) {
       body.appendChild(actionWrap);
     }
     const modalEl = document.getElementById('actionSummaryModal');
-    if (outputsZipInfo) {
-      try {
-        const base64 = outputsZipInfo.base64;
-        const binary = atob(base64);
-        const len = binary.length;
-        const bytes = new Uint8Array(len);
-        for (let i = 0; i < len; i += 1) {
-          bytes[i] = binary.charCodeAt(i);
+    if (outputsZipInfos.length) {
+      outputsZipInfos.forEach((archiveInfo, archiveIndex) => {
+        try {
+          const base64 = archiveInfo.base64;
+          const binary = atob(base64);
+          const len = binary.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i += 1) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'application/zip' });
+          const url = URL.createObjectURL(blob);
+          const container = document.createElement('div');
+          container.className = 'mt-3';
+          const heading = document.createElement('h6');
+          heading.textContent = archiveInfo.label || 'Command Outputs';
+          container.appendChild(heading);
+          const link = document.createElement('a');
+          link.className = 'btn btn-sm btn-outline-primary';
+          link.href = url;
+          link.download = archiveInfo.filename || `action-output-${archiveIndex + 1}.zip`;
+          const sizeLabel = formatBytes(archiveInfo.size || bytes.length);
+          link.textContent = outputsZipInfos.length > 1 ? `Download ${archiveIndex + 1} (${sizeLabel})` : `Download (${sizeLabel})`;
+          container.appendChild(link);
+          body.appendChild(container);
+          if (modalEl && window.bootstrap) {
+            const cleanup = () => {
+              try { URL.revokeObjectURL(url); } catch { }
+              try { modalEl.removeEventListener('hidden.bs.modal', cleanup); } catch { }
+            };
+            modalEl.addEventListener('hidden.bs.modal', cleanup, { once: true });
+          }
+        } catch (err) {
+          try { console.error('Failed to prepare action output download', err); } catch { }
         }
-        const blob = new Blob([bytes], { type: 'application/zip' });
-        const url = URL.createObjectURL(blob);
-        const container = document.createElement('div');
-        container.className = 'mt-3';
-        const heading = document.createElement('h6');
-        heading.textContent = 'Command Outputs';
-        container.appendChild(heading);
-        const link = document.createElement('a');
-        link.className = 'btn btn-sm btn-outline-primary';
-        link.href = url;
-        link.download = outputsZipInfo.filename || 'startup-command-outputs.zip';
-        const sizeLabel = formatBytes(outputsZipInfo.size || bytes.length);
-        link.textContent = `Download (${sizeLabel})`;
-        container.appendChild(link);
-        body.appendChild(container);
-        if (modalEl && window.bootstrap) {
-          const cleanup = () => {
-            try { URL.revokeObjectURL(url); } catch { }
-            try { modalEl.removeEventListener('hidden.bs.modal', cleanup); } catch { }
-          };
-          modalEl.addEventListener('hidden.bs.modal', cleanup, { once: true });
-        }
-      } catch (err) {
-        try { console.error('Failed to prepare startup command outputs download', err); } catch { }
-      }
+      });
     }
     if (modalEl && window.bootstrap) {
       const bs = bootstrap.Modal.getOrCreateInstance(modalEl);

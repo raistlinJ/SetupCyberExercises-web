@@ -8935,6 +8935,10 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
               log.textContent = detail || '';
             }
           }
+          if (statusText === 'completed' || statusText === 'cancelled' || statusText === 'error') {
+            setCancelEnabled(false);
+            if (cancelBtn) cancelBtn.textContent = 'Cancel Import';
+          }
         } catch { }
 
         if (statusText === 'completed') return s;
@@ -9638,7 +9642,6 @@ async function uploadCredentialsFile(pid) {
     const warn = document.getElementById(`cred-warn-${pid}`);
     if (!input || !input.files || input.files.length === 0) return;
     const file = input.files[0];
-    const existing = collectCredentials(pid);
     const text = await file.text();
     const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
     const creds = [];
@@ -9673,6 +9676,7 @@ async function uploadCredentialsFile(pid) {
       creds.push({ username: a, password: b });
     }
     let inst = Number(document.getElementById(`cfg-${pid}-instances`)?.value || 0);
+    let instanceCountChanged = false;
     if (inst > 0 && creds.length !== inst && creds.length > 0) {
       const msg = `The CSV contains ${creds.length} rows, but the number of VM clones/users is currently set to ${inst}.\n\nWould you like to change the number of clones/users to ${creds.length} to match the file?`;
       const selection = await window.showConfirmModal("Update Instance Count?", msg, {
@@ -9691,41 +9695,39 @@ async function uploadCredentialsFile(pid) {
         if (instInput) {
           instInput.value = creds.length;
           onInstancesChange(pid);
-          debounceProjectSave(pid, 'instances');
           inst = creds.length;
+          instanceCountChanged = true;
         }
       }
     }
-    let applied = creds;
-    if (inst > 0) applied = creds.slice(0, inst);
-    const targetLength = inst > 0 ? inst : Math.max(existing.length, applied.length);
-    const merged = [];
-    for (let i = 0; i < targetLength; i++) {
-      if (i < applied.length) {
-        const item = applied[i] || { username: '', password: '' };
-        merged.push({ username: item.username || '', password: item.password || '' });
-      } else if (i < existing.length) {
-        const item = existing[i] || { username: '', password: '' };
-        merged.push({ username: item.username || '', password: item.password || '' });
-      } else {
-        merged.push({ username: '', password: '' });
-      }
+    if (creds.length === 0) {
+      if (warn) warn.textContent = 'No valid rows found. Expected two columns: username,password';
+      try { input.value = ''; } catch { }
+      return;
     }
+    let applied = inst > 0 ? creds.slice(0, inst) : creds;
+    // CSV upload is a replacement operation. If the user keeps a larger
+    // instance count, generate credentials for missing rows instead of
+    // retaining usernames/passwords from the previous list.
+    const replacement = inst > 0 ? harmonizeCredentialsToInstances(pid, applied) : applied;
     const host = document.getElementById(`cred-${pid}-list`);
     if (host) {
-      const renderList = targetLength > 0 ? merged : applied;
-      host.innerHTML = renderCredentials(pid, renderList);
+      host.innerHTML = renderCredentials(pid, replacement);
     }
     if (warn) {
-      if (creds.length === 0) warn.textContent = 'No valid rows found. Expected two columns: username,password';
-      else if (inst > 0 && creds.length > inst) warn.textContent = `Imported ${applied.length} of ${creds.length} rows (trimmed to Instances=${inst}).`;
+      if (inst > 0 && creds.length > inst) warn.textContent = `Imported ${applied.length} of ${creds.length} rows (trimmed to Instances=${inst}).`;
+      else if (inst > 0 && applied.length < inst) warn.textContent = `Imported ${applied.length} rows and generated ${inst - applied.length} replacement credential(s).`;
       else warn.textContent = `Imported ${applied.length} rows.`;
     }
     // Clear the file input so the same file can be re-selected later
     try { input.value = ''; } catch { }
     updateCredControls(pid);
-    onCredentialChanged(pid);
-    try { showToast('Credentials imported from CSV', 'success'); } catch { }
+    // Persist before reporting success. A debounced save could be cancelled by
+    // navigating to VM Manager immediately after selecting the CSV.
+    const saved = await _saveCredentialsNow(pid, instanceCountChanged ? { instances: inst } : undefined);
+    if (saved) {
+      try { showToast('Credentials imported from CSV', 'success'); } catch { }
+    }
   } catch (e) {
     try { showToast('Failed to import CSV: ' + (e?.message || e), 'danger'); } catch { }
   }
@@ -9796,16 +9798,34 @@ function onCredentialChanged(pid) {
   if (status) { status.textContent = 'Saving…'; status.className = 'small text-muted'; }
   _credSaveTimers[pid] = setTimeout(() => _saveCredentialsNow(pid), 600);
 }
-async function _saveCredentialsNow(pid) {
+async function _saveCredentialsNow(pid, additionalProjectFields = undefined) {
+  if (_credSaveTimers[pid]) {
+    try { clearTimeout(_credSaveTimers[pid]); } catch { }
+  }
   delete _credSaveTimers[pid];
   try {
     const creds = harmonizeCredentialsToInstances(pid, collectCredentials(pid));
-    await http('PATCH', `/api/projects/${pid}`, { credentials: creds });
+    const extraFields = (additionalProjectFields && typeof additionalProjectFields === 'object')
+      ? additionalProjectFields
+      : {};
+    const savedProject = await http('PATCH', `/api/projects/${pid}`, { ...extraFields, credentials: creds });
+    try {
+      const cache = window.PROJ_CACHE || {};
+      const cachedProject = cache[pid] || {};
+      cache[pid] = {
+        ...cachedProject,
+        ...extraFields,
+        credentials: Array.isArray(savedProject?.credentials) ? savedProject.credentials : creds,
+      };
+      window.PROJ_CACHE = cache;
+    } catch { }
     const status = document.getElementById(`cred-status-${pid}`);
     if (status) { status.textContent = 'Saved'; status.className = 'small text-success'; setTimeout(() => { if (status && status.textContent === 'Saved') status.textContent = ''; }, 1500); }
+    return true;
   } catch (e) {
     const status = document.getElementById(`cred-status-${pid}`);
     if (status) { status.textContent = 'Error'; status.className = 'small text-danger'; }
     try { showToast('Failed to auto-save credentials', 'danger'); } catch { }
+    return false;
   }
 }

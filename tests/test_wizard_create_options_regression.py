@@ -668,6 +668,56 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
 
         self._run_node_regression(harness)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
+    def test_csv_credentials_replace_old_rows_and_save_immediately(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              const pid = 'proj';
+              document.getElementById(`cfg-${pid}-instances`).value = '2';
+              const fileInput = document.getElementById(`cfg-${pid}-cred-file`);
+              fileInput.files = [{ text: async () => 'new-user,new-password' }];
+
+              let rendered = [
+                { username: 'old-user-1', password: 'old-password-1' },
+                { username: 'old-user-2', password: 'old-password-2' },
+              ];
+              renderCredentials = (_pid, credentials) => {
+                rendered = credentials.map(item => ({ ...item }));
+                return '<div>rendered</div>';
+              };
+              collectCredentials = () => rendered.map(item => ({ ...item }));
+              window.showConfirmModal = async () => 'no';
+              window.PROJ_CACHE = { proj: { id: pid, credentials: rendered.map(item => ({ ...item })) } };
+
+              const calls = [];
+              http = async (method, url, body) => {
+                calls.push({ method, url, body });
+                return { id: pid, credentials: body.credentials };
+              };
+
+              await uploadCredentialsFile(pid);
+
+              assert(calls.length === 1, `Expected one immediate save, got ${calls.length}`);
+              assert(calls[0].method === 'PATCH', 'CSV replacement should PATCH the project');
+              assert(calls[0].url === '/api/projects/proj', `Unexpected URL: ${calls[0].url}`);
+              const saved = calls[0].body.credentials;
+              assert(saved.length === 2, 'Credentials should remain aligned with the instance count');
+              assert(saved[0].username === 'new-user' && saved[0].password === 'new-password', 'CSV row should replace the first credential');
+              assert(saved[1].username !== 'old-user-2', 'Missing CSV rows must not retain an old username');
+              assert(saved[1].password !== 'old-password-2', 'Missing CSV rows must not retain an old password');
+              assert(window.PROJ_CACHE.proj.credentials[0].username === 'new-user', 'Project cache should update after save');
+              assert(window.PROJ_CACHE.proj.credentials[1].username !== 'old-user-2', 'Project cache must not retain old trailing credentials');
+            })();
+            """
+        )
+
+        self._run_node_regression(harness)
+
 
 if __name__ == '__main__':
     unittest.main()

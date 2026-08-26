@@ -2,12 +2,17 @@ import os
 import io
 import json
 import zipfile
+import tarfile
 import hashlib
 import base64
 import uuid
 import time
 import random
 import socket
+import shlex
+import posixpath
+import tempfile
+import shutil
 import secrets
 import string
 import logging
@@ -8394,6 +8399,414 @@ def _execute_instance_command(proj, base_url, password, client, m, command_text,
         )
 
 
+def _coerce_request_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _lxc_transfer_ssh_host(proj: Project, base_url: str, node_name: str) -> str:
+    """Resolve the Proxmox node SSH host using the same precedence as LXC commands."""
+    override = str(getattr(proj, 'proxmox_ssh_host', '') or '').strip()
+    if override:
+        return override
+    mapping = dict(getattr(proj, 'proxmox_node_host_map', {}) or {})
+    mapped = str(mapping.get(node_name) or '').strip()
+    if mapped:
+        return mapped
+    candidate = str(node_name or '').strip()
+    if candidate:
+        try:
+            socket.getaddrinfo(candidate, None)
+            return candidate
+        except Exception:
+            pass
+    try:
+        api_host = urlparse(base_url).hostname or ''
+    except Exception:
+        api_host = ''
+    return api_host or candidate
+
+
+def _lxc_transfer_context(pid: str, body: Dict[str, Any]):
+    store = _store()
+    proj = store.get(pid)
+    if not proj:
+        raise LookupError('Project not found')
+    username = body.get('username') or None
+    password = body.get('password') or None
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    verify = _coerce_request_bool(
+        body.get('verifySSL'),
+        getattr(proj, 'proxmox_verify_ssl', True) is not False,
+    )
+    body_port = body.get('apiPort')
+    if body_port is not None:
+        try:
+            port_int = int(body_port)
+            if port_int > 0:
+                parsed = urlparse(base_url)
+                hostname = parsed.hostname or ''
+                scheme = parsed.scheme or 'https'
+                netloc = hostname
+                if parsed.username:
+                    auth = parsed.username
+                    if parsed.password:
+                        auth += f":{parsed.password}"
+                    netloc = f"{auth}@{netloc}"
+                netloc = f"{netloc}:{port_int}"
+                base_url = urlunparse((scheme, netloc, '', '', '', ''))
+        except Exception:
+            pass
+    targets = body.get('targets') or []
+    if not base_url or not ((username and password) or getattr(proj, 'proxmox_api_token', '')):
+        raise ValueError('Missing Proxmox URL and credentials (username/password or API token)')
+    if not password:
+        raise ValueError('A Proxmox SSH password is required for LXC file transfers')
+    if not isinstance(targets, list) or not targets:
+        raise ValueError('No targets provided')
+    client = ProxmoxClient(
+        base_url=base_url,
+        token=getattr(proj, 'proxmox_api_token', '') or None,
+        username=username,
+        password=password,
+        verify=verify,
+    )
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+    lxc_targets = []
+    for entry in mapped:
+        if str(entry.get('type') or '').strip().lower() == 'lxc':
+            lxc_targets.append(entry)
+        else:
+            skipped.append({
+                'index': entry.get('index'),
+                'name': entry.get('name'),
+                'vmid': entry.get('vmid'),
+                'reason': 'not an LXC container',
+            })
+    return proj, base_url, password, lxc_targets, skipped, errors
+
+
+def _safe_upload_relative_path(value: Any) -> str:
+    raw = str(value or '').replace('\\', '/').strip().lstrip('/')
+    normalized = posixpath.normpath(raw)
+    if not normalized or normalized in {'.', '..'} or normalized.startswith('../'):
+        raise ValueError(f'Invalid upload path: {value!s}')
+    return normalized
+
+
+def _normalize_lxc_paths(value: Any) -> List[str]:
+    raw_items = value if isinstance(value, list) else [value]
+    normalized: List[str] = []
+    for raw in raw_items:
+        path = str(raw or '').strip().replace('\\', '/')
+        if not path:
+            continue
+        if not path.startswith('/'):
+            raise ValueError(f'Container path must be absolute: {path}')
+        clean = posixpath.normpath(path)
+        if clean not in normalized:
+            normalized.append(clean)
+    if not normalized:
+        raise ValueError('At least one container path is required')
+    # If a parent was requested, omit duplicate descendants from the tar command.
+    result: List[str] = []
+    for path in sorted(normalized, key=lambda item: (item.count('/'), len(item), item)):
+        if any(parent == '/' or path.startswith(parent.rstrip('/') + '/') for parent in result):
+            continue
+        result.append(path)
+    return result
+
+
+def _normalize_host_push_paths(value: Any) -> List[str]:
+    raw_items = value if isinstance(value, list) else [value]
+    normalized: List[str] = []
+    for raw in raw_items:
+        path = str(raw or '').strip().replace('\\', '/')
+        if not path:
+            continue
+        if not path.startswith('/'):
+            raise ValueError(f'Proxmox host path must be absolute: {path}')
+        clean = posixpath.normpath(path)
+        if clean == '/':
+            raise ValueError('The Proxmox host root directory cannot be pushed')
+        if clean not in normalized:
+            normalized.append(clean)
+    return normalized
+
+
+def _ssh_exec_result(ssh_client, command: str, timeout: int = 600) -> Tuple[int, bytes, str]:
+    _stdin, stdout, stderr = ssh_client.exec_command(command, timeout=timeout)
+    output = stdout.read()
+    error_raw = stderr.read()
+    code = stdout.channel.recv_exit_status()
+    if not isinstance(output, bytes):
+        output = str(output or '').encode('utf-8', errors='replace')
+    if isinstance(error_raw, bytes):
+        error_text = error_raw.decode('utf-8', errors='replace')
+    else:
+        error_text = str(error_raw or '')
+    return int(code), output, error_text.strip()
+
+
+def _lxc_zip_prefix(name: Any, vmid: Any) -> str:
+    safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name or 'lxc')).strip('._') or 'lxc'
+    return f"{safe_name}-{int(vmid)}"
+
+
+def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -> int:
+    """Copy safe regular files/directories/symlinks from a pct tar stream into a ZIP."""
+    copied = 0
+    tar_stream.seek(0)
+    with tarfile.open(fileobj=tar_stream, mode='r:*') as archive:
+        for member in archive:
+            member_name = str(member.name or '').replace('\\', '/').lstrip('/')
+            member_name = posixpath.normpath(member_name)
+            if not member_name or member_name in {'.', '..'} or member_name.startswith('../'):
+                continue
+            archive_name = f"{prefix}/{member_name}"
+            if member.isdir():
+                zip_file.writestr(archive_name.rstrip('/') + '/', b'')
+                continue
+            if member.isfile():
+                source = archive.extractfile(member)
+                if source is None:
+                    continue
+                with source, zip_file.open(archive_name, mode='w') as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                copied += 1
+                continue
+            if member.issym():
+                info = zipfile.ZipInfo(archive_name)
+                info.create_system = 3
+                info.external_attr = (0o120777 << 16)
+                zip_file.writestr(info, str(member.linkname or '').encode('utf-8'))
+                copied += 1
+    return copied
+
+
+@api_bp.route("/projects/<pid>/instances/actions/lxc_push", methods=["POST"])
+def instances_lxc_push(pid: str):
+    blocked = _block_when_remote('LXC file transfer')
+    if blocked:
+        return blocked
+    try:
+        raw_body = request.form.get('payload') or '{}'
+        body = json.loads(raw_body)
+        if not isinstance(body, dict):
+            raise ValueError('Invalid transfer payload')
+    except Exception as exc:
+        return jsonify({'error': f'Invalid transfer payload: {exc}'}), 400
+    destination = str(body.get('destination') or '').strip().replace('\\', '/')
+    if not destination.startswith('/'):
+        return jsonify({'error': 'Destination must be an absolute container directory'}), 400
+    destination = posixpath.normpath(destination)
+    uploads = request.files.getlist('files')
+    relative_paths = body.get('relativePaths') or []
+    try:
+        host_paths = _normalize_host_push_paths(body.get('hostPaths') or [])
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if not uploads and not host_paths:
+        return jsonify({'error': 'Select content or provide at least one Proxmox host path to push'}), 400
+    if uploads and (not isinstance(relative_paths, list) or len(relative_paths) != len(uploads)):
+        relative_paths = [upload.filename for upload in uploads]
+    try:
+        safe_paths = [_safe_upload_relative_path(path) for path in relative_paths]
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if len(set(safe_paths)) != len(safe_paths):
+        return jsonify({'error': 'The selected upload contains duplicate relative paths'}), 400
+    try:
+        proj, base_url, password, mapped, skipped, errors = _lxc_transfer_context(pid, body)
+    except LookupError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': f'Could not resolve LXC targets: {exc}'}), 502
+
+    pushed: List[Dict[str, Any]] = []
+    tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
+    try:
+        with tarfile.open(fileobj=tar_stream, mode='w') as archive:
+            for upload, relative_path in zip(uploads, safe_paths):
+                stream = upload.stream
+                try:
+                    stream.seek(0, os.SEEK_END)
+                    size = stream.tell()
+                    stream.seek(0)
+                except Exception:
+                    data = stream.read()
+                    stream = io.BytesIO(data)
+                    size = len(data)
+                info = tarfile.TarInfo(relative_path)
+                info.size = int(size)
+                info.mode = 0o644
+                info.mtime = int(time.time())
+                archive.addfile(info, stream)
+        archive_size = tar_stream.tell()
+        for entry in mapped:
+            ssh_client = None
+            sftp = None
+            remote_archive = f"/tmp/deployforge-lxc-push-{uuid.uuid4().hex}.tar"
+            try:
+                ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
+                ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
+                ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
+                ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
+                inner = f"mkdir -p -- {shlex.quote(destination)} && tar -xpf - -C {shlex.quote(destination)}"
+                if uploads:
+                    sftp = ssh_client.open_sftp()
+                    tar_stream.seek(0)
+                    sftp.putfo(tar_stream, remote_archive, file_size=archive_size)
+                    command = (
+                        f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
+                        f"< {shlex.quote(remote_archive)}"
+                    )
+                    code, _output, stderr_text = _ssh_exec_result(ssh_client, command)
+                    if code != 0:
+                        raise RuntimeError(stderr_text or f'pct extract exited with {code}')
+                for host_path in host_paths:
+                    parent_path = posixpath.dirname(host_path) or '/'
+                    base_name = posixpath.basename(host_path)
+                    tar_command = f"tar -C {shlex.quote(parent_path)} -cf - -- {shlex.quote(base_name)}"
+                    extract_command = f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)}"
+                    pipeline = f"{tar_command} | {extract_command}"
+                    command = f"bash -o pipefail -c {shlex.quote(pipeline)}"
+                    code, _output, stderr_text = _ssh_exec_result(ssh_client, command)
+                    if code != 0:
+                        raise RuntimeError(stderr_text or f'host path transfer exited with {code}: {host_path}')
+                pushed.append({
+                    'index': entry.get('index'),
+                    'name': entry.get('name'),
+                    'vmid': entry.get('vmid'),
+                    'node': entry.get('node'),
+                    'destination': destination,
+                    'file_count': len(safe_paths),
+                    'host_path_count': len(host_paths),
+                    'item_count': len(safe_paths) + len(host_paths),
+                    'bytes': archive_size,
+                })
+            except Exception as exc:
+                errors.append({
+                    'index': entry.get('index'),
+                    'name': entry.get('name'),
+                    'vmid': entry.get('vmid'),
+                    'node': entry.get('node'),
+                    'reason': f'push failed: {exc}',
+                })
+            finally:
+                if sftp is not None:
+                    try:
+                        sftp.remove(remote_archive)
+                    except Exception:
+                        pass
+                    try:
+                        sftp.close()
+                    except Exception:
+                        pass
+                if ssh_client is not None:
+                    try:
+                        ssh_client.close()
+                    except Exception:
+                        pass
+    finally:
+        tar_stream.close()
+    return jsonify({'pushed': pushed, 'skipped': skipped, 'errors': errors})
+
+
+@api_bp.route("/projects/<pid>/instances/actions/lxc_pull", methods=["POST"])
+def instances_lxc_pull(pid: str):
+    blocked = _block_when_remote('LXC file transfer')
+    if blocked:
+        return blocked
+    try:
+        body = request.get_json(force=True) or {}
+        paths = _normalize_lxc_paths(body.get('paths') or [])
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    try:
+        proj, base_url, password, mapped, skipped, errors = _lxc_transfer_context(pid, body)
+    except LookupError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': f'Could not resolve LXC targets: {exc}'}), 502
+
+    pulled: List[Dict[str, Any]] = []
+    zip_stream = io.BytesIO()
+    with zipfile.ZipFile(zip_stream, mode='w', compression=zipfile.ZIP_DEFLATED) as output_zip:
+        for entry in mapped:
+            ssh_client = None
+            try:
+                ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
+                ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
+                ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
+                ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
+                tar_paths = [path.lstrip('/') or '.' for path in paths]
+                quoted_paths = ' '.join(shlex.quote(path) for path in tar_paths)
+                command = f"pct exec {int(entry['vmid'])} -- tar -C / -cf - -- {quoted_paths}"
+                _stdin, stdout, stderr = ssh_client.exec_command(command, timeout=1800)
+                tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
+                try:
+                    while True:
+                        chunk = stdout.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        if not isinstance(chunk, bytes):
+                            chunk = str(chunk).encode('utf-8', errors='replace')
+                        tar_stream.write(chunk)
+                    stderr_raw = stderr.read()
+                    stderr_text = stderr_raw.decode('utf-8', errors='replace') if isinstance(stderr_raw, bytes) else str(stderr_raw or '')
+                    code = int(stdout.channel.recv_exit_status())
+                    if code != 0:
+                        raise RuntimeError(stderr_text.strip() or f'pct tar exited with {code}')
+                    prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'))
+                    output_zip.writestr(prefix.rstrip('/') + '/', b'')
+                    file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
+                    pulled.append({
+                        'index': entry.get('index'),
+                        'name': entry.get('name'),
+                        'vmid': entry.get('vmid'),
+                        'node': entry.get('node'),
+                        'paths': paths,
+                        'file_count': file_count,
+                    })
+                finally:
+                    tar_stream.close()
+            except Exception as exc:
+                errors.append({
+                    'index': entry.get('index'),
+                    'name': entry.get('name'),
+                    'vmid': entry.get('vmid'),
+                    'node': entry.get('node'),
+                    'reason': f'pull failed: {exc}',
+                })
+            finally:
+                if ssh_client is not None:
+                    try:
+                        ssh_client.close()
+                    except Exception:
+                        pass
+    zip_bytes = zip_stream.getvalue()
+    outputs_zip = None
+    if pulled:
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        outputs_zip = {
+            'filename': f'lxc_pull_{timestamp}.zip',
+            'base64': base64.b64encode(zip_bytes).decode('ascii'),
+            'size': len(zip_bytes),
+            'label': 'Pulled Files',
+        }
+    return jsonify({'pulled': pulled, 'skipped': skipped, 'errors': errors, 'outputs_zip': outputs_zip})
+
+
 @api_bp.route("/projects/<pid>/instances/actions/run_startup_cmds", methods=["POST"])
 def instances_run_startup_cmds(pid: str):
     _start_job(pid, 'run_startup_cmds')
@@ -11440,6 +11853,48 @@ def _sanitize_import_vms(vms_value: object, keep_vmid: bool, include_creds: bool
     return out
 
 
+def _merge_restored_vmids(vms_value: object, restored: object) -> list:
+    """Replace source-export VMIDs with IDs allocated during restore.
+
+    VMIDs are local to a Proxmox cluster. An ID in ``project.json`` identifies
+    the VM that was backed up; it must never survive as the ID of the imported
+    VM. Match using the same VM-name normalization used by manifest import so
+    older archives with unsanitized or differently-cased folder names still
+    receive their newly allocated IDs.
+    """
+    restored_by_name: Dict[str, int] = {}
+    for item in restored if isinstance(restored, (list, tuple)) else []:
+        try:
+            if isinstance(item, dict):
+                name = item.get('name')
+                vmid = item.get('vmid')
+            else:
+                name, vmid = item[0], item[1]
+            key = _sanitize_vm_name(str(name or '').strip()).casefold()
+            if key and vmid is not None:
+                restored_by_name[key] = int(vmid)
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    merged = []
+    for vm in vms_value if isinstance(vms_value, list) else []:
+        if isinstance(vm, dict):
+            rec = dict(vm)
+        else:
+            try:
+                rec = asdict(vm)
+            except Exception:
+                rec = {'name': str(vm)}
+
+        # Never retain an ID belonging to the source/export cluster.
+        rec.pop('vmid', None)
+        key = _sanitize_vm_name(str(rec.get('name', '') or '').strip()).casefold()
+        if key in restored_by_name:
+            rec['vmid'] = restored_by_name[key]
+        merged.append(rec)
+    return merged
+
+
 _NON_IMPORTABLE_PROJECT_FIELDS = {
     'id',
     'name',
@@ -12398,9 +12853,9 @@ def import_project():
                     # Apply import selection: remove credentials/VMs as requested
                     if not include_creds:
                         pdata2.pop('credentials', None)
-                    # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                    # VMIDs belong to the source cluster; restored IDs are merged later.
                     pdata2['vms'] = _sanitize_import_vms(
-                        pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                        pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                     )
                     try:
                         vlist = pdata2.get('vms') or []
@@ -12425,7 +12880,7 @@ def import_project():
                     _apply_imported_project_fields(proj, pdata2, include_creds=include_creds)
                     try:
                         proj.vms = _sanitize_import_vms(
-                            pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                            pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                         )
                     except Exception:
                         proj.vms = []
@@ -12502,9 +12957,9 @@ def import_project():
                 # Apply import selection: remove credentials/VMs as requested
                 if not include_creds:
                     pdata2.pop('credentials', None)
-                # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                # VMIDs belong to the source cluster; restored IDs are merged later.
                 pdata2['vms'] = _sanitize_import_vms(
-                    pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                    pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                 )
                 try:
                     vlist = pdata2.get('vms') or []
@@ -12522,7 +12977,7 @@ def import_project():
                 _apply_imported_project_fields(project, pdata2, include_creds=include_creds)
                 try:
                     project.vms = _sanitize_import_vms(
-                        pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                        pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                     )
                 except Exception:
                     project.vms = []
@@ -12805,9 +13260,9 @@ def import_project_start():
                                 pdata2['tag'] = _sanitize_tag(pdata2.get('tag', ''))
                             if not include_creds:
                                 pdata2.pop('credentials', None)
-                            # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                            # VMIDs belong to the source cluster; restored IDs are merged later.
                             pdata2['vms'] = _sanitize_import_vms(
-                                pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                                pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                             )
                             try:
                                 vlist = pdata2.get('vms') or []
@@ -12829,7 +13284,7 @@ def import_project_start():
                             # Preserve VM entries from manifest (names, adaptors, commands, etc.)
                             try:
                                 proj.vms = _sanitize_import_vms(
-                                    pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                                    pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                                 )
                             except Exception:
                                 proj.vms = []
@@ -12907,9 +13362,9 @@ def import_project_start():
                             pdata2['tag'] = _sanitize_tag(pdata2.get('tag', ''))
                         if not include_creds:
                             pdata2.pop('credentials', None)
-                        # Always import VM configuration; when include_vms is False, drop vmid (config-only)
+                        # VMIDs belong to the source cluster; restored IDs are merged later.
                         pdata2['vms'] = _sanitize_import_vms(
-                            pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                            pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                         )
                         try:
                             vlist = pdata2.get('vms') or []
@@ -12929,7 +13384,7 @@ def import_project_start():
                         # Preserve VM entries from manifest
                         try:
                             project.vms = _sanitize_import_vms(
-                                pdata2.get('vms') or [], keep_vmid=include_vms, include_creds=include_creds
+                                pdata2.get('vms') or [], keep_vmid=False, include_creds=include_creds
                             )
                         except Exception:
                             project.vms = []
@@ -13227,24 +13682,9 @@ def import_project_start():
                                                     except Exception as e:
                                                         _emit_import(job, f"[TEMPLATE][WARN] failed to convert {vm_name} ({vmid}) to template: {e}")
                                                 restored.append((vm_name, vmid))
-                                            # Merge restored VMIDs onto existing VM entries, preserving other fields
-                                            try:
-                                                vlist = []
-                                                for vm in (getattr(project, 'vms', []) or []):
-                                                    if isinstance(vm, dict):
-                                                        rec = dict(vm)
-                                                    else:
-                                                        rec = { 'name': str(vm) }
-                                                    nm = str(rec.get('name','')).strip()
-                                                    if nm:
-                                                        rid = next((vid for (n, vid) in restored if n == nm), None)
-                                                        if rid is not None:
-                                                            rec['vmid'] = int(rid)
-                                                    vlist.append(rec)
-                                                project.vms = vlist
-                                                # Defer persistence until commit (after cancellation check).
-                                            except Exception:
-                                                pass
+                                            # Merge target-cluster VMIDs onto the imported configuration.
+                                            project.vms = _merge_restored_vmids(project.vms, restored)
+                                            # Defer persistence until commit (after cancellation check).
                                     finally:
                                         try:
                                             c.close()

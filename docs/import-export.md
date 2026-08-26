@@ -33,8 +33,9 @@ The Import Options dialog controls what is applied:
 
 - **Credentials**: include credentials from the bundle.
 - **VMs**:
-  - When enabled, import includes VM config and can optionally restore VM backups to Proxmox.
-  - When disabled, VM configuration is imported but VMIDs are treated as config-only.
+  - When enabled, import includes VM config and can optionally restore VM backups to Proxmox. Restored VMs use the new IDs allocated by the target Proxmox cluster.
+  - When disabled, VM configuration is imported without VMIDs.
+  - VMIDs from the export are never reused as target VMIDs.
 - **Import VMs as templates**:
   - Only applies when importing VMs.
   - After each VM restore, DeployForge will attempt to run `qm template <vmid>` on the target Proxmox node (best-effort).

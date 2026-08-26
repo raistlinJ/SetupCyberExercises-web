@@ -5,8 +5,33 @@ import tempfile
 import time
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from app import create_app
+
+
+class _FakeImportSFTP:
+    def putfo(self, source, remote_path, file_size=None, callback=None):
+        if callback:
+            callback(file_size or 0)
+
+
+class _FakeImportSSH:
+    def open_sftp(self):
+        return _FakeImportSFTP()
+
+    def close(self):
+        return None
+
+
+class _FakeImportProxmoxClient:
+    def __init__(self, *args, **kwargs):
+        self._next_id = 9001
+
+    def cluster_nextid(self):
+        vmid = self._next_id
+        self._next_id += 1
+        return vmid
 
 
 class ImportSelectionApiTests(unittest.TestCase):
@@ -186,6 +211,61 @@ class ImportSelectionApiTests(unittest.TestCase):
         self.assertFalse(imported_vm['stored_commands'][0]['commands'][0]['enabled'])
         self.assertEqual(imported_vm['validation_commands'][0]['command'], 'echo valid')
         self.assertEqual(imported_vm['validation_commands'][0]['match'], '^valid$')
+        # A source-cluster VMID is not valid on the import target. With no
+        # restore in this test, it must be cleared instead of copying 101.
+        self.assertIsNone(imported_vm.get('vmid'))
+
+    def test_import_uses_newly_allocated_vmid_after_restore(self):
+        project = {
+            'id': 'orig-restored-vmid',
+            'name': 'ImportUsesRestoredVmid',
+            'vms': [{
+                'name': 'VM One',
+                'vmid': 101,
+                'internal_network_adaptors': ['LAN'],
+            }],
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('project.json', json.dumps({'schemaVersion': 1, 'project': project}))
+            # The folder name intentionally uses a different case/format than
+            # the sanitized configuration name to exercise normalized matching.
+            zf.writestr(
+                'backups/vm one/vzdump-qemu-101-2025_01_01-00_00_00.vma.zst',
+                b'dummy',
+            )
+        buf.seek(0)
+
+        with (
+            patch('app.routes.api.ProxmoxClient', new=_FakeImportProxmoxClient),
+            patch('app.routes.api._ssh_connect', return_value=_FakeImportSSH()),
+            patch('app.routes.api._ssh_run_cmd', return_value=(None, None)),
+            patch('app.routes.api._ssh_run_stream', return_value=('', '')),
+        ):
+            resp = self.client.post(
+                '/api/projects/import/start',
+                data={
+                    'file': (buf, 'restore.zip'),
+                    'includeCreds': 'true',
+                    'includeVms': 'true',
+                    'includeNotifyAudio': 'true',
+                    'baseUrl': 'https://proxmox.example.test:8006',
+                    'username': 'root@pam',
+                    'password': 'password',
+                    'verifySSL': 'false',
+                },
+                content_type='multipart/form-data',
+            )
+            self.assertEqual(resp.status_code, 200)
+            status = self._wait_job_completed((resp.get_json() or {})['job'])
+
+        self.assertEqual(status.get('status'), 'completed')
+        projects = (self.client.get('/api/projects').get_json() or {}).get('projects') or []
+        created = next((p for p in projects if p.get('name') == project['name']), None)
+        self.assertIsNotNone(created)
+        imported_vm = (created.get('vms') or [])[0]
+        self.assertEqual(imported_vm.get('vmid'), 9001)
+        self.assertNotEqual(imported_vm.get('vmid'), 101)
 
     def test_import_notify_audio_unchecked_drops_media_audio(self):
         # Minimal valid data URL (base64 for 'abc')

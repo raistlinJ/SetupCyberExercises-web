@@ -258,6 +258,18 @@
                       title="Run validation commands on running selected VMs">Validate</button></li>
                 </ul>
               </div>
+              <!-- LXC file transfer group -->
+              <div class="btn-group btn-group-sm">
+                <button id="act-lxc-files" type="button" class="btn btn-outline-secondary dropdown-toggle"
+                  data-bs-toggle="dropdown" aria-expanded="false" disabled
+                  title="Push files to or pull files from selected LXC containers">LXC Files</button>
+                <ul class="dropdown-menu">
+                  <li><button class="dropdown-item" type="button" onclick="openLxcPushModal()"
+                      title="Upload files or a folder into each selected LXC container">Push File</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="openLxcPullModal()"
+                      title="Download files or folders from each selected LXC container">Pull File</button></li>
+                </ul>
+              </div>
               <!-- Users & Access group -->
               <div class="btn-group btn-group-sm" id="users-group" data-bs-toggle="tooltip" data-bs-placement="top"
                 title="Creates a Proxmox user and pool for the credential username, and adds selected VMs as pool members.">
@@ -388,6 +400,70 @@
         </div>
       </div>
     </div>
+    <div class="modal fade" id="lxcPushModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Push Files to LXC Containers</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div id="lxc-push-summary" class="text-muted small mb-3"></div>
+            <div class="mb-3">
+              <label class="form-label" for="lxc-push-files">Files</label>
+              <input id="lxc-push-files" class="form-control" type="file" multiple>
+              <div class="form-text">Select one or more individual files.</div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="lxc-push-folder">Folder</label>
+              <input id="lxc-push-folder" class="form-control" type="file" webkitdirectory directory multiple>
+              <div class="form-text">Select a folder to preserve its relative directory structure. You may combine it with individual files.</div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="lxc-push-host-paths">Paths already on the Proxmox host (optional)</label>
+              <textarea id="lxc-push-host-paths" class="form-control font-monospace" rows="3"
+                placeholder="/srv/scenario/config.json&#10;/srv/scenario/assets"></textarea>
+              <div class="form-text">Enter one absolute host file or folder path per line. Use this when the content is already on each selected container's Proxmox node.</div>
+            </div>
+            <div class="mb-2">
+              <label class="form-label" for="lxc-push-destination">Destination directory in each container</label>
+              <input id="lxc-push-destination" class="form-control font-monospace" type="text"
+                placeholder="/opt/scenario" autocomplete="off">
+              <div class="form-text">Enter an absolute LXC path. The directory will be created if needed.</div>
+            </div>
+            <div id="lxc-push-error" class="text-danger small d-none" role="alert"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button id="lxc-push-confirm" type="button" class="btn btn-primary">Push</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="lxcPullModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Pull Files from LXC Containers</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div id="lxc-pull-summary" class="text-muted small mb-3"></div>
+            <div class="mb-2">
+              <label class="form-label" for="lxc-pull-paths">Container paths</label>
+              <textarea id="lxc-pull-paths" class="form-control font-monospace" rows="6"
+                placeholder="/etc/hosts&#10;/var/log/my-app"></textarea>
+              <div class="form-text">Enter one absolute file or folder path per line. Results are zipped under one <code>vmname-vmid</code> directory per LXC.</div>
+            </div>
+            <div id="lxc-pull-error" class="text-danger small d-none" role="alert"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button id="lxc-pull-confirm" type="button" class="btn btn-primary">Pull &amp; Zip</button>
+          </div>
+        </div>
+      </div>
+    </div>
   <!-- Action Results Modal -->
   <div class="modal fade" id="actionSummaryModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg">
@@ -446,10 +522,10 @@
   <script src="/static/js/creds.js?v=20251116b"></script>
   <script src="/static/js/auth.js?v=20251116b"></script>
   <script src="/static/js/shell.js?v=20260508c"></script>
-  <script src="/static/js/app.js?v=20260824a"></script>
+  <script src="/static/js/app.js?v=20260826b"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/vm_manager.js?v=20260824a"></script>
+  <script src="/static/js/vm_manager.js?v=20260825a"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
