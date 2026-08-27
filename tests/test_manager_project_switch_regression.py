@@ -280,6 +280,85 @@ class ManagerProjectSwitchRegressionTests(unittest.TestCase):
 
         self._run_node_regression('app/static/js/vm_manager.js', harness, 'vm_manager.bundle.js')
 
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend project-switch regression checks')
+    def test_queued_vm_actions_keep_their_original_project_and_targets(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+
+              const noop = () => {};
+              const queued = [];
+              const calls = [];
+              SELECTED_PIDS = null;
+              vmEnsureLiveStateBeforeAction = async () => 'continue';
+              runQueued = async (label, fn, options) => {
+                queued.push({ label, fn, options });
+                return { status: 'queued' };
+              };
+              showVmInlineProgress = noop;
+              updateVmInlineProgress = noop;
+              hideVmInlineProgress = noop;
+              showActionProgress = noop;
+              updateActionProgress = noop;
+              hideActionProgress = noop;
+              showActionSummary = noop;
+              updateRefreshState = noop;
+              renderVmTable = noop;
+              vmRefresh = async () => {};
+              http = async (method, url, body) => {
+                calls.push({ method, url, body });
+                return {};
+              };
+
+              PROJ = {
+                id: 'project-a',
+                name: 'Alpha',
+                tag: '-a-',
+                proxmox_url: 'https://alpha.example',
+                proxmox_api_port: 8006,
+                proxmox_verify_ssl: true,
+                vms: [{ name: 'web', viewable_to_user: false }],
+                instance_statuses: [],
+              };
+              SELECTED_ROWS = new Set(['project-a|1|web-a-1']);
+              await vmAction('users_access_enable');
+
+              PROJ = {
+                id: 'project-b',
+                name: 'Beta',
+                tag: '-b-',
+                proxmox_url: 'https://beta.example',
+                proxmox_api_port: 9443,
+                proxmox_verify_ssl: false,
+                vms: [{ name: 'db', viewable_to_user: false }],
+                instance_statuses: [],
+              };
+              SELECTED_ROWS = new Set(['project-b|2|db-b-2']);
+              await vmAction('users_access_enable');
+
+              assert(queued.length === 2, `Expected two queued actions, saw ${queued.length}`);
+              assert(queued[0].options.projectId === 'project-a', 'First queue entry should retain project A');
+              assert(queued[1].options.projectId === 'project-b', 'Second queue entry should retain project B');
+
+              await queued[0].fn();
+              await queued[1].fn();
+
+              const urls = calls.map(call => call.url);
+              assert(urls.length === 4, `Expected two requests per action, saw ${urls.length}`);
+              assert(urls[0] === '/api/projects/project-a/vms/web', 'First queued PATCH should target project A');
+              assert(urls[1] === '/api/projects/project-a/instances/actions/users_access_sync', 'First queued sync should target project A');
+              assert(urls[2] === '/api/projects/project-b/vms/db', 'Second queued PATCH should target project B');
+              assert(urls[3] === '/api/projects/project-b/instances/actions/users_access_sync', 'Second queued sync should target project B');
+              assert(calls[0].body.viewable_to_user === true && calls[2].body.viewable_to_user === true, 'Both captured templates should be enabled');
+            })();
+            """
+        )
+
+        self._run_node_regression('app/static/js/vm_manager.js', harness, 'vm_manager.queued_project.bundle.js')
+
     @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend VM Manager regression checks')
     def test_vm_manager_renders_and_refreshes_server_resource_usage(self):
         harness = textwrap.dedent(

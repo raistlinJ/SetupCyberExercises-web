@@ -1307,7 +1307,6 @@ function showActionProgress(title, text){
     updatedAt: Date.now()
   };
   actionProgressEmit();
-  try { showQueuePanel(); } catch {}
   if (modal && modal.parentElement !== document.body) {
     try { document.body.appendChild(modal); } catch {}
   }

@@ -612,11 +612,12 @@ function vmActionTargetPids(opts = {}) {
   if ((vmIsMulti && vmIsMulti())) {
     return canonicalPidList(listSelectedEntries().map(entry => entry.pid));
   }
-  if (!PROJ || !PROJ.id) return [];
+  const project = opts.project && typeof opts.project === 'object' ? opts.project : PROJ;
+  if (!project || !project.id) return [];
   const selected = Array.isArray(opts.targets) && opts.targets.length
     ? opts.targets.map(entry => ({ index: Number(entry?.index), name: String(entry?.name || '') })).filter(entry => Number.isFinite(entry.index) && entry.name)
-    : listSelectedEntriesForPid(PROJ.id);
-  return selected.length ? [canonicalPid(PROJ.id)] : [];
+    : listSelectedEntriesForPid(project.id);
+  return selected.length ? [canonicalPid(project.id)] : [];
 }
 
 async function vmEnsureLiveStateBeforeAction(opts = {}) {
@@ -3362,6 +3363,25 @@ function hasAuth() {
   }
 }
 
+function hasAuthForProject(project) {
+  const pid = canonicalPid(project?.id);
+  if (!pid) return false;
+  try {
+    const sess = readProxCreds(pid) || {};
+    if (sess.username && sess.password) return true;
+    const persisted = readPersistedProxCreds(pid) || {};
+    if (persisted.username && persisted.password) return true;
+    const cache = (window.PROJ_CACHE && window.PROJ_CACHE[pid]) ? window.PROJ_CACHE[pid] : project;
+    return !!(cache && typeof cache.proxmox_api_token === 'string' && cache.proxmox_api_token.trim());
+  } catch {
+    return false;
+  }
+}
+
+function isCurrentVmProject(project) {
+  return !!(project && canonicalPid(project.id) && canonicalPid(project.id) === canonicalPid(PROJ?.id));
+}
+
 function updateRefreshState() {
   const btn = document.getElementById('btn-refresh');
   const wrap = document.getElementById('refresh-wrapper');
@@ -5753,6 +5773,41 @@ function interpretStoredCommandSelection(value) {
 // Dispatch VM actions (queued wrapper)
 async function vmAction(action, opts) {
   const options = opts ? { ...opts } : {};
+  const multi = (vmIsMulti && vmIsMulti()) || !!options.targetsByPid;
+  let actionProject = null;
+  if (multi) {
+    if (!options.targetsByPid) {
+      const targetsByPid = {};
+      listSelectedEntries().forEach(entry => {
+        const pid = canonicalPid(entry?.pid);
+        if (!pid || !Number.isFinite(Number(entry?.index)) || !entry?.name) return;
+        if (!targetsByPid[pid]) targetsByPid[pid] = [];
+        targetsByPid[pid].push({ index: Number(entry.index), name: String(entry.name) });
+      });
+      options.targetsByPid = targetsByPid;
+    }
+  } else {
+    const currentProject = PROJ;
+    if (currentProject && typeof currentProject === 'object') {
+      try {
+        actionProject = typeof structuredClone === 'function'
+          ? structuredClone(currentProject)
+          : JSON.parse(JSON.stringify(currentProject));
+      } catch {
+        actionProject = {
+          ...currentProject,
+          vms: Array.isArray(currentProject.vms) ? currentProject.vms.map(vm => ({ ...vm })) : [],
+          instance_statuses: Array.isArray(currentProject.instance_statuses) ? currentProject.instance_statuses.map(status => ({ ...status })) : [],
+        };
+      }
+      options.project = actionProject;
+      if (!Array.isArray(options.targets) || !options.targets.length) {
+        options.targets = listSelectedEntriesForPid(actionProject.id)
+          .map(entry => ({ index: Number(entry.index), name: String(entry.name || '') }))
+          .filter(entry => Number.isFinite(entry.index) && entry.name);
+      }
+    }
+  }
   const liveStateDecision = await vmEnsureLiveStateBeforeAction(options);
   if (liveStateDecision !== 'continue') return;
   if (action === 'users_creds_set') {
@@ -5795,7 +5850,6 @@ async function vmAction(action, opts) {
       options.deleteOptions = deleteOptions;
     }
   }
-  const multi = (vmIsMulti && vmIsMulti()) || !!(options && options.targetsByPid);
   const selCount = countExplicitActionTargets(options) || getActionableSelections().length;
   const labelName = friendlyActionName(action) || action;
   const commandSuffix = (() => {
@@ -5807,11 +5861,17 @@ async function vmAction(action, opts) {
   const label = multi
     ? `Multi ${labelName}${commandSuffix}`
     : `${labelName}${commandSuffix} (${selCount || 0} item${(selCount || 0) === 1 ? '' : 's'})`;
-  await runQueued(label, async () => { await vmActionExec(action, options); }, { projectId: PROJ?.id });
+  const queueProjectId = multi ? canonicalPid(PROJ?.id) : canonicalPid(actionProject?.id);
+  await runQueued(label, async () => { await vmActionExec(action, options); }, { projectId: queueProjectId });
 }
 
 // Original implementation moved to vmActionExec
 async function vmActionExec(action, opts = {}) {
+  const project = opts && opts.project && typeof opts.project === 'object' ? opts.project : PROJ;
+  return vmActionExecForProject(action, opts, project);
+}
+
+async function vmActionExecForProject(action, opts = {}, PROJ = null) {
   if ((vmIsMulti && vmIsMulti()) || !!opts.targetsByPid) { return vmActionMultiExec(action, opts); }
   if (!PROJ) { alert('Select a project first.'); return; }
   const selected = Array.isArray(opts.targets) && opts.targets.length
@@ -5918,7 +5978,7 @@ async function vmActionExec(action, opts = {}) {
         const errCount = Array.isArray(syncResp?.errors) ? syncResp.errors.length : 0;
         if (errCount === 0) {
           _vmOptimisticallyUpdateUserAccessProject(PROJ, bases, indices, enable);
-          try { renderVmTable(PROJ); } catch { }
+          try { if (isCurrentVmProject(PROJ)) renderVmTable(PROJ); } catch { }
         }
       } catch { }
 
@@ -5936,13 +5996,15 @@ async function vmActionExec(action, opts = {}) {
       try { hideActionProgress(); } catch { }
       try {
         const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-        Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+        if (isCurrentVmProject(PROJ)) {
+          Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+        }
       } catch { }
     }
     return;
   }
 
-  if (!hasAuth()) { alert('Please log in to Proxmox (or configure an API token) to run actions.'); return; }
+  if (!hasAuthForProject(PROJ)) { alert('Please log in to Proxmox (or configure an API token) to run actions.'); return; }
   // Build targets; for 'create' we must use the base VM name from Configuration (without tag/index suffix)
   let targets = selected.map(entry => ({ index: Number(entry.index), name: entry.name }));
   const sess = readProxCreds(PROJ.id) || {};
@@ -5989,7 +6051,7 @@ async function vmActionExec(action, opts = {}) {
         const applyErrCount = Array.isArray(resp?.network_apply_errors) ? resp.network_apply_errors.length : 0;
         if (errCount === 0 && applyErrCount === 0) {
           _vmOptimisticallyUpdateProjectNets(PROJ, targets, normalizedAction === 'nets_remove' ? 'remove' : 'set');
-          try { renderVmTable(PROJ); } catch { }
+          try { if (isCurrentVmProject(PROJ)) renderVmTable(PROJ); } catch { }
         }
       } catch { }
       const successKey = normalizedAction === 'nets_set' ? 'updated' : 'cleared';
@@ -6105,7 +6167,7 @@ async function vmActionExec(action, opts = {}) {
             }
           }
           for (const [baseName, map] of group0.entries()) {
-            await showTemplateResolveDialog(baseName, Array.from(map.values()));
+            await showTemplateResolveDialog(baseName, Array.from(map.values()), PROJ);
           }
           // Loop and re-check until no ambiguous remain
         }
@@ -6141,7 +6203,7 @@ async function vmActionExec(action, opts = {}) {
           }
           // Show one dialog per base
           for (const [baseName, map] of group.entries()) {
-            await showTemplateResolveDialog(baseName, Array.from(map.values()));
+            await showTemplateResolveDialog(baseName, Array.from(map.values()), PROJ);
           }
           const resp2 = await makeRequest();
           lastResp = resp2 || resp;
@@ -6488,7 +6550,9 @@ async function vmActionExec(action, opts = {}) {
     // Always refresh after any action (even on failure) but do not block UI while pending
     try {
       const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-      Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+      if (isCurrentVmProject(PROJ)) {
+        Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+      }
     } catch { }
   }
 }
@@ -6865,8 +6929,6 @@ async function vmActionMultiExec(action, opts = {}) {
         };
         // Preflight ambiguous templates per project
         try {
-          // Temporarily switch PROJ for resolution dialog save
-          const prev = PROJ; PROJ = proj;
           let guard = 0;
           for (; ;) {
             if (guard++ > 5) break;
@@ -6882,9 +6944,8 @@ async function vmActionMultiExec(action, opts = {}) {
               const seen = group0.get(baseName);
               for (const c of list) { const vmid = (c && (c.vmid ?? c.id)); if (vmid === undefined || vmid === null || vmid === '') continue; const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || ''; const key = `${vmid}@@${node}`; if (!seen.has(key)) seen.set(key, { vmid, node }); }
             }
-            for (const [baseName, map] of group0.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values())); }
+            for (const [baseName, map] of group0.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values()), proj); }
           }
-          PROJ = prev;
         } catch { }
         setAp(Math.max(35, pct), 'Cloning…', `Cloning in ${projName}…`);
         const createPath = `/api/projects/${encodeURIComponent(pid)}/instances/actions/create`;
@@ -6892,7 +6953,7 @@ async function vmActionMultiExec(action, opts = {}) {
         // Retry once if ambiguous reported
         const amb = Array.isArray(resp.ambiguous) ? resp.ambiguous : [];
         if (amb.length) {
-          try { const prev = PROJ; PROJ = proj; const group = new Map(); for (const entry of amb) { const baseName = String(entry?.name || ''); const list = Array.isArray(entry?.candidates) ? entry.candidates : []; if (!group.has(baseName)) group.set(baseName, new Map()); const seen = group.get(baseName); for (const c of list) { const vmid = (c && (c.vmid ?? c.id)); if (vmid === undefined || vmid === null || vmid === '') continue; const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || ''; const k = `${vmid}@@${node}`; if (!seen.has(k)) seen.set(k, { vmid, node }); } } for (const [baseName, map] of group.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values())); } PROJ = prev; } catch { }
+          try { const group = new Map(); for (const entry of amb) { const baseName = String(entry?.name || ''); const list = Array.isArray(entry?.candidates) ? entry.candidates : []; if (!group.has(baseName)) group.set(baseName, new Map()); const seen = group.get(baseName); for (const c of list) { const vmid = (c && (c.vmid ?? c.id)); if (vmid === undefined || vmid === null || vmid === '') continue; const node = (c && (c.node ?? c.nodename ?? c.nodeName)) || ''; const k = `${vmid}@@${node}`; if (!seen.has(k)) seen.set(k, { vmid, node }); } } for (const [baseName, map] of group.entries()) { await showTemplateResolveDialog(baseName, Array.from(map.values()), proj); } } catch { }
           resp = await makeReq('/instances/actions/create', { ...createBaseBody, targets: t });
         }
         setAp(Math.max(90, pct), 'Finalizing…', `${buildVmCreateFinalizeDetail(createOptions)} in ${projName}…`);
@@ -7117,7 +7178,8 @@ async function vmCancelActions() {
 }
 
 // Show modal to resolve ambiguous template base name to a specific VMID and persist to configuration
-async function showTemplateResolveDialog(baseName, candidates) {
+async function showTemplateResolveDialog(baseName, candidates, projectOverride) {
+  const project = projectOverride && typeof projectOverride === 'object' ? projectOverride : PROJ;
   return new Promise((resolve, reject) => {
     try {
       // Only show during an active Create run; otherwise resolve immediately to avoid stray dialogs
@@ -7224,9 +7286,9 @@ async function showTemplateResolveDialog(baseName, candidates) {
           if (!(ACTION_IN_FLIGHT && CURRENT_ACTION === 'create')) { bs && bs.hide(); cleanup(); resolve(); return; }
           const chosen = (modalEl.querySelector('input[name="tmpl-vmid"]:checked') || {}).value;
           if (!chosen) { alert('Please select a VM ID.'); return; }
-          const vm = (PROJ.vms || []).find(v => String(v.name).toLowerCase() === String(baseName).toLowerCase());
+          const vm = (project?.vms || []).find(v => String(v.name).toLowerCase() === String(baseName).toLowerCase());
           if (!vm) { bs && bs.hide(); resolve(); return; }
-          await http('PATCH', `/api/projects/${PROJ.id}/vms/${encodeURIComponent(vm.name)}`, { vmid: Number(chosen) });
+          await http('PATCH', `/api/projects/${project.id}/vms/${encodeURIComponent(vm.name)}`, { vmid: Number(chosen) });
           vm.vmid = Number(chosen);
           bs && bs.hide();
           cleanup();
