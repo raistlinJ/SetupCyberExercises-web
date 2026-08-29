@@ -695,8 +695,9 @@ class ProxmoxClient:
         self,
         node: str,
         vmid: int,
-        command: str,
+        command: Any,
         shell: bool = True,
+        input_data: Optional[str] = None,
         timeout: int = 300,
         return_partial_on_timeout: bool = False,
     ) -> Dict[str, Any]:
@@ -716,6 +717,8 @@ class ProxmoxClient:
             else:
                 command_list = [str(command)]
         payload: Dict[str, Any] = {'command': command_list}
+        if input_data is not None:
+            payload['input-data'] = str(input_data)
         if isinstance(command, (list, tuple)):
             preview_src = ' '.join(str(item) for item in command)
         else:
@@ -854,6 +857,32 @@ class ProxmoxClient:
                 }
 
             _t.sleep(1)
+
+    def agent_file_read(
+        self,
+        node: str,
+        vmid: int,
+        path: str,
+        offset: int = 0,
+        count: int = 4 * 1024 * 1024,
+        decode: bool = False,
+        legacy: bool = False,
+    ) -> Dict[str, Any]:
+        """Read a file chunk through the Proxmox QEMU guest-agent API."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/agent/file-read"
+        params = {'file': str(path)}
+        if not legacy:
+            params.update({
+                'offset': max(0, int(offset)),
+                'count': max(1, int(count)),
+                'decode': 1 if decode else 0,
+            })
+        response = s.get(url, params=params, timeout=60)
+        if response.status_code >= 400:
+            raise RuntimeError(f"Proxmox guest agent file-read error {response.status_code}: {response.text}")
+        data = response.json().get('data', {}) if response.content else {}
+        return data if isinstance(data, dict) else {}
 
     def ensure_guest_agent_ready(self, node: str, vmid: int, timeout: int = 10) -> None:
         """Verify that the QEMU guest agent is available for the VM.

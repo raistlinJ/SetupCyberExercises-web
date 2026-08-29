@@ -188,6 +188,45 @@ def _validate_iface(value: str) -> str:
     return iface
 
 
+def _bridge_ageing_update_script_lines(ifaces: Iterable[Any], log_label: str = 'AGEING') -> List[str]:
+    """Build a safe shell loop for adding bridge-ageing to existing bridge stanzas.
+
+    A bridge newly staged by Proxmox can exist only in ``interfaces.new``.  We
+    must not synthesize a partial stanza in the active interfaces file when it
+    is absent there.  Older versions of this helper did that and could leave an
+    ``iface`` with bridge-ageing but no bridge-ports, which ifupdown2 then
+    treated as a malformed bridge.
+    """
+    valid_ifaces: List[str] = []
+    for value in ifaces or []:
+        iface = _validate_iface(value)
+        if iface not in valid_ifaces:
+            valid_ifaces.append(iface)
+    if not valid_ifaces:
+        return []
+    iface_list = ' '.join(valid_ifaces)
+    label = re.sub(r'[^A-Za-z0-9_.:-]+', '_', str(log_label or 'AGEING'))
+    return [
+        'repair_bridge_ageing() {',
+        '  FILE="$1"; IFACE="$2";',
+        '  [ -f "$FILE" ] || return 0;',
+        '  if ! grep -Eq "^iface[[:space:]]+${IFACE}[[:space:]]" "$FILE"; then',
+        f'    echo "[{label}] skipped ${{IFACE}} in $FILE (stanza absent)" >> "$LOG_BASE" 2>&1 || true;',
+        '    return 0;',
+        '  fi;',
+        "  if ! awk -v IFACE=\"$IFACE\" 'BEGIN{active=0;found=0} $1==\"iface\" {if(active){exit}; active=($2==IFACE); next} active && ($1==\"bridge-ports\" || $1==\"bridge_ports\") {found=1} END{exit(found?0:1)}' \"$FILE\" >/dev/null 2>&1; then",
+        '    sed -i "/^iface[[:space:]]\\+${IFACE}[[:space:]]/a\\    bridge-ports none" "$FILE";',
+        f'    echo "[{label}] repaired missing bridge-ports for ${{IFACE}} in $FILE" >> "$LOG_BASE" 2>&1 || true;',
+        '  fi;',
+        "  if ! awk -v IFACE=\"$IFACE\" 'BEGIN{active=0;found=0} $1==\"iface\" {if(active){exit}; active=($2==IFACE); next} active && ($1==\"bridge-ageing\" || $1==\"bridge_ageing\") && $2==\"0\" {found=1} END{exit(found?0:1)}' \"$FILE\" >/dev/null 2>&1; then",
+        '    sed -i "/^iface[[:space:]]\\+${IFACE}[[:space:]]/a\\    bridge-ageing 0" "$FILE";',
+        '  fi;',
+        f'  echo "[{label}] ensured ${{IFACE}} in $FILE" >> "$LOG_BASE" 2>&1 || true;',
+        '}',
+        f'for IFACE in {iface_list}; do repair_bridge_ageing "$MAIN" "$IFACE"; repair_bridge_ageing "$NEW" "$IFACE"; done',
+    ]
+
+
 def _safe_file_stem(value: str, default: str = "project") -> str:
     """Return a filesystem-friendly stem for export file names."""
     try:
@@ -3552,19 +3591,7 @@ def instances_create(pid: str):
                         'test -w /var/tmp || LOG_BASE=/tmp/ageing_debug.log',
                         'if [ ! -f "$NEW" ]; then cp "$MAIN" "$NEW"; fi',
                         f'echo "[AGEING][BEGIN] node={node} ifaces: {iface_list}" >> "$LOG_BASE" 2>&1 || true',
-                        'add_ageing() {',
-                        '  FILE=$1; IFACE=$2; ADDED=0;',
-                        '  grep -Eq "^iface ${IFACE} " "$FILE" || { echo "iface ${IFACE} inet manual" >> "$FILE"; ADDED=1; };',
-                        "  if ! awk -v IFACE=\\\"$IFACE\\\" 'BEGIN{in=0;have=0} $1==\\\"iface\\\" { if(in && $2!=IFACE) in=0; if($2==IFACE){in=1; next} } in && ($1==\\\"bridge-ageing\\\" || $1==\\\"bridge_ageing\\\") && $2==\\\"0\\\" {have=1} END{exit(have?0:1)}' \"$FILE\" >/dev/null 2>&1; then",
-                        '    if grep -Eq "bridge-ageing" "$FILE"; then',
-                        '      sed -i "/^iface ${IFACE} /a\\    bridge-ageing 0" "$FILE";',
-                        '    else',
-                        '      sed -i "/^iface ${IFACE} /a\\    bridge_ageing 0" "$FILE";',
-                        '    fi;',
-                        '  fi;',
-                        "  if awk -v IFACE=\\\"$IFACE\\\" 'BEGIN{in=0;ok=0} $1==\\\"iface\\\" { if(in && $2!=IFACE) in=0; if($2==IFACE){in=1; next} } in && ($1==\\\"bridge-ageing\\\" || $1==\\\"bridge_ageing\\\") && $2==\\\"0\\\" {ok=1} END{exit(ok?0:1)}' \"$FILE\"; then echo \"[AGEING] ensured ${IFACE} in $FILE (added_stanza=$ADDED)\" >> \"$LOG_BASE\"; else echo \"[AGEING] FAILED ${IFACE} in $FILE\" >> \"$LOG_BASE\"; fi;",
-                        '}',
-                        f'for IFACE in {iface_list}; do add_ageing "$MAIN" "$IFACE"; add_ageing "$NEW" "$IFACE"; done',
+                        *_bridge_ageing_update_script_lines(valid_ifaces, 'AGEING'),
                         'for F in "$MAIN" "$NEW"; do [ -f "$F" ] || continue; echo "[AGEING][DUMP-BEGIN] $F" >> "$LOG_BASE"; grep -n "bridge[_-]ageing" "$F" >> "$LOG_BASE" 2>&1 || true; echo "[AGEING][DUMP-END] $F" >> "$LOG_BASE"; done',
                         f'echo "[AGEING][END] node={node}" >> "$LOG_BASE" 2>&1 || true'
                     ]
@@ -3640,14 +3667,14 @@ def instances_create(pid: str):
                             # --- Legacy per-interface fallback if needed ---
                             if fallback_used:
                                 for _iface in valid_ifaces:
-                                    legacy_cmd = (
-                                        "LOG_BASE=/var/tmp/ageing_debug.log; test -w /var/tmp || LOG_BASE=/tmp/ageing_debug.log; "
-                                        "MAIN=/etc/network/interfaces; NEW=/etc/network/interfaces.new; "
-                                        "[ -f $NEW ] || cp $MAIN $NEW; "
-                                        f"for F in $MAIN $NEW; do [ -f $F ] || continue; grep -Eq '^iface {_iface} ' $F || echo 'iface {_iface} inet manual' >> $F; "
-                                        f"awk -v IFACE='{_iface}' 'BEGIN{{in=0;found=0}} $1==\"iface\" {{ if(in && $2!=IFACE) in=0; if($2==IFACE){{in=1; next}} }} in && $1==\"bridge-ageing\" && $2==\"0\" {{found=1}} END{{exit(found?0:1)}}' $F >/dev/null 2>&1 || sed -i '/^iface {_iface} /a\\    bridge-ageing 0' $F; done; "
-                                        f"echo '[LEGACY] {_iface}' >> $LOG_BASE 2>/dev/null || true"
-                                    )
+                                    legacy_cmd = '\n'.join([
+                                        'LOG_BASE=/var/tmp/ageing_debug.log',
+                                        'test -w /var/tmp || LOG_BASE=/tmp/ageing_debug.log',
+                                        'MAIN=/etc/network/interfaces',
+                                        'NEW=/etc/network/interfaces.new',
+                                        '[ -f "$NEW" ] || cp "$MAIN" "$NEW"',
+                                        *_bridge_ageing_update_script_lines([_iface], 'AGEING-LEGACY'),
+                                    ])
                                     l_wrapped = f"sh -lc {shlex.quote(legacy_cmd)}"
                                     try:
                                         _ssh_run_cmd(c, l_wrapped, sudo=use_sudo, sudo_password=ssh_pass)
@@ -3851,31 +3878,9 @@ def instances_create(pid: str):
                             'set -e',
                             'MAIN=/etc/network/interfaces',
                             'NEW=/etc/network/interfaces.new',
-                            'log=/var/tmp/ageing_debug.log',
-                            f'echo "[AGEING-VERIFY] node={node} ifaces: {verify_list}" >> "$log" 2>&1 || true',
-                            f'for IFACE in {verify_list}; do',
-                            '  FILES="$MAIN"; [ -f "$NEW" ] && FILES="$FILES $NEW";',
-                            '  MISSING=1',
-                            '  for F in $FILES; do',
-                            '    if awk -v I="$IFACE" '"'"'BEGIN{in=0;ok=0} $1=="iface" { if(in && $2!=I) in=0; if($2==I){in=1; next} } in && $1=="bridge-ageing" && $2=="0" {ok=1} END{exit(ok?0:1)}'"'"' "$F"; then MISSING=0; fi',
-                            '  done',
-                            '  if [ $MISSING -eq 1 ]; then',
-                            '    # Re-apply into both MAIN and NEW (idempotent) if missing',
-                            '    for F in $FILES; do',
-                            '      grep -Eq "^iface ${IFACE} " "$F" || echo "iface ${IFACE} inet manual" >> "$F";',
-                            '      awk -v IFACE="$IFACE" '"'"'BEGIN{in=0;found=0} $1=="iface" { if(in && $2!=IFACE) in=0; if($2==IFACE){in=1; next} } in && $1=="bridge-ageing" && $2=="0" {found=1} END{exit(found?0:1)}'"'"' "$F" >/dev/null 2>&1 || sed -i "/^iface ${IFACE} /a\\    bridge-ageing 0" "$F";',
-                            '    done',
-                            '    echo "[AGEING-VERIFY] reinsert ${IFACE}" >> "$log" 2>&1 || true',
-                            '  else',
-                            '    echo "[AGEING-VERIFY] present ${IFACE}" >> "$log" 2>&1 || true',
-                            '  fi',
-                            '  # Log the stanza excerpt (first iface line plus following lines until next iface or blank)',
-                            '  for F in $FILES; do',
-                            '    echo "[AGEING-STANZA-BEGIN] ${IFACE} $F" >> "$log";',
-                            '    awk -v I="$IFACE" '"'"'BEGIN{in=0} $1=="iface" { if(in){exit}; if($2==I){print; in=1; next} } in { if($1=="iface"){exit}; if($0!=""){print} else {print; exit}}'"'"' "$F" >> "$log" 2>&1 || true',
-                            '    echo "[AGEING-STANZA-END] ${IFACE} $F" >> "$log";',
-                            '  done',
-                            'done'
+                            'LOG_BASE=/var/tmp/ageing_debug.log',
+                            f'echo "[AGEING-VERIFY] node={node} ifaces: {verify_list}" >> "$LOG_BASE" 2>&1 || true',
+                            *_bridge_ageing_update_script_lines(iface_list, 'AGEING-VERIFY'),
                         ]
                         full_cmd = '; '.join(script_lines)
                         c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -4698,11 +4703,7 @@ def instances_fix_ageing(pid: str):
                     'TARGET=/etc/network/interfaces; [ -f /etc/network/interfaces.new ] && TARGET=/etc/network/interfaces.new',
                     'LOG_BASE=/var/tmp/ageing_debug.log; test -w /var/tmp || LOG_BASE=/tmp/ageing_debug.log',
                     f'echo "[FIX-AGEING][BEGIN] node={node} ifaces: {iface_list}" >> "$LOG_BASE" 2>&1 || true',
-                    'for IFACE in ' + iface_list + '; do',
-                    '  for F in "$MAIN" "$NEW"; do [ -f "$F" ] || continue; grep -Eq "^iface ${IFACE} " "$F" || echo "iface ${IFACE} inet manual" >> "$F"; done;',
-                    "  for F in $MAIN $NEW; do [ -f \"$F\" ] || continue; if ! awk -v IFACE=\\\"$IFACE\\\" 'BEGIN{in=0;have=0} $1==\\\"iface\\\" { if(in && $2!=IFACE) in=0; if($2==IFACE){in=1; next} } in && ($1==\\\"bridge-ageing\\\" || $1==\\\"bridge_ageing\\\") && $2==\\\"0\\\" {have=1} END{exit(have?0:1)}' \"$F\" >/dev/null 2>&1; then if grep -Eq \"bridge-ageing\" \"$F\"; then sed -i \"/^iface $IFACE /a\\\\    bridge-ageing 0\" \"$F\"; else sed -i \"/^iface $IFACE /a\\\\    bridge_ageing 0\" \"$F\"; fi; fi; done",
-                    "  for F in $MAIN $NEW; do [ -f \"$F\" ] || continue; if awk -v IFACE=\\\"$IFACE\\\" 'BEGIN{in=0;ok=0} $1==\\\"iface\\\" { if(in && $2!=IFACE) in=0; if($2==IFACE){in=1; next} } in && ($1==\\\"bridge-ageing\\\" || $1==\\\"bridge_ageing\\\") && $2==\\\"0\\\" {ok=1} END{exit(ok?0:1)}' \"$F\"; then echo \"[FIX-AGEING] ensured ${IFACE} in $F\" >> \"$LOG_BASE\"; else echo \"[FIX-AGEING] FAILED ${IFACE} in $F\" >> \"$LOG_BASE\"; fi; done",
-                    'done',
+                    *_bridge_ageing_update_script_lines(valid_ifaces, 'FIX-AGEING'),
                     'echo "[FIX-AGEING][DUMP-MAIN]" >> "$LOG_BASE"; grep -n "bridge[_-]ageing" "$MAIN" >> "$LOG_BASE" 2>&1 || true',
                     'echo "[FIX-AGEING][DUMP-NEW]" >> "$LOG_BASE"; [ -f "$NEW" ] && grep -n "bridge[_-]ageing" "$NEW" >> "$LOG_BASE" 2>&1 || true',
                     'echo "[FIX-AGEING][END]" >> "$LOG_BASE" 2>&1 || true'
@@ -8432,7 +8433,7 @@ def _lxc_transfer_ssh_host(proj: Project, base_url: str, node_name: str) -> str:
     return api_host or candidate
 
 
-def _lxc_transfer_context(pid: str, body: Dict[str, Any]):
+def _guest_transfer_context(pid: str, body: Dict[str, Any], include_qemu: bool = True):
     store = _store()
     proj = store.get(pid)
     if not proj:
@@ -8465,8 +8466,6 @@ def _lxc_transfer_context(pid: str, body: Dict[str, Any]):
     targets = body.get('targets') or []
     if not base_url or not ((username and password) or getattr(proj, 'proxmox_api_token', '')):
         raise ValueError('Missing Proxmox URL and credentials (username/password or API token)')
-    if not password:
-        raise ValueError('A Proxmox SSH password is required for LXC file transfers')
     if not isinstance(targets, list) or not targets:
         raise ValueError('No targets provided')
     client = ProxmoxClient(
@@ -8477,18 +8476,22 @@ def _lxc_transfer_context(pid: str, body: Dict[str, Any]):
         verify=verify,
     )
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
-    lxc_targets = []
+    guest_targets = []
+    supported_types = {'lxc', 'qemu'} if include_qemu else {'lxc'}
     for entry in mapped:
-        if str(entry.get('type') or '').strip().lower() == 'lxc':
-            lxc_targets.append(entry)
+        guest_type = str(entry.get('type') or '').strip().lower()
+        if guest_type in supported_types:
+            guest_targets.append(entry)
         else:
             skipped.append({
                 'index': entry.get('index'),
                 'name': entry.get('name'),
                 'vmid': entry.get('vmid'),
-                'reason': 'not an LXC container',
+                'reason': 'not a supported guest type' if include_qemu else 'not an LXC container',
             })
-    return proj, base_url, password, lxc_targets, skipped, errors
+    if any(str(entry.get('type') or '').lower() == 'lxc' for entry in guest_targets) and not password:
+        raise ValueError('A Proxmox SSH password is required when transferring LXC files')
+    return proj, client, base_url, password, guest_targets, skipped, errors
 
 
 def _safe_upload_relative_path(value: Any) -> str:
@@ -8499,44 +8502,94 @@ def _safe_upload_relative_path(value: Any) -> str:
     return normalized
 
 
+def _lxc_prepare_directory_command(path: str) -> str:
+    """Build commands that create an absolute directory, replacing file conflicts."""
+    current = '/'
+    commands: List[str] = []
+    for component in [part for part in path.split('/') if part]:
+        current = posixpath.join(current, component)
+        quoted = shlex.quote(current)
+        commands.append(
+            f"if {{ [ -e {quoted} ] || [ -L {quoted} ]; }} && [ ! -d {quoted} ]; "
+            f"then rm -rf -- {quoted}; fi"
+        )
+        commands.append(f"mkdir -p -- {quoted}")
+    return ' && '.join(commands) or 'true'
+
+
+def _path_input_lines(value: Any) -> List[str]:
+    """Return non-empty path entries, with each input line representing one entry."""
+    raw_items = value if isinstance(value, (list, tuple)) else [value]
+    lines: List[str] = []
+    for raw in raw_items:
+        for line in str(raw or '').splitlines():
+            path = line.strip()
+            if path:
+                lines.append(path)
+    return lines
+
+
+def _has_shell_path_pattern(path: str) -> bool:
+    return any(character in path for character in ('*', '?', '['))
+
+
+def _shell_quote_path_pattern(path: str) -> str:
+    """Quote a shell word while leaving supported glob operators active."""
+    fragments: List[str] = []
+    literal: List[str] = []
+
+    def flush_literal():
+        if literal:
+            fragments.append(shlex.quote(''.join(literal)))
+            literal.clear()
+
+    index = 0
+    while index < len(path):
+        character = path[index]
+        if character in {'*', '?'}:
+            flush_literal()
+            fragments.append(character)
+            index += 1
+            continue
+        if character == '[':
+            closing = path.find(']', index + 1)
+            expression = path[index:closing + 1] if closing >= 0 else ''
+            # Keep normal glob character classes active. Treat unusual bracket
+            # content literally so it cannot introduce shell syntax.
+            if expression and re.fullmatch(r'\[(?:[!^]?[A-Za-z0-9_.:-]+)\]', expression):
+                flush_literal()
+                fragments.append(expression)
+                index = closing + 1
+                continue
+        literal.append(character)
+        index += 1
+    flush_literal()
+    return ''.join(fragments) or "''"
+
+
 def _normalize_lxc_paths(value: Any) -> List[str]:
-    raw_items = value if isinstance(value, list) else [value]
+    raw_items = _path_input_lines(value)
     normalized: List[str] = []
     for raw in raw_items:
-        path = str(raw or '').strip().replace('\\', '/')
-        if not path:
-            continue
+        path = str(raw or '').strip()
         if not path.startswith('/'):
-            raise ValueError(f'Container path must be absolute: {path}')
+            raise ValueError(f'Guest path must be absolute: {path}')
         clean = posixpath.normpath(path)
         if clean not in normalized:
             normalized.append(clean)
     if not normalized:
-        raise ValueError('At least one container path is required')
-    # If a parent was requested, omit duplicate descendants from the tar command.
-    result: List[str] = []
-    for path in sorted(normalized, key=lambda item: (item.count('/'), len(item), item)):
-        if any(parent == '/' or path.startswith(parent.rstrip('/') + '/') for parent in result):
-            continue
-        result.append(path)
-    return result
-
-
-def _normalize_host_push_paths(value: Any) -> List[str]:
-    raw_items = value if isinstance(value, list) else [value]
-    normalized: List[str] = []
-    for raw in raw_items:
-        path = str(raw or '').strip().replace('\\', '/')
-        if not path:
-            continue
-        if not path.startswith('/'):
-            raise ValueError(f'Proxmox host path must be absolute: {path}')
-        clean = posixpath.normpath(path)
-        if clean == '/':
-            raise ValueError('The Proxmox host root directory cannot be pushed')
-        if clean not in normalized:
-            normalized.append(clean)
-    return normalized
+        raise ValueError('At least one guest path is required')
+    # If a literal parent was requested, omit duplicate descendants while
+    # preserving the order in which the user entered the remaining lines.
+    return [
+        path for path in normalized
+        if _has_shell_path_pattern(path) or not any(
+            other != path
+            and not _has_shell_path_pattern(other)
+            and (other == '/' or path.startswith(other.rstrip('/') + '/'))
+            for other in normalized
+        )
+    ]
 
 
 def _ssh_exec_result(ssh_client, command: str, timeout: int = 600) -> Tuple[int, bytes, str]:
@@ -8551,6 +8604,192 @@ def _ssh_exec_result(ssh_client, command: str, timeout: int = 600) -> Tuple[int,
     else:
         error_text = str(error_raw or '')
     return int(code), output, error_text.strip()
+
+
+def _guest_agent_exec_checked(
+    client: ProxmoxClient,
+    entry: Dict[str, Any],
+    command: List[str],
+    input_data: Optional[str] = None,
+    timeout: int = 600,
+) -> Dict[str, Any]:
+    result = client.agent_exec(
+        node=str(entry.get('node') or ''),
+        vmid=int(entry.get('vmid')),
+        command=command,
+        shell=False,
+        input_data=input_data,
+        timeout=timeout,
+    ) or {}
+    exitcode = result.get('exitcode')
+    if exitcode not in (0, None):
+        reason = str(result.get('stderr') or result.get('stdout') or '').strip()
+        raise RuntimeError(reason or f'guest-agent command exited with {exitcode}')
+    if result.get('timed_out'):
+        raise RuntimeError('guest-agent command timed out')
+    return result
+
+
+def _ensure_linux_qemu_guest(client: ProxmoxClient, entry: Dict[str, Any]):
+    try:
+        config = client.get_qemu_config(str(entry.get('node') or ''), int(entry.get('vmid'))) or {}
+    except Exception:
+        config = {}
+    ostype = str(config.get('ostype') or '').strip().lower()
+    if ostype.startswith('win'):
+        raise RuntimeError('QEMU guest file transfer currently supports Linux guests only')
+
+
+def _push_tar_through_guest_agent(
+    client: ProxmoxClient,
+    entry: Dict[str, Any],
+    tar_stream,
+    archive_size: int,
+    destination: str,
+):
+    _ensure_linux_qemu_guest(client, entry)
+    guest_archive = f"/tmp/deployforge-qemu-push-{uuid.uuid4().hex}.tar"
+    quoted_archive = shlex.quote(guest_archive)
+    try:
+        _guest_agent_exec_checked(
+            client,
+            entry,
+            ['/bin/sh', '-c', f'rm -f -- {quoted_archive}'],
+            timeout=120,
+        )
+        tar_stream.seek(0)
+        while True:
+            chunk = tar_stream.read(45 * 1024)
+            if not chunk:
+                break
+            encoded = base64.b64encode(chunk).decode('ascii')
+            _guest_agent_exec_checked(
+                client,
+                entry,
+                ['/bin/sh', '-c', f'base64 -d >> {quoted_archive}'],
+                input_data=encoded,
+                timeout=120,
+            )
+        extract_command = (
+            f"{_lxc_prepare_directory_command(destination)} && "
+            f"tar --overwrite -xpf {quoted_archive} -C {shlex.quote(destination)}"
+        )
+        _guest_agent_exec_checked(
+            client,
+            entry,
+            ['/bin/sh', '-c', extract_command],
+            timeout=max(600, int(archive_size / (256 * 1024)) + 120),
+        )
+    finally:
+        try:
+            _guest_agent_exec_checked(
+                client,
+                entry,
+                ['/bin/sh', '-c', f'rm -f -- {quoted_archive}'],
+                timeout=120,
+            )
+        except Exception:
+            pass
+
+
+def _pull_tar_through_guest_agent(
+    client: ProxmoxClient,
+    entry: Dict[str, Any],
+    paths: List[str],
+):
+    _ensure_linux_qemu_guest(client, entry)
+    guest_archive = f"/tmp/deployforge-qemu-pull-{uuid.uuid4().hex}.tar"
+    quoted_archive = shlex.quote(guest_archive)
+    guest_part_prefix = f"{guest_archive}.b64.part."
+    quoted_part_prefix = shlex.quote(guest_part_prefix)
+    relative_archive = guest_archive.lstrip('/')
+    tar_paths = [path.lstrip('/') or '.' for path in paths]
+    quoted_paths = ' '.join(_shell_quote_path_pattern(path) for path in tar_paths)
+    create_command = (
+        f"cd / && rm -f -- {quoted_archive} && "
+        f"tar --exclude={shlex.quote(relative_archive)} -cf {quoted_archive} -- {quoted_paths}"
+    )
+    tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
+    try:
+        _guest_agent_exec_checked(
+            client,
+            entry,
+            ['/bin/sh', '-c', create_command],
+            timeout=1800,
+        )
+        try:
+            offset = 0
+            chunk_size = 4 * 1024 * 1024
+            while True:
+                result = client.agent_file_read(
+                    node=str(entry.get('node') or ''),
+                    vmid=int(entry.get('vmid')),
+                    path=guest_archive,
+                    offset=offset,
+                    count=chunk_size,
+                    decode=False,
+                ) or {}
+                content = str(result.get('content') or '')
+                chunk = base64.b64decode(content, validate=False) if content else b''
+                bytes_read = int(result.get('bytes-read') or len(chunk) or 0)
+                if chunk:
+                    tar_stream.write(chunk)
+                if bytes_read <= 0:
+                    break
+                offset += bytes_read
+                if not result.get('truncated') or bytes_read < chunk_size:
+                    break
+        except RuntimeError as exc:
+            # Proxmox versions predating chunked file-read reject offset/count/decode.
+            # Split a newline-free base64 representation into pieces below the
+            # legacy endpoint's 16 MiB limit and read those with only `file=`.
+            message = str(exc)
+            if 'error 400' not in message or 'Parameter verification failed' not in message:
+                raise
+            tar_stream.seek(0)
+            tar_stream.truncate(0)
+            legacy_command = (
+                f"rm -f -- {quoted_part_prefix}* && "
+                f"base64 {quoted_archive} | tr -d '\\r\\n' | "
+                f"split -b 12000000 - {quoted_part_prefix} && "
+                f"for part in {quoted_part_prefix}*; do [ -f \"$part\" ] && printf '%s\\n' \"$part\"; done"
+            )
+            legacy_result = _guest_agent_exec_checked(
+                client,
+                entry,
+                ['/bin/sh', '-c', legacy_command],
+                timeout=1800,
+            )
+            part_paths = [line.strip() for line in str(legacy_result.get('stdout') or '').splitlines() if line.strip()]
+            if not part_paths:
+                raise RuntimeError('guest-agent did not produce readable archive chunks')
+            for part_path in part_paths:
+                result = client.agent_file_read(
+                    node=str(entry.get('node') or ''),
+                    vmid=int(entry.get('vmid')),
+                    path=part_path,
+                    legacy=True,
+                ) or {}
+                encoded = ''.join(str(result.get('content') or '').split())
+                if encoded:
+                    tar_stream.write(base64.b64decode(encoded, validate=True))
+        if tar_stream.tell() <= 0:
+            raise RuntimeError('guest-agent returned an empty archive')
+        tar_stream.seek(0)
+        return tar_stream
+    except Exception:
+        tar_stream.close()
+        raise
+    finally:
+        try:
+            _guest_agent_exec_checked(
+                client,
+                entry,
+                ['/bin/sh', '-c', f'rm -f -- {quoted_archive} {quoted_part_prefix}*'],
+                timeout=120,
+            )
+        except Exception:
+            pass
 
 
 def _lxc_zip_prefix(name: Any, vmid: Any) -> str:
@@ -8589,9 +8828,11 @@ def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -
     return copied
 
 
+@api_bp.route("/projects/<pid>/instances/actions/guest_push", methods=["POST"])
 @api_bp.route("/projects/<pid>/instances/actions/lxc_push", methods=["POST"])
 def instances_lxc_push(pid: str):
-    blocked = _block_when_remote('LXC file transfer')
+    include_qemu = request.path.endswith('/guest_push')
+    blocked = _block_when_remote('Guest file transfer')
     if blocked:
         return blocked
     try:
@@ -8603,16 +8844,15 @@ def instances_lxc_push(pid: str):
         return jsonify({'error': f'Invalid transfer payload: {exc}'}), 400
     destination = str(body.get('destination') or '').strip().replace('\\', '/')
     if not destination.startswith('/'):
-        return jsonify({'error': 'Destination must be an absolute container directory'}), 400
+        return jsonify({'error': 'Destination must be an absolute guest directory'}), 400
     destination = posixpath.normpath(destination)
     uploads = request.files.getlist('files')
     relative_paths = body.get('relativePaths') or []
-    try:
-        host_paths = _normalize_host_push_paths(body.get('hostPaths') or [])
-    except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-    if not uploads and not host_paths:
-        return jsonify({'error': 'Select content or provide at least one Proxmox host path to push'}), 400
+    selection_type = str(body.get('selectionType') or 'file').strip().lower()
+    if selection_type not in {'file', 'folder'}:
+        return jsonify({'error': 'Push selection type must be file or folder'}), 400
+    if not uploads:
+        return jsonify({'error': 'Select at least one file or folder to push'}), 400
     if uploads and (not isinstance(relative_paths, list) or len(relative_paths) != len(uploads)):
         relative_paths = [upload.filename for upload in uploads]
     try:
@@ -8622,18 +8862,34 @@ def instances_lxc_push(pid: str):
     if len(set(safe_paths)) != len(safe_paths):
         return jsonify({'error': 'The selected upload contains duplicate relative paths'}), 400
     try:
-        proj, base_url, password, mapped, skipped, errors = _lxc_transfer_context(pid, body)
+        proj, client, base_url, password, mapped, skipped, errors = _guest_transfer_context(
+            pid,
+            body,
+            include_qemu=include_qemu,
+        )
     except LookupError as exc:
         return jsonify({'error': str(exc)}), 404
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except Exception as exc:
-        return jsonify({'error': f'Could not resolve LXC targets: {exc}'}), 502
+        return jsonify({'error': f'Could not resolve guest targets: {exc}'}), 502
 
     pushed: List[Dict[str, Any]] = []
     tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
     try:
         with tarfile.open(fileobj=tar_stream, mode='w') as archive:
+            directory_paths: Set[str] = set()
+            for relative_path in safe_paths:
+                parent = posixpath.dirname(relative_path)
+                while parent and parent != '.':
+                    directory_paths.add(parent)
+                    parent = posixpath.dirname(parent)
+            for directory_path in sorted(directory_paths, key=lambda item: (item.count('/'), item)):
+                info = tarfile.TarInfo(directory_path.rstrip('/') + '/')
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                info.mtime = int(time.time())
+                archive.addfile(info)
             for upload, relative_path in zip(uploads, safe_paths):
                 stream = upload.stream
                 try:
@@ -8655,42 +8911,67 @@ def instances_lxc_push(pid: str):
             sftp = None
             remote_archive = f"/tmp/deployforge-lxc-push-{uuid.uuid4().hex}.tar"
             try:
+                guest_type = str(entry.get('type') or '').strip().lower()
+                if guest_type == 'qemu':
+                    _push_tar_through_guest_agent(
+                        client,
+                        entry,
+                        tar_stream,
+                        archive_size,
+                        destination,
+                    )
+                    pushed.append({
+                        'index': entry.get('index'),
+                        'name': entry.get('name'),
+                        'vmid': entry.get('vmid'),
+                        'node': entry.get('node'),
+                        'type': 'qemu',
+                        'transfer_method': 'qemu-guest-agent',
+                        'destination': destination,
+                        'file_count': len(safe_paths),
+                        'item_count': len(safe_paths),
+                        'bytes': archive_size,
+                        'overwrite': True,
+                        'created_directories': True,
+                        'selection_type': selection_type,
+                    })
+                    continue
                 ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
                 ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
                 ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
                 ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
-                inner = f"mkdir -p -- {shlex.quote(destination)} && tar -xpf - -C {shlex.quote(destination)}"
-                if uploads:
-                    sftp = ssh_client.open_sftp()
-                    tar_stream.seek(0)
-                    sftp.putfo(tar_stream, remote_archive, file_size=archive_size)
-                    command = (
-                        f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
-                        f"< {shlex.quote(remote_archive)}"
-                    )
-                    code, _output, stderr_text = _ssh_exec_result(ssh_client, command)
-                    if code != 0:
-                        raise RuntimeError(stderr_text or f'pct extract exited with {code}')
-                for host_path in host_paths:
-                    parent_path = posixpath.dirname(host_path) or '/'
-                    base_name = posixpath.basename(host_path)
-                    tar_command = f"tar -C {shlex.quote(parent_path)} -cf - -- {shlex.quote(base_name)}"
-                    extract_command = f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)}"
-                    pipeline = f"{tar_command} | {extract_command}"
-                    command = f"bash -o pipefail -c {shlex.quote(pipeline)}"
-                    code, _output, stderr_text = _ssh_exec_result(ssh_client, command)
-                    if code != 0:
-                        raise RuntimeError(stderr_text or f'host path transfer exited with {code}: {host_path}')
+                # Prepare each destination component so missing parents are
+                # created and a file-vs-directory conflict is replaced.
+                # tar's overwrite mode replaces conflicting files without an
+                # interactive prompt and merges existing directories.
+                inner = (
+                    f"{_lxc_prepare_directory_command(destination)} && "
+                    f"tar --overwrite -xpf - -C {shlex.quote(destination)}"
+                )
+                sftp = ssh_client.open_sftp()
+                tar_stream.seek(0)
+                sftp.putfo(tar_stream, remote_archive, file_size=archive_size)
+                command = (
+                    f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
+                    f"< {shlex.quote(remote_archive)}"
+                )
+                code, _output, stderr_text = _ssh_exec_result(ssh_client, command)
+                if code != 0:
+                    raise RuntimeError(stderr_text or f'pct extract exited with {code}')
                 pushed.append({
                     'index': entry.get('index'),
                     'name': entry.get('name'),
                     'vmid': entry.get('vmid'),
                     'node': entry.get('node'),
+                    'type': 'lxc',
+                    'transfer_method': 'pct-over-ssh',
                     'destination': destination,
                     'file_count': len(safe_paths),
-                    'host_path_count': len(host_paths),
-                    'item_count': len(safe_paths) + len(host_paths),
+                    'item_count': len(safe_paths),
                     'bytes': archive_size,
+                    'overwrite': True,
+                    'created_directories': True,
+                    'selection_type': selection_type,
                 })
             except Exception as exc:
                 errors.append({
@@ -8720,9 +9001,11 @@ def instances_lxc_push(pid: str):
     return jsonify({'pushed': pushed, 'skipped': skipped, 'errors': errors})
 
 
+@api_bp.route("/projects/<pid>/instances/actions/guest_pull", methods=["POST"])
 @api_bp.route("/projects/<pid>/instances/actions/lxc_pull", methods=["POST"])
 def instances_lxc_pull(pid: str):
-    blocked = _block_when_remote('LXC file transfer')
+    include_qemu = request.path.endswith('/guest_pull')
+    blocked = _block_when_remote('Guest file transfer')
     if blocked:
         return blocked
     try:
@@ -8731,13 +9014,17 @@ def instances_lxc_pull(pid: str):
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     try:
-        proj, base_url, password, mapped, skipped, errors = _lxc_transfer_context(pid, body)
+        proj, client, base_url, password, mapped, skipped, errors = _guest_transfer_context(
+            pid,
+            body,
+            include_qemu=include_qemu,
+        )
     except LookupError as exc:
         return jsonify({'error': str(exc)}), 404
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except Exception as exc:
-        return jsonify({'error': f'Could not resolve LXC targets: {exc}'}), 502
+        return jsonify({'error': f'Could not resolve guest targets: {exc}'}), 502
 
     pulled: List[Dict[str, Any]] = []
     zip_stream = io.BytesIO()
@@ -8745,13 +9032,43 @@ def instances_lxc_pull(pid: str):
         for entry in mapped:
             ssh_client = None
             try:
+                guest_type = str(entry.get('type') or '').strip().lower()
+                if guest_type == 'qemu':
+                    tar_stream = _pull_tar_through_guest_agent(client, entry, paths)
+                    try:
+                        prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'))
+                        output_zip.writestr(prefix.rstrip('/') + '/', b'')
+                        file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
+                        pulled.append({
+                            'index': entry.get('index'),
+                            'name': entry.get('name'),
+                            'vmid': entry.get('vmid'),
+                            'node': entry.get('node'),
+                            'type': 'qemu',
+                            'transfer_method': 'qemu-guest-agent',
+                            'paths': paths,
+                            'file_count': file_count,
+                        })
+                    finally:
+                        tar_stream.close()
+                    continue
                 ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
                 ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
                 ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
                 ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
                 tar_paths = [path.lstrip('/') or '.' for path in paths]
-                quoted_paths = ' '.join(shlex.quote(path) for path in tar_paths)
-                command = f"pct exec {int(entry['vmid'])} -- tar -C / -cf - -- {quoted_paths}"
+                quoted_paths = ' '.join(_shell_quote_path_pattern(path) for path in tar_paths)
+                # Run through the container shell so supported path patterns are
+                # expanded against the LXC filesystem. Literal segments remain
+                # shell-quoted by _shell_quote_path_pattern.
+                # Change directory before invoking tar so the shell expands
+                # relative patterns against the container root, not /root (or
+                # another pct exec working directory).
+                inner_command = f"cd / && tar -cf - -- {quoted_paths}"
+                command = (
+                    f"pct exec {int(entry['vmid'])} -- sh -c "
+                    f"{shlex.quote(inner_command)}"
+                )
                 _stdin, stdout, stderr = ssh_client.exec_command(command, timeout=1800)
                 tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
                 try:
@@ -8775,6 +9092,8 @@ def instances_lxc_pull(pid: str):
                         'name': entry.get('name'),
                         'vmid': entry.get('vmid'),
                         'node': entry.get('node'),
+                        'type': 'lxc',
+                        'transfer_method': 'pct-over-ssh',
                         'paths': paths,
                         'file_count': file_count,
                     })
@@ -8799,7 +9118,7 @@ def instances_lxc_pull(pid: str):
     if pulled:
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         outputs_zip = {
-            'filename': f'lxc_pull_{timestamp}.zip',
+            'filename': f"{'guest' if include_qemu else 'lxc'}_pull_{timestamp}.zip",
             'base64': base64.b64encode(zip_bytes).decode('ascii'),
             'size': len(zip_bytes),
             'label': 'Pulled Files',
@@ -13535,17 +13854,14 @@ def import_project_start():
                                                 _emit_import(job, f"[AGEING] ensuring bridge-ageing 0 for {len(bridges_needed)} bridge(s): {', '.join(sorted(bridges_needed))}")
                                                 iface_list = ' '.join(sorted(bridges_needed))
                                                 # Keep it idempotent; create interfaces.new if missing.
-                                                ageing_script = (
-                                                    "set -e; "
-                                                    "MAIN=/etc/network/interfaces; NEW=/etc/network/interfaces.new; "
-                                                    "[ -f $NEW ] || cp $MAIN $NEW; "
-                                                    f"for IFACE in {iface_list}; do "
-                                                    "for F in $MAIN $NEW; do [ -f $F ] || continue; "
-                                                    "grep -Eq \"^iface ${IFACE} \" $F || echo \"iface ${IFACE} inet manual\" >> $F; "
-                                                    "awk -v IFACE=\"$IFACE\" 'BEGIN{in=0;have=0} $1==\"iface\" { if(in && $2!=IFACE) in=0; if($2==IFACE){in=1; next} } in && ($1==\"bridge-ageing\" || $1==\"bridge_ageing\") && $2==\"0\" {have=1} END{exit(have?0:1)}' $F >/dev/null 2>&1 "
-                                                    "|| sed -i \"/^iface ${IFACE} /a\\\\    bridge-ageing 0\" $F; "
-                                                    "done; done"
-                                                )
+                                                ageing_script = '\n'.join([
+                                                    'set -e',
+                                                    'MAIN=/etc/network/interfaces',
+                                                    'NEW=/etc/network/interfaces.new',
+                                                    'LOG_BASE=/var/tmp/ageing_debug.log',
+                                                    '[ -f "$NEW" ] || cp "$MAIN" "$NEW"',
+                                                    *_bridge_ageing_update_script_lines(sorted(bridges_needed), 'IMPORT-AGEING'),
+                                                ])
                                                 import shlex
                                                 use_sudo_ageing = (str(ssh_user).strip().lower() != 'root')
                                                 _ssh_run_cmd(c, f"sh -lc {shlex.quote(ageing_script)}", sudo=use_sudo_ageing, sudo_password=password)

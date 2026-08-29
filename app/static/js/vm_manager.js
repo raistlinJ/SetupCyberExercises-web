@@ -3417,15 +3417,15 @@ function updateRefreshState() {
     });
     const usersBtn = document.getElementById('act-users');
     if (usersBtn) usersBtn.disabled = disable;
-    const lxcEntries = getSelectedLxcEntries();
-    const lxcFilesBtn = document.getElementById('act-lxc-files');
-    if (lxcFilesBtn) {
-      const lxcAuthorized = lxcEntries.length > 0
-        && lxcEntries.every(entry => hasAuthForPid(entry.pid || PROJ?.id));
-      lxcFilesBtn.disabled = !lxcAuthorized;
-      lxcFilesBtn.title = lxcEntries.length
-        ? `Push or pull files for ${lxcEntries.length} selected LXC container${lxcEntries.length === 1 ? '' : 's'}`
-        : 'Select at least one existing LXC container (refresh states first)';
+    const guestEntries = getSelectedGuestEntries();
+    const guestFilesBtn = document.getElementById('act-guest-files');
+    if (guestFilesBtn) {
+      const guestAuthorized = guestEntries.length > 0
+        && guestEntries.every(entry => hasAuthForPid(entry.pid || PROJ?.id));
+      guestFilesBtn.disabled = !guestAuthorized;
+      guestFilesBtn.title = guestEntries.length
+        ? `Push or pull files for ${guestEntries.length} selected guest${guestEntries.length === 1 ? '' : 's'}`
+        : 'Select at least one existing LXC container or QEMU VM (refresh states first)';
     }
   } catch { }
   // Enable Cancel button only while an action is in flight
@@ -3518,49 +3518,52 @@ function getActionableSelections() {
   return [];
 }
 
-function getSelectedLxcEntries() {
+function getSelectedGuestEntries() {
   const selected = getActionableSelections();
   const mergedRows = Array.isArray(window.__MERGED_ROWS__) ? window.__MERGED_ROWS__ : [];
-  return selected.filter(entry => {
+  return selected.reduce((entries, entry) => {
     try {
       const merged = mergedRows.find(row => canonicalPid(row?.pid) === canonicalPid(entry?.pid)
         && Number(row?.index) === Number(entry?.index)
         && String(row?.vmName || '') === String(entry?.name || ''));
-      if (String(merged?.detail?.type || '').toLowerCase() === 'lxc') return true;
+      let guestType = String(merged?.detail?.type || '').toLowerCase();
       const proj = canonicalPid(PROJ?.id) === canonicalPid(entry?.pid)
         ? PROJ
         : (ALL_PROJECTS || []).find(item => canonicalPid(item?.id) === canonicalPid(entry?.pid));
-      const detail = _findVmDetailForTarget(proj, entry);
-      return String(detail?.type || '').toLowerCase() === 'lxc';
-    } catch {
-      return false;
-    }
-  });
+      if (!guestType) {
+        const detail = _findVmDetailForTarget(proj, entry);
+        guestType = String(detail?.type || '').toLowerCase();
+      }
+      if (guestType === 'lxc' || guestType === 'qemu') entries.push({ ...entry, type: guestType });
+    } catch { }
+    return entries;
+  }, []);
 }
 
-function groupSelectedLxcEntriesByProject() {
+function groupSelectedGuestEntriesByProject() {
   const grouped = new Map();
-  getSelectedLxcEntries().forEach(entry => {
+  getSelectedGuestEntries().forEach(entry => {
     const pid = canonicalPid(entry?.pid || PROJ?.id);
     if (!pid) return;
     if (!grouped.has(pid)) grouped.set(pid, []);
-    grouped.get(pid).push({ index: Number(entry.index), name: String(entry.name || '') });
+    grouped.get(pid).push({ index: Number(entry.index), name: String(entry.name || ''), type: String(entry.type || '') });
   });
   return grouped;
 }
 
-function lxcTransferProject(pid) {
+function guestTransferProject(pid) {
   const canonical = canonicalPid(pid);
   if (canonicalPid(PROJ?.id) === canonical) return PROJ;
   return (ALL_PROJECTS || []).find(item => canonicalPid(item?.id) === canonical) || null;
 }
 
-async function lxcTransferAuthPayload(pid) {
-  const proj = lxcTransferProject(pid);
+async function guestTransferAuthPayload(pid, targets) {
+  const proj = guestTransferProject(pid);
   if (!proj) throw new Error(`Project ${pid} is unavailable`);
   try { await hydrateProxCredsFromPersisted(pid); } catch { }
   const sess = readProxCreds(pid) || {};
-  if (!sess.password) throw new Error(`${proj.name || pid}: an SSH password is required`);
+  const needsSsh = (targets || []).some(target => String(target?.type || '').toLowerCase() === 'lxc');
+  if (!sess.password && needsSsh) throw new Error(`${proj.name || pid}: an SSH password is required for LXC transfers`);
   return {
     username: sess.username || undefined,
     password: sess.password,
@@ -3570,7 +3573,7 @@ async function lxcTransferAuthPayload(pid) {
   };
 }
 
-function mergeLxcTransferResponses(responses) {
+function mergeGuestTransferResponses(responses) {
   const merged = { pushed: [], pulled: [], skipped: [], errors: [], outputs_zips: [] };
   (responses || []).forEach(({ project, response }) => {
     const projectName = project?.name || project?.id || '';
@@ -3584,10 +3587,10 @@ function mergeLxcTransferResponses(responses) {
   return merged;
 }
 
-async function runLxcTransfer(label, operation) {
-  const grouped = groupSelectedLxcEntriesByProject();
+async function runGuestTransfer(label, operation) {
+  const grouped = groupSelectedGuestEntriesByProject();
   if (!grouped.size) {
-    alert('Select at least one existing LXC container. Refresh states first if needed.');
+    alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
     return;
   }
   const responses = [];
@@ -3595,42 +3598,77 @@ async function runLxcTransfer(label, operation) {
   CURRENT_ACTION = label;
   ACTION_RUN_ID += 1;
   updateRefreshState();
+  let summaryResult = null;
+  const progressCancelButton = document.getElementById('action-progress-cancel-btn');
+  const progressCancelWasDisabled = !!progressCancelButton?.disabled;
+  const progressCancelTitle = progressCancelButton?.getAttribute('title');
+  if (progressCancelButton) {
+    progressCancelButton.disabled = true;
+    progressCancelButton.title = 'Guest file transfers cannot be cancelled after they start';
+  }
   try {
     try { shell.beginActionContext(label); } catch { }
-    try { showActionProgress(`${label} in progress`, `Preparing ${getSelectedLxcEntries().length} LXC container(s)…`); } catch { }
+    try { showActionProgress(`${label} in progress`, `Preparing ${getSelectedGuestEntries().length} guest(s)…`); } catch { }
+    try { openActionProgressModal(); } catch { }
     let position = 0;
     for (const [pid, targets] of grouped.entries()) {
       position += 1;
-      const project = lxcTransferProject(pid);
+      const project = guestTransferProject(pid);
       const progress = Math.max(10, Math.round((position - 1) * 80 / grouped.size) + 10);
-      try { updateActionProgress(progress, label, `${project?.name || pid}: ${targets.length} LXC container(s)`); } catch { }
-      const auth = await lxcTransferAuthPayload(pid);
+      try { updateActionProgress(progress, `${position}/${grouped.size}`, `${project?.name || pid}: transferring ${targets.length} guest(s)…`); } catch { }
+      const auth = await guestTransferAuthPayload(pid, targets);
       const response = await operation(pid, targets, auth);
       responses.push({ project, response });
+      const completedProgress = Math.min(95, Math.round(position * 85 / grouped.size) + 10);
+      try { updateActionProgress(completedProgress, `${position}/${grouped.size}`, `${project?.name || pid}: transfer complete`); } catch { }
     }
-    const merged = mergeLxcTransferResponses(responses);
+    const merged = mergeGuestTransferResponses(responses);
     try { updateActionProgress(100, 'Done', `${label} completed`); } catch { }
-    showActionSummary(label, merged);
+    summaryResult = merged;
     emitActionLogs(label, merged);
     try { shell.endActionContext((merged.errors || []).length === 0); } catch { }
   } catch (error) {
     const message = error?.message || String(error);
     try { shell.logError(`${label}: ${message}`); } catch { }
     try { shell.endActionContext(false); } catch { }
-    showActionSummary(label, { errors: [{ reason: message }] });
+    summaryResult = { errors: [{ reason: message }] };
   } finally {
     ACTION_IN_FLIGHT = false;
     CURRENT_ACTION = null;
     updateRefreshState();
     try { hideActionProgress(); } catch { }
+    if (progressCancelButton) {
+      progressCancelButton.disabled = progressCancelWasDisabled;
+      if (progressCancelTitle === null) progressCancelButton.removeAttribute('title');
+      else progressCancelButton.setAttribute('title', progressCancelTitle);
+    }
+  }
+  if (summaryResult) {
+    window.setTimeout(() => showActionSummary(label, summaryResult), 200);
   }
 }
 
+function hideLxcSetupModal(modal) {
+  return new Promise(resolve => {
+    if (!modal || !window.bootstrap || !bootstrap.Modal) return resolve();
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
+    };
+    if (!modal.classList.contains('show')) return finish();
+    modal.addEventListener('hidden.bs.modal', finish, { once: true });
+    try { bootstrap.Modal.getOrCreateInstance(modal).hide(); } catch { return finish(); }
+    window.setTimeout(finish, 500);
+  });
+}
+
 function openLxcPushModal() {
-  const selected = getSelectedLxcEntries();
-  if (!selected.length) return alert('Select at least one existing LXC container. Refresh states first if needed.');
+  const selected = getSelectedGuestEntries();
+  if (!selected.length) return alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
   const summary = document.getElementById('lxc-push-summary');
-  if (summary) summary.textContent = `The selected content will be pushed to ${selected.length} LXC container${selected.length === 1 ? '' : 's'}.`;
+  if (summary) summary.textContent = `The selected content will be pushed to ${selected.length} guest${selected.length === 1 ? '' : 's'}. QEMU VMs use the guest agent; LXC containers use the configured Proxmox SSH connection.`;
   const error = document.getElementById('lxc-push-error');
   if (error) { error.textContent = ''; error.classList.add('d-none'); }
   const modal = document.getElementById('lxcPushModal');
@@ -3638,10 +3676,10 @@ function openLxcPushModal() {
 }
 
 function openLxcPullModal() {
-  const selected = getSelectedLxcEntries();
-  if (!selected.length) return alert('Select at least one existing LXC container. Refresh states first if needed.');
+  const selected = getSelectedGuestEntries();
+  if (!selected.length) return alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
   const summary = document.getElementById('lxc-pull-summary');
-  if (summary) summary.textContent = `The requested paths will be pulled from ${selected.length} LXC container${selected.length === 1 ? '' : 's'}.`;
+  if (summary) summary.textContent = `The requested paths will be pulled from ${selected.length} guest${selected.length === 1 ? '' : 's'}. QEMU VMs use the guest agent; LXC containers use the configured Proxmox SSH connection.`;
   const error = document.getElementById('lxc-pull-error');
   if (error) { error.textContent = ''; error.classList.add('d-none'); }
   const modal = document.getElementById('lxcPullModal');
@@ -3649,30 +3687,46 @@ function openLxcPullModal() {
 }
 
 function wireLxcTransferModals() {
+  const updatePushTypeUi = () => {
+    const selectionType = document.querySelector('input[name="lxc-push-type"]:checked')?.value === 'folder' ? 'folder' : 'file';
+    const filesGroup = document.getElementById('lxc-push-files-group');
+    const folderGroup = document.getElementById('lxc-push-folder-group');
+    const filesInput = document.getElementById('lxc-push-files');
+    const folderInput = document.getElementById('lxc-push-folder');
+    filesGroup?.classList.toggle('d-none', selectionType !== 'file');
+    folderGroup?.classList.toggle('d-none', selectionType !== 'folder');
+    if (selectionType === 'file' && folderInput) folderInput.value = '';
+    if (selectionType === 'folder' && filesInput) filesInput.value = '';
+  };
+  document.querySelectorAll('input[name="lxc-push-type"]').forEach(input => {
+    if (input._lxcPushTypeBound) return;
+    input._lxcPushTypeBound = true;
+    input.addEventListener('change', updatePushTypeUi);
+  });
+  updatePushTypeUi();
   const pushButton = document.getElementById('lxc-push-confirm');
   if (pushButton && !pushButton._lxcTransferBound) {
     pushButton._lxcTransferBound = true;
     pushButton.addEventListener('click', async () => {
-      const individual = Array.from(document.getElementById('lxc-push-files')?.files || []);
-      const folder = Array.from(document.getElementById('lxc-push-folder')?.files || []);
-      const files = individual.concat(folder);
-      const hostPaths = String(document.getElementById('lxc-push-host-paths')?.value || '')
-        .split(/\r?\n/).map(path => path.trim()).filter(Boolean);
+      const selectionType = document.querySelector('input[name="lxc-push-type"]:checked')?.value === 'folder' ? 'folder' : 'file';
+      const files = selectionType === 'folder'
+        ? Array.from(document.getElementById('lxc-push-folder')?.files || [])
+        : Array.from(document.getElementById('lxc-push-files')?.files || []);
       const destination = String(document.getElementById('lxc-push-destination')?.value || '').trim();
       const error = document.getElementById('lxc-push-error');
       const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
-      if (!files.length && !hostPaths.length) return fail('Select content or enter at least one Proxmox host path.');
-      if (hostPaths.some(path => !path.startsWith('/'))) return fail('Every Proxmox host path must be absolute.');
+      if (!files.length) return fail(selectionType === 'folder' ? 'Select a folder.' : 'Select at least one file.');
       if (!destination.startsWith('/')) return fail('Enter an absolute destination directory.');
       const relativePaths = files.map(file => String(file.webkitRelativePath || file.name || ''));
       const modal = document.getElementById('lxcPushModal');
-      try { bootstrap.Modal.getOrCreateInstance(modal).hide(); } catch { }
-      await runQueued(`Push Files (${getSelectedLxcEntries().length} LXC)`, async () => {
-        await runLxcTransfer('Push Files', async (pid, targets, auth) => {
+      await hideLxcSetupModal(modal);
+      const transferLabel = selectionType === 'folder' ? 'Push Folder' : 'Push Files';
+      await runQueued(`${transferLabel} (${getSelectedGuestEntries().length} guests)`, async () => {
+        await runGuestTransfer(transferLabel, async (pid, targets, auth) => {
           const form = new FormData();
-          form.append('payload', JSON.stringify({ ...auth, targets, destination, relativePaths, hostPaths }));
+          form.append('payload', JSON.stringify({ ...auth, targets, destination, relativePaths, selectionType }));
           files.forEach(file => form.append('files', file, file.name));
-          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/lxc_push`, form);
+          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_push`, form);
         });
       }, { projectId: PROJ?.id });
     });
@@ -3685,13 +3739,13 @@ function wireLxcTransferModals() {
       const paths = raw.split(/\r?\n/).map(path => path.trim()).filter(Boolean);
       const error = document.getElementById('lxc-pull-error');
       const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
-      if (!paths.length) return fail('Enter at least one container path.');
-      if (paths.some(path => !path.startsWith('/'))) return fail('Every container path must be absolute.');
+      if (!paths.length) return fail('Enter at least one guest path.');
+      if (paths.some(path => !path.startsWith('/'))) return fail('Every guest path must be absolute.');
       const modal = document.getElementById('lxcPullModal');
-      try { bootstrap.Modal.getOrCreateInstance(modal).hide(); } catch { }
-      await runQueued(`Pull Files (${getSelectedLxcEntries().length} LXC)`, async () => {
-        await runLxcTransfer('Pull Files', async (pid, targets, auth) => {
-          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/lxc_pull`, { ...auth, targets, paths });
+      await hideLxcSetupModal(modal);
+      await runQueued(`Pull Files (${getSelectedGuestEntries().length} guests)`, async () => {
+        await runGuestTransfer('Pull Files', async (pid, targets, auth) => {
+          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_pull`, { ...auth, targets, paths: raw });
         });
       }, { projectId: PROJ?.id });
     });
@@ -7639,8 +7693,8 @@ function showActionSummary(actionName, resp) {
       netsCleared.length ? `${netsCleared.length} network removed` : null,
       appliedNodes.length ? `network applied on ${appliedNodes.length} node(s)` : null,
       applyErrors.length ? `${applyErrors.length} network apply errors` : null,
-      pushed.length ? `${pushed.length} LXC push passed` : null,
-      pulled.length ? `${pulled.length} LXC pull passed` : null
+      pushed.length ? `${pushed.length} guest push passed` : null,
+      pulled.length ? `${pulled.length} guest pull passed` : null
     ].filter(Boolean).join(' · ');
 
     const contentSections = leadSections.concat(sections);
