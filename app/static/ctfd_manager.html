@@ -294,6 +294,7 @@
  </div>
 <script src="/static/js/auth.js"></script>
 <script src="/static/js/shell.js"></script>
+<script src="/static/js/queue_persistence.js?v=20260829a"></script>
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/app.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -400,12 +401,12 @@
     </div>
   </div>
 </div>
-<!-- CTFd Login Modal (API Token preferred) -->
+<!-- CTFd Login Modal -->
 <div class="modal fade" id="ctfdLoginModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-  <h5 class="modal-title">CTFd API Access</h5>
+  <h5 class="modal-title">CTFd Access</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
@@ -419,13 +420,38 @@
             <input id="ctfd-port" type="number" class="form-control" placeholder="443" title="CTFd port" />
           </div>
         </div>
-        <div class="mb-3">
+        <fieldset class="mb-3">
+          <legend class="form-label mb-2">Authentication</legend>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="ctfd-auth-mode" id="ctfd-auth-token" value="token" checked onchange="updateCtfdAuthMode()">
+            <label class="form-check-label" for="ctfd-auth-token">API token</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="ctfd-auth-mode" id="ctfd-auth-password" value="password" onchange="updateCtfdAuthMode()">
+            <label class="form-check-label" for="ctfd-auth-password">Username &amp; password</label>
+          </div>
+        </fieldset>
+        <div class="mb-3" id="ctfd-token-fields">
           <label class="form-label" title="CTFd API Token (recommended)">API Token</label>
           <div class="input-group">
             <input id="ctfd-token" type="password" class="form-control" placeholder="ctfd_..." />
             <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" data-target="ctfd-token" title="Show">&#x1F576;&#xFE0E;</button>
           </div>
-          <div class="form-text">Use an admin/teacher API token for full user management. This avoids CSRF issues and is not stored on the server.</div>
+          <div class="form-text">Use an admin API token for user creation and deletion.</div>
+        </div>
+        <div class="row g-2 mb-3 d-none" id="ctfd-password-fields">
+          <div class="col-md-6">
+            <label class="form-label" for="ctfd-username">Username</label>
+            <input id="ctfd-username" autocomplete="username" class="form-control" placeholder="admin" />
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="ctfd-password">Password</label>
+            <div class="input-group">
+              <input id="ctfd-password" type="password" autocomplete="current-password" class="form-control" />
+              <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" data-target="ctfd-password" title="Show">&#x1F576;&#xFE0E;</button>
+            </div>
+          </div>
+          <div class="form-text">User creation and deletion require a CTFd Admin account.</div>
         </div>
         <div class="form-check mb-3">
           <input class="form-check-input" type="checkbox" id="ctfd-verify-ssl" checked>
@@ -433,9 +459,9 @@
         </div>
         <div class="form-check mb-2">
           <input class="form-check-input" type="checkbox" id="ctfd-save-creds">
-          <label class="form-check-label" for="ctfd-save-creds" title="If enabled, the API token will be saved on the server for your user and this project (encrypted at rest).">Save credentials</label>
+          <label class="form-check-label" for="ctfd-save-creds" title="If enabled, the selected credentials will be saved on the server for your user and this project (encrypted at rest).">Save credentials</label>
         </div>
-  <small class="text-muted">If unchecked, the token is stored only for this session (sessionStorage). If checked, it is saved on the server for your user and this project (encrypted at rest).</small>
+  <small class="text-muted">If unchecked, credentials are stored only for this browser session. If checked, they are saved on the server for your user and this project (encrypted at rest).</small>
       </div>
       <div class="modal-footer">
         <div id="ctfd-login-feedback" class="me-auto small"></div>
@@ -473,9 +499,9 @@
         <div id="ctfd-multi-creds-list" class="vstack gap-3"></div>
         <div class="form-check mb-2">
           <input class="form-check-input" type="checkbox" id="ctfd-multi-save-creds">
-          <label class="form-check-label" for="ctfd-multi-save-creds" title="If enabled, tokens will be saved on the server for your user and each project (encrypted at rest).">Save credentials</label>
+          <label class="form-check-label" for="ctfd-multi-save-creds" title="If enabled, credentials will be saved on the server for your user and each project (encrypted at rest).">Save credentials</label>
         </div>
-        <small class="text-muted">If unchecked, tokens are session-only (sessionStorage + ephemeral cookie for popups). If checked, they are saved on the server for your user and each project (encrypted at rest).</small>
+        <small class="text-muted">If unchecked, credentials are session-only. If checked, they are saved on the server for your user and each project (encrypted at rest).</small>
       </div>
       <div class="modal-footer">
         <div id="ctfd-multi-login-feedback" class="me-auto small"></div>

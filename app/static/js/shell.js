@@ -777,7 +777,16 @@ function _remoteQueue_scheduleRestoredEntry(saved){
   try {
     const fn = builder(normalizedSaved.persist.data, normalizedSaved) || null;
     if (typeof fn !== 'function') {
-      try { logWarn ? logWarn(`[QUEUE] Persist handler for ${key} returned no function, skipping restore.`) : console.warn('Queue restore skipped for', key); } catch {}
+      // A shared page may know about an operation type without being able to
+      // execute it. Keep the entry in the backlog so the owning page can
+      // register its full handler later instead of silently losing the task.
+      const back = REMOTE_QUEUE_BACKLOG.get(key) || [];
+      const idx = back.findIndex(item => item && item.token === normalizedSaved.token);
+      if (idx !== -1) back[idx] = normalizedSaved;
+      else back.push(normalizedSaved);
+      REMOTE_QUEUE_BACKLOG.set(key, back);
+      _remoteQueue_saveState();
+      _remoteQueue_emit();
       return;
     }
     REMOTE_QUEUE_RESTORING = true;
@@ -1043,6 +1052,14 @@ function runQueued(label, fn, options){
   });
 }
 
+function _remoteQueue_cleanupPersistedTask(entry){
+  try {
+    if (typeof window.cleanupPersistentQueueTask === 'function') {
+      window.cleanupPersistentQueueTask(entry);
+    }
+  } catch {}
+}
+
 function cancelRemoteAction(id) {
   const targetId = Number(id);
   if (!Number.isFinite(targetId)) return false;
@@ -1052,6 +1069,7 @@ function cancelRemoteAction(id) {
     if (entry && entry.id === targetId) {
       REMOTE_ACTION_QUEUE.splice(i, 1);
       if (entry.key) REMOTE_QUEUE_LABELS.delete(entry.key);
+      _remoteQueue_cleanupPersistedTask(entry);
       try { entry.onCancel && entry.onCancel(); } catch {}
       _remoteQueue_log();
       _remoteQueue_emit();
@@ -1067,6 +1085,7 @@ function cancelRemoteAction(id) {
     const [entry] = list.splice(idx, 1);
     if (list.length) REMOTE_QUEUE_BACKLOG.set(key, list);
     else REMOTE_QUEUE_BACKLOG.delete(key);
+    _remoteQueue_cleanupPersistedTask(entry);
     _remoteQueue_log();
     _remoteQueue_emit();
     _remoteQueue_saveState();
@@ -1104,12 +1123,12 @@ function _remoteQueue_start(task){
   if (requiresLock && task.projectId) REMOTE_PROJECT_LOCKS.add(task.projectId);
   if (task.exclusive !== false) REMOTE_ACTIVE_EXCLUSIVE_COUNT += 1;
   REMOTE_ACTIVE_ENTRIES.push(task);
+  task.startedAt = Date.now();
   const label = task.label;
   try { window.CURRENT_ACTION_LABEL = String(label||''); } catch {}
   try { logInfo ? logInfo(`[QUEUE] Starting: ${label}`) : console.log('[QUEUE] Starting:', label); } catch {}
   _remoteQueue_emit();
   _remoteQueue_saveState();
-  task.startedAt = Date.now();
   const fn = typeof task.fn === 'function' ? task.fn : async () => {};
   Promise.resolve()
     .then(() => fn())
@@ -1278,7 +1297,38 @@ const ACTION_PROGRESS_DEFAULT_STATE = Object.freeze({
   barText: '',
   updatedAt: 0
 });
+const ACTION_PROGRESS_STORE_KEY = 'toolhub.remoteQueue.progress.v1';
 let ACTION_PROGRESS_STATE = { ...ACTION_PROGRESS_DEFAULT_STATE };
+function saveActionProgressState(){
+  const store = _remoteQueue_storage();
+  if (!store) return;
+  try {
+    if (!ACTION_PROGRESS_STATE.active) {
+      store.removeItem(ACTION_PROGRESS_STORE_KEY);
+      return;
+    }
+    store.setItem(ACTION_PROGRESS_STORE_KEY, JSON.stringify(ACTION_PROGRESS_STATE));
+  } catch {}
+}
+function restoreActionProgressState(){
+  const store = _remoteQueue_storage();
+  if (!store) return;
+  try {
+    const raw = store.getItem(ACTION_PROGRESS_STORE_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (!saved || !saved.active) return;
+    ACTION_PROGRESS_STATE = {
+      active: true,
+      visible: false,
+      title: saved.title ? String(saved.title) : 'Working…',
+      text: saved.text ? String(saved.text) : '',
+      percent: Math.max(0, Math.min(100, Number(saved.percent) || 0)),
+      barText: saved.barText ? String(saved.barText) : '',
+      updatedAt: Number(saved.updatedAt) || Date.now(),
+    };
+  } catch {}
+}
 function actionProgressEmit(){ try { document.dispatchEvent(new CustomEvent('queue-progress-updated')); } catch {} }
 function hasActiveActionProgress(){ return !!ACTION_PROGRESS_STATE.active; }
 function getActionProgressState(){ return { ...ACTION_PROGRESS_STATE }; }
@@ -1306,6 +1356,7 @@ function showActionProgress(title, text){
     barText: nextText || 'Starting…',
     updatedAt: Date.now()
   };
+  saveActionProgressState();
   actionProgressEmit();
   if (modal && modal.parentElement !== document.body) {
     try { document.body.appendChild(modal); } catch {}
@@ -1337,6 +1388,7 @@ function updateActionProgress(percent, label, detail){
     if (label !== undefined) ACTION_PROGRESS_STATE.barText = (label !== null ? String(label) : '');
     if (message) ACTION_PROGRESS_STATE.text = message;
     ACTION_PROGRESS_STATE.updatedAt = Date.now();
+    saveActionProgressState();
     actionProgressEmit();
   }
 }
@@ -1362,6 +1414,7 @@ function hideActionProgress(){
     document.body.style.removeProperty('overflow');
   } catch {}
   ACTION_PROGRESS_STATE = { ...ACTION_PROGRESS_DEFAULT_STATE, updatedAt: Date.now() };
+  saveActionProgressState();
   actionProgressEmit();
 }
 function openActionProgressModal(){
@@ -1388,6 +1441,7 @@ function openActionProgressModal(){
   }
   ACTION_PROGRESS_STATE.visible = true;
   ACTION_PROGRESS_STATE.updatedAt = Date.now();
+  saveActionProgressState();
   actionProgressEmit();
   setTimeout(() => {
     try { inst && inst.show(); } catch {}
@@ -1439,6 +1493,7 @@ document.addEventListener('hidden.bs.modal', (ev)=>{
   if (!ev || !ev.target || ev.target.id !== 'actionProgressModal') return;
   ACTION_PROGRESS_STATE.visible = false;
   ACTION_PROGRESS_STATE.updatedAt = Date.now();
+  saveActionProgressState();
   actionProgressEmit();
 });
 window.showActionProgress = showActionProgress;
@@ -1843,7 +1898,7 @@ const ConsoleDock = (() => {
                 const startedLabel = formatStampLabel(entry.startedAt, 'Started');
                 const queuedMeta = queuedLabel ? `<div class="queue-meta text-muted">${escapeHtml(queuedLabel)}</div>` : '';
                 const startedMeta = startedLabel ? `<div class="queue-meta text-muted">${escapeHtml(startedLabel)}</div>` : '';
-                const restoringNote = entry.restoring ? '<div class="queue-meta text-muted">Restoring after page reload...</div>' : '';
+                const restoringNote = entry.restoring ? '<div class="queue-meta text-muted">Reconnecting after navigation…</div>' : '';
                 const cancelNote = entry.cancelRequested ? '<div class="queue-meta text-warning">Cancel requested…</div>' : '';
                 const disableCancel = entry.cancelRequested ? 'disabled' : '';
                 const isPrimary = idx === 0;
@@ -1882,7 +1937,7 @@ const ConsoleDock = (() => {
                 const queuedMeta = queuedLabel ? `<span class="queue-meta text-muted">${escapeHtml(queuedLabel)}</span>` : '';
                 const blocked = item.blocked ? ' queue-item-blocked' : '';
                 const blockedNote = item.blocked ? '<span class="queue-blocked text-warning ms-2">Waiting on project</span>' : '';
-                const restoringNote = item.restoring ? '<span class="queue-meta text-muted ms-2">Restoring after page reload</span>' : '';
+                const restoringNote = item.restoring ? '<span class="queue-meta text-muted ms-2">Waiting for its operation handler</span>' : '';
                 return `<li class="queue-item${blocked}">`
                   + `<span class="queue-index">${idx+1}</span>`
                   + `<span class="queue-label">${escapeHtml(item.label)}</span>`
@@ -2198,6 +2253,7 @@ if (document.readyState === 'loading') {
 }
 
 _remoteQueue_checkForAbortNotice();
+restoreActionProgressState();
 _remoteQueue_restoreFromStorage();
 
 window.addEventListener('beforeunload', (ev) => {

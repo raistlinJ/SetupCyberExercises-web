@@ -4,6 +4,7 @@ import tempfile
 import base64
 import hashlib
 import ast
+import threading
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
 
@@ -399,6 +400,7 @@ class Project:
 
 class ProjectStore:
     def __init__(self, data_dir: str):
+        self._write_lock = threading.RLock()
         self.data_dir = data_dir
         self.db_path = os.path.join(self.data_dir, "projects.json")
         os.makedirs(self.data_dir, exist_ok=True)
@@ -991,19 +993,64 @@ class ProjectStore:
         return proj
 
     def upsert(self, project: Project) -> Project:
-        allp = self._read_all()
-        allp[project.id] = asdict(project)
-        self._write_all(allp)
+        with self._write_lock:
+            allp = self._read_all()
+            allp[project.id] = asdict(project)
+            self._write_all(allp)
         return project
 
     def update_audio(self, pid: str, audio: Dict[str, Any]) -> Project:
-        proj = self.get(pid)
-        if not proj:
-            raise KeyError("Project not found")
-        sanitized = self._sanitize_audio_map(audio)
-        proj.audio = sanitized
-        self.upsert(proj)
-        return proj
+        with self._write_lock:
+            proj = self.get(pid)
+            if not proj:
+                raise KeyError("Project not found")
+            sanitized = self._sanitize_audio_map(audio)
+            proj.audio = sanitized
+            self.upsert(proj)
+            return proj
+
+    def patch_audio(
+        self,
+        pid: str,
+        entries: Dict[str, Any],
+        *,
+        remove_keys: Optional[List[str]] = None,
+        remove_fields: Optional[Dict[str, List[str]]] = None,
+    ) -> Project:
+        """Atomically merge audio entries without replacing unrelated media."""
+        with self._write_lock:
+            proj = self.get(pid)
+            if not proj:
+                raise KeyError("Project not found")
+            current = dict(proj.audio or {}) if isinstance(proj.audio, dict) else {}
+
+            for raw_key, raw_patch in (entries or {}).items():
+                key = str(raw_key or '').strip()
+                if not key or not isinstance(raw_patch, dict):
+                    continue
+                existing = current.get(key)
+                merged = dict(existing) if isinstance(existing, dict) else {}
+                merged.update(raw_patch)
+                current[key] = merged
+
+            for raw_key, fields in (remove_fields or {}).items():
+                key = str(raw_key or '').strip()
+                entry = current.get(key)
+                if not key or not isinstance(entry, dict) or not isinstance(fields, list):
+                    continue
+                for raw_field in fields:
+                    field_name = str(raw_field or '').strip()
+                    if field_name:
+                        entry.pop(field_name, None)
+
+            for raw_key in (remove_keys or []):
+                key = str(raw_key or '').strip()
+                if key:
+                    current.pop(key, None)
+
+            proj.audio = self._sanitize_audio_map(current)
+            self.upsert(proj)
+            return proj
 
     def delete(self, pid: str) -> bool:
         allp = self._read_all()

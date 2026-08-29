@@ -20,7 +20,8 @@ def test_lxc_transfer_ui_has_progress_and_typed_push_controls():
     assert 'openActionProgressModal()' in javascript
     assert 'await hideLxcSetupModal(modal)' in javascript
     assert 'selectionType' in javascript
-    assert 'targets, paths: raw' in javascript
+    assert 'paths: rawPaths' in javascript
+    assert 'GUEST_TRANSFER_QUEUE_PERSIST_KEY' in javascript
     assert '/instances/actions/guest_push' in javascript
     assert '/instances/actions/guest_pull' in javascript
     assert 'getSelectedGuestEntries' in javascript

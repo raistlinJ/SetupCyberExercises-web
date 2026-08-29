@@ -61,7 +61,7 @@ class CTFdClient:
                     h['X-Requested-With'] = 'XMLHttpRequest'
                     # Provide a Referer to satisfy stricter CSRF checks
                     base = self.base_url.rstrip('/') + '/'
-                    h['Referer'] = base
+                    h['Referer'] = base + 'admin/users'
                     # Provide Origin as well (some proxies/frameworks require both)
                     origin = self.base_url.rstrip('/')
                     h['Origin'] = origin
@@ -70,6 +70,81 @@ class CTFdClient:
         # Use Content-Type to indicate JSON payloads (instead of Accept)
         h.setdefault('Content-Type', 'application/json')
         return h
+
+    @staticmethod
+    def _extract_csrf_token(html: str) -> Optional[str]:
+        """Extract CTFd's session nonce from current and legacy page formats."""
+        source = str(html or '')
+        if not source:
+            return None
+        try:
+            # Hidden form fields. Inspect each tag so name/value attribute order
+            # does not matter.
+            for match in re.finditer(r"<input\b[^>]*>", source, flags=re.IGNORECASE):
+                tag = match.group(0)
+                name_match = re.search(
+                    r"\bname\s*=\s*['\"](csrf_token|nonce)['\"]",
+                    tag,
+                    flags=re.IGNORECASE,
+                )
+                value_match = re.search(
+                    r"\bvalue\s*=\s*['\"]([^'\"]+)['\"]",
+                    tag,
+                    flags=re.IGNORECASE,
+                )
+                if name_match and value_match:
+                    return value_match.group(1)
+
+            # Custom themes sometimes expose a meta csrf-token. Support either
+            # attribute order.
+            for match in re.finditer(r"<meta\b[^>]*>", source, flags=re.IGNORECASE):
+                tag = match.group(0)
+                if not re.search(r"\bname\s*=\s*['\"]csrf-token['\"]", tag, flags=re.IGNORECASE):
+                    continue
+                content_match = re.search(
+                    r"\bcontent\s*=\s*['\"]([^'\"]+)['\"]",
+                    tag,
+                    flags=re.IGNORECASE,
+                )
+                if content_match:
+                    return content_match.group(1)
+
+            # CTFd 3.x admin/core templates expose Session.nonce as either
+            # window.init = {'csrfNonce': "..."} or var init = {...}.
+            js_match = re.search(
+                r"['\"]?csrfNonce['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]",
+                source,
+                flags=re.IGNORECASE,
+            )
+            if js_match:
+                return js_match.group(1)
+        except Exception:
+            return None
+        return None
+
+    def _refresh_session_csrf(self, path: str = '/admin/users') -> Optional[str]:
+        """Fetch an authenticated CTFd page and capture its current nonce."""
+        if self.session is None:
+            return None
+        url = self._url(path)
+        try:
+            response = self.session.get(
+                url,
+                headers={'Referer': self.base_url.rstrip('/') + '/'},
+                timeout=30,
+                verify=self.verify_ssl,
+            )
+            self._log('request', method='GET', url=url)
+            self._log('response', status=getattr(response, 'status_code', None), url=url)
+            if getattr(response, 'status_code', 500) >= 400:
+                return None
+            token = self._extract_csrf_token(getattr(response, 'text', '') or '')
+            if token:
+                self.csrf_token = token
+                self._log('csrf', captured=True, source='authenticated_page', token_length=len(token))
+            return token
+        except Exception:
+            return None
 
     def _url(self, path: str) -> str:
         base = self.base_url.rstrip('/')
@@ -271,34 +346,13 @@ class CTFdClient:
         if r1.status_code >= 400:
             return False, f"login page error {r1.status_code}"
         html = r1.text or ''
-        # Try to extract CSRF/nonce from the login form specifically
-        token_name: Optional[str] = None
-        token_value: Optional[str] = None
+        token_value = self._extract_csrf_token(html)
+        token_name: Optional[str] = 'nonce'
         try:
-            form_match = re.search(r"<form[^>]*action[^>]*login[^>]*>(.*?)</form>", html, flags=re.IGNORECASE | re.DOTALL)
-            search_space = form_match.group(1) if form_match else html
-            for m in re.finditer(r"<input[^>]*>", search_space, flags=re.IGNORECASE):
-                tag = m.group(0)
-                nm = re.search(r"name\s*=\s*['\"](csrf_token|nonce)['\"]", tag, flags=re.IGNORECASE)
-                if not nm:
-                    continue
-                vm = re.search(r"value\s*=\s*['\"]([^'\"]+)['\"]", tag, flags=re.IGNORECASE)
-                if vm:
-                    token_name = nm.group(1)
-                    token_value = vm.group(1)
-                    break
+            if re.search(r"\bname\s*=\s*['\"]csrf_token['\"]", html, flags=re.IGNORECASE):
+                token_name = 'csrf_token'
         except Exception:
-            token_name = None
-            token_value = None
-        # Fallback: try meta tag
-        if not token_value:
-            try:
-                mm = re.search(r"<meta\s+name=['\"]csrf-token['\"]\s+content=['\"]([^'\"]+)['\"]", html, flags=re.IGNORECASE)
-                if mm:
-                    token_name = 'csrf_token'
-                    token_value = mm.group(1)
-            except Exception:
-                pass
+            pass
         form = {
             'name': username,
             'username': username,  # some deployments use 'username' instead of 'name'
@@ -352,55 +406,11 @@ class CTFdClient:
                 user = data.get('data') if isinstance(data.get('data'), dict) else {}
                 uid = user.get('id') if isinstance(user, dict) else None
                 if (success is True) and uid:
-                    # Try to capture CSRF nonce from admin page for subsequent API writes
-                    try:
-                        admin_url = self._url('/admin/users')
-                        radmin = s.get(admin_url, timeout=30)
-                        if getattr(radmin, 'status_code', 0) < 400:
-                            html_admin = getattr(radmin, 'text', '') or ''
-                            # Prefer meta csrf-token
-                            m = re.search(r"<meta\\s+name=['\"]csrf-token['\"]\\s+content=['\"]([^'\"]+)['\"]", html_admin, flags=re.IGNORECASE)
-                            token_admin = None
-                            if m:
-                                token_admin = m.group(1)
-                            else:
-                                # Fallback to csrfNonce JS variable
-                                m2 = re.search(r"csrfNonce\s*[:=]\s*['\"]([^'\"]+)['\"]", html_admin, flags=re.IGNORECASE)
-                                if m2:
-                                    token_admin = m2.group(1)
-                            if token_admin:
-                                self.csrf_token = token_admin
-                                try:
-                                    self._log("csrf", captured=True, source="admin_page", token=token_admin, token_length=len(token_admin))
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                    self._refresh_session_csrf('/admin/users')
                     return True, 'ok'
                 # If success flag missing, consider uid presence as signal
                 if (success is None) and uid:
-                    # Same admin-page CSRF capture fallback
-                    try:
-                        admin_url = self._url('/admin/users')
-                        radmin = s.get(admin_url, timeout=30)
-                        if getattr(radmin, 'status_code', 0) < 400:
-                            html_admin = getattr(radmin, 'text', '') or ''
-                            m = re.search(r"<meta\\s+name=['\"]csrf-token['\"]\\s+content=['\"]([^'\"]+)['\"]", html_admin, flags=re.IGNORECASE)
-                            token_admin = None
-                            if m:
-                                token_admin = m.group(1)
-                            else:
-                                m2 = re.search(r"csrfNonce\s*[:=]\s*['\"]([^'\"]+)['\"]", html_admin, flags=re.IGNORECASE)
-                                if m2:
-                                    token_admin = m2.group(1)
-                            if token_admin:
-                                self.csrf_token = token_admin
-                                try:
-                                    self._log("csrf", captured=True, source="admin_page", token=token_admin, token_length=len(token_admin))
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                    self._refresh_session_csrf('/admin/users')
                     return True, 'ok'
                 msg = data.get('message') or 'not authenticated'
                 return False, f"login verify failed: {msg}"

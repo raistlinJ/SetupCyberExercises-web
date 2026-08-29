@@ -1,16 +1,69 @@
 import unittest
 from unittest.mock import patch
+from requests.cookies import RequestsCookieJar
 
 from app.connectors.ctfd import CTFdClient
 
 
 class _FakeResponse:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload=None, status_code=200, text=''):
         self.payload = payload
         self.status_code = status_code
+        self.text = text
+        self.content = b'x' if payload is not None else text.encode()
+        self.headers = {'Content-Type': 'application/json'} if payload is not None else {'Content-Type': 'text/html'}
+
+    def json(self):
+        return self.payload
 
 
 class CtfdConnectorUserLookupTests(unittest.TestCase):
+
+    def test_username_password_login_uses_session_and_captures_admin_csrf(self):
+        class FakeSession:
+            def __init__(self):
+                self.cookies = RequestsCookieJar()
+                self.verify = True
+                self.posted = None
+                self.requests = []
+
+            def get(self, url, **kwargs):
+                if url.endswith('/login'):
+                    return _FakeResponse(
+                        text='<form action="/login"><input name="nonce" value="login-nonce"></form>'
+                    )
+                return _FakeResponse(text='<meta name="csrf-token" content="admin-csrf">')
+
+            def post(self, url, data=None, **kwargs):
+                self.posted = dict(data or {})
+                return _FakeResponse(status_code=302)
+
+            def request(self, method, url, **kwargs):
+                self.requests.append((method, url, kwargs))
+                if method.upper() == 'POST' and url.endswith('/api/v1/users'):
+                    return _FakeResponse({'success': True, 'data': {'id': 8, 'name': 'new-user'}})
+                return _FakeResponse({'success': True, 'data': {'id': 7, 'name': 'admin'}})
+
+        session = FakeSession()
+        client = CTFdClient(base_url='https://ctfd.local', verify_ssl=False)
+
+        with patch('app.connectors.ctfd.requests.Session', return_value=session):
+            ok, message = client.login_with_credentials('admin', 'secret')
+
+        self.assertTrue(ok, message)
+        self.assertIs(client.session, session)
+        self.assertEqual(session.posted.get('name'), 'admin')
+        self.assertEqual(session.posted.get('password'), 'secret')
+        self.assertEqual(session.posted.get('nonce'), 'login-nonce')
+        self.assertEqual(client.csrf_token, 'admin-csrf')
+
+        created = client.create_user('new-user', 'new-user@example.com', 'new-secret')
+        self.assertEqual(created.get('id'), 8)
+        create_call = next(call for call in session.requests if call[0] == 'POST')
+        headers = create_call[2].get('headers') or {}
+        self.assertEqual(headers.get('CSRF-Token'), 'admin-csrf')
+        self.assertEqual(headers.get('X-CSRF-Token'), 'admin-csrf')
+        self.assertEqual(headers.get('Referer'), 'https://ctfd.local/admin/users')
 
     def test_find_user_id_by_name_uses_ctfd_38_query_params(self):
         client = CTFdClient(base_url='https://ctfd.local', token='token')

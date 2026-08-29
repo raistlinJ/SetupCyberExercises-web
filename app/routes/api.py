@@ -70,14 +70,20 @@ def api_test_credentials():
     if ctf_creds:
         url = (ctf_creds.get("url") or "").strip()
         token = (ctf_creds.get("token") or "").strip()
+        username = (ctf_creds.get("username") or "").strip()
+        password = ctf_creds.get("password") or ""
         verify_ssl = bool(ctf_creds.get("verify_ssl", False))
-        if not url or not token:
-            return jsonify({"ok": False, "error": "CTFd URL and Admin Access Token are required."})
+        if not url or not (token or (username and password)):
+            return jsonify({"ok": False, "error": "CTFd URL and either an Admin Access Token or username/password are required."})
         try:
             client = CTFdClient(url, token, verify_ssl=verify_ssl)
+            if not token:
+                ok, message = client.login_with_credentials(username, password)
+                if not ok:
+                    return jsonify({"ok": False, "error": f"CTFd login failed: {message}"})
             u = client.get_current_user()
             if not u:
-                return jsonify({"ok": False, "error": "CTFd connection failed or token is invalid."})
+                return jsonify({"ok": False, "error": "CTFd connection failed or credentials are invalid."})
         except Exception as e:
             return jsonify({"ok": False, "error": f"CTFd validation failed: {str(e)}"})
             
@@ -8875,6 +8881,7 @@ def instances_lxc_push(pid: str):
         return jsonify({'error': f'Could not resolve guest targets: {exc}'}), 502
 
     pushed: List[Dict[str, Any]] = []
+    _start_job(pid, 'guest_push', total_steps=len(mapped))
     tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
     try:
         with tarfile.open(fileobj=tar_stream, mode='w') as archive:
@@ -8906,7 +8913,17 @@ def instances_lxc_push(pid: str):
                 info.mtime = int(time.time())
                 archive.addfile(info, stream)
         archive_size = tar_stream.tell()
-        for entry in mapped:
+        total_mapped = max(1, len(mapped))
+        for position, entry in enumerate(mapped, start=1):
+            _update_job_detail(
+                pid,
+                phase='guest_push',
+                current=str(entry.get('name') or ''),
+                step=position,
+                total_steps=len(mapped),
+                progress=max(1, min(99, int(((position - 1) / total_mapped) * 100))),
+                message=f"Pushing files to {entry.get('name') or 'guest'} ({position}/{len(mapped)})",
+            )
             ssh_client = None
             sftp = None
             remote_archive = f"/tmp/deployforge-lxc-push-{uuid.uuid4().hex}.tar"
@@ -8998,6 +9015,8 @@ def instances_lxc_push(pid: str):
                         pass
     finally:
         tar_stream.close()
+        _update_job_detail(pid, progress=100, message='Guest push completed')
+        _end_job(pid)
     return jsonify({'pushed': pushed, 'skipped': skipped, 'errors': errors})
 
 
@@ -9027,9 +9046,20 @@ def instances_lxc_pull(pid: str):
         return jsonify({'error': f'Could not resolve guest targets: {exc}'}), 502
 
     pulled: List[Dict[str, Any]] = []
+    _start_job(pid, 'guest_pull', total_steps=len(mapped))
     zip_stream = io.BytesIO()
     with zipfile.ZipFile(zip_stream, mode='w', compression=zipfile.ZIP_DEFLATED) as output_zip:
-        for entry in mapped:
+        total_mapped = max(1, len(mapped))
+        for position, entry in enumerate(mapped, start=1):
+            _update_job_detail(
+                pid,
+                phase='guest_pull',
+                current=str(entry.get('name') or ''),
+                step=position,
+                total_steps=len(mapped),
+                progress=max(1, min(99, int(((position - 1) / total_mapped) * 100))),
+                message=f"Pulling files from {entry.get('name') or 'guest'} ({position}/{len(mapped)})",
+            )
             ssh_client = None
             try:
                 guest_type = str(entry.get('type') or '').strip().lower()
@@ -9123,6 +9153,8 @@ def instances_lxc_pull(pid: str):
             'size': len(zip_bytes),
             'label': 'Pulled Files',
         }
+    _update_job_detail(pid, progress=100, message='Guest pull completed')
+    _end_job(pid)
     return jsonify({'pulled': pulled, 'skipped': skipped, 'errors': errors, 'outputs_zip': outputs_zip})
 
 
@@ -11020,9 +11052,9 @@ def _ctfd_client_from_req(proj: Project) -> CTFdClient:
     body = request.get_json(silent=True) or {}
     base_url = (body.get('baseUrl') or getattr(proj, 'challenge_url', '') or '').strip()
     port = body.get('port') if ('port' in body) else getattr(proj, 'challenge_port', 443)
-    token = body.get('token') or ''
-    username = body.get('username') or None
-    password = body.get('password') or None
+    token = str(body.get('token') or '').strip()
+    username = str(body.get('username') or '').strip()
+    password = str(body.get('password') or '')
     verify = bool(body.get('verifySSL', True))
     # Normalize base_url and apply port if provided
     try:
@@ -11045,6 +11077,8 @@ def _ctfd_client_from_req(proj: Project) -> CTFdClient:
         pass
     client = CTFdClient(base_url=base_url, token=token, verify_ssl=verify)
     # If token not provided but username/password provided, attempt session login (cookie-based)
+    if not token and not (username and password):
+        raise RuntimeError('CTFd token or username/password are required')
     if (not token) and username and password:
         ok, msg = client.login_with_credentials(username, password)
         if not ok:
@@ -11230,6 +11264,7 @@ def ctfd_login(pid: str):
             # Session flow: if we got here without exception, login_with_credentials worked
             ok_flag = bool(client.session is not None)
             try:
+                me_json = client.get_current_user() or {}
                 role = client.get_role()
             except Exception:
                 role = None
@@ -11258,11 +11293,11 @@ def ctfd_users_create(pid: str):
 
     # Preflight: ensure current identity has permission to manage users
     try:
-        # Admin or teacher roles typically required; some setups use 'admin'
+        # Stock CTFd protects POST /api/v1/users with admins_only.
         role = client.get_role()
-        if role not in ('admin','teacher'):  # be permissive but safe
+        if role != 'admin':
             return jsonify({
-                "error": f"CTFd account lacks permission to manage users (need admin/teacher); got: {role}",
+                "error": f"CTFd account lacks permission to manage users (an admin account is required); got: {role or 'unknown'}",
                 "ok": False
             }), 403
     except Exception as e:
@@ -11304,9 +11339,9 @@ def ctfd_users_delete(pid: str):
     # Preflight: ensure permission to delete users
     try:
         role = client.get_role()
-        if role not in ('admin','teacher'):
+        if role != 'admin':
             return jsonify({
-                "error": f"CTFd account lacks permission to delete users (need admin/teacher); got: {role}",
+                "error": f"CTFd account lacks permission to delete users (an admin account is required); got: {role or 'unknown'}",
                 "ok": False
             }), 403
     except Exception as e:
@@ -12448,6 +12483,8 @@ def get_project_secrets(pid: str):
     prox_user = _dec_secret(sk, enc.get('proxmox_username_enc') or '')
     prox_pass = _dec_secret(sk, enc.get('proxmox_password_enc') or '')
     ctfd_token = _dec_secret(sk, enc.get('ctfd_token_enc') or '')
+    ctfd_username = _dec_secret(sk, enc.get('ctfd_username_enc') or '')
+    ctfd_password = _dec_secret(sk, enc.get('ctfd_password_enc') or '')
     return jsonify({
         "projectId": pid,
         "proxmox": {
@@ -12457,7 +12494,9 @@ def get_project_secrets(pid: str):
         },
         "ctfd": {
             "token": ctfd_token,
-            "saved": bool(ctfd_token),
+            "username": ctfd_username,
+            "password": ctfd_password,
+            "saved": bool(ctfd_token or ctfd_username or ctfd_password),
         }
     })
 
@@ -12468,9 +12507,9 @@ def update_project_secrets(pid: str):
     """Set/clear project-scoped credentials.
 
     Accepts either nested objects:
-      { proxmox: { username, password }, ctfd: { token } }
+      { proxmox: { username, password }, ctfd: { token, username, password } }
     or flat keys:
-      { proxmox_username, proxmox_password, ctfd_token }
+      { proxmox_username, proxmox_password, ctfd_token, ctfd_username, ctfd_password }
 
     Any provided secret field set to an empty string clears that secret.
     """
@@ -12492,6 +12531,8 @@ def update_project_secrets(pid: str):
     prox_user_in = prox.get('username') if 'username' in prox else data.get('proxmox_username')
     prox_pass_in = prox.get('password') if 'password' in prox else data.get('proxmox_password')
     ctfd_token_in = ctfd.get('token') if 'token' in ctfd else data.get('ctfd_token')
+    ctfd_user_in = ctfd.get('username') if 'username' in ctfd else data.get('ctfd_username')
+    ctfd_pass_in = ctfd.get('password') if 'password' in ctfd else data.get('ctfd_password')
 
     sk = current_app.config.get('SECRET_KEY')
     ss = _user_secrets_store()
@@ -12520,6 +12561,19 @@ def update_project_secrets(pid: str):
         ss.upsert_enc(secrets_username, pid, ctfd_token_enc=_enc_secret(sk, token) if token else '')
         changed = True
 
+    if ctfd_user_in is not None or ctfd_pass_in is not None:
+        cur_user = _dec_secret(sk, existing.get('ctfd_username_enc') or '')
+        cur_pass = _dec_secret(sk, existing.get('ctfd_password_enc') or '')
+        new_user = cur_user if ctfd_user_in is None else str(ctfd_user_in or '').strip()
+        new_pass = cur_pass if ctfd_pass_in is None else str(ctfd_pass_in or '')
+        ss.upsert_enc(
+            secrets_username,
+            pid,
+            ctfd_username_enc=_enc_secret(sk, new_user) if new_user else '',
+            ctfd_password_enc=_enc_secret(sk, new_pass) if new_pass else '',
+        )
+        changed = True
+
     # Keep project record in sync: ensure project-level fields are cleared so secrets aren't shared.
     try:
         if getattr(proj, 'proxmox_username_enc', '') or getattr(proj, 'proxmox_password_enc', '') or getattr(proj, 'ctfd_token_enc', ''):
@@ -12534,11 +12588,13 @@ def update_project_secrets(pid: str):
     prox_user = _dec_secret(sk, enc.get('proxmox_username_enc') or '')
     prox_pass = _dec_secret(sk, enc.get('proxmox_password_enc') or '')
     ctfd_token = _dec_secret(sk, enc.get('ctfd_token_enc') or '')
+    ctfd_username = _dec_secret(sk, enc.get('ctfd_username_enc') or '')
+    ctfd_password = _dec_secret(sk, enc.get('ctfd_password_enc') or '')
     return jsonify({
         "ok": True,
         "projectId": pid,
         "proxmox_saved": bool(prox_user or prox_pass),
-        "ctfd_saved": bool(ctfd_token),
+        "ctfd_saved": bool(ctfd_token or ctfd_username or ctfd_password),
     })
 
 @api_bp.route("/projects", methods=["POST"])
@@ -12801,11 +12857,8 @@ def delete_project_audio_entry(pid: str):
         audio = {}
     if key not in audio:
         return jsonify({"error": "Audio entry not found"}), 404
-    try:
-        del audio[key]
-    except Exception:
-        audio.pop(key, None)
     # Clear any per-event references to this media key
+    remove_fields: Dict[str, List[str]] = {}
     try:
         for k, v in list(audio.items()):
             if not isinstance(k, str) or not k.startswith('event:'):
@@ -12813,16 +12866,11 @@ def delete_project_audio_entry(pid: str):
             if not isinstance(v, dict):
                 continue
             if v.get('soundKey') == key:
-                try:
-                    del v['soundKey']
-                except Exception:
-                    v.pop('soundKey', None)
-                audio[k] = v
+                remove_fields[k] = ['soundKey']
     except Exception:
         pass
 
-    sanitized = ProjectStore._sanitize_audio_map(audio)
-    proj = s.update_audio(pid, sanitized)
+    proj = s.patch_audio(pid, {}, remove_keys=[key], remove_fields=remove_fields)
     return jsonify({"ok": True, "audio": getattr(proj, 'audio', {}) or {}})
 
 
@@ -12927,7 +12975,7 @@ def upload_project_audio_media(pid: str):
     except Exception:
         size_num = len(raw_bytes)
 
-    audio[new_key] = {
+    new_entry = {
         'sounds': [
             {
                 'name': label,
@@ -12940,8 +12988,9 @@ def upload_project_audio_media(pid: str):
         ]
     }
 
-    sanitized = ProjectStore._sanitize_audio_map(audio)
-    proj = s.update_audio(pid, sanitized)
+    # Merge just the new media entry so a concurrent notification/settings save
+    # cannot replace unrelated uploads with an older full-store snapshot.
+    proj = s.patch_audio(pid, {new_key: new_entry})
     entry = (getattr(proj, 'audio', {}) or {}).get(new_key)
     return jsonify({"ok": True, "duplicated": False, "key": new_key, "entry": entry})
 
@@ -12965,8 +13014,20 @@ def update_project_audio(pid: str):
     validation_errors = _validate_audio_payload(payload)
     if validation_errors:
         return jsonify({"errors": validation_errors}), 400
-    # Note: update_audio calls _sanitize_audio_map internally, no need to sanitize here
-    proj = s.update_audio(pid, payload)
+    if request.method == 'PATCH':
+        remove_keys_raw = body.get('remove') if isinstance(body, dict) else []
+        remove_keys = remove_keys_raw if isinstance(remove_keys_raw, list) else []
+        remove_fields_raw = body.get('removeFields') if isinstance(body, dict) else {}
+        remove_fields = remove_fields_raw if isinstance(remove_fields_raw, dict) else {}
+        proj = s.patch_audio(
+            pid,
+            payload,
+            remove_keys=remove_keys,
+            remove_fields=remove_fields,
+        )
+    else:
+        # PUT remains an explicit whole-store replacement for imports and legacy clients.
+        proj = s.update_audio(pid, payload)
     audio = getattr(proj, 'audio', {}) or {}
     return jsonify({"audio": audio})
 
@@ -15693,12 +15754,18 @@ def proxmox_node_network(node: str):
 def ctfd_challenges():
     data = request.get_json(force=True) or {}
     base_url = data.get("baseUrl")
-    token = data.get("token")
-    if not base_url or not token:
-        return jsonify({"error": "Missing baseUrl or token"}), 400
+    token = str(data.get("token") or '').strip()
+    username = str(data.get("username") or '').strip()
+    password = str(data.get("password") or '')
+    if not base_url or not (token or (username and password)):
+        return jsonify({"error": "Missing baseUrl or credentials"}), 400
 
-    client = CTFdClient(base_url=base_url, token=token)
+    client = CTFdClient(base_url=base_url, token=token, verify_ssl=bool(data.get('verifySSL', True)))
     try:
+        if not token:
+            ok, message = client.login_with_credentials(username, password)
+            if not ok:
+                return jsonify({"error": f"CTFd login failed: {message}"}), 401
         challenges = client.list_challenges()
         return jsonify({"challenges": challenges})
     except Exception as e:

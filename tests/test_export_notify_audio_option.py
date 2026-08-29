@@ -117,6 +117,50 @@ class ExportNotifyAudioOptionTests(unittest.TestCase):
         self.assertIn('event:challenge_solved', audio)
         self.assertIn('media:uploaded1', audio)
 
+    def test_audio_patch_preserves_unrelated_uploaded_media(self):
+        pid = self._create_project()
+        self._seed_project_audio(pid)
+
+        response = self.client.patch(
+            f'/api/projects/{pid}/audio',
+            json={
+                'audio': {
+                    'event:challenge_solved': {
+                        'enabled': False,
+                        'speakTemplates': ['Updated {{challenge}}'],
+                    }
+                },
+                'removeFields': {
+                    'event:challenge_solved': ['soundKey'],
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        audio = (response.get_json() or {}).get('audio') or {}
+        self.assertIn('media:uploaded1', audio)
+        self.assertTrue((audio['media:uploaded1'].get('sounds') or [])[0].get('dataUrl'))
+        event = audio.get('event:challenge_solved') or {}
+        self.assertFalse(event.get('enabled'))
+        self.assertNotIn('soundKey', event)
+        self.assertEqual(event.get('speakTemplates'), ['Updated {{challenge}}'])
+
+    def test_media_enabled_patch_preserves_clip_payload_and_events(self):
+        pid = self._create_project()
+        self._seed_project_audio(pid)
+
+        response = self.client.patch(
+            f'/api/projects/{pid}/audio',
+            json={'audio': {'media:uploaded1': {'enabled': False}}},
+        )
+        self.assertEqual(response.status_code, 200)
+        audio = (response.get_json() or {}).get('audio') or {}
+        self.assertIn('event:challenge_solved', audio)
+        media = audio.get('media:uploaded1') or {}
+        self.assertFalse(media.get('enabled'))
+        sounds = media.get('sounds') or []
+        self.assertEqual(len(sounds), 1)
+        self.assertTrue((sounds[0] or {}).get('dataUrl'))
+
     def test_audio_notify_templates_sanitize_to_strings(self):
         pid = self._create_project()
         self._seed_project_audio(pid)

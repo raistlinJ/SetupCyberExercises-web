@@ -717,9 +717,13 @@ function settingsModalRenderSpeechTemplate(template, context) {
   const ctx = context && typeof context === 'object' ? context : {};
   const replaced = raw.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
     if (!key) return '';
-    if (key === 'audio') return '';
-    if (Object.prototype.hasOwnProperty.call(ctx, key) && ctx[key] != null) {
-      return String(ctx[key]);
+    const normalizedKey = String(key).toLowerCase();
+    if (normalizedKey === 'audio') return '';
+    const contextKey = Object.prototype.hasOwnProperty.call(ctx, key)
+      ? key
+      : (Object.prototype.hasOwnProperty.call(ctx, normalizedKey) ? normalizedKey : '');
+    if (contextKey && ctx[contextKey] != null) {
+      return String(ctx[contextKey]);
     }
     return '';
   });
@@ -895,6 +899,7 @@ async function loadProjectAudio(pid, options) {
     if (!opts.silent) {
       try { (window.shell && shell.logWarn) ? shell.logWarn(`Settings: failed to load audio for project ${id}: ${err?.message || err}`) : console.warn('Settings: failed to load audio', id, err); } catch { }
     }
+    if (opts.requireFresh) throw err;
     if (!PROJECT_AUDIO_LOADED.has(id)) return {};
     return cloneSettingsAudio(PROJECT_AUDIO_CACHE[id] || {});
   }
@@ -940,8 +945,25 @@ async function saveProjectAudio(pid, audio) {
   PROJECT_AUDIO_LOADED.add(id);
   return dispatchProjectAudioUpdated(id, sanitized);
 }
+async function patchProjectAudio(pid, audioPatch, options) {
+  const id = projectAudioCacheKey(pid);
+  if (!id) throw new Error('Project id required to patch audio');
+  const opts = options && typeof options === 'object' ? options : {};
+  const payload = { audio: cloneSettingsAudio(audioPatch || {}) };
+  if (Array.isArray(opts.remove) && opts.remove.length) payload.remove = opts.remove.map(String);
+  if (opts.removeFields && typeof opts.removeFields === 'object') {
+    payload.removeFields = cloneSettingsAudio(opts.removeFields);
+  }
+  const res = await http('PATCH', `/api/projects/${id}/audio`, payload);
+  const normalized = res && typeof res.audio === 'object' ? res.audio : {};
+  const sanitized = cloneSettingsAudio(normalized);
+  PROJECT_AUDIO_CACHE[id] = sanitized;
+  PROJECT_AUDIO_LOADED.add(id);
+  return dispatchProjectAudioUpdated(id, sanitized);
+}
 window.loadProjectAudio = loadProjectAudio;
 window.saveProjectAudio = saveProjectAudio;
+window.patchProjectAudio = patchProjectAudio;
 window.getProjectAudio = getProjectAudio;
 window.peekProjectAudio = peekProjectAudio;
 window.projectAudioIsLoaded = projectAudioIsLoaded;
@@ -949,6 +971,7 @@ window.projectAudioIsLoaded = projectAudioIsLoaded;
 // Project audio store prefixes
 const AUDIO_MEDIA_PREFIX = 'media:';
 const AUDIO_EVENT_PREFIX = 'event:';
+let MEDIA_MANAGER_REFRESH_TOKEN = 0;
 
 let APP_ACTIVE_AUDIO_PLAYBACK = null;
 let APP_ACTIVE_SPEECH_PLAYBACK = null;
@@ -1298,7 +1321,7 @@ async function mediaManagerDeleteItems(mediaKeys) {
     }
 
     if (fellBackToLegacy) {
-      const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+      const audioStore = await loadProjectAudio(pid, { force: true, silent: true, requireFresh: true });
       let legacyDeleted = 0;
       unique.forEach((key) => {
         if (!Object.prototype.hasOwnProperty.call(audioStore, key)) return;
@@ -1341,18 +1364,11 @@ async function mediaManagerSetItemsEnabled(mediaKeys, enabled) {
   const keys = Array.isArray(mediaKeys) ? mediaKeys.map(key => String(key || '').trim()).filter(audioIsMediaKey) : [];
   const unique = Array.from(new Set(keys));
   if (!unique.length) return { updated: 0 };
-  const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
   const nextEnabled = !!enabled;
-  let updated = 0;
-  unique.forEach((key) => {
-    const entry = audioStore && typeof audioStore[key] === 'object' ? audioStore[key] : null;
-    if (!entry) return;
-    if (audioMediaEntryEnabled(entry) === nextEnabled && entry.enabled !== undefined) return;
-    audioStore[key] = { ...entry, enabled: nextEnabled };
-    updated += 1;
-  });
-  if (updated) await saveProjectAudio(pid, audioStore);
-  return { updated };
+  const audioPatch = {};
+  unique.forEach((key) => { audioPatch[key] = { enabled: nextEnabled }; });
+  await patchProjectAudio(pid, audioPatch);
+  return { updated: unique.length };
 }
 
 async function mediaManagerUploadFilesBatch(files) {
@@ -1434,7 +1450,7 @@ async function mediaManagerUploadFilesBatch(files) {
       // Upload path
       if (legacyMode) {
         if (!legacyLoaded) {
-          legacyAudioStore = await loadProjectAudio(pid, { force: true, silent: true });
+          legacyAudioStore = await loadProjectAudio(pid, { force: true, silent: true, requireFresh: true });
           legacyLoaded = true;
         }
         const dupKey = mediaManagerFindDuplicateKeyByDataUrl(legacyAudioStore, dataUrl);
@@ -1612,7 +1628,7 @@ async function mediaManagerUploadFile(file) {
         }
       } catch { }
 
-      const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+      const audioStore = await loadProjectAudio(pid, { force: true, silent: true, requireFresh: true });
 
       // Dedupe even in legacy path
       const legacyDup = mediaManagerFindDuplicateKeyByDataUrl(audioStore, dataUrl);
@@ -1669,7 +1685,7 @@ async function mediaManagerDeleteItem(mediaKey) {
     const looks404 = msg.includes('404') || msg.toLowerCase().includes('not found') || msg.includes('requested URL was not found');
     if (!looks404) throw err;
 
-    const audioStore = await loadProjectAudio(pid, { force: true, silent: true });
+    const audioStore = await loadProjectAudio(pid, { force: true, silent: true, requireFresh: true });
     if (!Object.prototype.hasOwnProperty.call(audioStore, key)) return;
     delete audioStore[key];
     // Clear any per-event references to this media key
@@ -1690,6 +1706,7 @@ async function mediaManagerDeleteItem(mediaKey) {
 
 async function mediaManagerRefreshList(options) {
   const opts = options && typeof options === 'object' ? options : {};
+  const refreshToken = ++MEDIA_MANAGER_REFRESH_TOKEN;
   const listEl = document.getElementById('settings-media-list');
   const statusEl = document.getElementById('settings-media-status');
   if (!listEl) return;
@@ -1707,12 +1724,14 @@ async function mediaManagerRefreshList(options) {
   try {
     mediaMeta = await mediaManagerLoadMediaMeta(pid);
   } catch (err) {
+    if (refreshToken !== MEDIA_MANAGER_REFRESH_TOKEN || mediaManagerReadCurrentPid() !== pid) return;
     listEl.innerHTML = '<li class="list-group-item small text-muted">Failed to load uploaded audio.</li>';
     if (statusEl) statusEl.textContent = `Load failed: ${err?.message || err}`;
     mediaManagerUpdateBatchDeleteButton();
     mediaManagerSetSelectAllState({ disabled: true, checked: false });
     return;
   }
+  if (refreshToken !== MEDIA_MANAGER_REFRESH_TOKEN || mediaManagerReadCurrentPid() !== pid) return;
   const items = audioListMediaItems(mediaMeta);
   if (!items.length) {
     listEl.innerHTML = '<li class="list-group-item small text-muted">No uploaded audio yet.</li>';
@@ -1756,6 +1775,12 @@ function wireMediaManagerControls() {
   const delSelected = document.getElementById('settings-media-delete-selected');
   const selectAll = document.getElementById('settings-media-select-all');
   const list = document.getElementById('settings-media-list');
+  if (!document._toolhubMediaProjectBound) {
+    document.addEventListener('project-selected', () => {
+      try { void mediaManagerRefreshList({ force: true }); } catch { }
+    });
+    document._toolhubMediaProjectBound = true;
+  }
   if (upload && !upload._toolhubBound) {
     upload.addEventListener('change', async (ev) => {
       const files = (ev.target && ev.target.files) ? Array.from(ev.target.files) : [];

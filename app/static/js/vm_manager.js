@@ -3551,6 +3551,32 @@ function groupSelectedGuestEntriesByProject() {
   return grouped;
 }
 
+function serializeGuestTransferGroups(grouped) {
+  const source = grouped instanceof Map ? grouped : groupSelectedGuestEntriesByProject();
+  return Array.from(source.entries()).map(([pid, targets]) => ({
+    pid: canonicalPid(pid),
+    targets: (Array.isArray(targets) ? targets : []).map(target => ({
+      index: Number(target?.index),
+      name: String(target?.name || ''),
+      type: String(target?.type || ''),
+    })).filter(target => Number.isFinite(target.index) && target.name),
+  })).filter(group => group.pid && group.targets.length);
+}
+
+function deserializeGuestTransferGroups(groups) {
+  const grouped = new Map();
+  (Array.isArray(groups) ? groups : []).forEach(group => {
+    const pid = canonicalPid(group?.pid);
+    const targets = (Array.isArray(group?.targets) ? group.targets : []).map(target => ({
+      index: Number(target?.index),
+      name: String(target?.name || ''),
+      type: String(target?.type || ''),
+    })).filter(target => Number.isFinite(target.index) && target.name);
+    if (pid && targets.length) grouped.set(pid, targets);
+  });
+  return grouped;
+}
+
 function guestTransferProject(pid) {
   const canonical = canonicalPid(pid);
   if (canonicalPid(PROJ?.id) === canonical) return PROJ;
@@ -3587,8 +3613,8 @@ function mergeGuestTransferResponses(responses) {
   return merged;
 }
 
-async function runGuestTransfer(label, operation) {
-  const grouped = groupSelectedGuestEntriesByProject();
+async function runGuestTransfer(label, operation, groupedOverride) {
+  const grouped = groupedOverride instanceof Map ? groupedOverride : groupSelectedGuestEntriesByProject();
   if (!grouped.size) {
     alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
     return;
@@ -3599,6 +3625,7 @@ async function runGuestTransfer(label, operation) {
   ACTION_RUN_ID += 1;
   updateRefreshState();
   let summaryResult = null;
+  const guestCount = Array.from(grouped.values()).reduce((total, targets) => total + (Array.isArray(targets) ? targets.length : 0), 0);
   const progressCancelButton = document.getElementById('action-progress-cancel-btn');
   const progressCancelWasDisabled = !!progressCancelButton?.disabled;
   const progressCancelTitle = progressCancelButton?.getAttribute('title');
@@ -3608,7 +3635,7 @@ async function runGuestTransfer(label, operation) {
   }
   try {
     try { shell.beginActionContext(label); } catch { }
-    try { showActionProgress(`${label} in progress`, `Preparing ${getSelectedGuestEntries().length} guest(s)…`); } catch { }
+    try { showActionProgress(`${label} in progress`, `Preparing ${guestCount} guest(s)…`); } catch { }
     try { openActionProgressModal(); } catch { }
     let position = 0;
     for (const [pid, targets] of grouped.entries()) {
@@ -3646,6 +3673,70 @@ async function runGuestTransfer(label, operation) {
   if (summaryResult) {
     window.setTimeout(() => showActionSummary(label, summaryResult), 200);
   }
+}
+
+const GUEST_TRANSFER_QUEUE_PERSIST_KEY = 'vm-manager-guest-transfer-v1';
+
+async function ensureGuestTransferProjects(groups) {
+  const wanted = new Set((Array.isArray(groups) ? groups : []).map(group => canonicalPid(group?.pid)).filter(Boolean));
+  const available = new Set((ALL_PROJECTS || []).map(project => canonicalPid(project?.id)).filter(Boolean));
+  if (PROJ?.id) available.add(canonicalPid(PROJ.id));
+  if (Array.from(wanted).every(pid => available.has(pid))) return;
+  const response = await http('GET', '/api/projects');
+  const projects = normalizeProjects(response?.projects || []);
+  if (projects.length) ALL_PROJECTS = projects;
+}
+
+async function executePersistedGuestTransfer(descriptor) {
+  const kind = String(descriptor?.kind || '').toLowerCase();
+  const groups = Array.isArray(descriptor?.groups) ? descriptor.groups : [];
+  await ensureGuestTransferProjects(groups);
+  const grouped = deserializeGuestTransferGroups(groups);
+  const label = String(descriptor?.label || (kind === 'push' ? 'Push Files' : 'Pull Files'));
+  if (kind === 'pull') {
+    const rawPaths = String(descriptor?.paths || '');
+    return runGuestTransfer(label, async (pid, targets, auth) => {
+      return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_pull`, {
+        ...auth,
+        targets,
+        paths: rawPaths,
+      });
+    }, grouped);
+  }
+  if (kind !== 'push') throw new Error(`Unsupported persisted guest transfer: ${kind || '(missing)'}`);
+  if (!window.PersistentQueuePayloads) throw new Error('Persistent upload storage is unavailable');
+  const payloadId = String(descriptor?.payloadId || '');
+  const payload = await window.PersistentQueuePayloads.get(payloadId);
+  if (!payload || !Array.isArray(payload.files) || !payload.files.length) {
+    throw new Error('The queued upload files are no longer available in browser storage');
+  }
+  try {
+    return await runGuestTransfer(label, async (pid, targets, auth) => {
+      const form = new FormData();
+      form.append('payload', JSON.stringify({
+        ...auth,
+        targets,
+        destination: descriptor.destination,
+        relativePaths: descriptor.relativePaths,
+        selectionType: descriptor.selectionType,
+      }));
+      payload.files.forEach(file => {
+        const body = file?.blob || file;
+        const name = String(file?.name || body?.name || 'upload');
+        form.append('files', body, name);
+      });
+      return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_push`, form);
+    }, grouped);
+  } finally {
+    try { await window.PersistentQueuePayloads.remove(payloadId); } catch { }
+  }
+}
+
+if (typeof window.registerRemoteActionHandler === 'function') {
+  window.registerRemoteActionHandler(GUEST_TRANSFER_QUEUE_PERSIST_KEY, (data, saved) => {
+    if (String(saved?.status || '') === 'active') return null;
+    return () => executePersistedGuestTransfer(data || {});
+  });
 }
 
 function hideLxcSetupModal(modal) {
@@ -3718,17 +3809,44 @@ function wireLxcTransferModals() {
       if (!files.length) return fail(selectionType === 'folder' ? 'Select a folder.' : 'Select at least one file.');
       if (!destination.startsWith('/')) return fail('Enter an absolute destination directory.');
       const relativePaths = files.map(file => String(file.webkitRelativePath || file.name || ''));
+      const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
+      const guestCount = groups.reduce((total, group) => total + group.targets.length, 0);
+      if (!guestCount) return fail('Select at least one existing LXC container or QEMU VM.');
+      if (!window.PersistentQueuePayloads) return fail('Persistent queue storage is unavailable in this browser.');
+      const payloadId = `guest-push-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      try {
+        await window.PersistentQueuePayloads.put(payloadId, {
+          files: files.map(file => ({
+            blob: file,
+            name: String(file.name || 'upload'),
+            type: String(file.type || ''),
+            lastModified: Number(file.lastModified) || 0,
+          })),
+        });
+      } catch (storageError) {
+        return fail(`Could not save the upload in the persistent queue: ${storageError?.message || storageError}`);
+      }
       const modal = document.getElementById('lxcPushModal');
       await hideLxcSetupModal(modal);
       const transferLabel = selectionType === 'folder' ? 'Push Folder' : 'Push Files';
-      await runQueued(`${transferLabel} (${getSelectedGuestEntries().length} guests)`, async () => {
-        await runGuestTransfer(transferLabel, async (pid, targets, auth) => {
-          const form = new FormData();
-          form.append('payload', JSON.stringify({ ...auth, targets, destination, relativePaths, selectionType }));
-          files.forEach(file => form.append('files', file, file.name));
-          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_push`, form);
-        });
-      }, { projectId: PROJ?.id });
+      const descriptor = {
+        kind: 'push',
+        label: transferLabel,
+        destination,
+        relativePaths,
+        selectionType,
+        payloadId,
+        groups,
+      };
+      const queueResult = await runQueued(`${transferLabel} (${guestCount} guests)`, async () => {
+        await executePersistedGuestTransfer(descriptor);
+      }, {
+        projectId: groups[0]?.pid || PROJ?.id,
+        persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
+      });
+      if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
+        try { await window.PersistentQueuePayloads.remove(payloadId); } catch { }
+      }
     });
   }
   const pullButton = document.getElementById('lxc-pull-confirm');
@@ -3741,13 +3859,18 @@ function wireLxcTransferModals() {
       const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
       if (!paths.length) return fail('Enter at least one guest path.');
       if (paths.some(path => !path.startsWith('/'))) return fail('Every guest path must be absolute.');
+      const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
+      const guestCount = groups.reduce((total, group) => total + group.targets.length, 0);
+      if (!guestCount) return fail('Select at least one existing LXC container or QEMU VM.');
       const modal = document.getElementById('lxcPullModal');
       await hideLxcSetupModal(modal);
-      await runQueued(`Pull Files (${getSelectedGuestEntries().length} guests)`, async () => {
-        await runGuestTransfer('Pull Files', async (pid, targets, auth) => {
-          return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_pull`, { ...auth, targets, paths: raw });
-        });
-      }, { projectId: PROJ?.id });
+      const descriptor = { kind: 'pull', label: 'Pull Files', paths: raw, groups };
+      await runQueued(`Pull Files (${guestCount} guests)`, async () => {
+        await executePersistedGuestTransfer(descriptor);
+      }, {
+        projectId: groups[0]?.pid || PROJ?.id,
+        persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
+      });
     });
   }
 }
@@ -5824,6 +5947,39 @@ function interpretStoredCommandSelection(value) {
   return { commands: normalizeSelectedCommands(value), overrides: null };
 }
 
+const VM_ACTION_QUEUE_PERSIST_KEY = 'vm-manager-action-v1';
+
+function makeVmActionQueuePersist(action, options, projectId) {
+  const persistedOptions = (() => {
+    try {
+      const copy = JSON.parse(JSON.stringify(options || {}));
+      // Fetch the current project again when restoring. Besides keeping the
+      // descriptor smaller, this avoids persisting project secrets or stale
+      // inventory snapshots in the queue record.
+      if (copy && typeof copy === 'object') delete copy.project;
+      return copy || {};
+    } catch {
+      return {};
+    }
+  })();
+  const ids = new Set();
+  const addId = value => {
+    const pid = canonicalPid(value);
+    if (pid) ids.add(pid);
+  };
+  addId(projectId);
+  Object.keys(persistedOptions.targetsByPid || {}).forEach(addId);
+  return {
+    key: VM_ACTION_QUEUE_PERSIST_KEY,
+    data: {
+      action: String(action || ''),
+      options: persistedOptions,
+      projectId: canonicalPid(projectId),
+      projectIds: Array.from(ids),
+    },
+  };
+}
+
 // Dispatch VM actions (queued wrapper)
 async function vmAction(action, opts) {
   const options = opts ? { ...opts } : {};
@@ -5916,7 +6072,10 @@ async function vmAction(action, opts) {
     ? `Multi ${labelName}${commandSuffix}`
     : `${labelName}${commandSuffix} (${selCount || 0} item${(selCount || 0) === 1 ? '' : 's'})`;
   const queueProjectId = multi ? canonicalPid(PROJ?.id) : canonicalPid(actionProject?.id);
-  await runQueued(label, async () => { await vmActionExec(action, options); }, { projectId: queueProjectId });
+  await runQueued(label, async () => { await vmActionExec(action, options); }, {
+    projectId: queueProjectId,
+    persist: makeVmActionQueuePersist(action, options, queueProjectId),
+  });
 }
 
 // Original implementation moved to vmActionExec
@@ -6614,6 +6773,18 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
 // Multi-project action orchestrator (queued wrapper)
 async function vmActionMulti(action, opts) {
   const options = opts ? { ...opts } : {};
+  if (!options.targetsByPid) {
+    const targetsByPid = {};
+    listSelectedEntries().forEach(entry => {
+      const pid = canonicalPid(entry?.pid);
+      const index = Number(entry?.index);
+      const name = String(entry?.name || '');
+      if (!pid || !Number.isFinite(index) || !name) return;
+      if (!targetsByPid[pid]) targetsByPid[pid] = [];
+      targetsByPid[pid].push({ index, name });
+    });
+    options.targetsByPid = targetsByPid;
+  }
   if (action === 'run_stored_cmds') {
     const initial = interpretStoredCommandSelection(options.selectedCommands || options.selectedCommand);
     let selectedCommands = initial.commands;
@@ -6632,7 +6803,7 @@ async function vmActionMulti(action, opts) {
       delete options.storedCommandOverrides;
     }
   }
-  const selCount = listSelectedEntries().length;
+  const selCount = countExplicitActionTargets(options) || listSelectedEntries().length;
   const labelName = friendlyActionName(action) || action;
   const commandSuffix = (() => {
     const cmds = Array.isArray(options.selectedCommands) ? options.selectedCommands : [];
@@ -6641,7 +6812,11 @@ async function vmActionMulti(action, opts) {
     return ` — ${cmds.length} cmds`;
   })();
   const label = `Multi ${labelName}${commandSuffix} (${selCount || 0} item${(selCount || 0) === 1 ? '' : 's'})`;
-  await runQueued(label, async () => { await vmActionMultiExec(action, options); }, { projectId: PROJ?.id });
+  const queueProjectId = canonicalPid(PROJ?.id);
+  await runQueued(label, async () => { await vmActionMultiExec(action, options); }, {
+    projectId: queueProjectId,
+    persist: makeVmActionQueuePersist(action, options, queueProjectId),
+  });
 }
 
 // Original implementation moved to vmActionMultiExec
@@ -7205,6 +7380,53 @@ async function vmActionMultiExec(action, opts = {}) {
     const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
     Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
   } catch { }
+}
+
+async function restoreQueuedVmAction(data) {
+  const action = String(data?.action || '').trim();
+  if (!action) throw new Error('The restored VM action is missing its action name');
+  const options = (() => {
+    try { return JSON.parse(JSON.stringify(data?.options || {})); }
+    catch { return {}; }
+  })();
+  const projectIds = new Set();
+  const addId = value => {
+    const pid = canonicalPid(value);
+    if (pid) projectIds.add(pid);
+  };
+  (Array.isArray(data?.projectIds) ? data.projectIds : []).forEach(addId);
+  addId(data?.projectId);
+  Object.keys(options.targetsByPid || {}).forEach(addId);
+
+  let projects = [];
+  try {
+    const response = await http('GET', '/api/projects');
+    projects = normalizeProjects(response?.projects || []);
+    if (projects.length) ALL_PROJECTS = projects;
+  } catch (error) {
+    throw new Error(`Could not reload projects for queued VM action: ${error?.message || error}`);
+  }
+
+  if (!options.targetsByPid) {
+    const pid = canonicalPid(data?.projectId || Array.from(projectIds)[0]);
+    const project = projects.find(item => canonicalPid(item?.id) === pid) || null;
+    if (!project) throw new Error(`Project ${pid || '(unknown)'} is unavailable for the queued VM action`);
+    options.project = project;
+  }
+
+  for (const pid of projectIds) {
+    try { await hydrateProxCredsFromPersisted(pid); } catch { }
+  }
+  return vmActionExec(action, options);
+}
+
+if (typeof window.registerRemoteActionHandler === 'function') {
+  window.registerRemoteActionHandler(VM_ACTION_QUEUE_PERSIST_KEY, (data, saved) => {
+    // Active entries are claimed by queue_persistence.js on every page and
+    // reconnected to the server-side action status. Never replay them here.
+    if (String(saved?.status || '') === 'active') return null;
+    return () => restoreQueuedVmAction(data || {});
+  });
 }
 
 async function vmCancelActions() {

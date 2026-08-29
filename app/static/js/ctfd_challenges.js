@@ -258,12 +258,28 @@
     } catch {}
   }
 
-  function readPersistedCtfdToken(pid){
+  function readPersistedCtfdCreds(pid){
     try {
-      return String(window.CREDS?.readPersistCtfdToken?.(String(pid || '')) || '').trim();
+      if (window.CREDS?.readPersistCtfdCreds) {
+        const value = window.CREDS.readPersistCtfdCreds(String(pid || '')) || {};
+        return {
+          token: String(value.token || '').trim(),
+          username: String(value.username || '').trim(),
+          password: String(value.password || ''),
+        };
+      }
+      return { token: String(window.CREDS?.readPersistCtfdToken?.(String(pid || '')) || '').trim(), username: '', password: '' };
     } catch {
-      return '';
+      return {};
     }
+  }
+  function readPersistedCtfdToken(pid){ return String(readPersistedCtfdCreds(pid).token || ''); }
+  function ctfdAuthPayload(creds){
+    const value = creds || {};
+    const token = String(value.token || '').trim();
+    return token
+      ? { token, username: '', password: '' }
+      : { token: '', username: String(value.username || '').trim(), password: String(value.password || '') };
   }
 
   async function hydrateCtfdCredsFromPersisted(pid, options){
@@ -271,13 +287,13 @@
     const projectId = String(pid || '').trim();
     if (!projectId) return readCtfdCreds(projectId);
     let sess = readCtfdCreds(projectId) || {};
-    if (sess?.token) return sess;
+    if (sess?.token || (sess?.username && sess?.password)) return sess;
     try {
       if (!opts.skipFetch) await window.CREDS?.fetchProjectSecrets?.(projectId);
     } catch {}
-    const token = readPersistedCtfdToken(projectId);
-    if (!token) return sess;
-    sess = { ...sess, token, validated: true };
+    const persisted = readPersistedCtfdCreds(projectId);
+    if (!(persisted.token || (persisted.username && persisted.password))) return sess;
+    sess = { ...sess, ...persisted, validated: true };
     writeCtfdCreds(projectId, sess);
     return sess;
   }
@@ -332,9 +348,8 @@
     const sess = await hydrateCtfdCredsFromPersisted(pid);
     const url = (proj && proj.challenge_url) ? String(proj.challenge_url).trim() : '';
     const port = (proj && proj.challenge_port) ? Number(proj.challenge_port) : 443;
-    const token = sess.token || '';
     const verify = ctfdProjectVerifySSL(proj);
-    return { url, port, token, verify };
+    return { url, port, ...ctfdAuthPayload(sess), verify };
   }
 
   function setProgText(msg, pct){
@@ -367,7 +382,7 @@
       const byId = {}; (PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
       const names = skippedPids.map(id=> byId[String(id)]?.name || String(id));
       const data = skippedPids.map(id=> String(id)).join(',');
-      box.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-2"><div><strong>Some projects were skipped</strong>:</div><div>${names.map(n=>`<span class=\"badge bg-light text-dark me-1\">${escapeHtml(n)}</span>`).join(' ')}</div><button id="proj-errors-fix" type="button" class="btn btn-sm btn-outline-primary" data-pids="${escapeHtml(data)}" title="Enter/Update tokens">Fix tokens</button></div><div class="mt-1">Reason: ${escapeHtml(reason||'credential or connection issue')}. Update tokens in CTFd Manager or via the login prompt.</div>`;
+      box.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-2"><div><strong>Some projects were skipped</strong>:</div><div>${names.map(n=>`<span class=\"badge bg-light text-dark me-1\">${escapeHtml(n)}</span>`).join(' ')}</div><button id="proj-errors-fix" type="button" class="btn btn-sm btn-outline-primary" data-pids="${escapeHtml(data)}" title="Enter or update credentials">Fix credentials</button></div><div class="mt-1">Reason: ${escapeHtml(reason||'credential or connection issue')}. Update credentials in CTFd Manager or via the login prompt.</div>`;
       box.classList.remove('d-none');
       // Wire button
       const btn = document.getElementById('proj-errors-fix');
@@ -395,7 +410,16 @@
       const byId = {}; (PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
       const entries = (pids||[]).map(pid => ({ pid: String(pid), name: byId[String(pid)]?.name || String(pid) }));
       if (!entries.length) return;
-      list.innerHTML = entries.map(m => `
+      list.innerHTML = entries.map(m => {
+        const current = readCtfdCreds(String(m.pid)) || {};
+        const persisted = readPersistedCtfdCreds(String(m.pid));
+        const auth = {
+          token: current.token || persisted.token || '',
+          username: current.username || persisted.username || '',
+          password: current.password || persisted.password || '',
+        };
+        const passwordMode = !auth.token && !!(auth.username || auth.password);
+        return `
         <div class="card">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -419,30 +443,48 @@
                   <label class="form-check-label">Verify SSL</label>
                 </div>
               </div>
-              <div class="col-md-12">
+              <div class="col-md-4">
+                <label class="form-label">Authentication</label>
+                <select class="form-select" data-pid="${m.pid}" data-field="auth">
+                  <option value="token"${passwordMode ? '' : ' selected'}>API token</option>
+                  <option value="password"${passwordMode ? ' selected' : ''}>Username &amp; password</option>
+                </select>
+              </div>
+              <div class="col-md-8">
                 <label class="form-label">API Token</label>
                 <div class="input-group">
-                  <input type="password" class="form-control ctfd-token-input" data-pid="${m.pid}" data-field="token" placeholder="ctfd_..." value="${escapeHtml((readCtfdCreds(String(m.pid)) || {}).token || readPersistedCtfdToken(String(m.pid)) || '')}">
+                  <input type="password" class="form-control ctfd-token-input" data-pid="${m.pid}" data-field="token" placeholder="ctfd_..." value="${escapeHtml(auth.token)}">
                   <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" title="Show">&#x1F576;&#xFE0E;</button>
                 </div>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Username</label>
+                <input class="form-control" data-pid="${m.pid}" data-field="username" value="${escapeHtml(auth.username)}" autocomplete="username">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Password</label>
+                <input type="password" class="form-control" data-pid="${m.pid}" data-field="password" value="${escapeHtml(auth.password)}" autocomplete="current-password">
               </div>
             </div>
           </div>
         </div>
-      `).join('');
+      `;
+      }).join('');
       if (feedback) { feedback.textContent = ''; feedback.className = 'me-auto small'; }
       const m = bootstrap.Modal.getInstance(el) || bootstrap.Modal.getOrCreateInstance(el);
       m.show();
-      // After showing, fetch server secrets to prefill empty token inputs
+      // After showing, fetch server secrets to prefill empty credential inputs
       try {
         if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
           (pids||[]).forEach(pid => {
             try {
               CREDS.fetchProjectSecrets(String(pid)).then(()=>{
                 try {
-                  const t = (window.CREDS && typeof CREDS.readPersistCtfdToken === 'function') ? (CREDS.readPersistCtfdToken(String(pid)) || '') : '';
-                  const inp = document.querySelector(`#ctfdLoginList .ctfd-token-input[data-pid="${CSS.escape(String(pid))}"]`);
-                  if (inp && !inp.value && t) inp.value = t;
+                  const saved = readPersistedCtfdCreds(String(pid));
+                  ['token', 'username', 'password'].forEach(field => {
+                    const inp = document.querySelector(`#ctfdLoginList [data-pid="${CSS.escape(String(pid))}"][data-field="${field}"]`);
+                    if (inp && !inp.value && saved[field]) inp.value = saved[field];
+                  });
                 } catch {}
               }).catch(()=>{});
             } catch {}
@@ -748,7 +790,7 @@
     try {
       await ensureAllProjects();
       const byId = {}; (PROJECTS||[]).forEach(p=> byId[String(p.id)] = p);
-      const missing = []; // missing token
+      const missing = []; // missing authentication
       const invalid = []; // missing challenge_url/port
       const needsSetup = new Map();
       for (const pid of pids){
@@ -759,7 +801,7 @@
           invalid.push(name);
           needsSetup.set(String(pid), { pid: String(pid), name });
         }
-        if (!creds.token) {
+        if (!(creds.token || (creds.username && creds.password))) {
           missing.push({ pid: String(pid), name });
           needsSetup.set(String(pid), { pid: String(pid), name });
         }
@@ -841,10 +883,10 @@
       // Notify about any invalid tokens or other failures; show persistent indicator
       try {
         const skipped = [...new Set([...invalidAuth, ...otherErrs])];
-        renderSkippedIndicator(skipped, invalidAuth.length ? 'invalid or missing token' : 'connection or configuration error');
+        renderSkippedIndicator(skipped, invalidAuth.length ? 'invalid or missing credentials' : 'connection or configuration error');
         if (invalidAuth.length) {
           const names = invalidAuth.map(id=> (byId[String(id)]?.name || String(id))).join(', ');
-          showToast(`CTFd token invalid for: ${names}. Ignoring these projects until updated.`, 'warning');
+          showToast(`CTFd credentials invalid for: ${names}. Ignoring these projects until updated.`, 'warning');
         }
         if (otherErrs.length) {
           const names = otherErrs.map(id=> (byId[String(id)]?.name || String(id))).join(', ');
@@ -865,7 +907,7 @@
     setProgText('Fetching challenges…', 10);
     let total = 0; let list = [];
     try {
-      const body1 = { baseUrl: creds.url, token: creds.token, port: creds.port, verifySSL: creds.verify };
+      const body1 = { baseUrl: creds.url, port: creds.port, ...ctfdAuthPayload(creds), verifySSL: creds.verify };
       let res1;
       await runQueued(`CTFd challenges list for project ${pid}`, async () => {
         res1 = await fetch(`/api/projects/${encodeURIComponent(pid)}/ctfd/challenges/list`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body1) });
@@ -884,7 +926,7 @@
         const i = index; index++;
         const ch = list[i];
         try {
-          const body = { baseUrl: creds.url, port: creds.port, token: creds.token, verifySSL: creds.verify };
+          const body = { baseUrl: creds.url, port: creds.port, ...ctfdAuthPayload(creds), verifySSL: creds.verify };
           let res;
           await runQueued(`CTFd challenge ${ch.id} stats`, async () => {
             res = await fetch(`/api/projects/${encodeURIComponent(pid)}/ctfd/stats/challenges/${encodeURIComponent(ch.id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -918,7 +960,7 @@
       // Prefetch challenge list to get total count for progress messaging
       let total = 0;
       try {
-        const body1 = { baseUrl: creds.url, token: creds.token, port: creds.port, verifySSL: creds.verify };
+        const body1 = { baseUrl: creds.url, port: creds.port, ...ctfdAuthPayload(creds), verifySSL: creds.verify };
         let res1;
         await runQueued(`CTFd challenges list for project ${pid}`, async () => {
           res1 = await fetch(`/api/projects/${encodeURIComponent(pid)}/ctfd/challenges/list`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body1) });
@@ -950,7 +992,7 @@
         }
       }, 700);
 
-      const body = { baseUrl: creds.url, port: creds.port, token: creds.token, verifySSL: creds.verify, detail: !!detailedSolves };
+      const body = { baseUrl: creds.url, port: creds.port, ...ctfdAuthPayload(creds), verifySSL: creds.verify, detail: !!detailedSolves };
       let res;
       await runQueued(`CTFd challenges stats for project ${pid}`, async () => {
         res = await fetch(`/api/projects/${encodeURIComponent(pid)}/ctfd/stats/challenges`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -1082,10 +1124,11 @@
             const pid = String(inp.getAttribute('data-pid') || '');
             const field = String(inp.getAttribute('data-field') || '');
             if (!pid || !field) return;
-            if (!entries.has(pid)) entries.set(pid, { url: '', port: 443, token: '', verify: true });
+            if (!entries.has(pid)) entries.set(pid, { url: '', port: 443, auth: 'token', token: '', username: '', password: '', verify: true });
             const obj = entries.get(pid);
             if (field === 'verify') obj.verify = !!inp.checked;
             else if (field === 'port') obj.port = Number(inp.value || 443);
+            else if (field === 'password') obj.password = String(inp.value || '');
             else obj[field] = String(inp.value || '').trim();
           });
           let okCount = 0;
@@ -1094,10 +1137,12 @@
           for (const [pid, entry] of entries.entries()) {
             const normUrl = normalizeUrl(entry.url || '');
             const port = Number(entry.port || 443) || 443;
-            const token = String(entry.token || '').trim();
+            const auth = entry.auth === 'password'
+              ? { token: '', username: String(entry.username || '').trim(), password: String(entry.password || '') }
+              : { token: String(entry.token || '').trim(), username: '', password: '' };
             const verify = !!entry.verify;
             const proj = (PROJECTS || []).find(p => String(p?.id) === String(pid)) || await loadProject(pid);
-            if (!normUrl || !token) { failCount += 1; continue; }
+            if (!normUrl || !(auth.token || (auth.username && auth.password))) { failCount += 1; continue; }
             const patch = {};
             if (proj) {
               if (normUrl !== String(proj.challenge_url || '').trim()) patch.challenge_url = normUrl;
@@ -1113,22 +1158,24 @@
                 await http('PATCH', `/api/projects/${encodeURIComponent(pid)}`, patch);
                 updateProjectCache(pid, patch);
               }
-              writeCtfdCreds(pid, { username: '', password: '', token, validated: false });
+              writeCtfdCreds(pid, { ...auth, validated: false });
               let res = null;
               await runQueued(`CTFd login for project ${pid}`, async () => {
                 res = await fetch(`/api/projects/${encodeURIComponent(pid)}/ctfd/login`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ baseUrl: normUrl, port, token, verifySSL: verify }),
+                  body: JSON.stringify({ baseUrl: normUrl, port, ...auth, verifySSL: verify }),
                 });
               }, { projectId: pid });
               if (!res || !res.ok) throw new Error(await readErrorText(res));
               const body = await res.json().catch(() => ({}));
               if (!body || body.ok !== true) throw new Error(String(body?.error || body?.message || 'Login failed'));
-              writeCtfdCreds(pid, { username: '', password: '', token, validated: true });
+              writeCtfdCreds(pid, { ...auth, validated: true });
               try {
-                if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
-                  await CREDS.setPersistCtfdToken(String(pid), token, persist);
+                if (window.CREDS && typeof CREDS.setPersistCtfdCreds === 'function') {
+                  await CREDS.setPersistCtfdCreds(String(pid), auth, persist);
+                } else if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
+                  await CREDS.setPersistCtfdToken(String(pid), auth.token, persist);
                 }
               } catch {}
               okCount += 1;
@@ -1141,7 +1188,7 @@
               feedback.textContent = `Saved ${okCount} connection${okCount === 1 ? '' : 's'}.`;
               feedback.className = 'me-auto small text-success';
             } else {
-              feedback.textContent = `Saved ${okCount}, ${failCount} failed. Check URL, token, or SSL settings.`;
+              feedback.textContent = `Saved ${okCount}, ${failCount} failed. Check URL, credentials, or SSL settings.`;
               feedback.className = 'me-auto small text-warning';
             }
           }
@@ -1240,7 +1287,7 @@
       let total = 0;
       for (const pid of pids){
         const creds = await getCreds(pid);
-        const body = { baseUrl: creds.url, port: creds.port, token: creds.token, verifySSL: creds.verify, ids: groups[pid], visible: !!visible };
+        const body = { baseUrl: creds.url, port: creds.port, ...ctfdAuthPayload(creds), verifySSL: creds.verify, ids: groups[pid], visible: !!visible };
         let res;
         await runQueued(`CTFd set challenge visibility for project ${pid}`, async () => {
           res = await fetch(`/api/projects/${encodeURIComponent(pid)}/ctfd/challenges/visibility`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

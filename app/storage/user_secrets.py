@@ -52,7 +52,13 @@ class UserSecretsStore:
             if not isinstance(entry, dict):
                 return {}
             out: Dict[str, str] = {}
-            for k in ("proxmox_username_enc", "proxmox_password_enc", "ctfd_token_enc"):
+            for k in (
+                "proxmox_username_enc",
+                "proxmox_password_enc",
+                "ctfd_token_enc",
+                "ctfd_username_enc",
+                "ctfd_password_enc",
+            ):
                 v = entry.get(k)
                 if isinstance(v, str) and v:
                     out[k] = v
@@ -76,7 +82,13 @@ class UserSecretsStore:
                 entry = projects.get(pid) or {}
                 if not isinstance(entry, dict):
                     continue
-                if entry.get("proxmox_username_enc") or entry.get("proxmox_password_enc") or entry.get("ctfd_token_enc"):
+                if any(entry.get(key) for key in (
+                    "proxmox_username_enc",
+                    "proxmox_password_enc",
+                    "ctfd_token_enc",
+                    "ctfd_username_enc",
+                    "ctfd_password_enc",
+                )):
                     try:
                         return str(username or '').strip() or None
                     except Exception:
@@ -90,6 +102,8 @@ class UserSecretsStore:
         proxmox_username_enc: Optional[str] = None,
         proxmox_password_enc: Optional[str] = None,
         ctfd_token_enc: Optional[str] = None,
+        ctfd_username_enc: Optional[str] = None,
+        ctfd_password_enc: Optional[str] = None,
     ) -> None:
         user = (username or "").strip() or "__anonymous__"
         pid = (project_id or "").strip()
@@ -117,9 +131,19 @@ class UserSecretsStore:
                 entry["proxmox_password_enc"] = str(proxmox_password_enc or "")
             if ctfd_token_enc is not None:
                 entry["ctfd_token_enc"] = str(ctfd_token_enc or "")
+            if ctfd_username_enc is not None:
+                entry["ctfd_username_enc"] = str(ctfd_username_enc or "")
+            if ctfd_password_enc is not None:
+                entry["ctfd_password_enc"] = str(ctfd_password_enc or "")
 
             # If everything is empty, drop the project entry
-            if not (entry.get("proxmox_username_enc") or entry.get("proxmox_password_enc") or entry.get("ctfd_token_enc")):
+            if not any(entry.get(key) for key in (
+                "proxmox_username_enc",
+                "proxmox_password_enc",
+                "ctfd_token_enc",
+                "ctfd_username_enc",
+                "ctfd_password_enc",
+            )):
                 try:
                     projects.pop(pid, None)
                 except Exception:

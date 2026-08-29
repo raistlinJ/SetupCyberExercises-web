@@ -118,23 +118,38 @@
     try { localStorage.removeItem(proxKey(pid)); } catch {}
     try { localStorage.removeItem(ctfdKey(pid)); } catch {}
   }
-  async function setPersistCtfdToken(pid, token, persist){
+  async function setPersistCtfdCreds(pid, credentials, persist){
     // Persist to the server (per-user, per-project, encrypted at rest).
+    const value = credentials || {};
     try {
       if (persist) {
-        await patchProjectSecrets(pid, { ctfd: { token: token || '' } });
+        await patchProjectSecrets(pid, { ctfd: {
+          token: value.token || '',
+          username: value.username || '',
+          password: value.password || '',
+        } });
       } else {
-        await patchProjectSecrets(pid, { ctfd: { token: '' } });
+        await patchProjectSecrets(pid, { ctfd: { token: '', username: '', password: '' } });
       }
     } catch {}
   }
-  function readPersistCtfdToken(pid){
+  async function setPersistCtfdToken(pid, token, persist){
+    return setPersistCtfdCreds(pid, { token: token || '', username: '', password: '' }, persist);
+  }
+  function readPersistCtfdCreds(pid){
     try {
       const cached = _secretsCache.get(String(pid||''));
-      const t = cached?.ctfd?.token;
-      if (typeof t === 'string' && t) return t;
+      const value = cached?.ctfd || {};
+      return {
+        token: typeof value.token === 'string' ? value.token : '',
+        username: typeof value.username === 'string' ? value.username : '',
+        password: typeof value.password === 'string' ? value.password : '',
+      };
     } catch {}
-    return '';
+    return {};
+  }
+  function readPersistCtfdToken(pid){
+    return String(readPersistCtfdCreds(pid).token || '');
   }
   async function setPersistProxCreds(pid, username, password, persist){
     // Persist to the server (per-user, per-project, encrypted at rest).
@@ -174,7 +189,7 @@
     } catch {}
     return removed;
   }
-  window.CREDS = { setPersistCtfdToken, readPersistCtfdToken, setPersistProxCreds, readPersistProxCreds, clearAllPersistedCreds };
+  window.CREDS = { setPersistCtfdCreds, readPersistCtfdCreds, setPersistCtfdToken, readPersistCtfdToken, setPersistProxCreds, readPersistProxCreds, clearAllPersistedCreds };
   window.CREDS.fetchProjectSecrets = fetchProjectSecrets;
   window.CREDS.patchProjectSecrets = patchProjectSecrets;
 

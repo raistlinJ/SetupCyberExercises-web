@@ -57,7 +57,7 @@ class ProjectSecretsApiTests(unittest.TestCase):
                 f'/api/projects/{self.project.id}/secrets',
                 json={
                     'proxmox': {'username': 'root@pam', 'password': 'pw123'},
-                    'ctfd': {'token': 'ctfdtoken'},
+                    'ctfd': {'token': '', 'username': 'ctfd-admin', 'password': 'ctfd-password'},
                 },
             )
             self.assertEqual(resp.status_code, 200)
@@ -73,7 +73,9 @@ class ProjectSecretsApiTests(unittest.TestCase):
             self.assertEqual(got.get('projectId'), self.project.id)
             self.assertEqual(got.get('proxmox', {}).get('username'), 'root@pam')
             self.assertEqual(got.get('proxmox', {}).get('password'), 'pw123')
-            self.assertEqual(got.get('ctfd', {}).get('token'), 'ctfdtoken')
+            self.assertEqual(got.get('ctfd', {}).get('token'), '')
+            self.assertEqual(got.get('ctfd', {}).get('username'), 'ctfd-admin')
+            self.assertEqual(got.get('ctfd', {}).get('password'), 'ctfd-password')
             self.assertTrue(got.get('proxmox', {}).get('saved'))
             self.assertTrue(got.get('ctfd', {}).get('saved'))
 
@@ -87,6 +89,8 @@ class ProjectSecretsApiTests(unittest.TestCase):
                 self.assertEqual(got2.get('proxmox', {}).get('username'), '')
                 self.assertEqual(got2.get('proxmox', {}).get('password'), '')
                 self.assertEqual(got2.get('ctfd', {}).get('token'), '')
+                self.assertEqual(got2.get('ctfd', {}).get('username'), '')
+                self.assertEqual(got2.get('ctfd', {}).get('password'), '')
 
     def test_clear_project_secrets(self):
         with ExitStack() as stack:
@@ -96,13 +100,18 @@ class ProjectSecretsApiTests(unittest.TestCase):
             # Set first
             self.client.patch(
                 f'/api/projects/{self.project.id}/secrets',
-                json={'proxmox_username': 'root@pam', 'proxmox_password': 'pw123', 'ctfd_token': 'ctfdtoken'},
+                json={
+                    'proxmox_username': 'root@pam',
+                    'proxmox_password': 'pw123',
+                    'ctfd_username': 'ctfd-admin',
+                    'ctfd_password': 'ctfd-password',
+                },
             )
 
             # Clear by sending empty strings
             resp = self.client.patch(
                 f'/api/projects/{self.project.id}/secrets',
-                json={'proxmox': {'username': '', 'password': ''}, 'ctfd': {'token': ''}},
+                json={'proxmox': {'username': '', 'password': ''}, 'ctfd': {'token': '', 'username': '', 'password': ''}},
             )
             self.assertEqual(resp.status_code, 200)
             body = resp.get_json() or {}
@@ -114,6 +123,8 @@ class ProjectSecretsApiTests(unittest.TestCase):
             self.assertEqual(got.get('proxmox', {}).get('username'), '')
             self.assertEqual(got.get('proxmox', {}).get('password'), '')
             self.assertEqual(got.get('ctfd', {}).get('token'), '')
+            self.assertEqual(got.get('ctfd', {}).get('username'), '')
+            self.assertEqual(got.get('ctfd', {}).get('password'), '')
             self.assertFalse(got.get('proxmox', {}).get('saved'))
             self.assertFalse(got.get('ctfd', {}).get('saved'))
 
