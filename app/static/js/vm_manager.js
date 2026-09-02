@@ -2199,6 +2199,7 @@ function emitActionLogs(actionName, resp) {
     const unchanged = Array.isArray(resp?.unchanged) ? resp.unchanged : [];
     const pushed = Array.isArray(resp?.pushed) ? resp.pushed : [];
     const pulled = Array.isArray(resp?.pulled) ? resp.pulled : [];
+    const removedGuestPaths = Array.isArray(resp?.removed_guest_paths) ? resp.removed_guest_paths : [];
     if (created.length) created.forEach(i => {
       try { shell.logSuccess(`${name}: created ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''} ${i?.node ? `on ${i.node}` : ''}`); } catch { }
       try {
@@ -2218,6 +2219,7 @@ function emitActionLogs(actionName, resp) {
     if (netsCleared.length) netsCleared.forEach(i => { try { shell.logSuccess(`${name}: network removed ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''} ${i?.node ? `on ${i.node}` : ''}`); } catch { } });
     if (pushed.length) pushed.forEach(i => { try { shell.logSuccess(`${name}: pushed ${i?.item_count ?? i?.file_count ?? 0} item(s) to ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}${i?.destination ? ` at ${i.destination}` : ''}`); } catch { } });
     if (pulled.length) pulled.forEach(i => { try { shell.logSuccess(`${name}: pulled ${i?.file_count || 0} file(s) from ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
+    if (removedGuestPaths.length) removedGuestPaths.forEach(i => { try { shell.logSuccess(`${name}: permanently deleted ${i?.selection_type || 'path'} ${i?.path || ''} from ${i?.name || ''} ${i?.vmid ? `(#${i.vmid})` : ''}`); } catch { } });
     if (createdUsers.length) createdUsers.forEach(i => { try { shell.logSuccess(`${name}: user created ${i?.userid || ''}`); } catch { } });
     if (createdPools.length) createdPools.forEach(i => { try { shell.logSuccess(`${name}: pool created ${i?.pool || ''}${i?.index ? ` (instance ${i.index})` : ''}`); } catch { } });
     if (addedMembers.length) addedMembers.forEach(i => {
@@ -3600,10 +3602,10 @@ async function guestTransferAuthPayload(pid, targets) {
 }
 
 function mergeGuestTransferResponses(responses) {
-  const merged = { pushed: [], pulled: [], skipped: [], errors: [], outputs_zips: [] };
+  const merged = { pushed: [], pulled: [], removed_guest_paths: [], skipped: [], errors: [], outputs_zips: [] };
   (responses || []).forEach(({ project, response }) => {
     const projectName = project?.name || project?.id || '';
-    ['pushed', 'pulled', 'skipped', 'errors'].forEach(key => {
+    ['pushed', 'pulled', 'removed_guest_paths', 'skipped', 'errors'].forEach(key => {
       const items = Array.isArray(response?.[key]) ? response[key] : [];
       items.forEach(item => merged[key].push({ ...(item || {}), project: projectName }));
     });
@@ -3687,12 +3689,13 @@ async function ensureGuestTransferProjects(groups) {
   if (projects.length) ALL_PROJECTS = projects;
 }
 
-async function executePersistedGuestTransfer(descriptor) {
+async function executePersistedGuestTransfer(descriptor, runtimePayload = null) {
   const kind = String(descriptor?.kind || '').toLowerCase();
   const groups = Array.isArray(descriptor?.groups) ? descriptor.groups : [];
   await ensureGuestTransferProjects(groups);
   const grouped = deserializeGuestTransferGroups(groups);
-  const label = String(descriptor?.label || (kind === 'push' ? 'Push Files' : 'Pull Files'));
+  const defaultLabel = kind === 'push' ? 'Push Files' : (kind === 'delete' ? 'Delete Guest Path' : 'Pull Files');
+  const label = String(descriptor?.label || defaultLabel);
   if (kind === 'pull') {
     const rawPaths = String(descriptor?.paths || '');
     return runGuestTransfer(label, async (pid, targets, auth) => {
@@ -3703,12 +3706,42 @@ async function executePersistedGuestTransfer(descriptor) {
       });
     }, grouped);
   }
+  if (kind === 'delete') {
+    const path = String(descriptor?.path || '').trim().replace(/\\/g, '/');
+    const selectionType = descriptor?.selectionType === 'folder' ? 'folder' : 'file';
+    if (!path.startsWith('/') || path.replace(/\//g, '') === '') {
+      throw new Error('The queued delete path must be an absolute guest file or folder path');
+    }
+    if (descriptor?.confirmed !== true) {
+      throw new Error('Guest file deletion requires irreversible-action confirmation');
+    }
+    return runGuestTransfer(label, async (pid, targets, auth) => {
+      return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_delete`, {
+        ...auth,
+        targets,
+        path,
+        selectionType,
+        confirmed: true,
+      });
+    }, grouped);
+  }
   if (kind !== 'push') throw new Error(`Unsupported persisted guest transfer: ${kind || '(missing)'}`);
   if (!window.PersistentQueuePayloads) throw new Error('Persistent upload storage is unavailable');
   const payloadId = String(descriptor?.payloadId || '');
-  const payload = await window.PersistentQueuePayloads.get(payloadId);
+  // Prefer the original in-memory File objects for a newly submitted upload.
+  // Safari can restore the surrounding IndexedDB record while failing to
+  // serialize its restored Blob/File values as multipart file parts. The
+  // durable payload remains the fallback after a page reload.
+  const payload = runtimePayload || await window.PersistentQueuePayloads.get(payloadId);
   if (!payload || !Array.isArray(payload.files) || !payload.files.length) {
     throw new Error('The queued upload files are no longer available in browser storage');
+  }
+  // Keep the destination with the persisted file payload as well as the
+  // queue descriptor. This prevents a restored queue entry from submitting
+  // an empty destination if its descriptor was saved incompletely.
+  const destination = String(payload.destination || descriptor?.destination || '').trim().replace(/\\/g, '/');
+  if (!destination.startsWith('/')) {
+    throw new Error('The queued upload destination must be an absolute guest directory');
   }
   try {
     return await runGuestTransfer(label, async (pid, targets, auth) => {
@@ -3716,16 +3749,35 @@ async function executePersistedGuestTransfer(descriptor) {
       form.append('payload', JSON.stringify({
         ...auth,
         targets,
-        destination: descriptor.destination,
+        destination,
         relativePaths: descriptor.relativePaths,
         selectionType: descriptor.selectionType,
       }));
+      // Send the destination as a dedicated multipart field as well. This
+      // keeps it intact even when a queued folder upload is restored from
+      // browser storage with an older or incomplete JSON descriptor.
+      form.append('destination', destination);
       payload.files.forEach(file => {
         const body = file?.blob || file;
         const name = String(file?.name || body?.name || 'upload');
         form.append('files', body, name);
       });
-      return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_push`, form);
+      // Carry the same validated value outside the multipart body so Safari
+      // folder uploads have an independent transport path; the API applies
+      // the same absolute-path validation to either representation.
+      const pushUrl = `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_push?destination=${encodeURIComponent(destination)}`;
+      // Submit FormData directly. This avoids routing it through a shared
+      // helper whose FormData type check is unreliable in some WebKit paths.
+      const response = await fetch(pushUrl, {
+        method: 'POST',
+        body: form,
+        credentials: 'same-origin',
+      });
+      const responseText = await response.text();
+      let responseBody = responseText;
+      try { responseBody = responseText ? JSON.parse(responseText) : {}; } catch { }
+      if (!response.ok) throw new Error(responseText || response.statusText || `HTTP ${response.status}`);
+      return responseBody;
     }, grouped);
   } finally {
     try { await window.PersistentQueuePayloads.remove(payloadId); } catch { }
@@ -3777,6 +3829,21 @@ function openLxcPullModal() {
   if (modal && window.bootstrap) bootstrap.Modal.getOrCreateInstance(modal).show();
 }
 
+function openLxcDeleteModal() {
+  const selected = getSelectedGuestEntries();
+  if (!selected.length) return alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
+  const summary = document.getElementById('lxc-delete-summary');
+  if (summary) summary.textContent = `The selected path will be permanently deleted from ${selected.length} guest${selected.length === 1 ? '' : 's'}.`;
+  const error = document.getElementById('lxc-delete-error');
+  if (error) { error.textContent = ''; error.classList.add('d-none'); }
+  const irreversible = document.getElementById('lxc-delete-confirm-irreversible');
+  if (irreversible) irreversible.checked = false;
+  const confirmButton = document.getElementById('lxc-delete-confirm');
+  if (confirmButton) confirmButton.disabled = true;
+  const modal = document.getElementById('lxcDeleteModal');
+  if (modal && window.bootstrap) bootstrap.Modal.getOrCreateInstance(modal).show();
+}
+
 function wireLxcTransferModals() {
   const updatePushTypeUi = () => {
     const selectionType = document.querySelector('input[name="lxc-push-type"]:checked')?.value === 'folder' ? 'folder' : 'file';
@@ -3795,6 +3862,29 @@ function wireLxcTransferModals() {
     input.addEventListener('change', updatePushTypeUi);
   });
   updatePushTypeUi();
+  const updateDeleteTypeUi = () => {
+    const selectionType = document.querySelector('input[name="lxc-delete-type"]:checked')?.value === 'folder' ? 'folder' : 'file';
+    const label = document.getElementById('lxc-delete-path-label');
+    const input = document.getElementById('lxc-delete-path');
+    const help = document.getElementById('lxc-delete-path-help');
+    if (label) label.textContent = selectionType === 'folder' ? 'Guest folder path' : 'Guest file path';
+    if (input) input.placeholder = selectionType === 'folder' ? '/opt/scenario/folder' : '/opt/scenario/file.txt';
+    if (help) help.textContent = `Enter one absolute, literal ${selectionType} path. Wildcards are not allowed.`;
+  };
+  document.querySelectorAll('input[name="lxc-delete-type"]').forEach(input => {
+    if (input._lxcDeleteTypeBound) return;
+    input._lxcDeleteTypeBound = true;
+    input.addEventListener('change', updateDeleteTypeUi);
+  });
+  updateDeleteTypeUi();
+  const irreversible = document.getElementById('lxc-delete-confirm-irreversible');
+  const deleteButton = document.getElementById('lxc-delete-confirm');
+  if (irreversible && !irreversible._lxcDeleteConfirmBound) {
+    irreversible._lxcDeleteConfirmBound = true;
+    irreversible.addEventListener('change', () => {
+      if (deleteButton) deleteButton.disabled = !irreversible.checked;
+    });
+  }
   const pushButton = document.getElementById('lxc-push-confirm');
   if (pushButton && !pushButton._lxcTransferBound) {
     pushButton._lxcTransferBound = true;
@@ -3814,15 +3904,17 @@ function wireLxcTransferModals() {
       if (!guestCount) return fail('Select at least one existing LXC container or QEMU VM.');
       if (!window.PersistentQueuePayloads) return fail('Persistent queue storage is unavailable in this browser.');
       const payloadId = `guest-push-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const runtimePayload = {
+        destination,
+        files: files.map(file => ({
+          blob: file,
+          name: String(file.name || 'upload'),
+          type: String(file.type || ''),
+          lastModified: Number(file.lastModified) || 0,
+        })),
+      };
       try {
-        await window.PersistentQueuePayloads.put(payloadId, {
-          files: files.map(file => ({
-            blob: file,
-            name: String(file.name || 'upload'),
-            type: String(file.type || ''),
-            lastModified: Number(file.lastModified) || 0,
-          })),
-        });
+        await window.PersistentQueuePayloads.put(payloadId, runtimePayload);
       } catch (storageError) {
         return fail(`Could not save the upload in the persistent queue: ${storageError?.message || storageError}`);
       }
@@ -3839,7 +3931,7 @@ function wireLxcTransferModals() {
         groups,
       };
       const queueResult = await runQueued(`${transferLabel} (${guestCount} guests)`, async () => {
-        await executePersistedGuestTransfer(descriptor);
+        await executePersistedGuestTransfer(descriptor, runtimePayload);
       }, {
         projectId: groups[0]?.pid || PROJ?.id,
         persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
@@ -3866,6 +3958,43 @@ function wireLxcTransferModals() {
       await hideLxcSetupModal(modal);
       const descriptor = { kind: 'pull', label: 'Pull Files', paths: raw, groups };
       await runQueued(`Pull Files (${guestCount} guests)`, async () => {
+        await executePersistedGuestTransfer(descriptor);
+      }, {
+        projectId: groups[0]?.pid || PROJ?.id,
+        persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
+      });
+    });
+  }
+  if (deleteButton && !deleteButton._lxcTransferBound) {
+    deleteButton._lxcTransferBound = true;
+    deleteButton.addEventListener('click', async () => {
+      const selectionType = document.querySelector('input[name="lxc-delete-type"]:checked')?.value === 'folder' ? 'folder' : 'file';
+      const path = String(document.getElementById('lxc-delete-path')?.value || '').trim().replace(/\\/g, '/');
+      const error = document.getElementById('lxc-delete-error');
+      const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
+      if (!path.startsWith('/')) return fail(`Enter an absolute guest ${selectionType} path.`);
+      if (path.replace(/\//g, '') === '') return fail('The guest root directory cannot be deleted.');
+      if (path.includes('*') || path.includes('?') || path.includes('[')) return fail('Wildcards are not allowed in a delete path.');
+      if (!irreversible?.checked) return fail('Confirm that you understand this deletion cannot be undone.');
+      const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
+      const guestCount = groups.reduce((total, group) => total + group.targets.length, 0);
+      if (!guestCount) return fail('Select at least one existing LXC container or QEMU VM.');
+      const finalConfirmation = window.confirm(
+        `Permanently delete ${selectionType} ${path} from ${guestCount} guest${guestCount === 1 ? '' : 's'}? This cannot be undone.`
+      );
+      if (!finalConfirmation) return;
+      const modal = document.getElementById('lxcDeleteModal');
+      await hideLxcSetupModal(modal);
+      const label = selectionType === 'folder' ? 'Delete Guest Folder' : 'Delete Guest File';
+      const descriptor = {
+        kind: 'delete',
+        label,
+        path,
+        selectionType,
+        confirmed: true,
+        groups,
+      };
+      await runQueued(`${label} (${guestCount} guests)`, async () => {
         await executePersistedGuestTransfer(descriptor);
       }, {
         projectId: groups[0]?.pid || PROJ?.id,
@@ -7641,6 +7770,7 @@ function showActionSummary(actionName, resp) {
       : (outputsZipInfo ? [outputsZipInfo] : []);
     const pushed = Array.isArray(resp.pushed) ? resp.pushed : [];
     const pulled = Array.isArray(resp.pulled) ? resp.pulled : [];
+    const removedGuestPaths = Array.isArray(resp.removed_guest_paths) ? resp.removed_guest_paths : [];
 
     const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
     const list = (items, fmt) => items && items.length ? `<ul class="small">${items.map(fmt).join('')}</ul>` : '<div class="text-muted small">None</div>';
@@ -7733,6 +7863,7 @@ function showActionSummary(actionName, resp) {
     if (netsCleared.length) sections.push(`<h6>Network Removed</h6>${list(netsCleared, i => `<li>${netActionIcon('disabled')}${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} ${i.node ? `on ${esc(i.node)}` : ''}</li>`)}`);
     if (pushed.length) sections.push(`<h6>Pushed</h6>${list(pushed, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} — ${esc(i.item_count ?? i.file_count ?? 0)} item(s) to <code>${esc(i.destination || '')}</code></li>`)}`);
     if (pulled.length) sections.push(`<h6>Pulled</h6>${list(pulled, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} — ${esc(i.file_count || 0)} file(s)</li>`)}`);
+    if (removedGuestPaths.length) sections.push(`<h6>Deleted Guest Paths</h6>${list(removedGuestPaths, i => `<li>${esc(i.name)} ${i.vmid ? `(#${esc(i.vmid)})` : ''} — permanently deleted ${esc(i.selection_type || 'path')} <code>${esc(i.path || '')}</code></li>`)}`);
     // Users / Pools sections
     if (createdUsers.length) sections.push(`<h6>Users Created</h6>${list(createdUsers, i => `<li>${esc(i.userid || '')}</li>`)}`);
     if (createdPools.length) sections.push(`<h6>Pools Created</h6>${list(createdPools, i => `<li>${esc(i.pool || '')} ${i.index ? `(instance ${esc(i.index)})` : ''}</li>`)}`);

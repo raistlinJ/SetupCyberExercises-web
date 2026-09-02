@@ -8338,13 +8338,27 @@ def instances_users_access_sync(pid: str):
         'errors': errors,
         'infos': infos,
     })
+
+
+def _proxmox_ssh_username(proj: Project, proxmox_username: Optional[str]) -> str:
+    """Resolve the host SSH user, dropping the Proxmox realm when needed."""
+    explicit = str(getattr(proj, 'proxmox_ssh_user', '') or '').strip()
+    if explicit:
+        return explicit
+    username = str(proxmox_username or '').strip() if isinstance(proxmox_username, str) else ''
+    if '@' in username:
+        username = username.split('@', 1)[0]
+    return username or 'root'
+
+
 def _execute_instance_command(proj, base_url, password, client, m, command_text, timeout_value, return_partial_on_timeout=False):
     import socket
     import shlex
     import time
     from urllib.parse import urlparse
     if m.get('type') == 'lxc':
-        ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
+        ssh_user = _proxmox_ssh_username(proj, getattr(client, 'username', None))
+        use_sudo = ssh_user.lower() != 'root'
         ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
         node_name = m.get('node', '')
         
@@ -8372,7 +8386,13 @@ def _execute_instance_command(proj, base_url, password, client, m, command_text,
         try:
             safe_cmd = shlex.quote(str(command_text))
             pct_cmd = f"timeout {timeout_value} pct exec {m['vmid']} -- sh -c {safe_cmd}"
-            stdin, stdout, stderr = c.exec_command(pct_cmd, timeout=timeout_value + 10)
+            stdout, stderr = _ssh_run_cmd(
+                c,
+                pct_cmd,
+                sudo=use_sudo,
+                sudo_password=password,
+                timeout=timeout_value + 10,
+            )
             
             start = time.time()
             while not stdout.channel.exit_status_ready():
@@ -8598,8 +8618,43 @@ def _normalize_lxc_paths(value: Any) -> List[str]:
     ]
 
 
-def _ssh_exec_result(ssh_client, command: str, timeout: int = 600) -> Tuple[int, bytes, str]:
-    _stdin, stdout, stderr = ssh_client.exec_command(command, timeout=timeout)
+def _guest_delete_command(path: str, selection_type: str) -> str:
+    """Build a checked, literal file or directory removal command for a guest."""
+    quoted = shlex.quote(path)
+    exists = (
+        f"if ! {{ [ -e {quoted} ] || [ -L {quoted} ]; }}; then "
+        f"echo {shlex.quote(f'Guest path does not exist: {path}')} >&2; exit 44; fi"
+    )
+    if selection_type == 'folder':
+        type_check = (
+            f"if [ ! -d {quoted} ] || [ -L {quoted} ]; then "
+            f"echo {shlex.quote(f'Guest path is not a folder: {path}')} >&2; exit 45; fi"
+        )
+        remove = f"rm -rf -- {quoted}"
+    else:
+        type_check = (
+            f"if [ -d {quoted} ] && [ ! -L {quoted} ]; then "
+            f"echo {shlex.quote(f'Guest path is a folder, not a file: {path}')} >&2; exit 45; fi"
+        )
+        remove = f"rm -f -- {quoted}"
+    return f"{exists} && {type_check} && {remove}"
+
+
+def _ssh_exec_result(
+    ssh_client,
+    command: str,
+    timeout: int = 600,
+    *,
+    sudo: bool = False,
+    sudo_password: str = '',
+) -> Tuple[int, bytes, str]:
+    stdout, stderr = _ssh_run_cmd(
+        ssh_client,
+        command,
+        sudo=sudo,
+        sudo_password=sudo_password,
+        timeout=timeout,
+    )
     output = stdout.read()
     error_raw = stderr.read()
     code = stdout.channel.recv_exit_status()
@@ -8848,7 +8903,16 @@ def instances_lxc_push(pid: str):
             raise ValueError('Invalid transfer payload')
     except Exception as exc:
         return jsonify({'error': f'Invalid transfer payload: {exc}'}), 400
-    destination = str(body.get('destination') or '').strip().replace('\\', '/')
+    # The web UI sends this in the multipart field and JSON payload, with the
+    # query string as a Safari/WebKit fallback for folder uploads. Every source
+    # is subjected to the same absolute guest-directory validation below.
+    destination_value = (
+        request.form.get('destination')
+        or body.get('destination')
+        or request.args.get('destination')
+        or ''
+    )
+    destination = str(destination_value).strip().replace('\\', '/')
     if not destination.startswith('/'):
         return jsonify({'error': 'Destination must be an absolute guest directory'}), 400
     destination = posixpath.normpath(destination)
@@ -8954,7 +9018,8 @@ def instances_lxc_push(pid: str):
                     })
                     continue
                 ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
-                ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
+                ssh_user = _proxmox_ssh_username(proj, body.get('username'))
+                use_sudo = ssh_user.lower() != 'root'
                 ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
                 ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
                 # Prepare each destination component so missing parents are
@@ -8968,11 +9033,19 @@ def instances_lxc_push(pid: str):
                 sftp = ssh_client.open_sftp()
                 tar_stream.seek(0)
                 sftp.putfo(tar_stream, remote_archive, file_size=archive_size)
-                command = (
+                pct_command = (
                     f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
                     f"< {shlex.quote(remote_archive)}"
                 )
-                code, _output, stderr_text = _ssh_exec_result(ssh_client, command)
+                # Keep the archive redirection inside the elevated shell. The
+                # SSH channel's stdin remains available for sudo's password.
+                command = f"sh -c {shlex.quote(pct_command)}"
+                code, _output, stderr_text = _ssh_exec_result(
+                    ssh_client,
+                    command,
+                    sudo=use_sudo,
+                    sudo_password=password,
+                )
                 if code != 0:
                     raise RuntimeError(stderr_text or f'pct extract exited with {code}')
                 pushed.append({
@@ -9083,7 +9156,8 @@ def instances_lxc_pull(pid: str):
                         tar_stream.close()
                     continue
                 ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
-                ssh_user = getattr(proj, 'proxmox_ssh_user', '') or 'root'
+                ssh_user = _proxmox_ssh_username(proj, body.get('username'))
+                use_sudo = ssh_user.lower() != 'root'
                 ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
                 ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
                 tar_paths = [path.lstrip('/') or '.' for path in paths]
@@ -9099,7 +9173,13 @@ def instances_lxc_pull(pid: str):
                     f"pct exec {int(entry['vmid'])} -- sh -c "
                     f"{shlex.quote(inner_command)}"
                 )
-                _stdin, stdout, stderr = ssh_client.exec_command(command, timeout=1800)
+                stdout, stderr = _ssh_run_cmd(
+                    ssh_client,
+                    command,
+                    sudo=use_sudo,
+                    sudo_password=password,
+                    timeout=1800,
+                )
                 tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
                 try:
                     while True:
@@ -9156,6 +9236,126 @@ def instances_lxc_pull(pid: str):
     _update_job_detail(pid, progress=100, message='Guest pull completed')
     _end_job(pid)
     return jsonify({'pulled': pulled, 'skipped': skipped, 'errors': errors, 'outputs_zip': outputs_zip})
+
+
+@api_bp.route("/projects/<pid>/instances/actions/guest_delete", methods=["POST"])
+@api_bp.route("/projects/<pid>/instances/actions/lxc_delete", methods=["POST"])
+def instances_guest_delete_files(pid: str):
+    include_qemu = request.path.endswith('/guest_delete')
+    blocked = _block_when_remote('Guest file deletion')
+    if blocked:
+        return blocked
+    try:
+        body = request.get_json(force=True) or {}
+        if not isinstance(body, dict):
+            raise ValueError('Invalid deletion payload')
+        if body.get('confirmed') is not True:
+            raise ValueError('You must confirm that guest file deletion cannot be undone')
+        selection_type = str(body.get('selectionType') or '').strip().lower()
+        if selection_type not in {'file', 'folder'}:
+            raise ValueError('Delete selection type must be file or folder')
+        raw_paths = _path_input_lines(body.get('path'))
+        if len(raw_paths) != 1:
+            raise ValueError('Enter exactly one guest file or folder path')
+        path = _normalize_lxc_paths(raw_paths)[0]
+        if not path.strip('/'):
+            raise ValueError('The guest root directory cannot be deleted')
+        if '\x00' in path or _has_shell_path_pattern(path):
+            raise ValueError('Delete path must be a literal guest file or folder path')
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    try:
+        proj, client, base_url, password, mapped, skipped, errors = _guest_transfer_context(
+            pid,
+            body,
+            include_qemu=include_qemu,
+        )
+    except LookupError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': f'Could not resolve guest targets: {exc}'}), 502
+
+    removed_guest_paths: List[Dict[str, Any]] = []
+    _start_job(pid, 'guest_delete', total_steps=len(mapped))
+    try:
+        total_mapped = max(1, len(mapped))
+        command = _guest_delete_command(path, selection_type)
+        for position, entry in enumerate(mapped, start=1):
+            _update_job_detail(
+                pid,
+                phase='guest_delete',
+                current=str(entry.get('name') or ''),
+                step=position,
+                total_steps=len(mapped),
+                progress=max(1, min(99, int(((position - 1) / total_mapped) * 100))),
+                message=f"Deleting guest {selection_type} from {entry.get('name') or 'guest'} ({position}/{len(mapped)})",
+            )
+            ssh_client = None
+            try:
+                guest_type = str(entry.get('type') or '').strip().lower()
+                if guest_type == 'qemu':
+                    _ensure_linux_qemu_guest(client, entry)
+                    _guest_agent_exec_checked(
+                        client,
+                        entry,
+                        ['/bin/sh', '-c', command],
+                        timeout=600,
+                    )
+                    transfer_method = 'qemu-guest-agent'
+                else:
+                    ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
+                    ssh_user = _proxmox_ssh_username(proj, body.get('username'))
+                    use_sudo = ssh_user.lower() != 'root'
+                    ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
+                    ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
+                    pct_command = (
+                        f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(command)}"
+                    )
+                    code, _output, stderr_text = _ssh_exec_result(
+                        ssh_client,
+                        pct_command,
+                        sudo=use_sudo,
+                        sudo_password=password,
+                    )
+                    if code != 0:
+                        raise RuntimeError(stderr_text or f'pct delete exited with {code}')
+                    transfer_method = 'pct-over-ssh'
+                removed_guest_paths.append({
+                    'index': entry.get('index'),
+                    'name': entry.get('name'),
+                    'vmid': entry.get('vmid'),
+                    'node': entry.get('node'),
+                    'type': guest_type,
+                    'transfer_method': transfer_method,
+                    'path': path,
+                    'selection_type': selection_type,
+                    'irreversible': True,
+                })
+            except Exception as exc:
+                errors.append({
+                    'index': entry.get('index'),
+                    'name': entry.get('name'),
+                    'vmid': entry.get('vmid'),
+                    'node': entry.get('node'),
+                    'reason': f'delete failed: {exc}',
+                })
+            finally:
+                if ssh_client is not None:
+                    try:
+                        ssh_client.close()
+                    except Exception:
+                        pass
+    finally:
+        _update_job_detail(pid, progress=100, message='Guest file deletion completed')
+        _end_job(pid)
+    return jsonify({
+        'removed_guest_paths': removed_guest_paths,
+        'skipped': skipped,
+        'errors': errors,
+    })
 
 
 @api_bp.route("/projects/<pid>/instances/actions/run_startup_cmds", methods=["POST"])
@@ -14323,18 +14523,26 @@ def _ssh_connect(host: str, port: int, user: str, password: str):
     return c
 
 
-def _ssh_run(c, cmd: str):
-    stdin, stdout, stderr = c.exec_command(cmd)
+def _ssh_run(c, cmd: str, *, timeout: Optional[int] = None):
+    stdin, stdout, stderr = c.exec_command(cmd, timeout=timeout)
     return stdout, stderr
 
-def _ssh_run_cmd(c, cmd: str, *, sudo: bool = False, sudo_password: str = ""):
+
+def _ssh_run_cmd(
+    c,
+    cmd: str,
+    *,
+    sudo: bool = False,
+    sudo_password: str = "",
+    timeout: Optional[int] = None,
+):
     """Run a remote command, optionally via sudo using non-interactive password feed.
     Returns (stdout, stderr) file-like objects.
     """
     if not sudo:
-        return _ssh_run(c, cmd)
+        return _ssh_run(c, cmd, timeout=timeout)
     # Use sudo -S to read password from stdin; -p '' suppresses prompt text.
-    stdin, stdout, stderr = c.exec_command(f"sudo -S -p '' {cmd}")
+    stdin, stdout, stderr = c.exec_command(f"sudo -S -p '' {cmd}", timeout=timeout)
     try:
         if sudo_password:
             stdin.write(sudo_password + "\n")

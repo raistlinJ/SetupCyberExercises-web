@@ -58,5 +58,7 @@ def test_guest_transfer_api_publishes_action_status_for_cross_page_tracking():
 
     assert "_start_job(pid, 'guest_push'" in source
     assert "_start_job(pid, 'guest_pull'" in source
+    assert "_start_job(pid, 'guest_delete'" in source
     assert "phase='guest_push'" in source
     assert "phase='guest_pull'" in source
+    assert "phase='guest_delete'" in source

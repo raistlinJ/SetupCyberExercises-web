@@ -262,12 +262,15 @@
               <div class="btn-group btn-group-sm">
                 <button id="act-guest-files" type="button" class="btn btn-outline-secondary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled
-                  title="Push files to or pull files from selected LXC containers and QEMU VMs">Guest Files</button>
+                  title="Push, pull, or delete files in selected LXC containers and QEMU VMs">Guest Files</button>
                 <ul class="dropdown-menu">
                   <li><button class="dropdown-item" type="button" onclick="openLxcPushModal()"
                       title="Upload files or a folder into each selected guest">Push</button></li>
                   <li><button class="dropdown-item" type="button" onclick="openLxcPullModal()"
                       title="Download files or folders from each selected guest">Pull</button></li>
+                  <li><hr class="dropdown-divider"></li>
+                  <li><button class="dropdown-item text-danger" type="button" onclick="openLxcDeleteModal()"
+                      title="Permanently delete a file or folder from each selected guest">Delete</button></li>
                 </ul>
               </div>
               <!-- Users & Access group -->
@@ -472,6 +475,50 @@
         </div>
       </div>
     </div>
+    <div class="modal fade" id="lxcDeleteModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Delete from Guests</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div id="lxc-delete-summary" class="text-muted small mb-3"></div>
+            <fieldset class="mb-3">
+              <legend class="form-label mb-2">Content type</legend>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="lxc-delete-type" id="lxc-delete-type-file" value="file" checked>
+                <label class="form-check-label" for="lxc-delete-type-file">File</label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="lxc-delete-type" id="lxc-delete-type-folder" value="folder">
+                <label class="form-check-label" for="lxc-delete-type-folder">Folder</label>
+              </div>
+            </fieldset>
+            <div class="mb-3">
+              <label id="lxc-delete-path-label" class="form-label" for="lxc-delete-path">Guest file path</label>
+              <input id="lxc-delete-path" class="form-control font-monospace" type="text"
+                placeholder="/opt/scenario/file.txt" autocomplete="off">
+              <div id="lxc-delete-path-help" class="form-text">Enter one absolute, literal file path. Wildcards are not allowed.</div>
+            </div>
+            <div class="alert alert-danger small py-2" role="alert">
+              This permanently removes the selected path from every selected guest. This cannot be undone.
+            </div>
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" id="lxc-delete-confirm-irreversible">
+              <label class="form-check-label" for="lxc-delete-confirm-irreversible">
+                I understand this cannot be undone.
+              </label>
+            </div>
+            <div id="lxc-delete-error" class="text-danger small d-none" role="alert"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button id="lxc-delete-confirm" type="button" class="btn btn-danger" disabled>Delete Permanently</button>
+          </div>
+        </div>
+      </div>
+    </div>
   <!-- Action Results Modal -->
   <div class="modal fade" id="actionSummaryModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg">
@@ -534,7 +581,7 @@
   <script src="/static/js/app.js?v=20260826b"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/vm_manager.js?v=20260829a"></script>
+  <script src="/static/js/vm_manager.js?v=20260902e"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">

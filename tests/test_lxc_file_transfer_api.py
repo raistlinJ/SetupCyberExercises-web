@@ -8,6 +8,7 @@ import zipfile
 from unittest.mock import MagicMock, patch
 
 from app import create_app
+from app.routes.api import _proxmox_ssh_username
 from app.storage.projects import Project, VMConfig
 
 
@@ -92,7 +93,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
         )
         self.target_name = 'alpha-lab-1'
         self.payload = {
-            'username': 'root@pam',
+            'username': 'jcacosta@pam',
             'password': 'secret',
             'baseUrl': self.project.proxmox_url,
             'targets': [{'index': 1, 'name': self.target_name}],
@@ -107,11 +108,18 @@ class LxcFileTransferApiTests(unittest.TestCase):
             'type': vm_type,
         }]
 
+    def test_proxmox_ssh_username_strips_realm_and_honors_override(self):
+        self.assertEqual(_proxmox_ssh_username(self.project, 'jcacosta@pam'), 'jcacosta')
+        self.project.proxmox_ssh_user = 'automation'
+        self.assertEqual(_proxmox_ssh_username(self.project, 'jcacosta@pam'), 'automation')
+        self.project.proxmox_ssh_user = ''
+        self.assertEqual(_proxmox_ssh_username(self.project, None), 'root')
+
     def test_push_preserves_folder_paths_and_reports_success(self):
         ssh = _Ssh()
         payload = {
             **self.payload,
-            'destination': '/opt/scenario files',
+            'destination': '/opt/new/parent/scenario files',
             'relativePaths': ['bundle/a.txt', 'bundle/nested/b.txt'],
             'selectionType': 'folder',
         }
@@ -119,7 +127,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
                 patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
                 patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped(), [], [])), \
                 patch('app.routes.api.ProxmoxClient'), \
-                patch('app.routes.api._ssh_connect', return_value=ssh):
+                patch('app.routes.api._ssh_connect', return_value=ssh) as ssh_connect:
             response = self.client.post(
                 f'/api/projects/{self.project.id}/instances/actions/lxc_push',
                 data={
@@ -138,18 +146,77 @@ class LxcFileTransferApiTests(unittest.TestCase):
         self.assertEqual(body['pushed'][0]['file_count'], 2)
         self.assertEqual(body['pushed'][0]['selection_type'], 'folder')
         self.assertFalse(body['errors'])
+        ssh_connect.assert_called_once_with('node1', 22, 'jcacosta', 'secret')
+        self.assertTrue(ssh.commands[0].startswith("sudo -S -p '' sh -c "))
         self.assertIn('pct exec 101', ssh.commands[0])
-        self.assertIn('/opt/scenario files', ssh.commands[0])
+        self.assertIn('/opt/new/parent/scenario files', ssh.commands[0])
         uploaded = next(iter(ssh.sftp.uploads.values()))
         with tarfile.open(fileobj=io.BytesIO(uploaded), mode='r:') as archive:
             self.assertEqual(archive.getnames(), ['bundle', 'bundle/nested', 'bundle/a.txt', 'bundle/nested/b.txt'])
             self.assertEqual(archive.extractfile('bundle/a.txt').read(), b'alpha')
         self.assertIn('mkdir -p', ssh.commands[0])
         self.assertIn('rm -rf', ssh.commands[0])
-        self.assertIn('/opt/scenario files', ssh.commands[0])
+        self.assertIn('mkdir -p -- /opt/new', ssh.commands[0])
+        self.assertIn('mkdir -p -- /opt/new/parent', ssh.commands[0])
+        self.assertIn('/opt/new/parent/scenario files', ssh.commands[0])
         self.assertIn('tar --overwrite -xpf', ssh.commands[0])
         self.assertEqual(len(ssh.sftp.removed), 1)
         self.assertTrue(ssh.closed)
+
+    def test_folder_push_accepts_dedicated_multipart_destination(self):
+        ssh = _Ssh()
+        payload = {
+            **self.payload,
+            'relativePaths': ['bundle/a.txt'],
+            'selectionType': 'folder',
+        }
+        with patch('app.routes.api._block_when_remote', return_value=None), \
+                patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped(), [], [])), \
+                patch('app.routes.api.ProxmoxClient'), \
+                patch('app.routes.api._ssh_connect', return_value=ssh):
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/lxc_push',
+                data={
+                    'payload': json.dumps(payload),
+                    'destination': '/srv/new/folder',
+                    'files': (io.BytesIO(b'alpha'), 'a.txt'),
+                },
+                content_type='multipart/form-data',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertFalse(body['errors'])
+        self.assertEqual(body['pushed'][0]['destination'], '/srv/new/folder')
+        self.assertIn('/srv/new/folder', ssh.commands[0])
+
+    def test_folder_push_accepts_safari_query_destination_fallback(self):
+        ssh = _Ssh()
+        payload = {
+            **self.payload,
+            'relativePaths': ['bundle/a.txt'],
+            'selectionType': 'folder',
+        }
+        with patch('app.routes.api._block_when_remote', return_value=None), \
+                patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped(), [], [])), \
+                patch('app.routes.api.ProxmoxClient'), \
+                patch('app.routes.api._ssh_connect', return_value=ssh):
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/lxc_push?destination=%2Fsrv%2Fsafari%20folder',
+                data={
+                    'payload': json.dumps(payload),
+                    'files': (io.BytesIO(b'alpha'), 'a.txt'),
+                },
+                content_type='multipart/form-data',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertFalse(body['errors'])
+        self.assertEqual(body['pushed'][0]['destination'], '/srv/safari folder')
+        self.assertIn('/srv/safari folder', ssh.commands[0])
 
     def test_push_rejects_relative_destination_and_path_traversal(self):
         for destination, relative_path, expected in [
@@ -234,7 +301,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
                 patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
                 patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped(), [], [])), \
                 patch('app.routes.api.ProxmoxClient'), \
-                patch('app.routes.api._ssh_connect', return_value=ssh):
+                patch('app.routes.api._ssh_connect', return_value=ssh) as ssh_connect:
             response = self.client.post(
                 f'/api/projects/{self.project.id}/instances/actions/lxc_pull',
                 json={**self.payload, 'paths': '/etc/hosts\n/var/log/app'},
@@ -244,6 +311,8 @@ class LxcFileTransferApiTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(len(body['pulled']), 1)
         self.assertEqual(body['pulled'][0]['file_count'], 2)
+        ssh_connect.assert_called_once_with('node1', 22, 'jcacosta', 'secret')
+        self.assertTrue(ssh.commands[0].startswith("sudo -S -p '' pct exec 101"))
         archive_bytes = base64.b64decode(body['outputs_zip']['base64'])
         with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
             names = set(archive.namelist())
@@ -361,6 +430,81 @@ class LxcFileTransferApiTests(unittest.TestCase):
         body = response.get_json()
         self.assertFalse(body['pushed'])
         self.assertIn('supports Linux guests only', body['errors'][0]['reason'])
+
+    def test_delete_file_uses_realm_stripped_ssh_user_and_sudo_pct(self):
+        ssh = _Ssh()
+        with patch('app.routes.api._block_when_remote', return_value=None), \
+                patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped(), [], [])), \
+                patch('app.routes.api.ProxmoxClient'), \
+                patch('app.routes.api._ssh_connect', return_value=ssh) as ssh_connect:
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/guest_delete',
+                json={
+                    **self.payload,
+                    'path': '/opt/scenario old/file.txt',
+                    'selectionType': 'file',
+                    'confirmed': True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertFalse(body['errors'])
+        self.assertEqual(body['removed_guest_paths'][0]['path'], '/opt/scenario old/file.txt')
+        self.assertEqual(body['removed_guest_paths'][0]['selection_type'], 'file')
+        ssh_connect.assert_called_once_with('node1', 22, 'jcacosta', 'secret')
+        self.assertTrue(ssh.commands[0].startswith("sudo -S -p '' pct exec 101"))
+        self.assertIn('rm -f --', ssh.commands[0])
+        self.assertIn('/opt/scenario old/file.txt', ssh.commands[0])
+        self.assertNotIn('rm -rf', ssh.commands[0])
+
+    def test_delete_folder_uses_qemu_guest_agent(self):
+        prox = MagicMock()
+        prox.get_qemu_config.return_value = {'ostype': 'l26'}
+        prox.agent_exec.return_value = {'exitcode': 0, 'stdout': '', 'stderr': ''}
+        self.project.proxmox_api_token = 'token-id=secret'
+        with patch('app.routes.api._block_when_remote', return_value=None), \
+                patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped('qemu'), [], [])), \
+                patch('app.routes.api.ProxmoxClient', return_value=prox), \
+                patch('app.routes.api._ssh_connect') as ssh_connect:
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/guest_delete',
+                json={
+                    'baseUrl': self.project.proxmox_url,
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                    'path': '/opt/old-folder',
+                    'selectionType': 'folder',
+                    'confirmed': True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertFalse(body['errors'])
+        self.assertEqual(body['removed_guest_paths'][0]['type'], 'qemu')
+        command = prox.agent_exec.call_args.kwargs['command'][-1]
+        self.assertIn('rm -rf -- /opt/old-folder', command)
+        self.assertIn('Guest path is not a folder', command)
+        ssh_connect.assert_not_called()
+
+    def test_delete_rejects_unconfirmed_or_unsafe_paths(self):
+        cases = [
+            ({'path': '/tmp/file', 'selectionType': 'file'}, 'cannot be undone'),
+            ({'path': '/', 'selectionType': 'folder', 'confirmed': True}, 'root directory'),
+            ({'path': 'tmp/file', 'selectionType': 'file', 'confirmed': True}, 'must be absolute'),
+            ({'path': '/tmp/*.log', 'selectionType': 'file', 'confirmed': True}, 'literal'),
+            ({'path': '/tmp/a\n/tmp/b', 'selectionType': 'file', 'confirmed': True}, 'exactly one'),
+        ]
+        for values, expected in cases:
+            with self.subTest(values=values), patch('app.routes.api._block_when_remote', return_value=None):
+                response = self.client.post(
+                    f'/api/projects/{self.project.id}/instances/actions/guest_delete',
+                    json={**self.payload, **values},
+                )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn(expected, response.get_json()['error'])
 
     def test_pull_expands_one_wildcard_pattern_per_line_and_quotes_literals(self):
         ssh = _Ssh(stdout=_tar_bytes({
