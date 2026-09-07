@@ -9,6 +9,21 @@ DeployForge is a Dockerized web UI for configuring CTF/scenario “Projects” a
 - Run Proxmox actions (create/refresh/restore, VM manager UI)
 - Manage CTFd settings and challenge visibility (with token-first auth)
 
+Queued actions run on the server in submission order. Once an upload or action
+has been accepted, switching pages, refreshing, closing the tab, or signing out
+does not stop it. The Queue dock reconnects to your running, waiting, and recent
+completed actions on every manager page. Complete VM, guest-transfer, wizard,
+and CTFd bulk plans are submitted together, including their follow-up steps.
+
+The queue uses `DATA_DIR/action_queue.sqlite3`; no separate worker service is
+required. WSGI workers share the scheduler through SQLite. Cancellation removes
+waiting work and asks running operations to stop at their next cancellation
+check. A server process must remain running to execute work. Interrupted running
+actions are marked failed when their worker process disappears and are never
+automatically replayed. Submitted request credentials and uploaded queue payloads
+are cleared after completion. Direct API clients retain the existing synchronous
+endpoints; the web UI submits work through `/api/queue`.
+
 ## Quick start (Docker)
 
 Prereqs: Docker + Docker Compose.
@@ -147,4 +162,3 @@ Challenges popup — Bulk visibility update
 ![Bulk Visibility Update](images/ctfd_challenges_bulk_visibility.svg)
 
 Tip: Replace the placeholder SVGs with real screenshots (keep filenames). PNGs work too if you update the links.
-

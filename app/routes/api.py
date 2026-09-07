@@ -1483,6 +1483,11 @@ def _start_job(pid: str, name: str, total_steps: Optional[int] = None):
         'detail': {},
         'cancel': False,
     }
+    # The persistent scheduler supplies a probe usable by endpoint pool threads
+    # and by cancellation requests arriving in a different WSGI process.
+    from flask import g, has_request_context
+    if has_request_context():
+        rec['queue_cancelled'] = getattr(g, 'action_queue_cancelled', None)
     with _JOB_LOCK:
         _ACTIVE_JOBS[_job_key(pid)] = rec
 
@@ -1516,7 +1521,9 @@ def _cancel_job(pid: str):
 def _is_cancelled(pid: str) -> bool:
     with _JOB_LOCK:
         rec = _ACTIVE_JOBS.get(_job_key(pid))
-        return bool(rec and rec.get('cancel'))
+        cancelled = bool(rec and rec.get('cancel'))
+        probe = rec.get('queue_cancelled') if rec else None
+    return cancelled or bool(probe and probe())
 
 
 def _format_vm_label(entry: Any) -> str:

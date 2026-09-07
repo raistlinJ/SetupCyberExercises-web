@@ -1002,7 +1002,7 @@ function queueRemoteAction(label, fn, options) {
   const lockProject = opts.lockProject !== undefined ? !!opts.lockProject : exclusive;
   const dedupeWhileActive = !!opts.dedupeWhileActive;
   const restoredId = _remoteQueue_savedId(opts.id);
-  const taskId = restoredId || (++REMOTE_ACTION_SEQ);
+  const taskId = restoredId || (window.ServerQueue ? -(++REMOTE_ACTION_SEQ) : (++REMOTE_ACTION_SEQ));
   if (restoredId) REMOTE_ACTION_SEQ = Math.max(REMOTE_ACTION_SEQ, restoredId);
   const createdAt = Number(opts.createdAt);
   const task = {
@@ -1029,6 +1029,7 @@ function queueRemoteAction(label, fn, options) {
 }
 
 function runQueued(label, fn, options){
+  if (window.ServerQueue) return window.ServerQueue.run(label, fn, options);
   const opts = options || {};
   return new Promise((resolve) => {
     const entry = queueRemoteAction(label, async () => {
@@ -1061,6 +1062,7 @@ function _remoteQueue_cleanupPersistedTask(entry){
 }
 
 function cancelRemoteAction(id) {
+  if (window.ServerQueue && Number(id) > 0) return window.ServerQueue.cancel(id);
   const targetId = Number(id);
   if (!Number.isFinite(targetId)) return false;
   // Pending entries
@@ -1096,6 +1098,7 @@ function cancelRemoteAction(id) {
   for (const entry of REMOTE_ACTIVE_ENTRIES) {
     if (entry && entry.id === targetId) {
       entry.cancelRequested = true;
+      if (entry.serverId) window.ServerQueue?.cancel(entry.serverId);
       try { entry.onCancel && entry.onCancel(); } catch {}
       _remoteQueue_emit();
       _remoteQueue_saveState();
@@ -1107,6 +1110,7 @@ function cancelRemoteAction(id) {
 
 function _remoteQueue_canStart(entry){
   if (!entry) return false;
+  if (window.ServerQueue) return true;
   if (entry.lockProject !== false) {
     const pid = entry.projectId;
     if (pid && REMOTE_PROJECT_LOCKS.has(pid)) return false;
@@ -1131,7 +1135,13 @@ function _remoteQueue_start(task){
   _remoteQueue_saveState();
   const fn = typeof task.fn === 'function' ? task.fn : async () => {};
   Promise.resolve()
-    .then(() => fn())
+    .then(() => window.ServerQueue ? window.ServerQueue.run(label, fn, {
+      projectId: task.projectId,
+      onAccepted: job => {
+        task.serverId = job.id;
+        if (task.cancelRequested) window.ServerQueue.cancel(job.id);
+      },
+    }) : fn())
     .then(() => {
       try { logSuccess ? logSuccess(`[QUEUE] Finished: ${label}`) : console.log('[QUEUE] Finished:', label); } catch {}
       const resolvedStatus = task.cancelRequested ? 'cancelled' : 'completed';
@@ -1217,6 +1227,7 @@ function _remoteQueue_emit(){
 }
 
 function getRemoteQueueState(){
+  if (window.ServerQueue) return window.ServerQueue.state();
   try {
     const restoredEntries = _remoteQueue_backlogEntries();
     const activeItems = REMOTE_ACTIVE_ENTRIES.map(it => it ? ({
@@ -1282,6 +1293,7 @@ function getRemoteQueueState(){
 }
 
 function clearCompletedRemoteActions(){
+  if (window.ServerQueue) return window.ServerQueue.clearCompleted();
   if (!REMOTE_COMPLETED_ITEMS.length) return;
   REMOTE_COMPLETED_ITEMS.length = 0;
   _remoteQueue_saveState();
@@ -1915,6 +1927,7 @@ const ConsoleDock = (() => {
                   + `${modeMeta}`
                   + `${queuedMeta}`
                   + `${startedMeta}`
+                  + (entry.server && entry.totalSteps ? `<div class="queue-meta">Step ${entry.step} of ${entry.totalSteps}</div>` : '')
                   + `${restoringNote}`
                   + `${progressMeta}`
                   + `${progressHint}`
@@ -1997,6 +2010,7 @@ const ConsoleDock = (() => {
                   + `${finishedMeta}`
                   + `${cancelMeta}`
                   + `${errorMeta}`
+                  + (item.server ? `<a class="btn btn-sm btn-outline-secondary ms-auto" href="/api/queue/${item.id}/result" target="_blank" rel="noopener">View results</a>` : '')
                   + `</li>`;
               }).join('')
             + `</ol>`
@@ -2007,7 +2021,10 @@ const ConsoleDock = (() => {
     }
     html += '</div>';
     body.innerHTML = html;
-    const btn = body.querySelector('[data-act="q-refresh"]'); if (btn) btn.addEventListener('click', renderQueue);
+    const btn = body.querySelector('[data-act="q-refresh"]'); if (btn) btn.addEventListener('click', () => {
+      if (window.ServerQueue) window.ServerQueue.refresh().catch(() => {});
+      else renderQueue();
+    });
     body.querySelectorAll('[data-act="q-cancel"]').forEach(cancelBtn => {
       cancelBtn.addEventListener('click', () => {
         const id = Number(cancelBtn.getAttribute('data-id'));
@@ -2257,6 +2274,7 @@ restoreActionProgressState();
 _remoteQueue_restoreFromStorage();
 
 window.addEventListener('beforeunload', (ev) => {
+  if (window.ServerQueue) return;
   try {
     const store = _remoteQueue_storage();
     if (store) {

@@ -593,6 +593,8 @@ def create_app():
     # Register blueprints
     from .routes.api import api_bp
     app.register_blueprint(api_bp, url_prefix="/api")
+    from .action_queue import init_action_queue
+    init_action_queue(app)
 
     @app.route("/")
     def index():

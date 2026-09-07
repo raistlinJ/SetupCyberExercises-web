@@ -19,6 +19,8 @@ def test_every_queue_page_loads_cross_page_persistence_after_shell():
         shell_at = source.index("/static/js/shell.js")
         persistence_at = source.index("/static/js/queue_persistence.js")
         assert persistence_at > shell_at, f"{name} must load queue persistence after shell.js"
+        server_at = source.index("/static/js/server_queue.js")
+        assert shell_at < server_at < persistence_at
 
 
 def test_shell_keeps_unclaimed_restored_tasks_and_progress_state():

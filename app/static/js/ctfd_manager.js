@@ -6482,6 +6482,10 @@ async function ctfdActionMulti(kind) {
   }
   // Show indicator for skipped ones but continue for valid
   if (invalidSet.size) ctfdRenderSkippedIndicator(Array.from(invalidSet), 'missing credentials or configuration'); else ctfdRenderSkippedIndicator([], '');
+  if (window.ServerQueue) {
+    try { return await submitServerCtfdBulk(kind, targets); }
+    catch (error) { showActionSummary('CTFd bulk action failed', `<p class="text-danger">${escHtml(error.message || error)}</p>`); return; }
+  }
   // Begin action context and modal
   let title = '';
   if (kind === 'users_create') title = 'CTFd Users Create (Multi)';

@@ -4972,6 +4972,10 @@ window.submitProjectCreation = async function(mode) {
 
   try {
     if (mode === 'wizard') {
+      if (window.ServerQueue) {
+        await submitServerWizard(payload, wizardRunOptions, { vmUser, vmPass, vmUrl, ctfdToken });
+        return;
+      }
       wizardUpdateRunItem('project-create', { status: 'running', progress: 15, detail: 'Sending create request...' });
     }
     try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: creating project \"${name}\"…`) : console.log('Creating project', name); } catch { }
@@ -8666,6 +8670,18 @@ function _ensureHttpsUrl(raw) {
 }
 
 function _xhrPostFormData(url, formData, { onProgress } = {}) {
+  if (window.ServerQueue) {
+    return ServerQueue.fetch(url, { method: 'POST', body: formData }, () => onProgress?.(100))
+      .then(async response => {
+        const text = await response.text();
+        let body;
+        try { body = JSON.parse(text); } catch { body = text; }
+        if (!response.ok) {
+          throw Object.assign(new Error(body?.error || text || `HTTP ${response.status}`), { status: response.status, body });
+        }
+        return body;
+      });
+  }
   return new Promise((resolve, reject) => {
     try {
       const xhr = new XMLHttpRequest();
@@ -9181,7 +9197,7 @@ async function startExportJob(pid, opts) {
     const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/export/start`, body);
     if (!resp || !resp.job) throw new Error('No job id returned');
     const modalEl = document.getElementById('exportProgressModal');
-    if (!modalEl || !window.bootstrap) { alert('Export started. Keep this page open.'); return; }
+    if (!modalEl || !window.bootstrap) { alert('Export submitted. You can track it in the Queue.'); return; }
     const bar = document.getElementById('exp-prog-bar');
     const stat = document.getElementById('exp-status');
     const log = document.getElementById('exp-log');

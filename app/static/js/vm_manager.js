@@ -3935,6 +3935,7 @@ function wireLxcTransferModals() {
       }, {
         projectId: groups[0]?.pid || PROJ?.id,
         persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
+        runtimePayload,
       });
       if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
         try { await window.PersistentQueuePayloads.remove(payloadId); } catch { }
