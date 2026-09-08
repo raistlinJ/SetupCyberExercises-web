@@ -1,9 +1,11 @@
 import tempfile
 import unittest
 import os
-from unittest.mock import patch
+from copy import deepcopy
+from unittest.mock import Mock, patch
 
 from app import create_app
+from app.routes import api
 from app.storage.projects import Project, VMConfig
 
 
@@ -117,6 +119,114 @@ class VmRefreshPoolMembershipApiTests(unittest.TestCase):
         self.assertTrue(all('qemu_agent_validation_state' in (entry or {}) for entry in details))
         self.assertTrue(all('validation_commands_configured' in (entry or {}) for entry in details))
         self.assertTrue(all((entry or {}).get('validation_commands_configured') is False for entry in details))
+
+    def test_incomplete_guest_inventory_preserves_previous_snapshot(self):
+        self.project.instance_statuses = [{
+            'index': 1, 'status': 'created',
+            'vm_details': [{'name': 'web-set-1', 'node': 'node1', 'vmid': 201,
+                            'type': 'lxc', 'state': 'running'}],
+        }]
+        original = deepcopy(self.project.instance_statuses)
+        # Cover partial guest types and a failed node alongside a healthy node.
+        for failed_kind in ('lxc', 'qemu', 'node'):
+            with self.subTest(failed_kind=failed_kind):
+                class IncompleteClient(_ClientStub):
+                    def list_nodes(self):
+                        return [{'node': 'node1'}, {'node': 'node2'}]
+
+                    def list_qemu_vms(self, node):
+                        if node == 'node1' and failed_kind in ('qemu', 'node'):
+                            raise TimeoutError('inventory timed out')
+                        return super().list_qemu_vms(node)
+
+                    def list_lxc_vms(self, node):
+                        if node == 'node1' and failed_kind in ('lxc', 'node'):
+                            raise TimeoutError('inventory timed out')
+                        return [{'vmid': 201, 'name': 'web-set-1', 'status': 'running'}]
+
+                store = _StoreStub(self.project)
+                store.upsert = Mock(wraps=store.upsert)
+                with patch('app.routes.api._store', return_value=store), \
+                        patch('app.routes.api.ProxmoxClient', IncompleteClient):
+                    resp = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+                self.assertEqual(resp.status_code, 502)
+                error = resp.get_json()['error']
+                self.assertIn('node1', error)
+                self.assertIn('LXC' if failed_kind == 'lxc' else 'QEMU', error)
+                self.assertIn('previous inventory retained', error)
+                store.upsert.assert_not_called()
+                self.assertEqual(self.project.instance_statuses, original)
+
+    def test_successful_lxc_inventory_recovers_missing_containers_and_detects_removal(self):
+        self.project.vms = [VMConfig(name='web'), VMConfig(name='db')]
+        self.project.instance_statuses = [{'index': 1, 'vm_details': [], 'status': 'missing'}]
+        guests = [{'vmid': 201, 'hostname': 'web-set-1', 'status': 'running'}]
+
+        class MixedClient(_ClientStub):
+            def list_qemu_vms(self, node):
+                return [{'vmid': 102, 'name': 'db-set-1', 'status': 'stopped'}]
+
+            def list_lxc_vms(self, node):
+                return list(guests)
+
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', MixedClient), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}):
+            resp = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+            self.assertEqual(resp.status_code, 200)
+            details = resp.get_json()['instance_statuses'][0]['vm_details']
+            self.assertEqual({d['type'] for d in details}, {'qemu', 'lxc'})
+            container = next(d for d in details if d['type'] == 'lxc')
+            self.assertEqual(container['name'], 'web-set-1')
+            self.assertEqual(container['state'], 'running')
+            # A successful empty LXC scan still detects actual removals.
+            guests.clear()
+            resp = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+            self.assertEqual(resp.status_code, 200)
+            details = resp.get_json()['instance_statuses'][0]['vm_details']
+            self.assertEqual([d['type'] for d in details], ['qemu'])
+
+    def test_refresh_does_not_replace_running_action_progress_or_cancellation(self):
+        pid = self.project.id
+        api._start_job(pid, 'create')
+        api._update_job_detail(pid, progress=42, message='Cloning VMs')
+        report = Mock()
+        action = api._ACTIVE_JOBS[api._job_key(pid)]
+        action['queue_progress'] = report
+        action['queue_cancelled'] = lambda: False
+        original = dict(action)
+        testcase = self
+
+        class InspectingClient(_ClientStub):
+            def list_nodes(self):
+                # Check both records while the inventory refresh is running.
+                client = testcase.app.test_client()
+                status = client.get(f'/api/projects/{pid}/instances/actions/status').get_json()
+                refresh = client.get(f'/api/projects/{pid}/instances/actions/status?scope=refresh').get_json()
+                testcase.assertEqual(status['action'], 'create')
+                testcase.assertEqual(status['progress'], 42)
+                testcase.assertEqual(refresh['action'], 'refresh_vm')
+                testcase.assertEqual(refresh['phase'], 'inventory')
+                return super().list_nodes()
+
+        try:
+            with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                    patch('app.routes.api.ProxmoxClient', InspectingClient), \
+                    patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}):
+                response = self.client.post(f'/api/projects/{pid}/instances/refresh/vm', json={})
+            self.assertEqual(response.status_code, 200)
+            self.assertIs(api._ACTIVE_JOBS[api._job_key(pid)], action)
+            self.assertEqual(action, original)
+            report.assert_not_called()
+            api._update_job_detail(pid, progress=60)
+            report.assert_called_once_with({'progress': 60})
+            api._cancel_job(pid)
+            self.assertTrue(api._is_cancelled(pid))
+            self.assertEqual(api._ACTIVE_JOBS[api._refresh_job_key(pid)]['status'], 'completed')
+        finally:
+            with api._JOB_LOCK:
+                api._ACTIVE_JOBS.pop(api._job_key(pid), None)
+                api._ACTIVE_JOBS.pop(api._refresh_job_key(pid), None)
 
     def test_refresh_uses_qemu_list_agent_hint_when_config_has_no_agent_field(self):
         class _ClientWithAgentHint(_ClientStub):

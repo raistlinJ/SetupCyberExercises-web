@@ -120,7 +120,11 @@ async function submitServerGuestTransfer(label, descriptor, queueOptions) {
       const destination = String(payload.destination || descriptor.destination || '').trim().replace(/\\/g, '/');
       if (!destination.startsWith('/')) throw new Error('The upload destination must be an absolute guest directory');
       const form = new FormData();
-      form.append('payload', JSON.stringify({ ...body, destination, relativePaths: descriptor.relativePaths, selectionType: descriptor.selectionType }));
+      form.append('payload', JSON.stringify({
+        ...body, destination, relativePaths: descriptor.relativePaths, selectionType: descriptor.selectionType,
+        ownerOnRemote: payload.ownerOnRemote ?? descriptor.ownerOnRemote ?? '',
+        filePermissions: payload.filePermissions ?? descriptor.filePermissions ?? '',
+      }));
       form.append('destination', destination);
       payload.files.forEach(file => form.append('files', file.blob || file, file.name || 'upload'));
       steps.push(ServerQueue.requestStep(url + `?destination=${encodeURIComponent(destination)}`, { method: 'POST', body: form }, files));

@@ -781,7 +781,7 @@ def _write_project_audio_to_zip(zf: zipfile.ZipFile, proj: Project, *, include_p
         "events": [],
     }
     total_written = 0
-    for idx, (raw_key, entry) in enumerate(audio.items(), start=1):
+    for idx, (raw_key, entry) in enumerate(_job_items(proj.id, list(audio.items()), 'archive', 'Packing notification audio', start=10, end=40, label=lambda pair: str(pair[0]), report=_queue_progress_reporter()), start=1):
         if include_prefixes:
             try:
                 key_s = str(raw_key or '')
@@ -986,7 +986,7 @@ def _write_project_materials_to_zip(zf: zipfile.ZipFile, proj: Project, material
     """Write every existing project material once under a project-scoped path."""
     written = 0
     seen = set()
-    for stored_name in list(getattr(proj, 'materials', []) or []):
+    for stored_name in _job_items(proj.id, list(getattr(proj, 'materials', []) or []), 'archive', 'Packing material', start=40, end=95, report=_queue_progress_reporter()):
         stored_name = str(stored_name or '')
         basename = os.path.basename(stored_name)
         if not basename or basename in seen:
@@ -1471,7 +1471,11 @@ def _job_key(pid: str) -> str:
     return f"project:{pid}"
 
 
-def _start_job(pid: str, name: str, total_steps: Optional[int] = None):
+def _refresh_job_key(pid: str) -> str:
+    return f"refresh:{pid}"
+
+
+def _start_job(pid: str, name: str, total_steps: Optional[int] = None, *, job_key=None):
     rec = {
         'project': pid,
         'name': name,
@@ -1488,26 +1492,96 @@ def _start_job(pid: str, name: str, total_steps: Optional[int] = None):
     from flask import g, has_request_context
     if has_request_context():
         rec['queue_cancelled'] = getattr(g, 'action_queue_cancelled', None)
+        rec['queue_progress'] = getattr(g, 'action_queue_progress', None)
     with _JOB_LOCK:
-        _ACTIVE_JOBS[_job_key(pid)] = rec
+        _ACTIVE_JOBS[job_key or _job_key(pid)] = rec
+    if rec.get('queue_progress'):
+        _update_job_detail(pid, job_key=job_key, progress=0)
 
 
-def _update_job_detail(pid: str, **fields):
+def _update_job_detail(pid: str, *, job_key=None, **fields):
     if not fields:
         return
     with _JOB_LOCK:
-        rec = _ACTIVE_JOBS.get(_job_key(pid))
+        rec = _ACTIVE_JOBS.get(job_key or _job_key(pid))
         if not rec:
             return
         rec.update(fields)
+        report = rec.get('queue_progress')
+    if report:
+        # Pool threads use the captured reporter, without needing a Flask
+        # request context. Queue readers in other processes see the same data.
+        try:
+            report(fields)
+        except Exception:
+            LOG.exception('Could not publish queue progress for %s', pid)
 
 
-def _end_job(pid: str, status: str = 'completed'):
+def _end_job(pid: str, status: str = 'completed', *, job_key=None):
     with _JOB_LOCK:
-        rec = _ACTIVE_JOBS.get(_job_key(pid))
+        rec = _ACTIVE_JOBS.get(job_key or _job_key(pid))
         if rec:
             rec['status'] = status
             rec['ended'] = time.time()
+
+
+def _progress_label(item):
+    """Only display identifiers, never stringify credential/config dictionaries."""
+    if not isinstance(item, dict):
+        return str(item)
+    name = str(item.get('name') or item.get('gen_name') or item.get('username') or item.get('id') or 'Item')
+    metadata = []
+    for key, title in (('index', 'instance'), ('vmid', 'VM'), ('node', 'node')):
+        if item.get(key) is not None:
+            metadata.append(f'{title} {item[key]}')
+    return f'{name} ({", ".join(metadata)})' if metadata else name
+
+
+def _instance_progress_label(proj, index):
+    credentials = proj.credentials or []
+    username = str((credentials[index - 1] or {}).get('username') or '') if 0 < index <= len(credentials) else ''
+    return f'Instance {index}' + (f' · {username}' if username else '')
+
+
+def _queue_progress_reporter():
+    # CTFd reads can overlap VM actions; publish to their own queue entry only.
+    from flask import g, has_request_context
+    return getattr(g, 'action_queue_progress', lambda fields: None) if has_request_context() else lambda fields: None
+
+
+def _job_items(pid, items, phase, verb, *, start=10, end=95, total=None, label=None, summary=None, report=None):
+    """Report before each item and after its body, including caught errors/skips.
+
+    Breaking out or propagating an exception does not count unfinished work.
+    Explicit totals allow streaming futures without waiting for all results.
+    """
+    callback = report or (lambda fields: _update_job_detail(pid, **fields))
+    def report(fields):
+        try:
+            callback(fields)
+        except Exception:
+            LOG.exception('Could not publish operation progress')
+    streaming = total is not None
+    total = len(items) if total is None else total
+    if total == 0:
+        return
+    initial = {'phase': phase, 'progress': start}
+    if not streaming:
+        initial.update(current='', message=f'{verb}… 0/{total} processed')
+    report(initial)
+    for index, item in enumerate(items):
+        current = label(item) if label else _progress_label(item)
+        report({'phase': phase, 'progress': start + (end - start) * index / max(total, 1),
+                'current': current, 'message': f'{verb} {current}… {index}/{total} processed'})
+        yield item
+        counts = summary() if summary else ''
+        report({'phase': phase, 'progress': start + (end - start) * (index + 1) / max(total, 1),
+                'current': current, 'message': f'{verb} · {index + 1}/{total} processed · {current}' + (f' · {counts}' if counts else '')})
+
+
+def _job_current(pid, phase, verb, item):
+    label = _progress_label(item)
+    _update_job_detail(pid, phase=phase, current=label, message=f'{verb} {label}…')
 
 
 def _cancel_job(pid: str):
@@ -2016,8 +2090,10 @@ def instances_refresh_vm(pid: str):
         pass
     if not base_url or (not token and not (username and password)):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
-    _start_job(pid, 'refresh_vm')
-    _update_job_detail(pid, phase='inventory', progress=5, message='Connecting to Proxmox…')
+    # Inventory reads may overlap actions; keep their progress records separate.
+    refresh_key = _refresh_job_key(pid)
+    _start_job(pid, 'refresh_vm', job_key=refresh_key)
+    _update_job_detail(pid, job_key=refresh_key, phase='inventory', progress=5, message='Connecting to Proxmox…')
     instances = int(proj.instances or 0)
     tag = str(proj.tag or '')
     tag_clean = tag.strip()
@@ -2051,8 +2127,10 @@ def instances_refresh_vm(pid: str):
     try:
         t_start = time.time()
         nodes = client.list_nodes()
+        if not nodes:
+            raise RuntimeError('No Proxmox nodes were returned; previous inventory retained')
         total_nodes = max(len(nodes), 1)
-        _update_job_detail(pid, phase='inventory', step=0, total_steps=total_nodes, progress=10, message=f'Scanning Proxmox nodes… 0/{total_nodes} complete')
+        _update_job_detail(pid, job_key=refresh_key, phase='inventory', step=0, total_steps=total_nodes, progress=10, message=f'Scanning Proxmox nodes… 0/{total_nodes} complete')
         
         # Build maps of name -> details, vmid -> name, and lowercase-name -> canonical name
         name_map = {}
@@ -2067,7 +2145,7 @@ def instances_refresh_vm(pid: str):
             """Helper to fetch VMs and LXCs from a single node (for parallel execution)"""
             node = node_info.get('node') or node_info.get('id') or ''
             if not node:
-                return (node, [], [], None)
+                return (node, [], [], RuntimeError('Inventory returned a node without a name'))
             qemus = []
             lxcs = []
             err = None
@@ -2077,13 +2155,13 @@ def instances_refresh_vm(pid: str):
                 try:
                     qemus = thread_client.list_qemu_vms(node) or []
                 except Exception as e:
-                    err = e
+                    err = RuntimeError(f'Could not list QEMU VMs on node {node}: {e}')
                 try:
                     if hasattr(thread_client, 'list_lxc_vms'):
                         lxcs = thread_client.list_lxc_vms(node) or []
                 except Exception as e:
                     if err is None:
-                        err = e
+                        err = RuntimeError(f'Could not list LXC containers on node {node}: {e}')
                 return (node, qemus, lxcs, err)
             except Exception as e:
                 return (node, [], [], e)
@@ -2099,6 +2177,7 @@ def instances_refresh_vm(pid: str):
                 try:
                     _update_job_detail(
                         pid,
+                        job_key=refresh_key,
                         phase='inventory',
                         current=str(node or ''),
                         step=processed_nodes,
@@ -2109,9 +2188,11 @@ def instances_refresh_vm(pid: str):
                     )
                 except Exception:
                     pass
-                if error and not qemus and not lxcs:
-                    logging.warning(f"Could not list VMs or LXCs on node {node}: {error}")
-                    continue
+                # A failed scan is not an empty inventory. Publishing either a
+                # partial node or a partial guest type would mark real guests
+                # missing and overwrite the last successful snapshot.
+                if error:
+                    raise RuntimeError(f'{error}; previous inventory retained') from error
                 
                 # Build maps (same logic as before, now with parallel-fetched data)
                 for q in qemus:
@@ -2173,14 +2254,14 @@ def instances_refresh_vm(pid: str):
         t_fetch = time.time()
         logging.info(f"VM/LXC refresh: node fetching took {(t_fetch-t_start)*1000:.0f}ms for {len(nodes)} nodes")
     except Exception as e:
-        _update_job_detail(pid, phase='error', progress=100, message=f'VM/LXC refresh failed: {e}')
-        _end_job(pid, status='error')
+        _update_job_detail(pid, job_key=refresh_key, phase='error', progress=100, message=f'VM/LXC refresh failed: {e}')
+        _end_job(pid, status='error', job_key=refresh_key)
         return jsonify({"error": f"Proxmox: {e}"}), 502
 
     # Pools list (single call) to avoid per-instance pool existence checks.
     pool_ids = None
     try:
-        _update_job_detail(pid, phase='access', progress=60, message='Checking pools and access controls…')
+        _update_job_detail(pid, job_key=refresh_key, phase='access', progress=60, message='Checking pools and access controls…')
         pool_ids = { str((p or {}).get('poolid') or '') for p in (client.list_pools() or []) }
         pool_ids = { p for p in pool_ids if p }
     except Exception:
@@ -2357,7 +2438,7 @@ def instances_refresh_vm(pid: str):
     for i in range(1, instances + 1):
         try:
             pct = int(round(70 + (i / max(instances or 1, 1)) * 25)) if instances > 0 else 95
-            _update_job_detail(pid, phase='summarizing', current=f'Instance {i}', step=i, total_steps=max(instances, 1), progress=min(pct, 95), message=f'Compiling instance {i}/{max(instances, 1)}…')
+            _update_job_detail(pid, job_key=refresh_key, phase='summarizing', current=f'Instance {i}', step=i, total_steps=max(instances, 1), progress=min(pct, 95), message=f'Compiling instance {i}/{max(instances, 1)}…')
         except Exception:
             pass
         entry = current.get(i) or { 'index': i, 'created': False, 'managers': {} }
@@ -2562,8 +2643,8 @@ def instances_refresh_vm(pid: str):
     # Log total refresh time for performance monitoring
     t_end = time.time()
     logging.info(f"VM refresh for project {pid} completed in {(t_end-t_start)*1000:.0f}ms")
-    _update_job_detail(pid, phase='done', step=max(instances, 1), total_steps=max(instances, 1), progress=100, message=f'Refresh completed: {len(out)} instance status entr{"y" if len(out) == 1 else "ies"}')
-    _end_job(pid)
+    _update_job_detail(pid, job_key=refresh_key, phase='done', step=max(instances, 1), total_steps=max(instances, 1), progress=100, message=f'Refresh completed: {len(out)} instance status entr{"y" if len(out) == 1 else "ies"}')
+    _end_job(pid, job_key=refresh_key)
     
     return jsonify({
         'instance_statuses': out,
@@ -4656,7 +4737,7 @@ def instances_fix_ageing(pid: str):
         return node_name
     fixed = []
     # Iterate each mapped VM, gather expected bridge names, batch insert per node
-    for m in mapped:
+    for m in _job_items(pid, mapped, 'networking', 'Fixing bridge ageing for', summary=lambda: f'{len(fixed)} processed, {len(errors)} errors'):
         if _is_cancelled(pid):
             break
         idx = m.get('index')
@@ -4914,6 +4995,7 @@ def instances_delete(pid: str):
         bulk_bridge_deletions.setdefault(node, []).append({ 'bridge': bname, 'index': idx, 'name': gen_name, 'adaptor': _normalize_bridge_adaptor_name(adaptor_name) })
 
     def do_delete(task):
+        _job_current(pid, 'deleting', 'Deleting', task)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         idx = task['index']
@@ -4980,6 +5062,7 @@ def instances_delete(pid: str):
         }
 
     if verify_cleanup:
+        _job_current(pid, 'cleanup', 'Removing unused bridges for', proj.name)
         cleanup_result = _execute_delete_bridge_cleanup(project_snapshot, client, bulk_bridge_deletions)
         notices.extend(list(cleanup_result.get('notices') or []))
         errors.extend(list(cleanup_result.get('errors') or []))
@@ -5018,7 +5101,7 @@ def instances_delete(pid: str):
                             remaining[nm.lower()] = { 'node': node, 'vmid': int(q.get('vmid')) if q.get('vmid') is not None else None }
                 except Exception:
                     continue
-            for d in deleted:
+            for d in _job_items(pid, deleted, 'verification', 'Checking deleted VM storage and networks for', start=95, end=98):
                 idx = d.get('index'); name = str(d.get('name') or '')
                 node = d.get('node'); vmid = d.get('vmid')
                 # 1) NICs: VM is gone, but we also removed bridges earlier; nothing in VM config remains. We still check bridges missing from node list to be safe.
@@ -5119,7 +5202,7 @@ def instances_delete(pid: str):
             cleanup_indices.append(idx)
 
         if cleanup_indices:
-            cleanup_resp = _delete_proxmox_users_and_pools_for_indices(proj, client, cleanup_indices)
+            cleanup_resp = _delete_proxmox_users_and_pools_for_indices(proj, client, cleanup_indices, progress_start=98, progress_end=99)
             deleted_users.extend(list(cleanup_resp.get('deleted_users') or []))
             deleted_pools.extend(list(cleanup_resp.get('deleted_pools') or []))
             errors.extend(list(cleanup_resp.get('errors') or []))
@@ -5190,7 +5273,7 @@ def instances_purge_leftovers(pid: str):
     errs = []
     bridges_to_reload = set()
 
-    for it in items:
+    for it in _job_items(pid, items, 'cleanup', 'Cleaning leftovers for', end=85):
         try:
             node = str(it.get('node') or '')
             vmid = it.get('vmid')
@@ -5222,7 +5305,7 @@ def instances_purge_leftovers(pid: str):
     # Reload networking once per affected node
     network_applied_nodes = []
     network_apply_errors = []
-    for node in bridges_to_reload:
+    for node in _job_items(pid, bridges_to_reload, 'networking', 'Reloading network on', start=85):
         try:
             client.reload_network(node)
             network_applied_nodes.append(node)
@@ -5398,6 +5481,8 @@ def _resolve_targets_to_vm_info(proj: Project, client: ProxmoxClient, targets: l
     """Map incoming targets (index, name base or generated) to actual VM info (node, vmid, gen_name).
     Returns (mapped_list, skipped_list, errors_list)
     """
+    _update_job_detail(proj.id, phase='inventory', progress=2, current='',
+                       message=f'Finding {len(targets)} selected VM(s) and containers in Proxmox…')
     name_to_info, list_err = _list_cluster_vms_by_name(client)
     if list_err:
         return [], [], [{ 'reason': list_err }]
@@ -5618,6 +5703,7 @@ def instances_start(pid: str):
         _job_emit_batch_progress(pid, 'starting', 'Starting', 0, total_mapped, message=f'Starting VM(s)… 0/{total_mapped} complete')
     # Run in parallel with a reasonable pool size
     def do_start(m):
+        _job_current(pid, 'start', 'Starting', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         st = (m.get('status') or '').lower()
@@ -5719,6 +5805,7 @@ def instances_apply_scenario(pid: str):
             cfg_map[name.lower()] = cfg
 
     def do_apply(m):
+        _job_current(pid, 'scenario', 'Applying scenario notes to', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
             
@@ -5848,6 +5935,7 @@ def instances_suspend(pid: str):
     if total_mapped > 0:
         _job_emit_batch_progress(pid, 'suspending', 'Suspending', 0, total_mapped, message=f'Suspending VM(s)… 0/{total_mapped} complete')
     def do_suspend(m):
+        _job_current(pid, 'suspend', 'Suspending', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         is_lxc = m.get('type') == 'lxc'
@@ -5922,6 +6010,7 @@ def instances_unlock(pid: str):
         _job_emit_batch_progress(pid, 'unlocking', 'Unlocking', 0, total_mapped, message=f'Unlocking VM(s)… 0/{total_mapped} complete')
 
     def do_unlock(m):
+        _job_current(pid, 'unlock', 'Unlocking', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         is_lxc = m.get('type') == 'lxc'
@@ -5995,6 +6084,7 @@ def instances_poweroff(pid: str):
     if total_mapped > 0:
         _job_emit_batch_progress(pid, 'powering_off', 'Powering Off', 0, total_mapped, message=f'Powering off VM(s)… 0/{total_mapped} complete')
     def do_poweroff(m):
+        _job_current(pid, 'poweroff', 'Powering off', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         is_lxc = m.get('type') == 'lxc'
@@ -6073,6 +6163,7 @@ def instances_snapshot(pid: str):
         _job_emit_batch_progress(pid, 'snapshotting', 'Snapshotting', 0, total_mapped, message=f'Creating snapshots… 0/{total_mapped} complete')
     # Execute snapshots sequentially with delay throttle to avoid overloading storage
     for i, m in enumerate(mapped):
+        _job_current(pid, 'snapshotting', f'Creating snapshot {snapname} for', m)
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
             break
@@ -6145,6 +6236,7 @@ def instances_restore(pid: str):
     if total_mapped > 0:
         _job_emit_batch_progress(pid, 'restoring', 'Restoring', 0, total_mapped, message=f'Restoring snapshots… 0/{total_mapped} complete')
     def do_restore(m):
+        _job_current(pid, 'restore', 'Restoring snapshot for', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         is_lxc = m.get('type') == 'lxc'
@@ -6340,7 +6432,7 @@ def instances_nets_set(pid: str):
             continue
 
     bridges_to_reload: Set[str] = set()
-    for node, needed in bridges_needed.items():
+    for node, needed in _job_items(pid, list(bridges_needed.items()), 'bridges', 'Preparing bridges on', start=10, end=25, label=lambda pair: pair[0]):
         existing = set()
         try:
             nets = client.list_network(node) or []
@@ -6363,7 +6455,7 @@ def instances_nets_set(pid: str):
 
     # Reload network immediately on nodes where bridges were created, so they exist in the active kernel
     # when VM / LXC network options are configured in the thread pool.
-    for node in sorted(bridges_to_reload):
+    for node in _job_items(pid, sorted(bridges_to_reload), 'networking', 'Applying new bridges on', start=25, end=35):
         try:
             client.reload_network(node)
             network_applied_nodes.append(node)
@@ -6389,6 +6481,7 @@ def instances_nets_set(pid: str):
         )
 
     def do_apply(m):
+        _job_current(pid, 'networking', 'Assigning network interfaces to', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         idx = int(m['index'])
@@ -6455,7 +6548,7 @@ def instances_nets_set(pid: str):
     pool_workers = _pool_workers_for(proj, len(mapped))
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_apply, m): m for m in mapped }
-        for fut in as_completed(future_map):
+        for fut in _job_items(pid, as_completed(future_map), 'networking', 'Assigning network interfaces to', start=35, end=85, total=len(future_map), label=lambda f: _progress_label(future_map[f]), summary=lambda: f'{len(skipped)} skipped, {len(errors)} errors'):
             try:
                 kind, payload = fut.result()
                 if kind == 'ok':
@@ -6478,7 +6571,7 @@ def instances_nets_set(pid: str):
     #   - we created bridges on the node, or
     #   - we changed VM netX config on the node (per user request to "apply" after enable/disable).
     nodes_to_reload = (set(bridges_to_reload) | set(nodes_with_vm_changes)) - set(network_applied_nodes)
-    for node in sorted(nodes_to_reload):
+    for node in _job_items(pid, sorted(nodes_to_reload), 'networking', 'Applying network changes on', start=85):
         try:
             client.reload_network(node)
             network_applied_nodes.append(node)
@@ -6554,6 +6647,7 @@ def instances_nets_remove(pid: str):
     nodes_with_vm_changes: Set[str] = set()
 
     def do_clear(m):
+        _job_current(pid, 'networking', 'Removing network interfaces from', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         idx = int(m['index'])
@@ -6578,7 +6672,7 @@ def instances_nets_remove(pid: str):
     pool_workers = _pool_workers_for(proj, len(mapped))
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         future_map = { pool.submit(do_clear, m): m for m in mapped }
-        for fut in as_completed(future_map):
+        for fut in _job_items(pid, as_completed(future_map), 'networking', 'Removing network interfaces from', start=35, end=85, total=len(future_map), label=lambda f: _progress_label(future_map[f]), summary=lambda: f'{len(skipped)} skipped, {len(errors)} errors'):
             m = future_map[fut]
             try:
                 kind, payload = fut.result()
@@ -6601,7 +6695,7 @@ def instances_nets_remove(pid: str):
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'network clear failed: {e}' })
 
     # Apply network reload once per affected node when we actually removed interfaces.
-    for node in sorted(nodes_with_vm_changes):
+    for node in _job_items(pid, sorted(nodes_with_vm_changes), 'networking', 'Applying network changes on', start=85):
         try:
             client.reload_network(node)
             network_applied_nodes.append(node)
@@ -6754,7 +6848,7 @@ def instances_users_create(pid: str):
             return False
         return False
 
-    for idx in indices:
+    for idx in _job_items(pid, indices, 'users', 'Creating users and permissions for', label=lambda i: _instance_progress_label(proj, i), summary=lambda: f'{len(errors)} errors'):
         mlist = by_index.get(idx, [])
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
@@ -6820,6 +6914,7 @@ def instances_users_create(pid: str):
                 errors.append({ 'index': idx, 'reason': 'no pool id (credential username empty or invalid)' })
             else:
                 for m in (mlist or []):
+                    _job_current(pid, 'pool_membership', f'Updating pool {poolid} for {userid} on', m)
                     # Add ALL mapped VMs to pool (reverted behavior)
                     dbg = []
                     try:
@@ -6935,6 +7030,7 @@ def instances_users_create(pid: str):
                         except Exception:
                             pass
                         for m in acl_targets:
+                            _job_current(pid, 'permissions', f'Setting permissions for {userid} on', m)
                             try:
                                 gen_name = str(m.get('name') or '')
                                 base_name = _base_from_generated(gen_name, idx)
@@ -7074,6 +7170,7 @@ def instances_users_perms(pid: str):
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+    _update_job_detail(pid, phase='inventory', progress=2, message=f'Resolving {len(targets)} selected VM(s)…')
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     
     by_index = {}
@@ -7081,6 +7178,7 @@ def instances_users_perms(pid: str):
         by_index.setdefault(int(m['index']), []).append(m)
     indices = sorted({ int((t or {}).get('index', 0)) for t in (targets or []) if (t or {}).get('index') })
     
+    _update_job_detail(pid, phase='inventory', progress=8, message='Scanning related VMs and containers for permission updates…')
     existing_vms_by_name = {}
     try:
         for n in client.list_nodes() or []:
@@ -7088,6 +7186,7 @@ def instances_users_perms(pid: str):
                 node_name = n.get('node') or n.get('id') or n.get('name') or ''
                 if not node_name:
                     continue
+                _update_job_detail(pid, phase='inventory', current=node_name, message=f'Scanning VMs and containers on {node_name}…')
                 for q in client.list_qemu_vms(node_name) or []:
                     try:
                         nm = str(q.get('name') or '')
@@ -7162,7 +7261,10 @@ def instances_users_perms(pid: str):
     def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
         return _vm_is_in_project_notes(client, proj, node_str, vmid_int)
         
-    for idx in indices:
+    total_instances = len(indices)
+    permissions_updated = 0
+    permissions_skipped = len(skipped)
+    for position, idx in enumerate(indices, start=1):
         mlist = by_index.get(idx, [])
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
@@ -7177,6 +7279,11 @@ def instances_users_perms(pid: str):
             userid = f"{uname}@pve"
             poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
             
+            instance_label = f'Instance {position}/{total_instances}'
+            instance_progress = 15 + 80 * (position - 1) / max(total_instances, 1)
+            _update_job_detail(pid, phase='users', current=userid, progress=instance_progress,
+                               message=f'{instance_label} · Checking user {userid}…')
+
             # Check user
             existing_user = None
             try:
@@ -7190,6 +7297,8 @@ def instances_users_perms(pid: str):
                 
             updated_users.append({ 'index': idx, 'userid': userid })
             
+            _update_job_detail(pid, phase='pool_permissions', current=userid,
+                               message=f'{instance_label} · Setting pool permissions for {userid} in {poolid}…')
             # Ensure AcostaPowerRollback role exists and assign it to the user on the POOL
             try:
                 try:
@@ -7208,6 +7317,8 @@ def instances_users_perms(pid: str):
             # Add members to pool
             if poolid:
                 for m in (mlist or []):
+                    _update_job_detail(pid, phase='pool_membership', current=str(m.get('name') or ''),
+                                       message=f'{instance_label} · Adding {m.get("name")} (VM {m.get("vmid")}) to pool {poolid} for {userid}…')
                     dbg = []
                     try:
                         client.add_pool_member(poolid, int(m['vmid']))
@@ -7290,13 +7401,22 @@ def instances_users_perms(pid: str):
                 except Exception:
                     pass
                     
-                for m in acl_targets:
+                for vm_position, m in enumerate(acl_targets, start=1):
+                    vm_label = f'{m.get("name")} (VM {m.get("vmid")}, {m.get("node")})'
+                    scope_label = f'{instance_label} · VM {vm_position}/{len(acl_targets)}'
+                    _update_job_detail(pid, phase='permissions', current=vm_label,
+                                       progress=instance_progress + 80 / max(total_instances, 1) * (0.3 + 0.7 * (vm_position - 1) / len(acl_targets)),
+                                       message=f'{scope_label} · Checking project ownership of {vm_label} for {userid}…')
                     try:
                         gen_name = str(m.get('name') or '')
                         base_name = _base_from_generated(gen_name, idx)
                         if not _is_in_scenario(base_name) or not _is_vm_in_project_notes(m.get('node'), m.get('vmid')):
+                            permissions_skipped += 1
                             continue
                         is_accessible = _is_user_accessible(base_name)
+                        access_label = 'Setting user access' if is_accessible else ('Setting rollback access' if rollback_for_non_viewable else 'Removing user access')
+                        _update_job_detail(pid, phase='permissions', current=vm_label,
+                                           message=f'{scope_label} · {access_label} for {userid} on {vm_label}…')
                         try:
                             _ensure_proxmox_role(client, 'AcostaPowerRollback', ['VM.Power.Start', 'VM.Power.Stop', 'VM.Power.Reset', 'VM.Power.Shutdown', 'VM.Snapshot.Rollback'])
                             _reconcile_vm_access_roles(
@@ -7308,15 +7428,21 @@ def instances_users_perms(pid: str):
                                 current_roles=None,
                             )
                             applied += 1
+                            permissions_updated += 1
                         except Exception as e2:
                             if '501' in str(e2) and 'not implemented' not in str(e2).lower():
                                 errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL permission issue (501) applying user {userid}: {e2}' })
                             elif 'not implemented' in str(e2).lower():
                                 unsupported = True
+                                permissions_skipped += 1
                             else:
                                 errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'per-VM ACL failed: {e2}' })
                     except Exception as e_outer:
                         errors.append({ 'index': idx, 'name': m.get('name'), 'reason': f'ACL processing failed: {e_outer}' })
+                    finally:
+                        _update_job_detail(pid, phase='permissions',
+                                           progress=instance_progress + 80 / max(total_instances, 1) * (0.3 + 0.7 * vm_position / len(acl_targets)),
+                                           message=f'{scope_label} processed · {userid} · {permissions_updated} VM(s) updated, {permissions_skipped} skipped, {len(errors)} error(s)')
                         
                 if applied:
                     acl_mode = 'user-access/rollback' if rollback_for_non_viewable else 'user-access only'
@@ -7327,7 +7453,14 @@ def instances_users_perms(pid: str):
                 errors.append({ 'index': idx, 'reason': f'ACL setup failed: {e}' })
         except Exception as e:
             errors.append({ 'index': idx, 'reason': f'users_perms failed: {e}' })
-    _end_job(pid)
+        finally:
+            _update_job_detail(pid, phase='permissions', progress=15 + 80 * position / max(total_instances, 1),
+                               message=f'Instances {position}/{total_instances} processed · {permissions_updated} VM(s) updated, {permissions_skipped} skipped, {len(errors)} error(s)')
+    cancelled = _is_cancelled(pid)
+    _update_job_detail(pid, phase='cancelled' if cancelled else 'done', current='',
+                       **({} if cancelled else {'progress': 100}),
+                       message=f'Permissions {"cancelled" if cancelled else "finished"} · {permissions_updated} VM(s) updated, {permissions_skipped} skipped, {len(errors)} error(s)')
+    _end_job(pid, status='cancelled' if cancelled else ('error' if errors else 'completed'))
     return jsonify({ 'updated_users': updated_users, 'added_members': added_members, 'skipped': skipped, 'errors': errors, 'notices': notices })
 
 
@@ -7433,7 +7566,7 @@ def instances_users_creds_check(pid: str):
     pool_members_cache: Dict[str, Optional[Set[int]]] = {}
     checked = []
 
-    for item in (mapped or []):
+    for item in _job_items(pid, mapped or [], 'credentials', 'Checking user, password, pool and access for', summary=lambda: f'{len(checked)} checked, {len(skipped)} skipped, {len(errors)} errors'):
         try:
             idx = int(item.get('index') or 0)
             vmid = int(item.get('vmid'))
@@ -7685,7 +7818,7 @@ def instances_users_creds_set(pid: str):
     def _is_vm_in_project_notes(node_str: str, vmid_int: int) -> bool:
         return _vm_is_in_project_notes(client, proj, node_str, vmid_int)
 
-    for idx in indices:
+    for idx in _job_items(pid, indices, 'users', 'Synchronizing credentials for', label=lambda i: _instance_progress_label(proj, i), summary=lambda: f'{len(errors)} errors'):
         mlist = by_index.get(idx, [])
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
@@ -7748,6 +7881,7 @@ def instances_users_creds_set(pid: str):
                 _add_notice_once({ 'index': idx, 'reason': f'pool power permissions sync failed for {userid}: {e}' })
 
             for m in (mlist or []):
+                _job_current(pid, 'pool_membership', f'Updating pool {poolid} for {userid} on', m)
                 try:
                     client.add_pool_member(poolid, int(m['vmid']))
                     added_members.append({ 'index': idx, 'pool': poolid, 'vmid': int(m['vmid']), 'name': m['name'] })
@@ -7814,6 +7948,7 @@ def instances_users_creds_set(pid: str):
                     pass
 
                 for m in acl_targets:
+                    _job_current(pid, 'permissions', f'Setting permissions for {userid} on', m)
                     try:
                         gen_name = str(m.get('name') or '')
                         base_name = _base_from_generated(gen_name, idx)
@@ -7863,7 +7998,7 @@ def instances_users_creds_set(pid: str):
     })
 
 
-def _delete_proxmox_users_and_pools_for_indices(proj: Project, client: ProxmoxClient, indices: Iterable[int]) -> Dict[str, Any]:
+def _delete_proxmox_users_and_pools_for_indices(proj: Project, client: ProxmoxClient, indices: Iterable[int], *, progress_start=10, progress_end=95) -> Dict[str, Any]:
     deleted_users = []
     deleted_pools = []
     errors = []
@@ -7888,7 +8023,7 @@ def _delete_proxmox_users_and_pools_for_indices(proj: Project, client: ProxmoxCl
         if idx > 0 and idx not in safe_indices:
             safe_indices.append(idx)
 
-    for idx in safe_indices:
+    for idx in _job_items(proj.id, safe_indices, 'users', 'Deleting user and pool for instance', start=progress_start, end=progress_end, summary=lambda: f'{len(deleted_users)} users deleted, {len(deleted_pools)} pools deleted, {len(errors)} errors'):
         try:
             cred = (proj.credentials or [])[idx - 1] if idx - 1 < len(proj.credentials or []) else None
             uname = (cred or {}).get('username') or ''
@@ -7897,6 +8032,7 @@ def _delete_proxmox_users_and_pools_for_indices(proj: Project, client: ProxmoxCl
                 continue
             userid = f"{uname}@pve"
             poolid = re.sub(r"[^A-Za-z0-9_-]+", "", str(uname))
+            _job_current(proj.id, 'users', 'Deleting user and pool', userid)
             try:
                 if poolid:
                     pool_exists = False
@@ -8228,7 +8364,7 @@ def instances_users_access_sync(pid: str):
         have_acl_index = False
 
     # Sync permissions for each mapped VM
-    for m in (mapped or []):
+    for m in _job_items(pid, mapped or [], 'permissions', 'Synchronizing access for', summary=lambda: f'{len(applied)} updated, {len(unchanged)} unchanged, {len(skipped)} skipped, {len(errors)} errors'):
         try:
             idx = int(m.get('index') or 0)
             vmid = int(m.get('vmid'))
@@ -8265,6 +8401,7 @@ def instances_users_access_sync(pid: str):
             errors.append({ 'index': idx, 'name': name, 'reason': f'user lookup failed: {e}' })
             continue
 
+        _job_current(pid, 'permissions', f'Synchronizing access for {userid} on', m)
         vm_path = f"/vms/{int(vmid)}"
         current_roles = existing_roles.get((userid, vm_path), set()) if have_acl_index else None
         base_name = _base_from_generated(name, idx)
@@ -8896,6 +9033,37 @@ def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -
     return copied
 
 
+def _guest_push_metadata_commands(
+    destination: str,
+    file_paths: List[str],
+    directory_paths: Set[str],
+    owner: str,
+    permissions: str,
+) -> List[str]:
+    """Update only archive members, in bounded commands suitable for either transport."""
+    commands: List[str] = []
+    operations = []
+    if owner:
+        operations.append((f'chown -- {shlex.quote(owner)}', sorted(directory_paths) + file_paths))
+    if permissions:
+        # chown can clear setuid/setgid bits, so always apply file modes last.
+        operations.append((f'chmod -- {shlex.quote(permissions)}', file_paths))
+    for prefix, paths in operations:
+        batch: List[str] = []
+        size = len(prefix)
+        for path in paths:
+            quoted = shlex.quote(posixpath.join(destination, path))
+            if batch and size + len(quoted.encode('utf-8')) + 1 > 8192:
+                commands.append(prefix + ' ' + ' '.join(batch))
+                batch = []
+                size = len(prefix)
+            batch.append(quoted)
+            size += len(quoted.encode('utf-8')) + 1
+        if batch:
+            commands.append(prefix + ' ' + ' '.join(batch))
+    return commands
+
+
 @api_bp.route("/projects/<pid>/instances/actions/guest_push", methods=["POST"])
 @api_bp.route("/projects/<pid>/instances/actions/lxc_push", methods=["POST"])
 def instances_lxc_push(pid: str):
@@ -8910,6 +9078,18 @@ def instances_lxc_push(pid: str):
             raise ValueError('Invalid transfer payload')
     except Exception as exc:
         return jsonify({'error': f'Invalid transfer payload: {exc}'}), 400
+    owner = body.get('ownerOnRemote', '')
+    permissions = body.get('filePermissions', '')
+    if not isinstance(owner, str) or (
+        owner.strip() and not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\$?', owner.strip())
+    ):
+        return jsonify({'error': 'Owner on remote must be a username or numeric UID'}), 400
+    if not isinstance(permissions, str) or (
+        permissions.strip() and not re.fullmatch(r'[0-7]{3,4}', permissions.strip())
+    ):
+        return jsonify({'error': 'File permissions must be 3 or 4 octal digits (0–7), such as 644 or 0755'}), 400
+    owner = owner.strip()
+    permissions = permissions.strip()
     # The web UI sends this in the multipart field and JSON payload, with the
     # query string as a Safari/WebKit fallback for folder uploads. Every source
     # is subjected to the same absolute guest-directory validation below.
@@ -8984,6 +9164,7 @@ def instances_lxc_push(pid: str):
                 info.mtime = int(time.time())
                 archive.addfile(info, stream)
         archive_size = tar_stream.tell()
+        metadata_commands = _guest_push_metadata_commands(destination, safe_paths, directory_paths, owner, permissions)
         total_mapped = max(1, len(mapped))
         for position, entry in enumerate(mapped, start=1):
             _update_job_detail(
@@ -8998,6 +9179,7 @@ def instances_lxc_push(pid: str):
             ssh_client = None
             sftp = None
             remote_archive = f"/tmp/deployforge-lxc-push-{uuid.uuid4().hex}.tar"
+            failure_stage = 'push failed'
             try:
                 guest_type = str(entry.get('type') or '').strip().lower()
                 if guest_type == 'qemu':
@@ -9008,6 +9190,9 @@ def instances_lxc_push(pid: str):
                         archive_size,
                         destination,
                     )
+                    failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
+                    for metadata_command in metadata_commands:
+                        _guest_agent_exec_checked(client, entry, ['/bin/sh', '-c', metadata_command])
                     pushed.append({
                         'index': entry.get('index'),
                         'name': entry.get('name'),
@@ -9022,6 +9207,8 @@ def instances_lxc_push(pid: str):
                         'overwrite': True,
                         'created_directories': True,
                         'selection_type': selection_type,
+                        'owner_on_remote': owner or None,
+                        'file_permissions': permissions or None,
                     })
                     continue
                 ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
@@ -9055,6 +9242,14 @@ def instances_lxc_push(pid: str):
                 )
                 if code != 0:
                     raise RuntimeError(stderr_text or f'pct extract exited with {code}')
+                failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
+                for metadata_command in metadata_commands:
+                    command = f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(metadata_command)}"
+                    code, _output, stderr_text = _ssh_exec_result(
+                        ssh_client, command, sudo=use_sudo, sudo_password=password,
+                    )
+                    if code != 0:
+                        raise RuntimeError(stderr_text or f'remote metadata command exited with {code}')
                 pushed.append({
                     'index': entry.get('index'),
                     'name': entry.get('name'),
@@ -9069,6 +9264,8 @@ def instances_lxc_push(pid: str):
                     'overwrite': True,
                     'created_directories': True,
                     'selection_type': selection_type,
+                    'owner_on_remote': owner or None,
+                    'file_permissions': permissions or None,
                 })
             except Exception as exc:
                 errors.append({
@@ -9076,7 +9273,7 @@ def instances_lxc_push(pid: str):
                     'name': entry.get('name'),
                     'vmid': entry.get('vmid'),
                     'node': entry.get('node'),
-                    'reason': f'push failed: {exc}',
+                    'reason': f'{failure_stage}: {exc}',
                 })
             finally:
                 if sftp is not None:
@@ -9439,7 +9636,7 @@ def instances_run_startup_cmds(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     ran = []
     zip_entries = []
-    for m in mapped:
+    for m in _job_items(pid, mapped, 'commands', 'Running startup commands on', summary=lambda: f'{len(errors)} errors'):
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
             break
@@ -11076,7 +11273,8 @@ def instances_actions_status(pid: str):
     """Generic status poller for long-running instance actions (create, delete, start, etc.).
     Response: { id, action, status, progress, phase, step, total_steps, current, message, eta }
     Returns 404 if no active job for the project."""
-    rec = _ACTIVE_JOBS.get(_job_key(pid))
+    key = _refresh_job_key(pid) if request.args.get('scope') == 'refresh' else _job_key(pid)
+    rec = _ACTIVE_JOBS.get(key)
     if not rec or rec.get('status') in ('completed','cancelled','error') and rec.get('progress',0) >= 100:
         return jsonify({ 'error': 'No active job' }), 404
     return jsonify({
@@ -11496,6 +11694,7 @@ def ctfd_users_create(pid: str):
     only = body.get('only')  # optional subset of usernames
     creds = [c for c in (proj.credentials or []) if (not only or c.get('username') in only)]
     if not creds: return jsonify({"created":0, "updated":0, "skipped":0})
+    _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
     client = _ctfd_client_from_req(proj)
 
     # Preflight: ensure current identity has permission to manage users
@@ -11510,7 +11709,7 @@ def ctfd_users_create(pid: str):
     except Exception as e:
         return jsonify({"error": f"CTFd self-check failed: {e}", "ok": False}), 400
     created = 0; updated = 0; skipped = 0; results = []
-    for c in creds:
+    for c in _job_items(pid, creds, 'ctfd_users', 'Creating or updating CTFd user', report=_queue_progress_reporter(), summary=lambda: f'{sum(bool(r.get("error")) for r in results)} errors'):
         uname = c.get('username') or ''
         email = f"{uname}@example.com"
         pw = c.get('password') or ''
@@ -11542,6 +11741,7 @@ def ctfd_users_delete(pid: str):
     body = request.get_json(silent=True) or {}
     only = body.get('only')  # optional subset
     creds = [c for c in (proj.credentials or []) if (not only or c.get('username') in only)]
+    _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
     client = _ctfd_client_from_req(proj)
     # Preflight: ensure permission to delete users
     try:
@@ -11554,7 +11754,7 @@ def ctfd_users_delete(pid: str):
     except Exception as e:
         return jsonify({"error": f"CTFd self-check failed: {e}", "ok": False}), 400
     deleted = 0; results = []
-    for c in creds:
+    for c in _job_items(pid, creds, 'ctfd_users', 'Deleting CTFd user', report=_queue_progress_reporter(), summary=lambda: f'{sum(bool(r.get("error")) for r in results)} errors'):
         uname = c.get('username') or ''
         try:
             uid = client.find_user_id_by_name(uname)
@@ -11598,6 +11798,7 @@ def ctfd_users_check(pid: str):
         except Exception:
             continue
     # Build client (supports token or session login)
+    _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
     client = _ctfd_client_from_req(proj)
 
     def _pick_id(source, keys):
@@ -11993,7 +12194,7 @@ def ctfd_users_check(pid: str):
                 bulk_user_matches = {}
 
     out = []
-    for uname in targets:
+    for uname in _job_items(pid, targets, 'ctfd_users', 'Checking CTFd user', report=_queue_progress_reporter()):
         exists = False
         uid = None
         tid = None
@@ -12276,6 +12477,7 @@ def ctfd_upload(pid: str):
         ts = time.strftime('%Y%m%d-%H%M%S')
         safe_name = secure_filename(f.filename) or 'ctfd_export.zip'
         dest = os.path.join(uploads_dir, f"{ts}-{safe_name}")
+        _queue_progress_reporter()({'phase': 'upload', 'progress': None, 'current': safe_name, 'message': f'Saving CTFd archive {safe_name}…'})
         f.save(dest)
         size = 0
         try:
@@ -13388,6 +13590,7 @@ def import_project():
             tmp_fd, tmp_path = tempfile.mkstemp(prefix="import_", suffix=".zip")
             try: os.close(tmp_fd)
             except Exception: pass
+        _queue_progress_reporter()({'phase': 'upload', 'progress': 5, 'message': 'Saving uploaded project archive…'})
         file.save(tmp_path)
         if not allow_best_effort:
             has_manifest = _zip_has_manifest(tmp_path)
@@ -13404,6 +13607,7 @@ def import_project():
         except Exception:
             work_dir = None
 
+        _queue_progress_reporter()({'phase': 'import', 'progress': 15, 'message': 'Reading project manifest and extracting materials…'})
         with zipfile.ZipFile(tmp_path) as zf:
             manifest, synthesized = _load_import_manifest(
                 zf,
@@ -13432,7 +13636,7 @@ def import_project():
                 except Exception:
                     pass
                 errors = []
-                for pdata in orig_list:
+                for pdata in _job_items('', orig_list, 'import', 'Reading project configuration', start=15, end=35, report=_queue_progress_reporter()):
                     # sanitize copy: tag and any VM names
                     pdata2 = dict(pdata)
                     if 'tag' in pdata2:
@@ -13488,7 +13692,7 @@ def import_project():
                     results.append(proj.__dict__)
 
                 # Import materials grouped by original id (materials/<orig_id>/filename)
-                for zname in zf.namelist():
+                for zname in _job_items('', zf.namelist(), 'import', 'Extracting archive entry', start=35, end=85, report=_queue_progress_reporter()):
                     if not zname.startswith('materials/') or zname.endswith('/'):
                         continue
                     parts = zname.split('/')
@@ -13584,7 +13788,7 @@ def import_project():
 
                 # Import materials at materials/* or materials/<orig_id>/*
                 imported = []
-                for zname in zf.namelist():
+                for zname in _job_items('', zf.namelist(), 'import', 'Extracting archive entry', start=35, end=85, report=_queue_progress_reporter()):
                     if not zname.startswith('materials/') or zname.endswith('/'):
                         continue
                     base = os.path.basename(zname)
@@ -15998,6 +16202,7 @@ def ctfd_stats_challenges(pid: str):
     if not proj:
         return jsonify({"error": "Project not found"}), 404
     try:
+        _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
         client = _ctfd_client_from_req(proj)
         # Require elevated role to read global solves; many CTFd deployments restrict this to admins/teachers
         try:
@@ -16027,7 +16232,7 @@ def ctfd_stats_challenges(pid: str):
             ch_list = client.list_challenges_all() if hasattr(client, 'list_challenges_all') else client.list_challenges()
         except Exception:
             ch_list = client.list_challenges()
-        for ch in ch_list or []:
+        for ch in _job_items(pid, ch_list or [], 'ctfd_challenges', 'Loading challenge statistics for', report=_queue_progress_reporter()):
             try:
                 cid = int(ch.get('id'))
             except Exception:
@@ -16514,6 +16719,7 @@ def ctfd_stats_challenge_one(pid: str, cid: int):
     if not proj:
         return jsonify({'error': 'Project not found'}), 404
     try:
+        _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
         client = _ctfd_client_from_req(proj)
         try:
             role = client.get_role() if hasattr(client, 'get_role') else ''
@@ -16758,11 +16964,11 @@ def ctfd_stats_challenge_one(pid: str, cid: int):
                 for idv, meta in info_map.items(): out.append((idv, idx2, meta)); idx2 += 1
                 return out
         teams = []
-        for tid, ordn, meta in _sorted_entries(teams_info):
+        for tid, ordn, meta in _job_items(pid, _sorted_entries(teams_info), 'ctfd_teams', 'Loading team', start=70, end=80, label=lambda item: str(item[0]), report=_queue_progress_reporter()):
             nm = client.get_team_name(tid) or str(tid)
             teams.append({ 'id': tid, 'name': nm, 'ord': int(ordn), 'ts': meta.get('ts') })
         users = []
-        for uid, ordn, meta in _sorted_entries(users_info):
+        for uid, ordn, meta in _job_items(pid, _sorted_entries(users_info), 'ctfd_users', 'Loading solver', start=80, end=95, label=lambda item: str(item[0]), report=_queue_progress_reporter()):
             nm = client.get_user_name(uid) or str(uid)
             users.append({ 'id': uid, 'name': nm, 'ord': int(ordn), 'ts': meta.get('ts') })
         item = {
@@ -16788,6 +16994,7 @@ def ctfd_challenges_visibility(pid: str):
     if not proj:
         return jsonify({'ok': False, 'error': 'Project not found'}), 404
     try:
+        _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
         client = _ctfd_client_from_req(proj)
         # Require elevated role for updates
         role = client.get_role() if hasattr(client, 'get_role') else ''
@@ -16806,7 +17013,7 @@ def ctfd_challenges_visibility(pid: str):
             return jsonify({'ok': False, 'error': 'ids must be a non-empty array'}), 400
         updated = []
         errors = []
-        for cid in ids:
+        for cid in _job_items(pid, ids, 'ctfd_challenges', 'Showing challenge' if visible else 'Hiding challenge', report=_queue_progress_reporter(), summary=lambda: f'{len(updated)} updated, {len(errors)} errors'):
             try:
                 ch = client.update_challenge_state(int(cid), bool(visible)) if hasattr(client, 'update_challenge_state') else {}
                 # Determine resulting state/visibility best-effort

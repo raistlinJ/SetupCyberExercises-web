@@ -7,7 +7,7 @@
   <title>DeployForge — VM Manager</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-  <link href="/static/css/shell.css" rel="stylesheet">
+  <link href="/static/css/shell.css?v=20260907c" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
 </head>
 
@@ -442,6 +442,21 @@
             <div class="alert alert-warning small py-2 mb-2" role="alert">
               Be careful: existing files and conflicting paths are replaced without another warning. The destination and any missing parent folders are created automatically.
             </div>
+            <details id="lxc-push-advanced" class="border rounded p-3 mb-3">
+              <summary class="fw-semibold">Advanced</summary>
+              <div class="mt-3 mb-3">
+                <label class="form-label" for="lxc-push-owner">Owner on remote</label>
+                <input id="lxc-push-owner" class="form-control font-monospace" type="text"
+                  placeholder="e.g. www-data or 1000" autocomplete="off" aria-describedby="lxc-push-owner-help">
+                <div id="lxc-push-owner-help" class="form-text">Optional username or UID in each guest. Applied after upload to the pushed files and included folders. Leave blank to use the default owner.</div>
+              </div>
+              <div>
+                <label class="form-label" for="lxc-push-permissions">File permissions</label>
+                <input id="lxc-push-permissions" class="form-control font-monospace" type="text"
+                  placeholder="e.g. 644 or 755" inputmode="numeric" autocomplete="off" aria-describedby="lxc-push-permissions-help">
+                <div id="lxc-push-permissions-help" class="form-text">Optional 3 or 4 octal digits (0–7). Applied to every pushed file after upload. Leave blank for 644. Included folders use 755.</div>
+              </div>
+            </details>
             <div id="lxc-push-error" class="text-danger small d-none" role="alert"></div>
           </div>
           <div class="modal-footer">
@@ -576,15 +591,15 @@
   <!-- Settings modal injected via creds.js -->
   <script src="/static/js/creds.js?v=20251116b"></script>
   <script src="/static/js/auth.js?v=20251116b"></script>
-  <script src="/static/js/shell.js?v=20260907a"></script>
-  <script src="/static/js/server_queue.js?v=20260907a"></script>
+  <script src="/static/js/shell.js?v=20260907c"></script>
+  <script src="/static/js/server_queue.js?v=20260907e"></script>
   <script src="/static/js/server_workflows.js?v=20260907a"></script>
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
   <script src="/static/js/app.js?v=20260907a"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/vm_manager.js?v=20260907a"></script>
-  <script src="/static/js/server_vm_actions.js?v=20260907a"></script>
+  <script src="/static/js/vm_manager.js?v=20260907f"></script>
+  <script src="/static/js/server_vm_actions.js?v=20260907b"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">

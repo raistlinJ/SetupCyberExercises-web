@@ -524,7 +524,8 @@ class ProxmoxClient:
     def list_lxc_vms(self, node: str) -> List[Dict[str, Any]]:
         s = self._ensure_session()
         url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/lxc"
-        resp = s.get(url, timeout=20)
+        # Listing a large container fleet can exceed 20 seconds on a busy node.
+        resp = s.get(url, timeout=(15, 60))
         if resp.status_code >= 400:
             raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
         data = resp.json()

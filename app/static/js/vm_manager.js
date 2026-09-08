@@ -532,7 +532,8 @@ function startVmActionStatusPolling(pid, options = {}) {
   const run = async () => {
     if (stopped) return;
     try {
-      const status = await http('GET', `/api/projects/${encodeURIComponent(projectId)}/instances/actions/status`);
+      const scope = options.scope === 'refresh' ? '?scope=refresh' : '';
+      const status = await http('GET', `/api/projects/${encodeURIComponent(projectId)}/instances/actions/status${scope}`);
       if (status && !status.error) {
         applyStatus(status);
         const normalized = String(status.status || '').toLowerCase();
@@ -1364,6 +1365,7 @@ async function refreshVmView(opts) {
   const mapById = {}; (ALL_PROJECTS || []).forEach(p => { const key = canonicalPid(p.id); if (key) mapById[key] = p; });
   const totalRefreshProjects = Math.max(ok.length, 1);
   let refreshedProjects = 0;
+  const refreshErrors = [];
   const projectRowsByPid = new Map();
   const runProjectRefresh = (pid, project) => new Promise((resolve) => {
     let settled = false;
@@ -1374,6 +1376,7 @@ async function refreshVmView(opts) {
     };
     const entry = queueRemoteAction(`Refresh VMs for project ${project.name || pid}`, async () => {
       const projectRows = [];
+      let resp = { instance_statuses: project.instance_statuses || [] };
       try {
         const sess = await hydrateProxCredsFromPersisted(pid);
         const body = {
@@ -1384,35 +1387,36 @@ async function refreshVmView(opts) {
           verifySSL: project.proxmox_verify_ssl !== false,
           forceRefresh: forceRefresh || undefined,
         };
-        const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
+        resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
         try { vmApplyServerResources(pid, resp?.server_resources); } catch { }
         vmMarkLiveRefreshed(pid);
-        const statuses = resp.instance_statuses || [];
-        const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
-        const hasAnyStatus = statuses.length > 0;
-        const inst = Number(project.instances || 0);
-        const tag = String(project.tag || '').trim();
-        const vms = project.vms || [];
-        const creds = project.credentials || [];
-        for (let i = 1; i <= inst; i++) {
-          const suffix = `${tag}${i}`;
-          const cred = creds[i - 1] || {};
-          const uname = (cred.username ?? '').trim();
-          const pword = cred.password ?? '';
-          const st = statusMap.get(i) || {};
-          const details = Array.isArray(st.vm_details) ? st.vm_details : [];
-          const detailMap = new Map(details.map(d => [String(d.name || ''), d]));
-          for (const v of vms) {
-            const baseName = String((v && v.name) || '');
-            const vmName = `${baseName}${suffix}`;
-            const d2 = detailMap.get(vmName) || null;
-            const rowStatus = hasAnyStatus ? (d2 ? 'created' : 'missing') : 'n/a';
-            const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null;
-            projectRows.push({ pid, project: project.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
-          }
-        }
       } catch (e) {
-        try { (window.shell && shell.logWarn) ? shell.logWarn(`Refresh skipped for ${project?.name || pid}: ${e?.message || e}`) : console.warn('Refresh skipped', pid, e); } catch { }
+        refreshErrors.push(`${project.name || pid}: ${e?.message || e}`);
+        try { (window.shell && shell.logWarn) ? shell.logWarn(`Refresh failed for ${project?.name || pid}; showing saved inventory: ${e?.message || e}`) : console.warn('Refresh failed', pid, e); } catch { }
+      }
+      const statuses = resp.instance_statuses || [];
+      const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
+      const hasAnyStatus = statuses.length > 0;
+      const inst = Number(project.instances || 0);
+      const tag = String(project.tag || '').trim();
+      const vms = project.vms || [];
+      const creds = project.credentials || [];
+      for (let i = 1; i <= inst; i++) {
+        const suffix = `${tag}${i}`;
+        const cred = creds[i - 1] || {};
+        const uname = (cred.username ?? '').trim();
+        const pword = cred.password ?? '';
+        const st = statusMap.get(i) || {};
+        const details = Array.isArray(st.vm_details) ? st.vm_details : [];
+        const detailMap = new Map(details.map(d => [String(d.name || ''), d]));
+        for (const v of vms) {
+          const baseName = String((v && v.name) || '');
+          const vmName = `${baseName}${suffix}`;
+          const d2 = detailMap.get(vmName) || null;
+          const rowStatus = hasAnyStatus ? (d2 ? 'created' : 'missing') : 'n/a';
+          const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null;
+          projectRows.push({ pid, project: project.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
+        }
       }
       finish({ pid, rows: projectRows });
     }, {
@@ -1478,6 +1482,9 @@ async function refreshVmView(opts) {
       (window.shell && shell.logDebug) ? shell.logDebug(`VM Manager: rendering ${vmCount} row(s) across ${projCount} project(s).`) : console.debug('VM Manager rows:', vmCount, 'projects:', projCount);
     } catch { }
     renderMergedVmTable(rows);
+    if (refreshErrors.length && note) {
+      note.innerHTML += `<div class="alert alert-warning py-2 px-3 small" role="alert">Refresh incomplete. Showing the last saved inventory for affected projects; their current state could not be verified.<ul class="mb-0">${refreshErrors.map(error => `<li>${escHtml(error)}</li>`).join('')}</ul></div>`;
+    }
   } else {
     try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: completed but project selection changed, discarding results') : console.log('VM Refresh: project selection changed, discarding'); } catch { }
   }
@@ -1954,7 +1961,7 @@ async function vmRefresh(opts) {
       try { shell.step('Prepared refresh body'); } catch { }
       setProg(15, 'Submitting…', 'Requesting live VM inventory from Proxmox…');
       if (typeof startVmActionStatusPolling === 'function') {
-        try { stopStatusPoll = startVmActionStatusPolling(refreshPid, { setProgress: setProg, initialDelay: 200, interval: 900 }); } catch { }
+        try { stopStatusPoll = startVmActionStatusPolling(refreshPid, { scope: 'refresh', setProgress: setProg, initialDelay: 200, interval: 900 }); } catch { }
       }
       const resp = await http('POST', `/api/projects/${refreshPid}/instances/refresh/vm`, body);
       try { shell.step('HTTP response received'); } catch { }
@@ -3752,6 +3759,8 @@ async function executePersistedGuestTransfer(descriptor, runtimePayload = null) 
         destination,
         relativePaths: descriptor.relativePaths,
         selectionType: descriptor.selectionType,
+        ownerOnRemote: payload.ownerOnRemote ?? descriptor.ownerOnRemote ?? '',
+        filePermissions: payload.filePermissions ?? descriptor.filePermissions ?? '',
       }));
       // Send the destination as a dedicated multipart field as well. This
       // keeps it intact even when a queued folder upload is restored from
@@ -3894,10 +3903,18 @@ function wireLxcTransferModals() {
         ? Array.from(document.getElementById('lxc-push-folder')?.files || [])
         : Array.from(document.getElementById('lxc-push-files')?.files || []);
       const destination = String(document.getElementById('lxc-push-destination')?.value || '').trim();
+      const ownerOnRemote = String(document.getElementById('lxc-push-owner')?.value || '').trim();
+      const filePermissions = String(document.getElementById('lxc-push-permissions')?.value || '').trim();
       const error = document.getElementById('lxc-push-error');
       const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
       if (!files.length) return fail(selectionType === 'folder' ? 'Select a folder.' : 'Select at least one file.');
       if (!destination.startsWith('/')) return fail('Enter an absolute destination directory.');
+      if (ownerOnRemote && !/^[A-Za-z0-9_][A-Za-z0-9_.@-]*\$?$/.test(ownerOnRemote)) {
+        return fail('Enter a remote username or numeric UID for the owner.');
+      }
+      if (filePermissions && !/^[0-7]{3,4}$/.test(filePermissions)) {
+        return fail('File permissions must be 3 or 4 octal digits (0–7), such as 644 or 0755.');
+      }
       const relativePaths = files.map(file => String(file.webkitRelativePath || file.name || ''));
       const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
       const guestCount = groups.reduce((total, group) => total + group.targets.length, 0);
@@ -3906,6 +3923,8 @@ function wireLxcTransferModals() {
       const payloadId = `guest-push-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const runtimePayload = {
         destination,
+        ownerOnRemote,
+        filePermissions,
         files: files.map(file => ({
           blob: file,
           name: String(file.name || 'upload'),
@@ -3925,6 +3944,8 @@ function wireLxcTransferModals() {
         kind: 'push',
         label: transferLabel,
         destination,
+        ownerOnRemote,
+        filePermissions,
         relativePaths,
         selectionType,
         payloadId,

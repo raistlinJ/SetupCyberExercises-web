@@ -8,7 +8,7 @@ import zipfile
 from unittest.mock import MagicMock, patch
 
 from app import create_app
-from app.routes.api import _proxmox_ssh_username
+from app.routes.api import _guest_push_metadata_commands, _proxmox_ssh_username
 from app.storage.projects import Project, VMConfig
 
 
@@ -162,6 +162,110 @@ class LxcFileTransferApiTests(unittest.TestCase):
         self.assertIn('tar --overwrite -xpf', ssh.commands[0])
         self.assertEqual(len(ssh.sftp.removed), 1)
         self.assertTrue(ssh.closed)
+
+    def test_push_applies_metadata_after_extract_for_both_transports(self):
+        for guest_type, owner, permissions in [('lxc', 'www-data', '0640'), ('qemu', '1000', '4755')]:
+            with self.subTest(guest_type=guest_type):
+                ssh = _Ssh()
+                prox = MagicMock()
+                prox.get_qemu_config.return_value = {'ostype': 'l26'}
+                prox.agent_exec.return_value = {'exitcode': 0}
+                payload = {
+                    **self.payload, 'destination': '/srv/scenario files',
+                    'relativePaths': ["bundle/a 'quoted'.txt", 'bundle/nested/b.txt'],
+                    'selectionType': 'folder', 'ownerOnRemote': f' {owner} ',
+                    'filePermissions': f' {permissions} ',
+                }
+                with patch('app.routes.api._block_when_remote', return_value=None), \
+                        patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                        patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped(guest_type), [], [])), \
+                        patch('app.routes.api.ProxmoxClient', return_value=prox), \
+                        patch('app.routes.api._ssh_connect', return_value=ssh):
+                    response = self.client.post(
+                        f'/api/projects/{self.project.id}/instances/actions/guest_push',
+                        data={'payload': json.dumps(payload), 'files': [
+                            (io.BytesIO(b'alpha'), 'a.txt'), (io.BytesIO(b'beta'), 'b.txt'),
+                        ]}, content_type='multipart/form-data',
+                    )
+                body = response.get_json()
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(body['errors'])
+                self.assertEqual(body['pushed'][0]['owner_on_remote'], owner)
+                self.assertEqual(body['pushed'][0]['file_permissions'], permissions)
+                if guest_type == 'qemu':
+                    commands = [call.kwargs['command'][-1] for call in prox.agent_exec.call_args_list]
+                else:
+                    # Unwrap the sudo/pct shell argument for exact path checks.
+                    commands = [shlex.split(command)[-1] for command in ssh.commands]
+                    self.assertEqual(len(ssh.sftp.removed), 1)
+                chown_index = next(i for i, cmd in enumerate(commands) if cmd.startswith('chown '))
+                chmod_index = next(i for i, cmd in enumerate(commands) if cmd.startswith('chmod '))
+                self.assertTrue(any('tar --overwrite -xpf' in cmd for cmd in commands[:chown_index]))
+                self.assertGreater(chmod_index, chown_index)
+                files = [f"/srv/scenario files/{path}" for path in payload['relativePaths']]
+                self.assertEqual(shlex.split(commands[chown_index]), [
+                    'chown', '--', owner, '/srv/scenario files/bundle', '/srv/scenario files/bundle/nested', *files,
+                ])
+                self.assertEqual(shlex.split(commands[chmod_index]), ['chmod', '--', permissions, *files])
+
+    def test_push_rejects_invalid_metadata_before_connecting(self):
+        for field, values in {
+            'ownerOnRemote': ['-R', 'root; touch /tmp/injected', 'root:root', {}, None],
+            'filePermissions': ['888', '64', '10000', 'u+rwx', '644;id', 644, None],
+        }.items():
+            for value in values:
+                with self.subTest(field=field, value=value), \
+                        patch('app.routes.api._block_when_remote', return_value=None), \
+                        patch('app.routes.api._guest_transfer_context') as context:
+                    response = self.client.post(
+                        f'/api/projects/{self.project.id}/instances/actions/guest_push',
+                        data={'payload': json.dumps({**self.payload, 'destination': '/opt', field: value}),
+                              'files': (io.BytesIO(b'data'), 'file.txt')},
+                        content_type='multipart/form-data',
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    context.assert_not_called()
+
+    def test_push_reports_metadata_failure_without_claiming_success(self):
+        for guest_type in ('lxc', 'qemu'):
+            with self.subTest(guest_type=guest_type):
+                ssh = _Ssh()
+                prox = MagicMock()
+                prox.get_qemu_config.return_value = {'ostype': 'l26'}
+                prox.agent_exec.side_effect = lambda **kwargs: (
+                    {'exitcode': 1, 'stderr': 'chown: invalid user'}
+                    if kwargs['command'][-1].startswith('chown ') else {'exitcode': 0}
+                )
+                with patch('app.routes.api._block_when_remote', return_value=None), \
+                        patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                        patch('app.routes.api._resolve_targets_to_vm_info', return_value=(self._mapped(guest_type), [], [])), \
+                        patch('app.routes.api.ProxmoxClient', return_value=prox), \
+                        patch('app.routes.api._ssh_connect', return_value=ssh), \
+                        patch('app.routes.api._ssh_exec_result', side_effect=[(0, b'', ''), (1, b'', 'chown: invalid user')]):
+                    response = self.client.post(
+                        f'/api/projects/{self.project.id}/instances/actions/guest_push',
+                        data={'payload': json.dumps({**self.payload, 'destination': '/opt',
+                              'ownerOnRemote': 'missing-user', 'filePermissions': '600'}),
+                              'files': (io.BytesIO(b'data'), 'file.txt')},
+                        content_type='multipart/form-data',
+                    )
+                body = response.get_json()
+                self.assertFalse(body['pushed'])
+                self.assertIn('files uploaded, but setting remote ownership or permissions failed', body['errors'][0]['reason'])
+                self.assertIn('invalid user', body['errors'][0]['reason'])
+                if guest_type == 'lxc':
+                    self.assertEqual(len(ssh.sftp.removed), 1)
+                    self.assertTrue(ssh.closed)
+
+    def test_metadata_commands_bound_large_folder_arguments_and_allow_independent_options(self):
+        paths = [f'bundle/{i:05d}-file.txt' for i in range(1000)]
+        commands = _guest_push_metadata_commands('/opt', paths, {'bundle'}, '', '000')
+        self.assertGreater(len(commands), 1)
+        self.assertTrue(all(len(cmd.encode('utf-8')) <= 8192 for cmd in commands))
+        self.assertEqual([path for cmd in commands for path in shlex.split(cmd)[3:]], [f'/opt/{p}' for p in paths])
+        self.assertEqual(_guest_push_metadata_commands('/opt', paths, {'bundle'}, '', ''), [])
+        owner_only = _guest_push_metadata_commands('/opt', ['a.txt'], set(), 'root', '')
+        self.assertEqual(owner_only, ['chown -- root /opt/a.txt'])
 
     def test_folder_push_accepts_dedicated_multipart_destination(self):
         ssh = _Ssh()

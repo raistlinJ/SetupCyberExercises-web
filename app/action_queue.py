@@ -5,6 +5,7 @@ without browser polling; request/session data is captured before acknowledging.
 """
 import io
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -14,6 +15,7 @@ from urllib.parse import quote, urlsplit
 
 from flask import Blueprint, Response, g, jsonify, request, session
 from werkzeug.datastructures import MultiDict
+from .queue_labels import queue_label, request_label
 
 
 class ActionQueue:
@@ -34,6 +36,11 @@ class ActionQueue:
                 UNIQUE(owner, token))''')
             db.execute('''CREATE TABLE IF NOT EXISTS uploads (
                 job INTEGER, name TEXT, filename TEXT, content_type TEXT, body BLOB)''')
+            # Existing queues are migrated without dropping accepted work.
+            db.execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(actions)')}
+            if 'progress_state' not in columns:
+                db.execute("ALTER TABLE actions ADD COLUMN progress_state TEXT NOT NULL DEFAULT '{}'")
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -65,7 +72,7 @@ class ActionQueue:
             db.execute('''INSERT OR IGNORE INTO actions
                 (owner, token, label, project, status, created, payload, total_steps)
                 VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)''',
-                (owner, plan['token'], plan.get('label', 'Action'), plan.get('projectId', ''), time.time(), payload, len(plan['steps'])))
+                (owner, plan['token'], queue_label(plan.get('label'), plan['steps']), plan.get('projectId', ''), time.time(), payload, len(plan['steps'])))
             inserted = db.execute('SELECT changes()').fetchone()[0]
             row = db.execute('SELECT * FROM actions WHERE owner=? AND token=?', (owner, plan['token'])).fetchone()
             if inserted:
@@ -91,7 +98,35 @@ class ActionQueue:
                 db.execute("UPDATE actions SET status='running', started=?, worker=? WHERE id=?", (time.time(), os.getpid(), row['id']))
             return row
 
-    def wait_for_child(self, step, result, job_id):
+    def progress_reporter(self, job_id, step_number):
+        state = {}
+        lock = threading.Lock()
+
+        def report(fields):
+            # Only publish display fields, never credentials, callbacks or logs.
+            patch = {}
+            for key in ('message', 'phase', 'current'):
+                if key in fields:
+                    patch[key] = str(fields[key] or '')[:1000]
+            if 'progress' in fields:
+                try:
+                    value = float(fields['progress'])
+                    patch['progress'] = max(0, min(100, value)) if math.isfinite(value) else None
+                except (TypeError, ValueError):
+                    patch['progress'] = None
+            with lock:
+                updated = {**state, **patch}
+                if updated == state:
+                    return
+                # Late reports from a finished step cannot overwrite the next
+                # step or turn a finished action back into a running one.
+                with self.connect() as db:
+                    db.execute("UPDATE actions SET progress_state=? WHERE id=? AND step=? AND status='running'",
+                               (json.dumps(updated), job_id, step_number))
+                state.update(updated)
+        return report
+
+    def wait_for_child(self, step, result, job_id, report):
         """Existing import/export endpoints launch their own in-process worker."""
         from .routes import api
         path = urlsplit(step['url']).path
@@ -108,6 +143,8 @@ class ActionQueue:
             rec = api._ACTIVE_JOBS.get(key)
             if not rec or rec.get('id') != result['job']:
                 raise ValueError('Background operation is no longer available')
+            report({key: rec.get(key) for key in ('progress', 'message', 'current')}
+                   | {'phase': rec.get('phase') or rec.get('status')})
             state = rec.get('status')
             if state in {'completed', 'error', 'cancelled'}:
                 if state == 'error':
@@ -124,7 +161,7 @@ class ActionQueue:
         with self.connect() as db:
             return bool(db.execute('SELECT cancel FROM actions WHERE id=?', (job_id,)).fetchone()[0])
 
-    def dispatch(self, step, payload, job_id):
+    def dispatch(self, step, payload, job_id, report):
         headers = dict(step.get('headers') or {})
         if payload.get('api_key'):
             headers['X-API-Key'] = payload['api_key']
@@ -145,6 +182,7 @@ class ActionQueue:
         with self.app.test_request_context(step['url'], **kwargs):
             session.update(payload['session'])
             g.action_queue_cancelled = lambda: self.cancelled(job_id)
+            g.action_queue_progress = report
             response = self.app.full_dispatch_request()
             response.direct_passthrough = False
             try:
@@ -158,6 +196,7 @@ class ActionQueue:
         status, error = 'completed', ''
         code, headers, body = 200, {'Content-Type': 'application/json'}, b'{}'
         results = []
+        partial_errors = False
         try:
             payload = json.loads(row['payload'])
             for index, step in enumerate(payload['steps']):
@@ -165,7 +204,8 @@ class ActionQueue:
                     status = 'cancelled'
                     break
                 with self.connect() as db:
-                    db.execute('UPDATE actions SET step=? WHERE id=?', (index + 1, job_id))
+                    db.execute("UPDATE actions SET step=?, progress_state='{}' WHERE id=?", (index + 1, job_id))
+                report = self.progress_reporter(job_id, index + 1)
                 if 'projectFromStep' in step:
                     previous = results[step['projectFromStep']]
                     project_id = previous.get('id') or previous.get('pid')
@@ -174,7 +214,10 @@ class ActionQueue:
                     step = {**step, 'url': step['url'].replace('$project', quote(str(project_id), safe=''))}
                     with self.connect() as db:
                         db.execute('UPDATE actions SET project=? WHERE id=?', (str(project_id), job_id))
-                code, headers, body = self.dispatch(step, payload, job_id)
+                operation = request_label(step['method'], step['url'], step.get('body'))
+                report({'phase': 'starting', 'progress': None, 'current': '',
+                        'message': f'Step {index + 1}/{len(payload["steps"])} · {operation}…'})
+                code, headers, body = self.dispatch(step, payload, job_id, report)
                 try:
                     result = json.loads(body)
                 except (ValueError, UnicodeDecodeError):
@@ -182,9 +225,26 @@ class ActionQueue:
                 results.append(result)
                 if code >= 400:
                     raise ValueError((result.get('error') if isinstance(result, dict) else None) or f'HTTP {code}')
-                if isinstance(result, dict) and (result.get('ok') is False or result.get('errors') or result.get('network_apply_errors') or result.get('ambiguous')):
-                    raise ValueError('Operation reported errors or unresolved templates; see results')
-                self.wait_for_child(step, result, job_id)
+                if isinstance(result, dict):
+                    if result.get('ok') is False or result.get('ambiguous'):
+                        raise ValueError('Operation reported errors or unresolved templates; see results')
+                    if result.get('errors') or result.get('network_apply_errors'):
+                        # Create can successfully provision guests and then fail
+                        # a snapshot or network operation. Those guests still
+                        # need the queued permissions and setup steps. Preserve
+                        # the errors and finish the plan before reporting failure.
+                        created_guests = result.get('created')
+                        partial_create = (
+                            step['method'] == 'POST'
+                            and urlsplit(step['url']).path.endswith('/instances/actions/create')
+                            and isinstance(created_guests, list) and bool(created_guests)
+                        )
+                        if not partial_create:
+                            raise ValueError('Operation reported errors or unresolved templates; see results')
+                        partial_errors = True
+                self.wait_for_child(step, result, job_id, report)
+            if partial_errors and status == 'completed':
+                status, error = 'error', 'VM creation reported errors; see results.'
         except Exception as exc:
             status, error = 'error', str(exc)
             self.app.logger.exception('Queued action %s failed', job_id)
@@ -212,13 +272,24 @@ class ActionQueue:
 
 
 def public_record(row):
-    return {'id': row['id'], 'label': row['label'], 'projectId': row['project'],
+    detail = json.loads(row['progress_state'] or '{}')
+    step_progress = detail.get('progress')
+    progress = None
+    if row['status'] == 'completed':
+        progress = 100
+    elif step_progress is not None and row['total_steps'] and row['step']:
+        progress = round(100 * (row['step'] - 1 + step_progress / 100) / row['total_steps'], 1)
+        progress = min(99, progress)
+    return {'id': row['id'], 'label': queue_label(row['label']), 'projectId': row['project'],
             'status': row['status'], 'createdAt': row['created'] * 1000,
             'startedAt': row['started'] * 1000 if row['started'] else None,
             'finishedAt': row['finished'] * 1000 if row['finished'] else None,
             'cancelRequested': bool(row['cancel']), 'errorMessage': row['error'],
             'durationMs': (row['finished'] - row['started']) * 1000 if row['finished'] and row['started'] else None,
             'step': row['step'], 'totalSteps': row['total_steps'],
+            'progress': progress, 'stepProgress': step_progress,
+            'message': detail.get('message', ''), 'phase': detail.get('phase', ''),
+            'current': detail.get('current', ''),
             'exclusive': True, 'lockProject': True, 'server': True}
 
 

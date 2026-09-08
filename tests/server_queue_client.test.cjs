@@ -65,6 +65,25 @@ test('navigation reads and cancellation bypass the queue, endpoint errors stay e
   assert(calls.some(([url]) => url.endsWith('/actions/cancel')));
 });
 
+test('automatically captured settings requests let the server name the action', async () => {
+  let submitted;
+  const window = browser(async (url, options = {}) => {
+    if (url === '/api/queue' && options.method === 'POST') {
+      submitted = JSON.parse(options.body);
+      return json({ id: 1, label: 'Save VM settings · agentic-VM', status: 'queued' }, 202);
+    }
+    if (url === '/api/queue') return json({ items: [] });
+    if (url.endsWith('/result')) return json({ ok: true });
+    return json({ id: 1, label: 'Save VM settings · agentic-VM', status: 'completed' });
+  });
+  await window.fetch('/api/projects/p/vms/agentic-VM', {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{"viewable_to_user":true}',
+  });
+  assert.equal(submitted.label, undefined);
+  assert.equal(submitted.steps[0].method, 'PATCH');
+  assert.equal(submitted.steps[0].body.viewable_to_user, true);
+});
+
 test('multipart submission includes actual files and all repeated form fields', () => {
   const window = browser(async () => json({ items: [] }));
   const files = [];
@@ -76,6 +95,34 @@ test('multipart submission includes actual files and all repeated form fields', 
   assert.equal(step.form.filter(([key]) => key === 'tag').length, 2);
   assert.equal(step.files.length, 1);
   assert.equal(files[0][1].name, 'hello.txt');
+});
+
+test('inventory POST lookups and refreshes bypass active jobs, including inside runQueued', async () => {
+  const calls = [];
+  const window = browser(async (url, options = {}) => {
+    calls.push([url, options]);
+    if (url === '/api/queue') {
+      assert.notEqual(options.method, 'POST', 'inventory reads must not submit jobs');
+      return json({ items: [{ id: 1, label: 'Running VM action', status: 'running' }] });
+    }
+    return json({ nodes: ['node1'] });
+  });
+  await window.ServerQueue.refresh();
+  const options = { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseUrl: 'https://proxmox.example', username: 'user', password: 'test' }) };
+  for (const url of ['/api/proxmox/nodes', '/api/proxmox/nodes?refresh=1',
+    '/api/proxmox/templates', '/api/proxmox/nodes/node1/network',
+    '/api/projects/project-1/instances/refresh/vm',
+    '/api/projects/project%202/instances/refresh/vm?forceRefresh=true']) {
+    const response = await window.fetch(url, options);
+    assert.deepEqual(await response.json(), { nodes: ['node1'] });
+    await window.ServerQueue.run('Read inventory', () => window.fetch(url, options));
+    const requests = calls.filter(([path]) => path === url);
+    assert.equal(requests.length, 2);
+    assert(requests.every(([, sent]) => sent === options), 'preserve credentials and request options');
+  }
+  assert.equal(window.ServerQueue.state().activeItems.length, 1);
+  assert.equal(window.ServerQueue.state().items.length, 0);
 });
 
 test('VM plans capture every project and all create/delete follow-ups before submission', () => {
@@ -124,4 +171,28 @@ test('wizard captures dynamically created project references and per-template ac
   assert.equal(syncs[0].body.enable, true);
   assert.equal(syncs[1].body.enable, false);
   assert.equal(steps.at(-1).url, '/api/projects/$project/ctfd/users_create');
+});
+
+test('queue progress renders each job independently, escapes status, and handles unknown percentages', () => {
+  const shell = fs.readFileSync('app/static/js/shell.js', 'utf8');
+  const helper = shell.slice(shell.indexOf('function renderRemoteQueueProgress('), shell.indexOf('function clearCompletedRemoteActions('));
+  const sandbox = { escapeHtml: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;') };
+  vm.createContext(sandbox); vm.runInContext(helper, sandbox);
+  const measured = sandbox.renderRemoteQueueProgress({ label: 'Create "VM"', progress: 70,
+    step: 2, totalSteps: 3, message: 'Cloning <vm1>' });
+  assert.match(measured, /aria-valuenow="70"/);
+  assert.match(measured, /width:70%/);
+  assert.match(measured, /Step 2 of 3/);
+  assert.match(measured, /Cloning &lt;vm1&gt;/);
+  assert.match(measured, /Create &quot;VM&quot; progress/);
+  assert.doesNotMatch(measured, /progress-bar-animated/);
+  for (const progress of [null, undefined, '', NaN]) {
+    const unknown = sandbox.renderRemoteQueueProgress({ label: 'Upload', progress, cancelRequested: true, phase: 'guest_push', current: 'vm2' });
+    assert.match(unknown, /progress-bar-animated/);
+    assert.match(unknown, /Cancelling/);
+    assert.match(unknown, /guest push · vm2/);
+    assert.doesNotMatch(unknown, /aria-valuenow|Cloning|70%/);
+  }
+  assert.match(sandbox.renderRemoteQueueProgress({ progress: 0 }), /aria-valuenow="0"/);
+  assert.match(sandbox.renderRemoteQueueProgress({ progress: 200 }), /width:100%/);
 });

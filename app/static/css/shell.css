@@ -418,6 +418,26 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 .console-dock .queue-card .queue-label { font-size: .9rem; font-weight: 600; margin-bottom: .25rem; }
 .console-dock .queue-card .queue-meta { font-size: .75rem; color: rgba(226, 232, 240, .78); }
 .console-dock .queue-card .queue-actions .btn { letter-spacing: .05em; text-transform: uppercase; }
+.console-dock .queue-progress { margin-top: .65rem; }
+.console-dock .queue-progress-status {
+	display: flex;
+	justify-content: space-between;
+	gap: .75rem;
+	font-size: .75rem;
+	font-weight: 600;
+	margin-bottom: .35rem;
+}
+.console-dock .queue-progress-track {
+	height: .55rem;
+	background: rgba(15, 23, 42, .65);
+	border-radius: 1rem;
+	margin-bottom: .4rem;
+}
+.console-dock .queue-progress-track .progress-bar { background-color: #60a5fa; }
+.console-dock .queue-progress-detail { overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) {
+	.console-dock .queue-progress-track .progress-bar { animation: none; transition: none; }
+}
 .console-dock .queue-list {
 	margin: 0;
 	padding: 0;
@@ -670,4 +690,3 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
     color: #10b981;
     background-color: rgba(16, 185, 129, 0.1);
 }
-

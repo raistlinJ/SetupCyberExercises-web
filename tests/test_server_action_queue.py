@@ -1,12 +1,13 @@
 import io
 import json
+import sqlite3
 import threading
 import time
 
 import pytest
 from flask import Flask, jsonify, request, session
 
-from app.action_queue import ActionQueue, init_action_queue
+from app.action_queue import ActionQueue, init_action_queue, public_record
 from app.routes import api
 
 
@@ -54,6 +55,15 @@ def harness(tmp_path):
         finished.set()
         return jsonify(ok=True)
 
+    @app.post('/api/projects/<pid>/instances/actions/create')
+    def create_vms(pid):
+        calls.append('create-vms')
+        body = request.get_json()
+        return jsonify(body['result']), body.get('status', 200)
+
+    app.add_url_rule('/api/projects/<pid>/instances/actions/start',
+                     view_func=api.instances_start, methods=['POST'])
+
     @app.post('/api/projects/import/start')
     def async_import():
         api._ACTIVE_JOBS[api._import_job_key('child')] = {'id': 'child', 'status': 'running'}
@@ -73,6 +83,20 @@ def harness(tmp_path):
             time.sleep(.01)
         finished.set()
         return jsonify(cancelled=api._is_cancelled('queue-test'))
+
+    @app.post('/api/progress')
+    def progress():
+        api._start_job('queue-test', 'create')
+        # Real action endpoints also report from pool threads without a Flask
+        # request context. Keep the operation blocked so we can inspect it live.
+        reporter = threading.Thread(target=lambda: api._update_job_detail(
+            'queue-test', progress=40, phase='cloning', current='vm1',
+            message='Cloning vm1', detail={'password': 'must-not-be-published'}))
+        reporter.start()
+        reporter.join()
+        started.set()
+        assert release.wait(5)
+        return jsonify(ok=True)
 
     init_action_queue(app)
     client = app.test_client()
@@ -100,6 +124,42 @@ def wait_terminal(client, job_id):
             return state
         time.sleep(.01)
     pytest.fail('Worker did not finish')
+
+
+@pytest.mark.parametrize('error_field', ['errors', 'network_apply_errors'])
+def test_partial_create_runs_permissions_and_other_followups_but_preserves_errors(harness, error_field):
+    app, client, started, release, finished, calls = harness
+    partial = {'created': [{'index': 1, 'name': 'agentic-VM1', 'vmid': 101}],
+               error_field: [{'reason': 'snapshot or network update failed'}]}
+    job = client.post('/api/queue', json={'token': 'partial-create', 'steps': [
+        {'method': 'POST', 'url': '/api/projects/lab/instances/actions/create', 'body': {'result': partial}},
+        {'method': 'POST', 'url': '/api/work/permissions'},
+        {'method': 'POST', 'url': '/api/work/scenario'},
+        {'method': 'POST', 'url': '/api/work/last'},
+    ]}).get_json()
+    state = wait_terminal(client, job['id'])
+    assert calls == ['create-vms', ('permissions', 'alice', None), ('scenario', 'alice', None), ('last', 'alice', None)]
+    assert state['status'] == 'error'
+    assert state['step'] == 4
+    results = client.get(f'/api/queue/{job["id"]}/result').get_json()['results']
+    assert results[0] == partial
+    assert len(results) == 4
+
+
+@pytest.mark.parametrize('result,code', [
+    ({'created': [], 'errors': [{'reason': 'clone failed'}]}, 200),
+    ({'created': [{'vmid': 101}], 'ambiguous': [{'name': 'template'}]}, 200),
+    ({'created': [{'vmid': 101}], 'ok': False}, 200),
+    ({'created': [{'vmid': 101}], 'error': 'Not authorized'}, 403),
+])
+def test_failed_or_unresolved_create_still_stops_followups(harness, result, code):
+    app, client, started, release, finished, calls = harness
+    job = client.post('/api/queue', json={'token': 'failed-create', 'steps': [
+        {'method': 'POST', 'url': '/api/projects/lab/instances/actions/create', 'body': {'result': result, 'status': code}},
+        {'method': 'POST', 'url': '/api/work/permissions'},
+    ]}).get_json()
+    assert wait_terminal(client, job['id'])['status'] == 'error'
+    assert calls == ['create-vms']
 
 
 def test_drains_fifo_with_no_browser_requests_and_pages_remain_available(harness):
@@ -272,3 +332,126 @@ def test_clearing_history_preserves_deduplication_and_active_work(harness):
     assert [item['id'] for item in client.get('/api/queue').get_json()['items']] == [active]
     assert enqueue(client, 'completed').get_json()['id'] == job
     assert [call[0] for call in calls] == ['completed', 'first']
+
+
+def test_worker_progress_is_shared_and_combined_across_plan_steps(harness):
+    app, client, started, release, finished, calls = harness
+    job = enqueue(client, 'progress', steps=[
+        {'method': 'POST', 'url': '/api/work/preparation'},
+        {'method': 'POST', 'url': '/api/progress'},
+    ]).get_json()['id']
+    assert started.wait(2)
+    state = client.get(f'/api/queue/{job}').get_json()
+    assert state['progress'] == 70  # One complete step, then 40% of the second.
+    assert state['stepProgress'] == 40
+    assert state['phase'] == 'cloning'
+    assert state['current'] == 'vm1'
+    assert state['message'] == 'Cloning vm1'
+    assert 'must-not-be-published' not in json.dumps(state)
+    assert client.get('/api/queue').get_json()['items'][0]['progress'] == 70
+    other_worker = ActionQueue(app)
+    with other_worker.connect() as db:
+        persisted = public_record(db.execute('SELECT * FROM actions WHERE id=?', (job,)).fetchone())
+    assert persisted == state
+    stale_report = api._ACTIVE_JOBS[api._job_key('queue-test')]['queue_progress']
+    release.set()
+    assert wait_terminal(client, job)['progress'] == 100
+    stale_report({'progress': 2, 'message': 'Late update'})
+    assert client.get(f'/api/queue/{job}').get_json()['progress'] == 100
+    assert client.get(f'/api/queue/{job}').get_json()['message'] == 'Cloning vm1'
+
+
+def test_progress_without_a_measurement_is_indeterminate(harness):
+    app, client, started, release, finished, calls = harness
+    job = enqueue(client, 'first').get_json()['id']
+    assert started.wait(2)
+    state = client.get(f'/api/queue/{job}').get_json()
+    assert state['status'] == 'running'
+    assert state['progress'] is None
+    assert state['stepProgress'] is None
+    assert state['message'] == 'Step 1/1 · Run operation…'
+
+
+def test_automatic_request_label_is_saved_as_readable_title(harness):
+    app, client, started, release, finished, calls = harness
+    path = '/api/projects/lab/instances/actions/create'
+    response = client.post('/api/queue', json={'token': 'readable-label', 'label': f'POST {path}',
+        'steps': [{'method': 'POST', 'url': path, 'body': {'result': {'created': []}}}]})
+    assert response.status_code == 202
+    job = response.get_json()
+    assert job['label'] == 'Create VMs'
+    assert wait_terminal(client, job['id'])['label'] == 'Create VMs'
+    with app.extensions['action_queue'].connect() as db:
+        assert db.execute('SELECT label FROM actions WHERE id=?', (job['id'],)).fetchone()['label'] == 'Create VMs'
+
+
+def test_parallel_vm_worker_publishes_current_guest_before_remote_call_finishes(harness, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from app.storage.projects import Project
+
+    app, client, started, release, finished, calls = harness
+    project = Project(id='p', name='Lab', proxmox_url='https://proxmox.local', proxmox_api_token='test')
+    guest = {'index': 1, 'name': 'vm1', 'vmid': 101, 'node': 'node1', 'status': 'stopped'}
+    proxmox = MagicMock()
+    def start(**kwargs):
+        started.set()
+        assert release.wait(5)
+        return 'task'
+    proxmox.start_qemu.side_effect = start
+    monkeypatch.setattr(api, '_store', lambda: SimpleNamespace(get=lambda pid: project))
+    monkeypatch.setattr(api, 'ProxmoxClient', lambda **kwargs: proxmox)
+    monkeypatch.setattr(api, '_resolve_targets_to_vm_info', lambda *args: ([guest], [], []))
+    try:
+        job = enqueue(client, 'start-progress', steps=[{'method': 'POST',
+            'url': '/api/projects/p/instances/actions/start', 'body': {'targets': [guest]}}]).get_json()['id']
+        assert started.wait(2)
+        state = client.get(f'/api/queue/{job}').get_json()
+        assert state['status'] == 'running'
+        assert 'Starting vm1' in state['message']
+        assert 'VM 101' in state['message']
+        assert 'node node1' in state['message']
+        release.set()
+        assert wait_terminal(client, job)['status'] == 'completed'
+    finally:
+        release.set()
+        with api._JOB_LOCK:
+            api._ACTIVE_JOBS.pop(api._job_key('p'), None)
+
+
+def test_async_child_progress_is_published_without_browser_polling(harness):
+    app, client, started, release, finished, calls = harness
+    job = enqueue(client, 'import-progress', steps=[{'method': 'POST', 'url': '/api/projects/import/start'}]).get_json()['id']
+    assert started.wait(2)
+    rec = api._ACTIVE_JOBS[api._import_job_key('child')]
+    rec.update(progress=63, phase='uploading', message='Uploading archive')
+    try:
+        deadline = time.monotonic() + 2
+        state = {}
+        while time.monotonic() < deadline:
+            # Read the shared database directly; no request drives progress.
+            with app.extensions['action_queue'].connect() as db:
+                state = public_record(db.execute('SELECT * FROM actions WHERE id=?', (job,)).fetchone())
+            if state['progress'] == 63:
+                break
+            time.sleep(.01)
+        assert state['progress'] == 63
+        assert state['message'] == 'Uploading archive'
+        assert state['phase'] == 'uploading'
+    finally:
+        rec['status'] = 'completed'
+    assert wait_terminal(client, job)['progress'] == 100
+
+
+def test_progress_schema_migration_preserves_existing_work(tmp_path):
+    path = tmp_path / 'action_queue.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE actions (id INTEGER PRIMARY KEY, status TEXT, payload TEXT)')
+        db.execute("INSERT INTO actions VALUES (1, 'queued', 'accepted payload')")
+    app = Flask(__name__)
+    app.config['DATA_DIR'] = str(tmp_path)
+    for _ in range(2):  # Safe when another WSGI worker initializes the same DB.
+        queue = ActionQueue(app)
+        with queue.connect() as db:
+            row = dict(db.execute('SELECT * FROM actions WHERE id=1').fetchone())
+        assert row == {'id': 1, 'status': 'queued', 'payload': 'accepted payload', 'progress_state': '{}'}

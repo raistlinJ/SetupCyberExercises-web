@@ -103,7 +103,8 @@
     const files = [];
     const step = requestStep(url, options, files);
     const opts = { ...(context || {}), headers: options.headers };
-    const label = opts.label || `${step.method} ${url}`;
+    // The server derives a readable action title when no explicit label exists.
+    const label = opts.label;
     const job = await submit(label, [step], opts, files);
     opts.onAccepted?.(job);
     onAccepted?.(job);
@@ -157,7 +158,14 @@
     if (typeof input !== 'string') return nativeFetch(input, options);
     const url = new URL(input, window.location.href);
     const method = String(options.method || 'GET').toUpperCase();
+    // These inventory reads use POST to carry connection credentials. They
+    // must remain available while actions are running, even inside runQueued.
+    const inventoryRead = method === 'POST' && (
+      /^\/api\/proxmox\/(?:nodes(?:\/[^/]+\/network)?|templates)$/.test(url.pathname)
+      || /^\/api\/projects\/[^/]+\/instances\/refresh\/vm$/.test(url.pathname)
+    );
     const eligible = url.origin === window.location.origin && url.pathname.startsWith('/api/')
+      && !inventoryRead
       && !url.pathname.startsWith('/api/queue')
       && !/\/(cancel|status|create-preflight)$/.test(url.pathname);
     if (eligible && (context || ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method))) {

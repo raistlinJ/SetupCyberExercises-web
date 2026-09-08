@@ -1,8 +1,10 @@
 import unittest
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
+from flask import g
 
 from app import create_app
+from app.routes import api
 from app.storage.projects import Project, VMConfig
 
 
@@ -37,6 +39,48 @@ class UsersPermsRollbackToggleApiTests(unittest.TestCase):
             patch('app.routes.api._start_job'),
             patch('app.routes.api._end_job'),
         ]
+
+    def test_permission_progress_reaches_queue_for_each_vm_and_reports_errors(self):
+        self.project.instances = 2
+        self.project.vms[0].viewable_to_user = True
+        self.project.credentials.append({'username': 'bob', 'password': 'private-password'})
+        mapped = [
+            {'index': i, 'name': f'web-set-{i}', 'vmid': 100 + i, 'node': 'node1'}
+            for i in (1, 2)
+        ]
+        reports = []
+        client = MagicMock()
+        client.list_nodes.return_value = []
+        client.get_user.side_effect = lambda userid: {'userid': userid} if userid == 'alice@pve' else None
+        during_grant = []
+        client.set_acl_user_vm.side_effect = lambda *args, **kwargs: during_grant.append(dict(reports[-1]))
+        body = {'targets': mapped, 'username': 'root@pam', 'password': 'connection-password'}
+        try:
+            with self.app.test_request_context(json=body), \
+                    patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                    patch('app.routes.api.ProxmoxClient', return_value=client), \
+                    patch('app.routes.api._resolve_targets_to_vm_info', return_value=(mapped, [], [])), \
+                    patch('app.routes.api._vm_is_in_project_notes', return_value=True):
+                g.action_queue_progress = reports.append
+                response = api.instances_users_perms(self.project.id)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(during_grant), 1)
+            self.assertIn('Setting user access for alice@pve', during_grant[0]['message'])
+            self.assertIn('web-set-1 (VM 101, node1)', during_grant[0]['message'])
+            self.assertIn('Instance 1/2 · VM 1/1', during_grant[0]['message'])
+            messages = ' '.join(r.get('message', '') for r in reports)
+            self.assertIn('Adding web-set-1', messages)
+            self.assertIn('Checking user bob@pve', messages)
+            self.assertIn('1 VM(s) updated, 0 skipped, 1 error(s)', reports[-1]['message'])
+            percentages = [r['progress'] for r in reports if 'progress' in r]
+            self.assertEqual(percentages, sorted(percentages))
+            self.assertEqual(percentages[-1], 100)
+            self.assertNotIn('connection-password', str(reports))
+            self.assertNotIn('private-password', str(reports))
+            self.assertEqual(api._ACTIVE_JOBS[api._job_key(self.project.id)]['status'], 'error')
+        finally:
+            with api._JOB_LOCK:
+                api._ACTIVE_JOBS.pop(api._job_key(self.project.id), None)
 
     def test_non_viewable_vm_gets_rollback_role_when_toggle_enabled(self):
         self.project.proxmox_assign_rollback_on_non_viewable = True

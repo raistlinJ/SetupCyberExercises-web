@@ -1292,6 +1292,27 @@ function getRemoteQueueState(){
   } catch { return { active:false, current:null, activeItems:[], items:[], completed:[] }; }
 }
 
+function renderRemoteQueueProgress(entry){
+  const raw = entry.progress;
+  const hasPercent = raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw));
+  const percent = hasPercent ? Math.max(0, Math.min(100, Number(raw))) : null;
+  const value = hasPercent ? `${Math.round(percent)}%` : 'In progress';
+  const status = entry.cancelRequested ? 'Cancelling…' : 'Running';
+  const detail = entry.message || [entry.phase ? String(entry.phase).replace(/_/g, ' ') : '', entry.current].filter(Boolean).join(' · ');
+  const step = Number(entry.step);
+  const total = Number(entry.totalSteps);
+  const steps = Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0
+    ? `<div class="queue-meta">Step ${step} of ${total}</div>` : '';
+  const ariaValue = hasPercent ? ` aria-valuenow="${percent}"` : '';
+  const animated = hasPercent ? '' : ' progress-bar-striped progress-bar-animated';
+  return `<div class="queue-progress">`
+    + `<div class="queue-progress-status"><span>${status}</span><span>${value}</span></div>`
+    + `<div class="progress queue-progress-track" role="progressbar" aria-label="${escapeHtml(entry.label || 'Action')} progress" aria-valuemin="0" aria-valuemax="100"${ariaValue} aria-valuetext="${escapeHtml(hasPercent ? value : 'In progress; percentage unavailable')}">`
+    + `<div class="progress-bar${animated}" style="width:${hasPercent ? percent : 100}%"></div></div>`
+    + (detail ? `<div class="queue-meta queue-progress-detail" role="status">${escapeHtml(detail)}</div>` : '')
+    + steps + `</div>`;
+}
+
 function clearCompletedRemoteActions(){
   if (window.ServerQueue) return window.ServerQueue.clearCompleted();
   if (!REMOTE_COMPLETED_ITEMS.length) return;
@@ -1913,7 +1934,7 @@ const ConsoleDock = (() => {
                 const restoringNote = entry.restoring ? '<div class="queue-meta text-muted">Reconnecting after navigation…</div>' : '';
                 const cancelNote = entry.cancelRequested ? '<div class="queue-meta text-warning">Cancel requested…</div>' : '';
                 const disableCancel = entry.cancelRequested ? 'disabled' : '';
-                const isPrimary = idx === 0;
+                const isPrimary = idx === 0 && !entry.server;
                 const progressMeta = (isPrimary && progressSummary) ? `<div class="queue-meta text-muted">${escapeHtml(progressSummary)}</div>` : '';
                 const progressHint = (isPrimary && progressAvailable) ? '<div class="queue-meta text-primary small">Click or tap for progress details.</div>' : '';
                 const progressButton = (isPrimary && progressAvailable) ? `<button type="button" class="btn btn-sm btn-outline-primary me-2" data-act="q-show-progress">View Progress</button>` : '';
@@ -1927,7 +1948,7 @@ const ConsoleDock = (() => {
                   + `${modeMeta}`
                   + `${queuedMeta}`
                   + `${startedMeta}`
-                  + (entry.server && entry.totalSteps ? `<div class="queue-meta">Step ${entry.step} of ${entry.totalSteps}</div>` : '')
+                  + (entry.server ? renderRemoteQueueProgress(entry) : '')
                   + `${restoringNote}`
                   + `${progressMeta}`
                   + `${progressHint}`
