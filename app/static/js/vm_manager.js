@@ -3919,8 +3919,12 @@ function wireLxcTransferModals() {
       const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
       const guestCount = groups.reduce((total, group) => total + group.targets.length, 0);
       if (!guestCount) return fail('Select at least one existing LXC container or QEMU VM.');
-      if (!window.PersistentQueuePayloads) return fail('Persistent queue storage is unavailable in this browser.');
-      const payloadId = `guest-push-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      // The server queue captures the files with the request before accepting
+      // the job. Only the legacy browser queue needs an IndexedDB copy; writing
+      // File objects there can fail with InvalidBlob before submission starts.
+      const useBrowserStorage = !window.ServerQueue;
+      if (useBrowserStorage && !window.PersistentQueuePayloads) return fail('Persistent queue storage is unavailable in this browser.');
+      const payloadId = useBrowserStorage ? `guest-push-${Date.now()}-${Math.random().toString(16).slice(2)}` : null;
       const runtimePayload = {
         destination,
         ownerOnRemote,
@@ -3932,10 +3936,12 @@ function wireLxcTransferModals() {
           lastModified: Number(file.lastModified) || 0,
         })),
       };
-      try {
-        await window.PersistentQueuePayloads.put(payloadId, runtimePayload);
-      } catch (storageError) {
-        return fail(`Could not save the upload in the persistent queue: ${storageError?.message || storageError}`);
+      if (useBrowserStorage) {
+        try {
+          await window.PersistentQueuePayloads.put(payloadId, runtimePayload);
+        } catch (storageError) {
+          return fail(`Could not save the upload in the persistent queue: ${storageError?.message || storageError}`);
+        }
       }
       const modal = document.getElementById('lxcPushModal');
       await hideLxcSetupModal(modal);
@@ -3958,7 +3964,7 @@ function wireLxcTransferModals() {
         persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
         runtimePayload,
       });
-      if (queueResult?.status === 'canceled' || queueResult?.status === 'skipped') {
+      if (payloadId && (queueResult?.status === 'canceled' || queueResult?.status === 'skipped')) {
         try { await window.PersistentQueuePayloads.remove(payloadId); } catch { }
       }
     });

@@ -9,7 +9,7 @@ function functionSource(name, next) {
   return manager.slice(manager.indexOf(`function ${name}(`), manager.indexOf(next, manager.indexOf(`function ${name}(`)));
 }
 
-function pushDialog(owner, permissions, selectionType = 'file') {
+function pushDialog(owner, permissions, selectionType = 'file', options = {}) {
   const elements = new Map();
   for (const [id, value] of Object.entries({
     'lxc-push-destination': '/opt/scenario', 'lxc-push-owner': owner,
@@ -23,10 +23,22 @@ function pushDialog(owner, permissions, selectionType = 'file') {
   let saved, queued;
   const sandbox = {
     document: { getElementById: id => elements.get(id), querySelector: () => ({ value: selectionType }), querySelectorAll: () => [] },
-    window: { PersistentQueuePayloads: { async put(id, data) { saved = data; } } },
+    window: {
+      ServerQueue: options.serverQueue,
+      PersistentQueuePayloads: options.noStorage ? undefined : {
+        async put(id, data) {
+          if (options.storageError) throw options.storageError;
+          saved = data;
+        },
+      },
+    },
     serializeGuestTransferGroups: () => [{ pid: 'p', targets: [{ index: 1, name: 'vm' }] }],
     groupSelectedGuestEntriesByProject() {}, hideLxcSetupModal: async () => {},
-    GUEST_TRANSFER_QUEUE_PERSIST_KEY: 'test', runQueued: async (label, fn, opts) => { queued = opts; },
+    GUEST_TRANSFER_QUEUE_PERSIST_KEY: 'vm-manager-guest-transfer-v1',
+    runQueued: async (label, fn, opts) => {
+      queued = opts;
+      return options.runQueued?.(label, fn, opts);
+    },
   };
   vm.createContext(sandbox);
   vm.runInContext(functionSource('wireLxcTransferModals', "document.addEventListener('DOMContentLoaded', wireLxcTransferModals)"), sandbox);
@@ -58,6 +70,66 @@ test('push dialog rejects invalid options before storing or queueing files', asy
   }
   const blank = await pushDialog('', '').submit();
   assert.ok(blank.queued);
+});
+
+test('server uploads bypass failing or unavailable browser storage and send bytes with advanced options', async () => {
+  for (const type of ['file', 'folder']) {
+    for (const noStorage of [false, true]) {
+      let submission;
+      const window = {
+        location: { href: 'http://localhost/static/vm_manager.html', origin: 'http://localhost' },
+        async fetch(url, options) {
+          if (url === '/api/queue' && options?.method === 'POST') {
+            submission = options.body;
+            return new Response(JSON.stringify({ id: 1, status: 'queued' }));
+          }
+          return new Response(JSON.stringify({ items: [] }));
+        },
+      };
+      const sandbox = {
+        window, FormData, Headers, Blob, URL, CustomEvent: class {},
+        document: { dispatchEvent() {} }, setInterval() {},
+        guestTransferAuthPayload: async () => ({}),
+      };
+      vm.createContext(sandbox);
+      vm.runInContext(fs.readFileSync('app/static/js/server_queue.js', 'utf8'), sandbox);
+      sandbox.ServerQueue = window.ServerQueue;
+      vm.runInContext(plans, sandbox);
+      window.submitServerGuestTransfer = sandbox.submitServerGuestTransfer;
+      sandbox.finishServerVmAction = async () => ({ status: 'completed' });
+      const result = await pushDialog('www-data', '0755', type, {
+        serverQueue: window.ServerQueue,
+        runQueued: window.ServerQueue.run,
+        storageError: new Error('Failed to write blobs (InvalidBlob)'),
+        noStorage,
+      }).submit();
+      assert.equal(result.error, undefined);
+      assert.equal(result.saved, undefined);
+      assert.equal(result.queued.persist.data.payloadId, null);
+      const plan = JSON.parse(submission.get('plan'));
+      assert.equal(plan.steps.length, 1);
+      const step = plan.steps[0];
+      const body = JSON.parse(step.form.find(([key]) => key === 'payload')[1]);
+      assert.equal(body.ownerOnRemote, 'www-data');
+      assert.equal(body.filePermissions, '0755');
+      assert.equal(body.destination, '/opt/scenario');
+      assert.equal(body.relativePaths[0], type === 'folder' ? 'bundle/hello.txt' : 'hello.txt');
+      const uploaded = submission.get(step.files[0][1]);
+      assert.equal(uploaded.name, 'hello.txt');
+      assert.equal(await uploaded.text(), 'hello');
+    }
+  }
+});
+
+test('legacy browser queue still requires durable storage before enqueueing', async () => {
+  for (const options of [
+    { noStorage: true },
+    { storageError: new Error('Failed to write blobs (InvalidBlob)') },
+  ]) {
+    const result = await pushDialog('www-data', '0755', 'file', options).submit();
+    assert.ok(result.error);
+    assert.equal(result.queued, undefined);
+  }
 });
 
 test('server and browser queue paths preserve advanced options when restored', async () => {
