@@ -1537,9 +1537,13 @@ def _progress_label(item):
     return f'{name} ({", ".join(metadata)})' if metadata else name
 
 
-def _instance_progress_label(proj, index):
+def _instance_username(proj, index):
     credentials = proj.credentials or []
-    username = str((credentials[index - 1] or {}).get('username') or '') if 0 < index <= len(credentials) else ''
+    return str((credentials[index - 1] or {}).get('username') or '') if isinstance(index, int) and 0 < index <= len(credentials) else ''
+
+
+def _instance_progress_label(proj, index):
+    username = _instance_username(proj, index)
     return f'Instance {index}' + (f' · {username}' if username else '')
 
 
@@ -9033,6 +9037,27 @@ def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -
     return copied
 
 
+def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
+    """Run guests within the project limit; publish completion from the request thread."""
+    if not mapped:
+        return []
+    _update_job_detail(pid, phase=phase, progress=0, total_steps=len(mapped),
+                       message=f'Processing {len(mapped)} guests')
+    results = [None] * len(mapped)
+    with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(mapped), hard_cap=0)) as pool:
+        futures = {pool.submit(worker, entry): position for position, entry in enumerate(mapped)}
+        for completed, future in enumerate(as_completed(futures), start=1):
+            position = futures[future]
+            results[position] = future.result()
+            _update_job_detail(
+                pid, phase=phase, current=str(mapped[position].get('name') or ''),
+                step=completed, total_steps=len(mapped),
+                progress=min(99, int(completed / len(mapped) * 100)),
+                message=f'Processed {completed}/{len(mapped)} guests',
+            )
+    return results
+
+
 def _guest_push_metadata_commands(
     destination: str,
     file_paths: List[str],
@@ -9133,7 +9158,7 @@ def instances_lxc_push(pid: str):
 
     pushed: List[Dict[str, Any]] = []
     _start_job(pid, 'guest_push', total_steps=len(mapped))
-    tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
+    tar_stream = tempfile.NamedTemporaryFile(mode='w+b')
     try:
         with tarfile.open(fileobj=tar_stream, mode='w') as archive:
             directory_paths: Set[str] = set()
@@ -9164,29 +9189,25 @@ def instances_lxc_push(pid: str):
                 info.mtime = int(time.time())
                 archive.addfile(info, stream)
         archive_size = tar_stream.tell()
+        tar_stream.flush()
         metadata_commands = _guest_push_metadata_commands(destination, safe_paths, directory_paths, owner, permissions)
-        total_mapped = max(1, len(mapped))
-        for position, entry in enumerate(mapped, start=1):
-            _update_job_detail(
-                pid,
-                phase='guest_push',
-                current=str(entry.get('name') or ''),
-                step=position,
-                total_steps=len(mapped),
-                progress=max(1, min(99, int(((position - 1) / total_mapped) * 100))),
-                message=f"Pushing files to {entry.get('name') or 'guest'} ({position}/{len(mapped)})",
-            )
+
+        def transfer_guest(entry):
+            pushed = []
+            errors = []
             ssh_client = None
             sftp = None
+            upload_stream = None
             remote_archive = f"/tmp/deployforge-lxc-push-{uuid.uuid4().hex}.tar"
             failure_stage = 'push failed'
             try:
+                upload_stream = open(tar_stream.name, 'rb')
                 guest_type = str(entry.get('type') or '').strip().lower()
                 if guest_type == 'qemu':
                     _push_tar_through_guest_agent(
                         client,
                         entry,
-                        tar_stream,
+                        upload_stream,
                         archive_size,
                         destination,
                     )
@@ -9210,7 +9231,7 @@ def instances_lxc_push(pid: str):
                         'owner_on_remote': owner or None,
                         'file_permissions': permissions or None,
                     })
-                    continue
+                    return pushed, errors
                 ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
                 ssh_user = _proxmox_ssh_username(proj, body.get('username'))
                 use_sudo = ssh_user.lower() != 'root'
@@ -9225,8 +9246,8 @@ def instances_lxc_push(pid: str):
                     f"tar --overwrite -xpf - -C {shlex.quote(destination)}"
                 )
                 sftp = ssh_client.open_sftp()
-                tar_stream.seek(0)
-                sftp.putfo(tar_stream, remote_archive, file_size=archive_size)
+                upload_stream.seek(0)
+                sftp.putfo(upload_stream, remote_archive, file_size=archive_size)
                 pct_command = (
                     f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
                     f"< {shlex.quote(remote_archive)}"
@@ -9276,6 +9297,8 @@ def instances_lxc_push(pid: str):
                     'reason': f'{failure_stage}: {exc}',
                 })
             finally:
+                if upload_stream is not None:
+                    upload_stream.close()
                 if sftp is not None:
                     try:
                         sftp.remove(remote_archive)
@@ -9290,6 +9313,13 @@ def instances_lxc_push(pid: str):
                         ssh_client.close()
                     except Exception:
                         pass
+            return pushed, errors
+
+        for guest_results, guest_errors in _run_guest_transfer_tasks(
+            proj, pid, mapped, 'guest_push', transfer_guest,
+        ):
+            pushed.extend(guest_results)
+            errors.extend(guest_errors)
     finally:
         tar_stream.close()
         _update_job_detail(pid, progress=100, message='Guest push completed')
@@ -9325,18 +9355,11 @@ def instances_lxc_pull(pid: str):
     pulled: List[Dict[str, Any]] = []
     _start_job(pid, 'guest_pull', total_steps=len(mapped))
     zip_stream = io.BytesIO()
+    zip_lock = threading.Lock()
     with zipfile.ZipFile(zip_stream, mode='w', compression=zipfile.ZIP_DEFLATED) as output_zip:
-        total_mapped = max(1, len(mapped))
-        for position, entry in enumerate(mapped, start=1):
-            _update_job_detail(
-                pid,
-                phase='guest_pull',
-                current=str(entry.get('name') or ''),
-                step=position,
-                total_steps=len(mapped),
-                progress=max(1, min(99, int(((position - 1) / total_mapped) * 100))),
-                message=f"Pulling files from {entry.get('name') or 'guest'} ({position}/{len(mapped)})",
-            )
+        def transfer_guest(entry):
+            pulled = []
+            errors = []
             ssh_client = None
             try:
                 guest_type = str(entry.get('type') or '').strip().lower()
@@ -9344,8 +9367,9 @@ def instances_lxc_pull(pid: str):
                     tar_stream = _pull_tar_through_guest_agent(client, entry, paths)
                     try:
                         prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'))
-                        output_zip.writestr(prefix.rstrip('/') + '/', b'')
-                        file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
+                        with zip_lock:
+                            output_zip.writestr(prefix.rstrip('/') + '/', b'')
+                            file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
                         pulled.append({
                             'index': entry.get('index'),
                             'name': entry.get('name'),
@@ -9358,7 +9382,7 @@ def instances_lxc_pull(pid: str):
                         })
                     finally:
                         tar_stream.close()
-                    continue
+                    return pulled, errors
                 ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
                 ssh_user = _proxmox_ssh_username(proj, body.get('username'))
                 use_sudo = ssh_user.lower() != 'root'
@@ -9399,8 +9423,9 @@ def instances_lxc_pull(pid: str):
                     if code != 0:
                         raise RuntimeError(stderr_text.strip() or f'pct tar exited with {code}')
                     prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'))
-                    output_zip.writestr(prefix.rstrip('/') + '/', b'')
-                    file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
+                    with zip_lock:
+                        output_zip.writestr(prefix.rstrip('/') + '/', b'')
+                        file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
                     pulled.append({
                         'index': entry.get('index'),
                         'name': entry.get('name'),
@@ -9427,6 +9452,13 @@ def instances_lxc_pull(pid: str):
                         ssh_client.close()
                     except Exception:
                         pass
+            return pulled, errors
+
+        for guest_results, guest_errors in _run_guest_transfer_tasks(
+            proj, pid, mapped, 'guest_pull', transfer_guest,
+        ):
+            pulled.extend(guest_results)
+            errors.extend(guest_errors)
     zip_bytes = zip_stream.getvalue()
     outputs_zip = None
     if pulled:
@@ -9485,18 +9517,10 @@ def instances_guest_delete_files(pid: str):
     removed_guest_paths: List[Dict[str, Any]] = []
     _start_job(pid, 'guest_delete', total_steps=len(mapped))
     try:
-        total_mapped = max(1, len(mapped))
         command = _guest_delete_command(path, selection_type)
-        for position, entry in enumerate(mapped, start=1):
-            _update_job_detail(
-                pid,
-                phase='guest_delete',
-                current=str(entry.get('name') or ''),
-                step=position,
-                total_steps=len(mapped),
-                progress=max(1, min(99, int(((position - 1) / total_mapped) * 100))),
-                message=f"Deleting guest {selection_type} from {entry.get('name') or 'guest'} ({position}/{len(mapped)})",
-            )
+        def transfer_guest(entry):
+            removed_guest_paths = []
+            errors = []
             ssh_client = None
             try:
                 guest_type = str(entry.get('type') or '').strip().lower()
@@ -9552,6 +9576,13 @@ def instances_guest_delete_files(pid: str):
                         ssh_client.close()
                     except Exception:
                         pass
+            return removed_guest_paths, errors
+
+        for guest_results, guest_errors in _run_guest_transfer_tasks(
+            proj, pid, mapped, 'guest_delete', transfer_guest,
+        ):
+            removed_guest_paths.extend(guest_results)
+            errors.extend(guest_errors)
     finally:
         _update_job_detail(pid, progress=100, message='Guest file deletion completed')
         _end_job(pid)
@@ -9957,6 +9988,10 @@ def instances_run_startup_cmds(pid: str):
             'planned_count': total_commands,
             'cmds': cmd_results
         })
+    for result in ran + errors:
+        result['username'] = _instance_username(proj, result.get('index'))
+    for entry in zip_entries:
+        entry['username'] = _instance_username(proj, entry.get('vm_index'))
     zip_payload = None
     if zip_entries:
         now = datetime.now(timezone.utc)
@@ -9969,12 +10004,15 @@ def instances_run_startup_cmds(pid: str):
             for entry in zip_entries:
                 vm_label = entry.get('vm_name') or f"vm_{entry.get('vm_index')}"
                 safe_vm = _safe_file_stem(vm_label) or f"vm_{entry.get('vm_index') or 'unknown'}"
+                if entry.get('username'):
+                    safe_vm += '_' + _safe_file_stem(entry['username'])
                 step_dir = f"step_{int(entry.get('step', 0)):02d}"
                 cmd_file = f"cmd_{int(entry.get('command_index', 0)):02d}.txt"
                 file_path = f"{safe_vm}/{step_dir}/{cmd_file}"
                 exitcode = entry.get('exitcode')
                 lines = [
                     f"VM Name: {vm_label}",
+                    f"Username: {entry.get('username') or ''}",
                     f"VM Index: {entry.get('vm_index')}",
                     f"Node: {entry.get('node')}",
                     f"VMID: {entry.get('vmid')}",
@@ -9997,6 +10035,7 @@ def instances_run_startup_cmds(pid: str):
                 zf.writestr(file_path, "\n".join(lines))
                 summary_entries.append({
                     'vm_name': vm_label,
+                    'username': entry.get('username') or '',
                     'step': entry.get('step'),
                     'command_index': entry.get('command_index'),
                     'command': entry.get('command'),
@@ -10065,6 +10104,13 @@ def instances_run_stored_cmds(pid: str):
     if not proj:
         return jsonify({"error": "Project not found"}), 404
     body = request.get_json(force=True) or {}
+    custom_command = body.get('customCommand')
+    if custom_command is not None:
+        if not isinstance(custom_command, str) or not custom_command.strip():
+            return jsonify({'error': 'Custom command must be a non-empty string'}), 400
+        if body.get('validateOnly'):
+            return jsonify({'error': 'Custom commands cannot be combined with validation'}), 400
+        custom_command = custom_command.strip()
     username = body.get('username') or None
     password = body.get('password') or None
     base_url = body.get('baseUrl') or proj.proxmox_url
@@ -10226,6 +10272,9 @@ def instances_run_stored_cmds(pid: str):
     _append_selected(body.get('command'))
     validate_only = _coerce_bool_flag(body.get('validateOnly'), False)
     if validate_only:
+        selected_commands = []
+        override_lookup = {}
+    if custom_command is not None:
         selected_commands = []
         override_lookup = {}
     selected_commands_filter: Optional[Set[str]] = set(selected_commands) if selected_commands else None
@@ -10567,10 +10616,14 @@ def instances_run_stored_cmds(pid: str):
                 ran.append(ran_entry)
         mapped = []
 
-    for vm_position, m in enumerate(mapped, start=1):
+    command_slots = threading.BoundedSemaphore(_project_max_jobs(proj))
+
+    def _run_command_target(vm_position, m):
+        # Collect each VM's output independently and merge in selection order.
+        ran, skipped, errors, zip_entries = [], [], [], []
         if _is_cancelled(pid):
             errors.append({ 'reason': 'cancelled' })
-            break
+            return ran, skipped, errors, zip_entries
         # Find stored commands from config for this base
         base = m['name']
         try:
@@ -10583,6 +10636,8 @@ def instances_run_stored_cmds(pid: str):
             pass
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
         steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
+        if custom_command is not None:
+            steps = sanitize_start_command_steps([{'commands': [{'command': custom_command}]}])
         validation_commands = _extract_validation_commands(vcfg)
         template_key = _make_template_key(proj, vcfg, base, m.get('name'))
 
@@ -10653,7 +10708,7 @@ def instances_run_stored_cmds(pid: str):
                 else:
                     reason = f'stored commands not configured: {joined}'
             skipped.append({ 'index': m['index'], 'name': m['name'], 'reason': reason })
-            continue
+            return ran, skipped, errors, zip_entries
         preview_limit = 1000
 
         def _make_preview(raw_value: Any):
@@ -10735,7 +10790,10 @@ def instances_run_stored_cmds(pid: str):
             timeout_value = _coerce_timeout(timeout_override)
             long_running_flag = bool(command_entry.get('long_running')) if isinstance(command_entry, dict) else False
             try:
-                res = _execute_instance_command(proj, base_url, password, client, m, str(command_text), timeout_value)
+                with command_slots:
+                    if _is_cancelled(pid):
+                        raise RuntimeError('cancelled')
+                    res = _execute_instance_command(proj, base_url, password, client, m, str(command_text), timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
@@ -10825,7 +10883,7 @@ def instances_run_stored_cmds(pid: str):
                 continue
 
             parallel_results = []
-            with ThreadPoolExecutor(max_workers=len(commands)) as pool:
+            with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(commands), hard_cap=0)) as pool:
                 futures = []
                 base_seq = executed_commands
                 step_command_total = len(commands)
@@ -10877,7 +10935,7 @@ def instances_run_stored_cmds(pid: str):
 
         if cancelled:
             errors.append({ 'index': m['index'], 'name': m['name'], 'reason': 'cancelled' })
-            break
+            return ran, skipped, errors, zip_entries
 
         validation_results: List[Dict[str, Any]] = []
         validation_all_passed = True
@@ -11180,6 +11238,27 @@ def instances_run_stored_cmds(pid: str):
             if len(selected_commands) == 1:
                 ran_entry['selected_command'] = selected_commands[0]
         ran.append(ran_entry)
+        return ran, skipped, errors, zip_entries
+
+    if mapped:
+        with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(mapped), hard_cap=0)) as pool:
+            futures = [pool.submit(_run_command_target, pos, m)
+                       for pos, m in enumerate(mapped, start=1)]
+            for m, future in zip(mapped, futures):
+                try:
+                    local_ran, local_skipped, local_errors, local_zip_entries = future.result()
+                except Exception as exc:
+                    errors.append({'index': m.get('index'), 'name': m.get('name'),
+                                   'reason': f'command execution failed: {exc}'})
+                    continue
+                ran.extend(local_ran)
+                skipped.extend(local_skipped)
+                errors.extend(local_errors)
+                zip_entries.extend(local_zip_entries)
+    for result in ran + errors:
+        result['username'] = _instance_username(proj, result.get('index'))
+    for entry in zip_entries:
+        entry['username'] = _instance_username(proj, entry.get('vm_index'))
     zip_payload: Optional[Dict[str, Any]] = None
     if zip_entries:
         now = datetime.now(timezone.utc)
@@ -11192,12 +11271,15 @@ def instances_run_stored_cmds(pid: str):
             for entry in zip_entries:
                 vm_label = entry.get('vm_name') or f"vm_{entry.get('vm_index')}"
                 safe_vm = _safe_file_stem(vm_label) or f"vm_{entry.get('vm_index') or 'unknown'}"
+                if entry.get('username'):
+                    safe_vm += '_' + _safe_file_stem(entry['username'])
                 step_dir = f"step_{int(entry.get('step', 0)):02d}"
                 cmd_file = f"cmd_{int(entry.get('command_index', 0)):02d}.txt"
                 file_path = f"{safe_vm}/{step_dir}/{cmd_file}"
                 exitcode = entry.get('exitcode')
                 lines = [
                     f"VM Name: {vm_label}",
+                    f"Username: {entry.get('username') or ''}",
                     f"VM Index: {entry.get('vm_index')}",
                     f"Node: {entry.get('node')}",
                     f"VMID: {entry.get('vmid')}",
@@ -11222,6 +11304,7 @@ def instances_run_stored_cmds(pid: str):
                 zf.writestr(file_path, "\n".join(lines))
                 summary_entries.append({
                     'vm_name': vm_label,
+                    'username': entry.get('username') or '',
                     'step': entry.get('step'),
                     'command_index': entry.get('command_index'),
                     'command': entry.get('command'),

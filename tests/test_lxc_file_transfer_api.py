@@ -108,6 +108,106 @@ class LxcFileTransferApiTests(unittest.TestCase):
             'type': vm_type,
         }]
 
+    def test_guest_actions_parallel_limit_and_transfer_integrity(self):
+        from contextlib import ExitStack
+        import threading
+        import time
+
+        for action in ('push', 'pull', 'delete'):
+            for transport in ('qemu', 'lxc'):
+                for limit in (1, 2):
+                    with self.subTest(action=action, transport=transport, limit=limit), ExitStack() as stack:
+                        self.project.proxmox_max_create_jobs = limit
+                        mapped = [{
+                            'index': i, 'name': f'guest-{i}', 'vmid': 100 + i,
+                            'node': str(i), 'type': transport,
+                        } for i in range(1, 5)]
+                        lock = threading.Lock()
+                        overlap = threading.Event()
+                        active = peak = 0
+                        seen = []
+                        connections = []
+
+                        def execute(entry, stream=None):
+                            nonlocal active, peak
+                            with lock:
+                                active += 1
+                                peak = max(peak, active)
+                                if active == limit:
+                                    overlap.set()
+                            try:
+                                self.assertTrue(overlap.wait(2), 'Guest operations did not overlap')
+                                time.sleep(0.01)
+                                if stream is not None:
+                                    # Interleave reads to detect shared file offsets.
+                                    stream.seek(0)
+                                    data = stream.read(512)
+                                    time.sleep(0.01)
+                                    data += stream.read()
+                                    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+                                        self.assertEqual(archive.extractfile('payload.txt').read(), b'payload-content')
+                                with lock:
+                                    seen.append(entry['index'])
+                                if entry['index'] == 3:
+                                    raise RuntimeError('guest unavailable')
+                                return _tar_bytes({'output.txt': f"guest {entry['index']}".encode()})
+                            finally:
+                                with lock:
+                                    active -= 1
+
+                        def connect(host, *args):
+                            ssh = _Ssh()
+                            ssh.entry = mapped[int(host) - 1]
+                            if action == 'push':
+                                ssh.sftp.putfo = lambda stream, *args, **kwargs: execute(ssh.entry, stream)
+                            connections.append(ssh)
+                            return ssh
+
+                        def ssh_exec(ssh, *args, **kwargs):
+                            if action == 'delete':
+                                execute(ssh.entry)
+                            return 0, '', ''
+
+                        stack.enter_context(patch('app.routes.api._block_when_remote', return_value=None))
+                        stack.enter_context(patch('app.routes.api._guest_transfer_context', return_value=(
+                            self.project, MagicMock(), self.project.proxmox_url, 'secret', mapped, [], [],
+                        )))
+                        stack.enter_context(patch('app.routes.api._lxc_transfer_ssh_host', side_effect=lambda proj, url, node: node))
+                        stack.enter_context(patch('app.routes.api._ssh_connect', side_effect=connect))
+                        stack.enter_context(patch('app.routes.api._ssh_exec_result', side_effect=ssh_exec))
+                        stack.enter_context(patch('app.routes.api._ssh_run_cmd', side_effect=lambda ssh, *args, **kwargs: (
+                            _Stream(execute(ssh.entry)), io.BytesIO(),
+                        )))
+                        stack.enter_context(patch('app.routes.api._push_tar_through_guest_agent', side_effect=lambda client, entry, stream, *args: execute(entry, stream)))
+                        stack.enter_context(patch('app.routes.api._pull_tar_through_guest_agent', side_effect=lambda client, entry, paths: io.BytesIO(execute(entry))))
+                        stack.enter_context(patch('app.routes.api._ensure_linux_qemu_guest'))
+                        stack.enter_context(patch('app.routes.api._guest_agent_exec_checked', side_effect=lambda client, entry, *args, **kwargs: execute(entry)))
+                        url = f'/api/projects/{self.project.id}/instances/actions/guest_{action}'
+                        if action == 'push':
+                            response = self.client.post(url, data={
+                                'payload': json.dumps({**self.payload, 'destination': '/opt', 'relativePaths': ['payload.txt']}),
+                                'files': (io.BytesIO(b'payload-content'), 'payload.txt'),
+                            }, content_type='multipart/form-data')
+                        else:
+                            response = self.client.post(url, json={
+                                **self.payload, 'paths': ['/output.txt'], 'path': '/output.txt',
+                                'selectionType': 'file', 'confirmed': True,
+                            })
+                        self.assertEqual(response.status_code, 200)
+                        body = response.get_json()
+                        self.assertEqual(peak, limit)
+                        self.assertEqual(sorted(seen), [1, 2, 3, 4])
+                        key = {'push': 'pushed', 'pull': 'pulled', 'delete': 'removed_guest_paths'}[action]
+                        self.assertEqual([entry['index'] for entry in body[key]], [1, 2, 4])
+                        self.assertEqual(len(body['errors']), 1)
+                        self.assertEqual(body['errors'][0]['index'], 3)
+                        self.assertTrue(all(ssh.closed for ssh in connections))
+                        if action == 'pull':
+                            with zipfile.ZipFile(io.BytesIO(base64.b64decode(body['outputs_zip']['base64']))) as archive:
+                                self.assertIsNone(archive.testzip())
+                                for i in (1, 2, 4):
+                                    self.assertEqual(archive.read(f'guest-{i}-{100+i}/output.txt'), f'guest {i}'.encode())
+
     def test_proxmox_ssh_username_strips_realm_and_honors_override(self):
         self.assertEqual(_proxmox_ssh_username(self.project, 'jcacosta@pam'), 'jcacosta')
         self.project.proxmox_ssh_user = 'automation'

@@ -123,6 +123,24 @@ body.sidebar-collapsed .sidebar-toggle-btn .icon {
 .modal { z-index: 2050 !important; }
 .modal .modal-dialog { margin-top: 10vh; }
 
+/* Keep long action output inside a roomy dialog with persistent controls. */
+#actionSummaryModal .modal-dialog {
+	max-width: 1140px;
+	width: calc(100% - 2rem);
+	margin-left: auto;
+	margin-right: auto;
+}
+#actionSummaryModal .modal-content {
+	max-height: 80vh;
+	max-height: 80dvh;
+	overflow: hidden;
+}
+#actionSummaryModal .modal-body {
+	min-height: 0;
+	overflow-y: auto;
+	scrollbar-gutter: stable;
+}
+
 /* App-wide top banner */
 .app-banner { position: relative; width: 100%; color: #fff; background: linear-gradient(90deg, #1e3a8a 0%, #3b82f6 100%); border-bottom: 1px solid rgba(255, 255, 255, .15); }
 .app-banner .banner-title { font-size: 1.15rem; font-weight: 600; letter-spacing: 1.5px; text-shadow: 0 1px 2px rgba(0,0,0,.15); }

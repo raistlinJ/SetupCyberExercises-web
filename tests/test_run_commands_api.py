@@ -3,6 +3,8 @@ import concurrent.futures
 import io
 import json
 import unittest
+import threading
+import time
 import zipfile
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
@@ -54,6 +56,7 @@ class RunCommandsApiTests(unittest.TestCase):
         vm.template_name = 'tmplAlpha'
         vm.template_id = '9000'
         self.project = Project(id='proj-run', name='Run Project', tag='-lab-', vms=[vm])
+        self.project.credentials = [{'username': 'student/one', 'password': 'private-password'}]
         self.template_key = f"{self.project.id}|{vm.template_name}|{vm.template_id}"
         self.target_name = f"{vm.name}{self.project.tag}1"
 
@@ -62,6 +65,17 @@ class RunCommandsApiTests(unittest.TestCase):
         raw = base64.b64decode(zip_info['base64'])
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             summary_bytes = zf.read('summary.json')
+            logs = [name for name in zf.namelist() if name.endswith('.txt')]
+            self.assertTrue(logs)
+            for name in logs:
+                if name.split('/')[0].startswith(self.target_name):
+                    self.assertTrue(name.split('/')[0].endswith('_student_one'), name)
+                    self.assertIn('Username: student/one', zf.read(name).decode('utf-8'))
+                self.assertNotIn('private-password', zf.read(name).decode('utf-8'))
+            summary = json.loads(summary_bytes)
+            for entry in summary['commands']:
+                expected = 'student/one' if entry['vm_name'] == self.target_name else ''
+                self.assertEqual(entry['username'], expected)
         return json.loads(summary_bytes.decode('utf-8'))
 
     def _common_patches(self, project: Project = None):
@@ -117,6 +131,94 @@ class RunCommandsApiTests(unittest.TestCase):
             command_list = summary.get('commands') or []
             self.assertEqual(len(command_list), 2)
             self.assertCountEqual([c.get('command') for c in command_list], ['echo start', 'hostname'])
+
+    def test_custom_command_runs_without_saved_commands(self):
+        self.project.vms[0].stored_commands = []
+        command = 'echo custom\nprintf "done\\n"'
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            client = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+            client.agent_exec.return_value = {'exitcode': 0, 'stdout': 'custom done', 'stderr': ''}
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={'username': 'root@pam', 'password': 'secret',
+                      'baseUrl': 'https://proxmox.local',
+                      'targets': [{'index': 1, 'name': self.target_name}],
+                      'customCommand': command},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual([call.kwargs['command'] for call in client.agent_exec.call_args_list], [command])
+            self.assertEqual(len(response.get_json()['ran']), 1)
+            self.assertIsNotNone(response.get_json().get('outputs_zip'))
+            self.assertEqual(self.project.vms[0].stored_commands, [])
+
+    def test_commands_run_in_parallel_with_project_limit(self):
+        mapped = [
+            {'index': i, 'name': f'alpha{self.project.tag}{i}',
+             'vmid': 100 + i, 'node': 'node1'}
+            for i in range(1, 5)
+        ]
+        for custom in (True, False):
+            for limit in (1, 2):
+                with self.subTest(custom=custom, limit=limit), ExitStack() as stack:
+                    self.project.proxmox_max_create_jobs = limit
+                    for ctx in self._common_patches():
+                        stack.enter_context(ctx)
+                    stack.enter_context(patch('app.routes.api._resolve_targets_to_vm_info',
+                                              return_value=(mapped, [], [])))
+                    client = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+                    lock = threading.Lock()
+                    overlap = threading.Event()
+                    active = peak = 0
+                    commands_by_vm = {}
+
+                    def execute(**kwargs):
+                        nonlocal active, peak
+                        with lock:
+                            active += 1
+                            peak = max(peak, active)
+                            commands_by_vm.setdefault(kwargs['vmid'], []).append(kwargs['command'])
+                            if active == limit:
+                                overlap.set()
+                        try:
+                            self.assertTrue(overlap.wait(2), 'Commands did not overlap')
+                            time.sleep(0.01)
+                            return {'exitcode': 0, 'stdout': 'ok', 'stderr': ''}
+                        finally:
+                            with lock:
+                                active -= 1
+
+                    client.agent_exec.side_effect = execute
+                    body = {'username': 'root@pam', 'password': 'secret',
+                            'baseUrl': 'https://proxmox.local', 'targets': mapped}
+                    if custom:
+                        body['customCommand'] = 'hostname'
+                    response = self.client.post(
+                        f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                        json=body,
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.get_json()
+                    self.assertEqual(payload['errors'], [])
+                    self.assertEqual(peak, limit)
+                    self.assertEqual([entry['vmid'] for entry in payload['ran']],
+                                     [entry['vmid'] for entry in mapped])
+                    expected = ['hostname'] if custom else ['echo ready', 'uptime']
+                    self.assertEqual(commands_by_vm, {m['vmid']: expected for m in mapped})
+                    summary = self._decode_outputs_zip(payload['outputs_zip'])
+                    self.assertEqual(len(summary['commands']), len(mapped) * len(expected))
+
+    def test_custom_command_rejects_empty_or_non_string_input(self):
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            for command in ('   ', True, ['hostname']):
+                response = self.client.post(
+                    f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                    json={'customCommand': command},
+                )
+                self.assertEqual(response.status_code, 400)
 
     def test_run_stored_cmds_honors_selection_and_overrides(self):
         override_text = 'sudo echo override'
@@ -326,6 +428,8 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertTrue(results[0].get('passed'))
             self.assertFalse(results[1].get('passed'))
             errors = payload.get('errors') or []
+            self.assertTrue(errors)
+            self.assertTrue(all(err.get('username') == 'student/one' for err in errors))
             self.assertTrue(any('validation regex did not match output' in str(err.get('reason', '')) for err in errors if isinstance(err, dict)))
 
     def test_run_stored_cmds_validate_only_runs_without_stored_commands(self):

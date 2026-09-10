@@ -34,6 +34,7 @@ function buildServerVmSteps(action, options, projects) {
     } else {
       const aliases = { nets_assign: 'nets_set', nets_clear: 'nets_remove', validate: 'run_stored_cmds' };
       const extra = {};
+      if (options.customCommand) extra.customCommand = options.customCommand;
       if (action === 'validate') extra.validateOnly = true;
       if (options.selectedCommands?.length) {
         extra.commands = options.selectedCommands.slice();

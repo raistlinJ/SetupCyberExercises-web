@@ -46,7 +46,7 @@ def test_lxc_transfer_ui_has_progress_and_typed_push_controls():
     assert 'executePersistedGuestTransfer(descriptor, runtimePayload)' in javascript
     assert "const payload = runtimePayload || await window.PersistentQueuePayloads.get(payloadId)" in javascript
     assert 'body: form' in javascript
-    assert 'vm_manager.js?v=20260908a' in html
+    assert '/static/js/vm_manager.js?v=' in html
     assert '/instances/actions/guest_push' in javascript
     assert '/instances/actions/guest_pull' in javascript
     assert '/instances/actions/guest_delete' in javascript

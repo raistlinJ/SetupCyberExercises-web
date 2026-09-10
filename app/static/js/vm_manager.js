@@ -5354,6 +5354,43 @@ function openStoredCommandsManagerForContext(ctx) {
   }
 }
 
+let lastCustomCommand = '';
+
+function promptCustomCommand(options) {
+  const modalEl = document.getElementById('customCommandModal');
+  const input = document.getElementById('custom-command-input');
+  const runBtn = document.getElementById('custom-command-run');
+  const count = countExplicitActionTargets(options);
+  if (!count) { alert('Select at least one VM.'); return Promise.resolve(null); }
+  document.getElementById('custom-command-summary').textContent =
+    `Run this command on ${count} selected VM${count === 1 ? '' : 's'}.`;
+  input.value = lastCustomCommand;
+  runBtn.disabled = !input.value.trim();
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  return new Promise(resolve => {
+    let command = null;
+    const update = () => { runBtn.disabled = !input.value.trim(); };
+    const run = () => {
+      if (!input.value.trim()) return;
+      command = input.value.trim();
+      lastCustomCommand = command;
+      modal.hide();
+    };
+    const focus = () => input.focus();
+    input.addEventListener('input', update);
+    runBtn.addEventListener('click', run);
+    modalEl.addEventListener('shown.bs.modal', focus, { once: true });
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      input.removeEventListener('input', update);
+      runBtn.removeEventListener('click', run);
+      modalEl.removeEventListener('shown.bs.modal', focus);
+      input.value = '';
+      resolve(command);
+    }, { once: true });
+    modal.show();
+  });
+}
+
 async function promptStoredCommandSelection() {
   let info = collectStoredCommandOptions();
   if (!info.options.length) {
@@ -6181,7 +6218,11 @@ async function vmAction(action, opts) {
     const confirmed = window.confirm(buildCredsSetConfirmationMessage(options));
     if (!confirmed) return;
   }
-  if (action === 'run_stored_cmds') {
+  if (action === 'run_stored_cmds' && options.customCommand === true) {
+    options.customCommand = await promptCustomCommand(options);
+    if (!options.customCommand) return;
+  }
+  if (action === 'run_stored_cmds' && !options.customCommand) {
     const initial = interpretStoredCommandSelection(options.selectedCommands || options.selectedCommand);
     let selectedCommands = initial.commands;
     let overridePayload = initial.overrides || coerceStoredCommandOverrides(options.storedCommandOverrides);
@@ -6218,7 +6259,7 @@ async function vmAction(action, opts) {
     }
   }
   const selCount = countExplicitActionTargets(options) || getActionableSelections().length;
-  const labelName = friendlyActionName(action) || action;
+  const labelName = options.customCommand ? 'Custom Command' : (friendlyActionName(action) || action);
   const commandSuffix = (() => {
     const cmds = Array.isArray(options.selectedCommands) ? options.selectedCommands : [];
     if (!cmds.length) return '';
@@ -6709,6 +6750,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
       } else if (opts.selectedCommand) {
         payload.command = opts.selectedCommand;
       }
+      if (opts.customCommand) payload.customCommand = opts.customCommand;
       if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
         payload.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({
           templateKey: entry.templateKey || '',
@@ -6942,7 +6984,11 @@ async function vmActionMulti(action, opts) {
     });
     options.targetsByPid = targetsByPid;
   }
-  if (action === 'run_stored_cmds') {
+  if (action === 'run_stored_cmds' && options.customCommand === true) {
+    options.customCommand = await promptCustomCommand(options);
+    if (!options.customCommand) return;
+  }
+  if (action === 'run_stored_cmds' && !options.customCommand) {
     const initial = interpretStoredCommandSelection(options.selectedCommands || options.selectedCommand);
     let selectedCommands = initial.commands;
     let overridePayload = initial.overrides || coerceStoredCommandOverrides(options.storedCommandOverrides);
@@ -6961,7 +7007,7 @@ async function vmActionMulti(action, opts) {
     }
   }
   const selCount = countExplicitActionTargets(options) || listSelectedEntries().length;
-  const labelName = friendlyActionName(action) || action;
+  const labelName = options.customCommand ? 'Custom Command' : (friendlyActionName(action) || action);
   const commandSuffix = (() => {
     const cmds = Array.isArray(options.selectedCommands) ? options.selectedCommands : [];
     if (!cmds.length) return '';
@@ -7202,6 +7248,7 @@ async function vmActionMultiExec(action, opts = {}) {
     } else if (opts.selectedCommand) {
       baseBody.command = opts.selectedCommand;
     }
+    if (opts.customCommand) baseBody.customCommand = opts.customCommand;
     if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
       baseBody.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({
         templateKey: entry.templateKey || '',
@@ -7806,9 +7853,10 @@ function showActionSummary(actionName, resp) {
       const href = `data:text/plain;charset=utf-8,${encodeURIComponent(String(content || ''))}`;
       return `<a class="small ms-2" href="${href}" download="${esc(filename)}">${esc(label)}</a>`;
     };
-    const buildRunLogText = (hostName, cmdObj) => {
+    const buildRunLogText = (hostName, cmdObj, username) => {
       const lines = [
         `Host: ${String(hostName || '')}`,
+        `Username: ${String(username || '')}`,
         `Command: ${String(cmdObj?.cmd || '')}`,
         `Exit Code: ${cmdObj?.exitcode === null || cmdObj?.exitcode === undefined ? '' : String(cmdObj.exitcode)}`,
         `Timeout (s): ${cmdObj?.timeout_seconds ?? ''}`,
@@ -7822,9 +7870,10 @@ function showActionSummary(actionName, resp) {
       ];
       return lines.join('\n');
     };
-    const buildValidationLogText = (hostName, validationObj) => {
+    const buildValidationLogText = (hostName, validationObj, username) => {
       const lines = [
         `Host: ${String(hostName || '')}`,
+        `Username: ${String(username || '')}`,
         `Validation Command: ${String(validationObj?.command || '')}`,
         `Match Regex: ${String(validationObj?.match || '')}`,
         `Passed: ${validationObj?.passed ? 'yes' : 'no'}`,
@@ -8004,10 +8053,11 @@ function showActionSummary(actionName, resp) {
       sections.push(`<h6 class="text-muted">Info</h6>${list(infos, i => `<li>${esc(i.name || i.node || '')} — ${esc(i.reason || i)}</li>`)}`);
     }
     if (visibleNotices.length) sections.push(`<h6 class="text-warning">Warnings</h6>${list(visibleNotices, w => `<li>${esc(w.name || w.node || '')} — ${esc(w.reason || w)}</li>`)}`);
-    if (errors.length) sections.push(`<h6 class="text-danger">Errors</h6>${list(errors, e => `<li>${esc(e.name || e.node || '')} — ${esc(e.reason || '')}</li>`)}`);
+    if (errors.length) sections.push(`<h6 class="text-danger">Errors</h6>${list(errors, e => `<li>${esc([e.name || e.node, e.username].filter(Boolean).join(' — '))} — ${esc(e.reason || '')}</li>`)}`);
     if (ran.length) sections.push(`<h6>Commands Run</h6>${list(ran, i => {
       const cmds = Array.isArray(i.cmds) ? i.cmds : [];
-      const hostSafe = String(i?.name || 'vm').replace(/[^A-Za-z0-9_.-]+/g, '_') || 'vm';
+      const hostLabel = [i?.name, i?.username].filter(Boolean).join(' — ');
+      const hostSafe = [i?.name || 'vm', i?.username].filter(Boolean).join('_').replace(/[^A-Za-z0-9_.-]+/g, '_') || 'vm';
       const cmdList = cmds.length ? `<ul class="small">${cmds.map(c => {
         const exitLabel = c.exitcode === null ? '?' : String(c.exitcode);
         const preview = c.stdout_preview || c.stderr_preview || '';
@@ -8015,7 +8065,7 @@ function showActionSummary(actionName, resp) {
         const cmdNameSafe = String(c?.cmd || 'command').replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 48) || 'command';
         const logLink = buildLogDownloadLink(
           `${hostSafe}_${cmdNameSafe}.log.txt`,
-          buildRunLogText(i?.name || '', c),
+          buildRunLogText(i?.name || '', c, i?.username),
           'download log'
         );
         return `<li><code>${esc(c.cmd || '')}</code> — exit ${exitLabel}${logLink}${previewBlock}</li>`;
@@ -8029,7 +8079,7 @@ function showActionSummary(actionName, resp) {
         const cmdNameSafe = String(v?.command || `validation_${idx + 1}`).replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 48) || `validation_${idx + 1}`;
         const logLink = buildLogDownloadLink(
           `${hostSafe}_validation_${idx + 1}_${cmdNameSafe}.log.txt`,
-          buildValidationLogText(i?.name || '', v),
+          buildValidationLogText(i?.name || '', v, i?.username),
           'download log'
         );
         return `<li><code>${esc(v?.command || '')}</code> — <span class="${statusClass}">${statusText}</span>${v?.timed_out ? ' (timed out)' : ''}${logLink}${previewBlock}</li>`;
@@ -8037,7 +8087,7 @@ function showActionSummary(actionName, resp) {
       const validationSummary = i?.validation && typeof i.validation === 'object'
         ? `<div class="small mt-2"><strong>Validation:</strong> ${i.validation.all_passed ? 'all passed' : 'one or more failed'} (${validationResults.length} attempted)</div>${validationList}`
         : '';
-      return `<li>${esc(i.name)} — ${i.count || 0} cmd(s)${cmds.length ? ':' : ''}${cmdList}${validationSummary}</li>`;
+      return `<li>${esc(hostLabel)} — ${i.count || 0} cmd(s)${cmds.length ? ':' : ''}${cmdList}${validationSummary}</li>`;
     })}`);
     if (resp.notice && typeof resp.notice === 'string') {
       leadSections.unshift(`<div class="alert alert-warning py-1 small">${esc(resp.notice)}</div>`);
