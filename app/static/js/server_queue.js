@@ -33,13 +33,43 @@
       body = JSON.stringify(plan);
       headers['Content-Type'] = 'application/json';
     }
-    // Small submissions survive ordinary page navigation while being accepted.
-    const response = await nativeFetch('/api/queue', {
-      method: 'POST', credentials: 'same-origin', headers, body,
-      keepalive: typeof body === 'string' && new Blob([body]).size < 60000,
-    });
-    if (!response.ok) throw new Error(await response.text());
-    const job = await response.json();
+    let job;
+    if (files.length && window.XMLHttpRequest) {
+      job = await new Promise((resolve, reject) => {
+        const xhr = new window.XMLHttpRequest();
+        xhr.open('POST', '/api/queue');
+        xhr.withCredentials = true;
+        Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+        xhr.upload.onprogress = event => options.onUploadProgress?.({
+          loaded: event.loaded, total: event.lengthComputable ? event.total : null,
+        });
+        xhr.upload.onload = () => options.onUploadProgress?.({ uploaded: true });
+        xhr.onerror = () => reject(new Error('Upload connection failed. Check the Queue before retrying.'));
+        xhr.onabort = () => reject(new Error('Upload interrupted. Check the Queue before retrying.'));
+        xhr.onload = () => {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            const message = xhr.status === 413
+              ? 'The server or proxy rejected this file as too large (HTTP 413).'
+              : `Upload submission failed (HTTP ${xhr.status}).`;
+            let detail;
+            try { detail = JSON.parse(xhr.responseText).error; } catch { }
+            reject(new Error(detail || message));
+            return;
+          }
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch { reject(new Error('Invalid upload response. Check the Queue before retrying.')); }
+        };
+        xhr.send(body);
+      });
+    } else {
+      // Small submissions survive ordinary page navigation while being accepted.
+      const response = await nativeFetch('/api/queue', {
+        method: 'POST', credentials: 'same-origin', headers, body,
+        keepalive: typeof body === 'string' && new Blob([body]).size < 60000,
+      });
+      if (!response.ok) throw new Error(await response.text());
+      job = await response.json();
+    }
     records = records.filter(item => item.id !== job.id).concat(job);
     emit();
     return job;

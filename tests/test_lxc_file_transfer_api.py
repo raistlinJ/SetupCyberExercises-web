@@ -33,14 +33,20 @@ class _Stream(io.BytesIO):
         super().__init__(data)
         self.channel = _Channel(code)
 
+    def readline(self, *args):
+        # Match Paramiko's default: text lines, but binary read() for archives.
+        return super().readline(*args).decode('utf-8')
+
 
 class _Sftp:
     def __init__(self):
         self.uploads = {}
         self.removed = []
 
-    def putfo(self, stream, remote_path, file_size=None):
+    def putfo(self, stream, remote_path, file_size=None, callback=None):
         self.uploads[remote_path] = stream.read()
+        if callback:
+            callback(len(self.uploads[remote_path]), file_size)
 
     def remove(self, remote_path):
         self.removed.append(remote_path)
@@ -63,7 +69,8 @@ class _Ssh:
 
     def exec_command(self, command, timeout=None):
         self.commands.append(command)
-        return io.BytesIO(), _Stream(self.stdout, self.code), io.BytesIO(self.stderr)
+        output = (f'TRANSFER_SIZE={len(self.stdout)}\n'.encode() + self.stdout) if 'TRANSFER_SIZE=' in command else self.stdout
+        return io.BytesIO(), _Stream(output, self.code), io.BytesIO(self.stderr)
 
     def close(self):
         self.closed = True
@@ -176,7 +183,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
                         stack.enter_context(patch('app.routes.api._ssh_connect', side_effect=connect))
                         stack.enter_context(patch('app.routes.api._ssh_exec_result', side_effect=ssh_exec))
                         stack.enter_context(patch('app.routes.api._ssh_run_cmd', side_effect=lambda ssh, *args, **kwargs: (
-                            _Stream(execute(ssh.entry)), io.BytesIO(),
+                            _Stream(b'TRANSFER_SIZE=10240\n' + execute(ssh.entry)), io.BytesIO(),
                         )))
                         stack.enter_context(patch('app.routes.api._push_tar_through_guest_agent', side_effect=lambda client, entry, stream, *args: execute(entry, stream)))
                         stack.enter_context(patch('app.routes.api._pull_tar_through_guest_agent', side_effect=lambda client, entry, paths: io.BytesIO(execute(entry))))
@@ -263,6 +270,138 @@ class LxcFileTransferApiTests(unittest.TestCase):
         self.assertEqual(len(ssh.sftp.removed), 1)
         self.assertTrue(ssh.closed)
 
+    def test_mixed_batch_stages_once_per_node_and_retains_archive_after_guest_failure(self):
+        mapped = [
+            {'index': i, 'name': f'guest-{i}', 'vmid': 100 + i,
+             'node': 'node1' if i < 4 else 'node2', 'type': 'qemu' if i == 2 else 'lxc'}
+            for i in range(1, 5)
+        ]
+        connections = {}
+        def connect(host, *args):
+            ssh = _Ssh()
+            connections.setdefault(host, []).append(ssh)
+            return ssh
+        def execute(ssh, command, **kwargs):
+            self.assertFalse(ssh.sftp.removed, 'Archive removed before batch finished')
+            ssh.commands.append(command)
+            return (1, '', 'guest failed') if 'pct exec 101' in command else (0, '', '')
+        with patch('app.routes.api._block_when_remote', return_value=None), \
+                patch('app.routes.api._guest_transfer_context', return_value=(
+                    self.project, MagicMock(), self.project.proxmox_url, 'secret', mapped, [], [])), \
+                patch('app.routes.api._lxc_transfer_ssh_host', side_effect=lambda p, u, n: n), \
+                patch('app.routes.api._ensure_linux_qemu_guest'), \
+                patch('app.routes.api._ssh_connect', side_effect=connect), \
+                patch('app.routes.api._ssh_exec_result', side_effect=execute), \
+                patch('app.routes.api._push_tar_through_guest_agent') as direct:
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/actions/guest_push', data={
+                'payload': json.dumps({**self.payload, 'destination': '/models', 'relativePaths': ['model.gguf']}),
+                'files': (io.BytesIO(b'GGUF'), 'model.gguf'),
+            })
+        body = response.get_json()
+        self.assertEqual([r['index'] for r in body['pushed']], [2, 3, 4])
+        self.assertEqual([r['index'] for r in body['errors']], [1])
+        self.assertEqual(body['pushed'][0]['transfer_method'], 'qm-over-ssh')
+        direct.assert_not_called()
+        self.assertEqual(len(connections), 2)
+        for clients in connections.values():
+            self.assertEqual(sum(len(ssh.sftp.uploads) for ssh in clients), 1)
+            self.assertEqual(sum(len(ssh.sftp.removed) for ssh in clients), 1)
+            self.assertTrue(all(ssh.closed for ssh in clients))
+
+    def test_same_host_push_obeys_max_jobs_without_duplicate_uploads(self):
+        import threading
+        import time
+        for transport in ('lxc', 'qemu', 'mixed'):
+            for limit in (1, 2, 3):
+                with self.subTest(transport=transport, limit=limit):
+                    self.project.proxmox_max_create_jobs = limit
+                    mapped = [dict(self._mapped()[0], index=i, vmid=100+i,
+                                   type=('qemu' if i % 2 else 'lxc') if transport == 'mixed' else transport)
+                              for i in range(1, 7)]
+                    lock = threading.Lock()
+                    overlap = threading.Event()
+                    staged = threading.Event()
+                    active = peak = upload_count = 0
+                    clients = []
+                    consumed = []
+
+                    def connect(*args):
+                        ssh = _Ssh()
+                        original_put = ssh.sftp.putfo
+                        def upload(*args, **kwargs):
+                            nonlocal upload_count
+                            time.sleep(.02)  # Let other workers reach the staging lock.
+                            original_put(*args, **kwargs)
+                            with lock:
+                                upload_count += 1
+                            staged.set()
+                        ssh.sftp.putfo = upload
+                        with lock:
+                            clients.append(ssh)
+                        return ssh
+
+                    def copy(ssh, identity):
+                        nonlocal active, peak
+                        self.assertTrue(staged.is_set())
+                        with lock:
+                            active += 1
+                            peak = max(peak, active)
+                            if active == limit:
+                                overlap.set()
+                        try:
+                            self.assertTrue(overlap.wait(2), 'Copies on the same host did not overlap')
+                            time.sleep(.02)
+                            self.assertFalse(any(client.sftp.removed for client in clients))
+                            consumed.append(identity)
+                            if identity == 103:
+                                raise RuntimeError('guest copy failed')
+                        finally:
+                            with lock:
+                                active -= 1
+
+                    def execute(ssh, command, **kwargs):
+                        import re
+                        copy(ssh, int(re.search(r'pct exec (\d+)', command).group(1)))
+                        return 0, '', ''
+
+                    with patch('app.routes.api._block_when_remote', return_value=None), \
+                            patch('app.routes.api._guest_transfer_context', return_value=(
+                                self.project, MagicMock(), self.project.proxmox_url, 'secret', mapped, [], [])), \
+                            patch('app.routes.api._ensure_linux_qemu_guest'), \
+                            patch('app.routes.api._ssh_connect', side_effect=connect), \
+                            patch('app.routes.api._ssh_exec_result', side_effect=execute), \
+                            patch('app.routes.api._push_staged_tar_to_qemu', side_effect=lambda ssh, entry, *args: copy(ssh, entry['vmid'])):
+                        response = self.client.post(f'/api/projects/{self.project.id}/instances/actions/guest_push', data={
+                            'payload': json.dumps({**self.payload, 'destination': '/models', 'relativePaths': ['model.gguf']}),
+                            'files': (io.BytesIO(b'GGUF'), 'model.gguf'),
+                        })
+                    body = response.get_json()
+                    self.assertEqual(peak, limit)
+                    self.assertEqual(upload_count, 1)
+                    self.assertEqual(len(clients), limit)
+                    self.assertEqual(sorted(consumed), list(range(101, 107)))
+                    self.assertEqual(len(body['pushed']), 5)
+                    self.assertEqual([entry['vmid'] for entry in body['errors']], [103])
+                    self.assertEqual(sum(len(client.sftp.removed) for client in clients), 1)
+                    self.assertTrue(all(client.closed for client in clients))
+
+    def test_batch_staging_failure_is_not_reuploaded_for_each_guest(self):
+        ssh = _Ssh()
+        ssh.sftp.putfo = MagicMock(side_effect=OSError('No space left'))
+        mapped = [dict(self._mapped()[0], index=i, vmid=100+i) for i in range(1, 4)]
+        with patch('app.routes.api._block_when_remote', return_value=None), \
+                patch('app.routes.api._guest_transfer_context', return_value=(
+                    self.project, MagicMock(), self.project.proxmox_url, 'secret', mapped, [], [])), \
+                patch('app.routes.api._ssh_connect', return_value=ssh):
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/actions/guest_push', data={
+                'payload': json.dumps({**self.payload, 'destination': '/models', 'relativePaths': ['model.gguf']}),
+                'files': (io.BytesIO(b'GGUF'), 'model.gguf'),
+            })
+        self.assertEqual(len(response.get_json()['errors']), 3)
+        ssh.sftp.putfo.assert_called_once()
+        self.assertEqual(len(ssh.sftp.removed), 1)
+        self.assertTrue(ssh.closed)
+
     def test_push_applies_metadata_after_extract_for_both_transports(self):
         for guest_type, owner, permissions in [('lxc', 'www-data', '0640'), ('qemu', '1000', '4755')]:
             with self.subTest(guest_type=guest_type):
@@ -293,7 +432,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
                 self.assertEqual(body['pushed'][0]['owner_on_remote'], owner)
                 self.assertEqual(body['pushed'][0]['file_permissions'], permissions)
                 if guest_type == 'qemu':
-                    commands = [call.kwargs['command'][-1] for call in prox.agent_exec.call_args_list]
+                    commands = ssh.commands + [call.kwargs['command'][-1] for call in prox.agent_exec.call_args_list]
                 else:
                     # Unwrap the sudo/pct shell argument for exact path checks.
                     commands = [shlex.split(command)[-1] for command in ssh.commands]
@@ -496,7 +635,8 @@ class LxcFileTransferApiTests(unittest.TestCase):
             self.assertEqual(archive.extractfile('bundle/a.txt').read(), b'alpha')
         ssh_connect.assert_not_called()
 
-    def test_pull_zip_uses_one_vmname_vmid_directory(self):
+    def test_pull_zip_includes_assigned_username_in_guest_directory(self):
+        self.project.credentials = [{'username': 'student/one'}]
         ssh = _Ssh(stdout=_tar_bytes({
             'etc/hosts': b'127.0.0.1 localhost\n',
             'var/log/app/output.log': b'ok\n',
@@ -520,15 +660,17 @@ class LxcFileTransferApiTests(unittest.TestCase):
         archive_bytes = base64.b64decode(body['outputs_zip']['base64'])
         with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
             names = set(archive.namelist())
-            prefix = f'{self.target_name}-101'
+            prefix = f'{self.target_name}-101_student_one'
             self.assertIn(f'{prefix}/', names)
             self.assertIn(f'{prefix}/etc/hosts', names)
             self.assertIn(f'{prefix}/var/log/app/output.log', names)
             self.assertEqual(archive.read(f'{prefix}/etc/hosts'), b'127.0.0.1 localhost\n')
         self.assertIn('pct exec 101 -- sh -c ', ssh.commands[0])
-        self.assertIn('cd / && tar -cf - -- etc/hosts var/log/app', ssh.commands[0])
+        self.assertIn('cd / && tar --exclude=', ssh.commands[0])
+        self.assertIn('-- etc/hosts var/log/app', ssh.commands[0])
 
     def test_qemu_pull_reads_archive_in_chunks_through_guest_agent_without_ssh(self):
+        self.project.credentials = [{'username': 'student/two'}]
         prox = MagicMock()
         prox.get_qemu_config.return_value = {'ostype': 'l26'}
         prox.agent_exec.return_value = {'exitcode': 0, 'stdout': '', 'stderr': ''}
@@ -561,7 +703,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
         output = base64.b64decode(body['outputs_zip']['base64'])
         with zipfile.ZipFile(io.BytesIO(output)) as archive:
             self.assertEqual(
-                archive.read(f'{self.target_name}-101/etc/hosts'),
+                archive.read(f'{self.target_name}-101_student_two/etc/hosts'),
                 b'127.0.0.1 localhost\n',
             )
         prox.agent_file_read.assert_called_once()
@@ -754,10 +896,9 @@ class LxcFileTransferApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         inner_command = shlex.split(ssh.commands[0])[-1]
         inner_arguments = shlex.split(inner_command)
-        self.assertEqual(inner_arguments, [
-            'cd', '/', '&&', 'tar', '-cf', '-', '--',
-            'tmp/*.txt; touch /tmp/injected',
-        ])
+        path_index = inner_arguments.index('--', inner_arguments.index('tar')) + 1
+        self.assertEqual(inner_arguments[path_index:path_index + 2], ['tmp/*.txt; touch /tmp/injected', '&&'])
+        self.assertNotIn('touch', inner_arguments)
 
     def test_pull_reports_failure_per_lxc_without_an_archive(self):
         ssh = _Ssh(stderr=b'file not found', code=2)

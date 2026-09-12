@@ -15,14 +15,31 @@ does not stop it. The Queue dock reconnects to your running, waiting, and recent
 completed actions on every manager page. Complete VM, guest-transfer, wizard,
 and CTFd bulk plans are submitted together, including their follow-up steps.
 
-The queue uses `DATA_DIR/action_queue.sqlite3`; no separate worker service is
-required. WSGI workers share the scheduler through SQLite. Cancellation removes
+The queue stores job metadata in `DATA_DIR/action_queue.sqlite3` and streams
+queued uploads to `DATA_DIR/queue_uploads` without loading whole files into RAM.
+Keep the upload directory alongside the database on persistent storage, with
+enough free space for queued files and transfer archives. The push dialog shows
+upload progress and stays open until the server accepts the job. No separate
+worker service is required. WSGI workers share the scheduler through SQLite. Cancellation removes
 waiting work and asks running operations to stop at their next cancellation
 check. A server process must remain running to execute work. Interrupted running
 actions are marked failed when their worker process disappears and are never
 automatically replayed. Submitted request credentials and uploaded queue payloads
 are cleared after completion. Direct API clients retain the existing synchronous
 endpoints; the web UI submits work through `/api/queue`.
+
+A push batch uploads each selected file to the app once, including selections
+across projects. With Proxmox SSH credentials, the app stages one archive per
+host and reuses it for that host's selected LXC containers and Linux QEMU VMs.
+Guest copies run in parallel, including guests on the same host, up to the
+project's Max Jobs setting. The host upload completes once before copying starts. The Queue shows the current upload/download byte percentage and
+transferred size, separately from the batch count. Archive preparation and
+extraction show indeterminate progress. LXC downloads temporarily stage an
+archive in the guest so the download size is known, then remove it. Staged archives are removed when the batch finishes. QEMU host-side
+copies require `python3`, `qm`, a working guest agent, and root/sudo access on
+the Proxmox host. Without an SSH password, QEMU retains the separate per-guest
+API transfer. The host-side QEMU copy uses bounded stdin chunks below the
+[Proxmox CLI's 1 MiB limit](https://lists.proxmox.com/pipermail/pve-devel/2020-February/041977.html).
 
 ## Quick start (Docker)
 

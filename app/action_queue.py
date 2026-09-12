@@ -8,20 +8,25 @@ import json
 import math
 import os
 import sqlite3
+import tempfile
+import shutil
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from urllib.parse import quote, urlsplit
 
 from flask import Blueprint, Response, g, jsonify, request, session
-from werkzeug.datastructures import MultiDict
+from werkzeug.datastructures import MultiDict, FileStorage
 from .queue_labels import queue_label, request_label
+from .guest_push_batch import GuestPushBatch
 
 
 class ActionQueue:
     def __init__(self, app):
         self.app = app
         self.path = os.path.join(app.config['DATA_DIR'], 'action_queue.sqlite3')
+        self.upload_dir = os.path.join(app.config['DATA_DIR'], 'queue_uploads')
+        os.makedirs(self.upload_dir, mode=0o700, exist_ok=True)
         self.lock = threading.Lock()
         self.thread = None
         self.stopped = threading.Event()
@@ -41,6 +46,9 @@ class ActionQueue:
             columns = {row['name'] for row in db.execute('PRAGMA table_info(actions)')}
             if 'progress_state' not in columns:
                 db.execute("ALTER TABLE actions ADD COLUMN progress_state TEXT NOT NULL DEFAULT '{}'")
+            upload_columns = {row['name'] for row in db.execute('PRAGMA table_info(uploads)')}
+            if 'path' not in upload_columns:
+                db.execute('ALTER TABLE uploads ADD COLUMN path TEXT')
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -68,19 +76,40 @@ class ActionQueue:
     def submit(self, owner, plan, uploads):
         payload = json.dumps({'steps': plan['steps'], 'session': dict(session),
                               'api_key': request.headers.get('X-API-Key') or request.args.get('api_key')})
-        with self.connect() as db:
-            db.execute('''INSERT OR IGNORE INTO actions
-                (owner, token, label, project, status, created, payload, total_steps)
-                VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)''',
-                (owner, plan['token'], queue_label(plan.get('label'), plan['steps']), plan.get('projectId', ''), time.time(), payload, len(plan['steps'])))
-            inserted = db.execute('SELECT changes()').fetchone()[0]
-            row = db.execute('SELECT * FROM actions WHERE owner=? AND token=?', (owner, plan['token'])).fetchone()
+        staged = []
+        try:
+            # Copy in bounded chunks before taking SQLite's write lock.
+            for name, file in uploads:
+                with tempfile.NamedTemporaryFile(dir=self.upload_dir, delete=False) as target:
+                    staged.append((name, file.filename, file.content_type, target.name))
+                    shutil.copyfileobj(file.stream, target, length=1024 * 1024)
+            with self.connect() as db:
+                db.execute('''INSERT OR IGNORE INTO actions
+                    (owner, token, label, project, status, created, payload, total_steps)
+                    VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)''',
+                    (owner, plan['token'], queue_label(plan.get('label'), plan['steps']), plan.get('projectId', ''), time.time(), payload, len(plan['steps'])))
+                inserted = db.execute('SELECT changes()').fetchone()[0]
+                row = db.execute('SELECT * FROM actions WHERE owner=? AND token=?', (owner, plan['token'])).fetchone()
+                if inserted:
+                    for name, filename, content_type, path in staged:
+                        db.execute('INSERT INTO uploads (job, name, filename, content_type, path) VALUES (?, ?, ?, ?, ?)',
+                                   (row['id'], name, filename, content_type, path))
             if inserted:
-                for name, file in uploads:
-                    db.execute('INSERT INTO uploads VALUES (?, ?, ?, ?, ?)',
-                               (row['id'], name, file.filename, file.content_type, file.read()))
+                staged = []  # The accepted job now owns these files.
+        finally:
+            for _, _, _, path in staged:
+                os.unlink(path)
         self.start()
         return row
+
+    def delete_uploads(self, db, job_id):
+        for row in db.execute('SELECT path FROM uploads WHERE job=?', (job_id,)):
+            if row['path']:
+                try:
+                    os.unlink(row['path'])
+                except FileNotFoundError:
+                    pass
+        db.execute('DELETE FROM uploads WHERE job=?', (job_id,))
 
     def claim(self):
         with self.connect() as db:
@@ -92,7 +121,7 @@ class ActionQueue:
                     return None
                 except ProcessLookupError:
                     db.execute("UPDATE actions SET status='error', error='Server worker stopped during execution; action was not replayed', finished=?, payload=NULL WHERE id=?", (time.time(), row['id']))
-                    db.execute('DELETE FROM uploads WHERE job=?', (row['id'],))
+                    self.delete_uploads(db, row['id'])
             row = db.execute("SELECT * FROM actions WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
             if row:
                 db.execute("UPDATE actions SET status='running', started=?, worker=? WHERE id=?", (time.time(), os.getpid(), row['id']))
@@ -105,15 +134,16 @@ class ActionQueue:
         def report(fields):
             # Only publish display fields, never credentials, callbacks or logs.
             patch = {}
-            for key in ('message', 'phase', 'current'):
+            for key in ('message', 'phase', 'current', 'transferDirection'):
                 if key in fields:
                     patch[key] = str(fields[key] or '')[:1000]
-            if 'progress' in fields:
-                try:
-                    value = float(fields['progress'])
-                    patch['progress'] = max(0, min(100, value)) if math.isfinite(value) else None
-                except (TypeError, ValueError):
-                    patch['progress'] = None
+            for key in ('progress', 'transferProgress'):
+                if key in fields:
+                    try:
+                        value = float(fields[key])
+                        patch[key] = max(0, min(100, value)) if math.isfinite(value) else None
+                    except (TypeError, ValueError):
+                        patch[key] = None
             with lock:
                 updated = {**state, **patch}
                 if updated == state:
@@ -161,35 +191,44 @@ class ActionQueue:
         with self.connect() as db:
             return bool(db.execute('SELECT cancel FROM actions WHERE id=?', (job_id,)).fetchone()[0])
 
-    def dispatch(self, step, payload, job_id, report):
+    def dispatch(self, step, payload, job_id, report, push_batch=None):
         headers = dict(step.get('headers') or {})
         if payload.get('api_key'):
             headers['X-API-Key'] = payload['api_key']
         kwargs = {'method': step['method'], 'headers': headers}
-        if 'form' in step:
-            data = MultiDict(step['form'])
-            with self.connect() as db:
-                for field, key in step.get('files', []):
-                    file = db.execute('SELECT * FROM uploads WHERE job=? AND name=?', (job_id, key)).fetchone()
-                    if file is None:
-                        raise ValueError('Queued upload is missing')
-                    data.add(field, (io.BytesIO(file['body']), file['filename'], file['content_type']))
-            kwargs['data'] = data
-        elif 'body' in step:
-            kwargs['json'] = step['body']
-        elif 'raw' in step:
-            kwargs['data'] = step['raw']
-        with self.app.test_request_context(step['url'], **kwargs):
-            session.update(payload['session'])
-            g.action_queue_cancelled = lambda: self.cancelled(job_id)
-            g.action_queue_progress = report
-            response = self.app.full_dispatch_request()
-            response.direct_passthrough = False
-            try:
-                body = response.get_data()
-                return response.status_code, dict(response.headers), body
-            finally:
-                response.close()
+        with ExitStack() as stack:
+            form, files = None, MultiDict()
+            if 'form' in step:
+                form = MultiDict(step['form'])
+                with self.connect() as db:
+                    for field, key in step.get('files', []):
+                        file = db.execute('SELECT * FROM uploads WHERE job=? AND name=?', (job_id, key)).fetchone()
+                        if file is None:
+                            raise ValueError('Queued upload is missing')
+                        stream = stack.enter_context(open(file['path'], 'rb') if file['path'] else io.BytesIO(file['body']))
+                        files.add(field, FileStorage(stream, filename=file['filename'], content_type=file['content_type']))
+            elif 'body' in step:
+                kwargs['json'] = step['body']
+            elif 'raw' in step:
+                kwargs['data'] = step['raw']
+            with self.app.test_request_context(step['url'], **kwargs):
+                # Reuse the accepted form and streams without encoding and parsing
+                # another multi-gigabyte multipart request in the worker.
+                if form is not None:
+                    request.form = form
+                    request.files = files
+                session.update(payload['session'])
+                g.guest_push_batch = push_batch
+                g.guest_push_upload_keys = tuple((field, key) for field, key in step.get('files', []))
+                g.action_queue_cancelled = lambda: self.cancelled(job_id)
+                g.action_queue_progress = report
+                response = self.app.full_dispatch_request()
+                response.direct_passthrough = False
+                try:
+                    body = response.get_data()
+                    return response.status_code, dict(response.headers), body
+                finally:
+                    response.close()
 
     def execute(self, row):
         job_id = row['id']
@@ -197,6 +236,7 @@ class ActionQueue:
         code, headers, body = 200, {'Content-Type': 'application/json'}, b'{}'
         results = []
         partial_errors = False
+        push_batch = GuestPushBatch()
         try:
             payload = json.loads(row['payload'])
             for index, step in enumerate(payload['steps']):
@@ -217,7 +257,7 @@ class ActionQueue:
                 operation = request_label(step['method'], step['url'], step.get('body'))
                 report({'phase': 'starting', 'progress': None, 'current': '',
                         'message': f'Step {index + 1}/{len(payload["steps"])} · {operation}…'})
-                code, headers, body = self.dispatch(step, payload, job_id, report)
+                code, headers, body = self.dispatch(step, payload, job_id, report, push_batch)
                 try:
                     result = json.loads(body)
                 except (ValueError, UnicodeDecodeError):
@@ -249,6 +289,7 @@ class ActionQueue:
             status, error = 'error', str(exc)
             self.app.logger.exception('Queued action %s failed', job_id)
         finally:
+            push_batch.close()
             if len(json.loads(row['payload'])['steps']) > 1:
                 body = json.dumps({'results': results}).encode()
                 headers = {'Content-Type': 'application/json'}
@@ -257,7 +298,7 @@ class ActionQueue:
             with self.connect() as db:
                 db.execute('''UPDATE actions SET status=?, finished=?, result=?, code=?, headers=?, error=?, payload=NULL WHERE id=?''',
                            (status, time.time(), body, code, json.dumps(headers), error, job_id))
-                db.execute('DELETE FROM uploads WHERE job=?', (job_id,))
+                self.delete_uploads(db, job_id)
 
     def work(self):
         while not self.stopped.is_set():
@@ -290,6 +331,8 @@ def public_record(row):
             'progress': progress, 'stepProgress': step_progress,
             'message': detail.get('message', ''), 'phase': detail.get('phase', ''),
             'current': detail.get('current', ''),
+            'transferProgress': detail.get('transferProgress'),
+            'transferDirection': detail.get('transferDirection', ''),
             'exclusive': True, 'lockProject': True, 'server': True}
 
 
@@ -379,7 +422,8 @@ def init_action_queue(app):
             return jsonify(error='not found'), 404
         with queue().connect() as db:
             db.execute("UPDATE actions SET cancel=1, status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END, payload=CASE WHEN status='queued' THEN NULL ELSE payload END, finished=CASE WHEN status='queued' THEN ? ELSE finished END WHERE id=? AND status IN ('queued','running')", (time.time(), job_id))
-            db.execute("DELETE FROM uploads WHERE job=? AND EXISTS (SELECT 1 FROM actions WHERE id=? AND status='cancelled')", (job_id, job_id))
+            if db.execute('SELECT status FROM actions WHERE id=?', (job_id,)).fetchone()['status'] == 'cancelled':
+                queue().delete_uploads(db, job_id)
         return jsonify(status='cancel requested')
 
     @bp.route('/completed', methods=['DELETE'])

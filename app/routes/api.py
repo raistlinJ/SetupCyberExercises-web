@@ -18,7 +18,7 @@ import string
 import logging
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
+from flask import g, Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import re
 import mimetypes
@@ -29,6 +29,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, fields
 import time
+from ..guest_push_batch import GuestPushBatch
 from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
 from ..storage.projects import (
@@ -8795,6 +8796,7 @@ def _ssh_exec_result(
     *,
     sudo: bool = False,
     sudo_password: str = '',
+    on_stdout_line=None,
 ) -> Tuple[int, bytes, str]:
     stdout, stderr = _ssh_run_cmd(
         ssh_client,
@@ -8803,7 +8805,19 @@ def _ssh_exec_result(
         sudo_password=sudo_password,
         timeout=timeout,
     )
-    output = stdout.read()
+    if on_stdout_line is None:
+        output = stdout.read()
+    else:
+        output = b''
+        # Paramiko readline() may return text even when read() returns bytes.
+        # Accept either EOF representation and keep progress callbacks binary.
+        while True:
+            line = stdout.readline()
+            if not line:
+                break
+            if isinstance(line, str):
+                line = line.encode('utf-8', errors='replace')
+            on_stdout_line(line)
     error_raw = stderr.read()
     code = stdout.channel.recv_exit_status()
     if not isinstance(output, bytes):
@@ -8849,6 +8863,74 @@ def _ensure_linux_qemu_guest(client: ProxmoxClient, entry: Dict[str, Any]):
         raise RuntimeError('QEMU guest file transfer currently supports Linux guests only')
 
 
+_TRANSFER_PROGRESS = threading.local()
+
+
+def _transfer_bytes(direction, loaded, total=None):
+    report = getattr(_TRANSFER_PROGRESS, 'report', None)
+    if report:
+        report(direction, loaded, total)
+
+
+def _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
+                             destination, use_sudo, password):
+    """Run the host-to-guest copy on Proxmox; only the script crosses SSH."""
+    guest_archive = f"/tmp/deployforge-qemu-push-{uuid.uuid4().hex}.tar"
+    extract = (f"{_lxc_prepare_directory_command(destination)} && "
+               f"tar --overwrite -xpf {shlex.quote(guest_archive)} -C {shlex.quote(destination)}")
+    # qm limits stdin to 1 MiB. Each bounded chunk travels locally from the
+    # staged host file through the guest agent, never back through this app.
+    script = f'''import json, subprocess, shlex
+vmid = {int(entry['vmid'])!r}
+archive = {remote_archive!r}
+guest_archive = {guest_archive!r}
+def run(command, data=None, timeout=120):
+    args = ['qm', 'guest', 'exec', str(vmid), '--synchronous', '1', '--timeout', str(timeout)]
+    if data is not None:
+        args += ['--pass-stdin', '1']
+    result = subprocess.run(args + ['--', '/bin/sh', '-c', command], input=data,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 30)
+    if result.returncode:
+        raise RuntimeError(result.stderr.decode(errors='replace') or 'qm guest exec failed')
+    state = json.loads(result.stdout)
+    if not state.get('exited') or state.get('exitcode') != 0:
+        raise RuntimeError(state.get('err-data') or state.get('out-data') or 'Guest command failed or timed out')
+try:
+    run('rm -f -- ' + shlex.quote(guest_archive))
+    with open(archive, 'rb') as stream:
+        previous_percent = -1
+        while True:
+            chunk = stream.read(512 * 1024)
+            if not chunk:
+                break
+            run('cat >> ' + shlex.quote(guest_archive), chunk)
+            percent = int(stream.tell() * 100 / {max(1, archive_size)})
+            if percent != previous_percent:
+                print('TRANSFER_BYTES=' + str(stream.tell()), flush=True)
+                previous_percent = percent
+    print('TRANSFER_EXTRACTING', flush=True)
+    run({extract!r}, timeout={max(600, int(archive_size / (256 * 1024)) + 120)})
+finally:
+    try:
+        run('rm -f -- ' + shlex.quote(guest_archive))
+    except Exception:
+        pass
+'''
+    def report_line(line):
+        if line.startswith(b'TRANSFER_BYTES='):
+            _transfer_bytes('Copying to guest', int(line.split(b'=', 1)[1]), archive_size)
+        elif line.strip() == b'TRANSFER_EXTRACTING':
+            _transfer_bytes('Extracting in guest', 0)
+    _transfer_bytes('Copying to guest', 0, archive_size)
+    code, _, error = _ssh_exec_result(
+        ssh_client, f'python3 -c {shlex.quote(script)}',
+        timeout=max(600, int(archive_size / (512 * 1024) + 1) * 150 + 720),
+        sudo=use_sudo, sudo_password=password, on_stdout_line=report_line,
+    )
+    if code != 0:
+        raise RuntimeError(error or f'Host-to-QEMU transfer exited with {code}')
+
+
 def _push_tar_through_guest_agent(
     client: ProxmoxClient,
     entry: Dict[str, Any],
@@ -8867,6 +8949,7 @@ def _push_tar_through_guest_agent(
             timeout=120,
         )
         tar_stream.seek(0)
+        _transfer_bytes('Uploading to guest', 0, archive_size)
         while True:
             chunk = tar_stream.read(45 * 1024)
             if not chunk:
@@ -8879,6 +8962,8 @@ def _push_tar_through_guest_agent(
                 input_data=encoded,
                 timeout=120,
             )
+            _transfer_bytes('Uploading to guest', tar_stream.tell(), archive_size)
+        _transfer_bytes('Extracting in guest', 0)
         extract_command = (
             f"{_lxc_prepare_directory_command(destination)} && "
             f"tar --overwrite -xpf {quoted_archive} -C {shlex.quote(destination)}"
@@ -8916,16 +9001,21 @@ def _pull_tar_through_guest_agent(
     quoted_paths = ' '.join(_shell_quote_path_pattern(path) for path in tar_paths)
     create_command = (
         f"cd / && rm -f -- {quoted_archive} && "
-        f"tar --exclude={shlex.quote(relative_archive)} -cf {quoted_archive} -- {quoted_paths}"
+        f"tar --exclude={shlex.quote(relative_archive)} -cf {quoted_archive} -- {quoted_paths} && "
+        f"stat -c %s -- {quoted_archive}"
     )
     tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
     try:
-        _guest_agent_exec_checked(
+        _transfer_bytes('Preparing download', 0)
+        created = _guest_agent_exec_checked(
             client,
             entry,
             ['/bin/sh', '-c', create_command],
             timeout=1800,
         )
+        size_text = str(created.get('stdout') or '').strip()
+        archive_size = int(size_text) if size_text.isdigit() else None
+        _transfer_bytes('Downloading from guest', 0, archive_size)
         try:
             offset = 0
             chunk_size = 4 * 1024 * 1024
@@ -8943,6 +9033,7 @@ def _pull_tar_through_guest_agent(
                 bytes_read = int(result.get('bytes-read') or len(chunk) or 0)
                 if chunk:
                     tar_stream.write(chunk)
+                    _transfer_bytes('Downloading from guest', tar_stream.tell(), archive_size)
                 if bytes_read <= 0:
                     break
                 offset += bytes_read
@@ -8982,6 +9073,7 @@ def _pull_tar_through_guest_agent(
                 encoded = ''.join(str(result.get('content') or '').split())
                 if encoded:
                     tar_stream.write(base64.b64decode(encoded, validate=True))
+                    _transfer_bytes('Downloading from guest', tar_stream.tell(), archive_size)
         if tar_stream.tell() <= 0:
             raise RuntimeError('guest-agent returned an empty archive')
         tar_stream.seek(0)
@@ -9001,9 +9093,13 @@ def _pull_tar_through_guest_agent(
             pass
 
 
-def _lxc_zip_prefix(name: Any, vmid: Any) -> str:
+def _lxc_zip_prefix(name: Any, vmid: Any, username: Any = '') -> str:
     safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name or 'lxc')).strip('._') or 'lxc'
-    return f"{safe_name}-{int(vmid)}"
+    prefix = f"{safe_name}-{int(vmid)}"
+    if username:
+        safe_username = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(username)).strip('._') or 'user'
+        prefix += f"_{safe_username}"
+    return prefix
 
 
 def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -> int:
@@ -9038,23 +9134,52 @@ def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -
 
 
 def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
-    """Run guests within the project limit; publish completion from the request thread."""
+    """Publish byte progress from workers as well as completed guest counts."""
     if not mapped:
         return []
     _update_job_detail(pid, phase=phase, progress=0, total_steps=len(mapped),
                        message=f'Processing {len(mapped)} guests')
     results = [None] * len(mapped)
+    lock = threading.Lock()
+    completed = 0
+
+    def run(entry):
+        last = [None, -1, 0.0]
+        def report(direction, loaded, total):
+            percent = min(100, int(loaded * 100 / total)) if total and total > 0 else None
+            now = time.monotonic()
+            if direction == last[0] and percent == last[1] and now - last[2] < 0.5:
+                return
+            last[:] = [direction, percent, now]
+            size = f'{loaded / 1048576:.1f} MiB'
+            if total:
+                size += f' / {total / 1048576:.1f} MiB'
+            message = f'{direction}: {percent}% ({size})' if percent is not None else (f'{direction}: {size}' if loaded else f'{direction}…')
+            with lock:
+                _update_job_detail(pid, phase=phase, current=str(entry.get('name') or ''),
+                                   progress=min(99, int(completed * 100 / len(mapped))),
+                                   transferProgress=percent, transferDirection=direction,
+                                   message=message)
+        _TRANSFER_PROGRESS.report = report
+        try:
+            return worker(entry)
+        finally:
+            del _TRANSFER_PROGRESS.report
+
     with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(mapped), hard_cap=0)) as pool:
-        futures = {pool.submit(worker, entry): position for position, entry in enumerate(mapped)}
-        for completed, future in enumerate(as_completed(futures), start=1):
+        futures = {pool.submit(run, entry): position for position, entry in enumerate(mapped)}
+        for future in as_completed(futures):
             position = futures[future]
             results[position] = future.result()
-            _update_job_detail(
-                pid, phase=phase, current=str(mapped[position].get('name') or ''),
-                step=completed, total_steps=len(mapped),
-                progress=min(99, int(completed / len(mapped) * 100)),
-                message=f'Processed {completed}/{len(mapped)} guests',
-            )
+            with lock:
+                completed += 1
+                _update_job_detail(
+                    pid, phase=phase, current=str(mapped[position].get('name') or ''),
+                    step=completed, total_steps=len(mapped),
+                    progress=min(99, int(completed / len(mapped) * 100)),
+                    transferProgress=None, transferDirection='',
+                    message=f'Processed {completed}/{len(mapped)} guests',
+                )
     return results
 
 
@@ -9159,6 +9284,9 @@ def instances_lxc_push(pid: str):
     pushed: List[Dict[str, Any]] = []
     _start_job(pid, 'guest_push', total_steps=len(mapped))
     tar_stream = tempfile.NamedTemporaryFile(mode='w+b')
+    batch = getattr(g, 'guest_push_batch', None) or GuestPushBatch()
+    owns_batch = getattr(g, 'guest_push_batch', None) is None
+    upload_key = (getattr(g, 'guest_push_upload_keys', None) or id(tar_stream), tuple(safe_paths))
     try:
         with tarfile.open(fileobj=tar_stream, mode='w') as archive:
             directory_paths: Set[str] = set()
@@ -9193,126 +9321,90 @@ def instances_lxc_push(pid: str):
         metadata_commands = _guest_push_metadata_commands(destination, safe_paths, directory_paths, owner, permissions)
 
         def transfer_guest(entry):
-            pushed = []
-            errors = []
-            ssh_client = None
-            sftp = None
-            upload_stream = None
-            remote_archive = f"/tmp/deployforge-lxc-push-{uuid.uuid4().hex}.tar"
+            pushed, errors = [], []
+            guest_type = str(entry.get('type') or '').strip().lower()
+            method = 'qemu-guest-agent' if guest_type == 'qemu' else 'pct-over-ssh'
             failure_stage = 'push failed'
             try:
-                upload_stream = open(tar_stream.name, 'rb')
-                guest_type = str(entry.get('type') or '').strip().lower()
-                if guest_type == 'qemu':
-                    _push_tar_through_guest_agent(
-                        client,
-                        entry,
-                        upload_stream,
-                        archive_size,
-                        destination,
-                    )
+                if guest_type == 'qemu' and not password:
+                    with open(tar_stream.name, 'rb') as upload_stream:
+                        _push_tar_through_guest_agent(client, entry, upload_stream, archive_size, destination)
                     failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
-                    for metadata_command in metadata_commands:
-                        _guest_agent_exec_checked(client, entry, ['/bin/sh', '-c', metadata_command])
-                    pushed.append({
-                        'index': entry.get('index'),
-                        'name': entry.get('name'),
-                        'vmid': entry.get('vmid'),
-                        'node': entry.get('node'),
-                        'type': 'qemu',
-                        'transfer_method': 'qemu-guest-agent',
-                        'destination': destination,
-                        'file_count': len(safe_paths),
-                        'item_count': len(safe_paths),
-                        'bytes': archive_size,
-                        'overwrite': True,
-                        'created_directories': True,
-                        'selection_type': selection_type,
-                        'owner_on_remote': owner or None,
-                        'file_permissions': permissions or None,
-                    })
-                    return pushed, errors
-                ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
-                ssh_user = _proxmox_ssh_username(proj, body.get('username'))
-                use_sudo = ssh_user.lower() != 'root'
-                ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
-                ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
-                # Prepare each destination component so missing parents are
-                # created and a file-vs-directory conflict is replaced.
-                # tar's overwrite mode replaces conflicting files without an
-                # interactive prompt and merges existing directories.
-                inner = (
-                    f"{_lxc_prepare_directory_command(destination)} && "
-                    f"tar --overwrite -xpf - -C {shlex.quote(destination)}"
-                )
-                sftp = ssh_client.open_sftp()
-                upload_stream.seek(0)
-                sftp.putfo(upload_stream, remote_archive, file_size=archive_size)
-                pct_command = (
-                    f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
-                    f"< {shlex.quote(remote_archive)}"
-                )
-                # Keep the archive redirection inside the elevated shell. The
-                # SSH channel's stdin remains available for sudo's password.
-                command = f"sh -c {shlex.quote(pct_command)}"
-                code, _output, stderr_text = _ssh_exec_result(
-                    ssh_client,
-                    command,
-                    sudo=use_sudo,
-                    sudo_password=password,
-                )
-                if code != 0:
-                    raise RuntimeError(stderr_text or f'pct extract exited with {code}')
-                failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
-                for metadata_command in metadata_commands:
-                    command = f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(metadata_command)}"
-                    code, _output, stderr_text = _ssh_exec_result(
-                        ssh_client, command, sudo=use_sudo, sudo_password=password,
-                    )
-                    if code != 0:
-                        raise RuntimeError(stderr_text or f'remote metadata command exited with {code}')
+                    for command in metadata_commands:
+                        _guest_agent_exec_checked(client, entry, ['/bin/sh', '-c', command])
+                else:
+                    if guest_type == 'qemu':
+                        _ensure_linux_qemu_guest(client, entry)
+                    ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
+                    ssh_user = _proxmox_ssh_username(proj, body.get('username'))
+                    use_sudo = ssh_user.lower() != 'root'
+                    ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
+                    # Include credentials and node identity so reuse cannot cross
+                    # authentication boundaries or distinct cluster nodes.
+                    key = (upload_key, str(entry.get('node') or ''), ssh_host, ssh_port, ssh_user, password)
+                    with batch.host(key) as staged:
+                        if 'error' in staged:
+                            raise RuntimeError(staged['error'])
+                        if 'ready' not in staged:
+                            try:
+                                staged['ssh'] = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
+                                staged['sftp'] = staged['ssh'].open_sftp()
+                                staged['archive'] = f"/tmp/deployforge-lxc-push-{uuid.uuid4().hex}.tar"
+                                with open(tar_stream.name, 'rb') as upload_stream:
+                                    _transfer_bytes('Uploading to host', 0, archive_size)
+                                    staged['sftp'].putfo(upload_stream, staged['archive'], file_size=archive_size,
+                                                         callback=lambda done, total: _transfer_bytes('Uploading to host', done, total))
+                                staged['ready'] = True
+                            except Exception as exc:
+                                staged['error'] = f'Could not stage batch on Proxmox host: {exc}'
+                                raise RuntimeError(staged['error']) from exc
+                        remote_archive = staged['archive']
+                    # Only staging holds the host lock. The existing guest pool
+                    # bounds these concurrent copies by the project's Max Jobs.
+                    with batch.command_client(staged, lambda: _ssh_connect(ssh_host, ssh_port, ssh_user, password)) as ssh_client:
+                        if guest_type == 'qemu':
+                            method = 'qm-over-ssh'
+                            _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
+                                                     destination, use_sudo, password)
+                        else:
+                            _transfer_bytes('Extracting in guest', 0)
+                            inner = (f"{_lxc_prepare_directory_command(destination)} && "
+                                     f"tar --overwrite -xpf - -C {shlex.quote(destination)}")
+                            pct_command = (f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
+                                           f"< {shlex.quote(remote_archive)}")
+                            code, _, stderr_text = _ssh_exec_result(
+                                ssh_client, f"sh -c {shlex.quote(pct_command)}",
+                                sudo=use_sudo, sudo_password=password,
+                            )
+                            if code != 0:
+                                raise RuntimeError(stderr_text or f'pct extract exited with {code}')
+                        failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
+                        for command in metadata_commands:
+                            if guest_type == 'qemu':
+                                _guest_agent_exec_checked(client, entry, ['/bin/sh', '-c', command])
+                            else:
+                                code, _, stderr_text = _ssh_exec_result(
+                                    ssh_client, f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(command)}",
+                                    sudo=use_sudo, sudo_password=password,
+                                )
+                                if code != 0:
+                                    raise RuntimeError(stderr_text or f'remote metadata command exited with {code}')
                 pushed.append({
-                    'index': entry.get('index'),
-                    'name': entry.get('name'),
-                    'vmid': entry.get('vmid'),
-                    'node': entry.get('node'),
-                    'type': 'lxc',
-                    'transfer_method': 'pct-over-ssh',
-                    'destination': destination,
-                    'file_count': len(safe_paths),
-                    'item_count': len(safe_paths),
-                    'bytes': archive_size,
-                    'overwrite': True,
-                    'created_directories': True,
+                    'index': entry.get('index'), 'name': entry.get('name'),
+                    'vmid': entry.get('vmid'), 'node': entry.get('node'),
+                    'type': guest_type, 'transfer_method': method,
+                    'destination': destination, 'file_count': len(safe_paths),
+                    'item_count': len(safe_paths), 'bytes': archive_size,
+                    'overwrite': True, 'created_directories': True,
                     'selection_type': selection_type,
-                    'owner_on_remote': owner or None,
-                    'file_permissions': permissions or None,
+                    'owner_on_remote': owner or None, 'file_permissions': permissions or None,
                 })
             except Exception as exc:
                 errors.append({
-                    'index': entry.get('index'),
-                    'name': entry.get('name'),
-                    'vmid': entry.get('vmid'),
-                    'node': entry.get('node'),
+                    'index': entry.get('index'), 'name': entry.get('name'),
+                    'vmid': entry.get('vmid'), 'node': entry.get('node'),
                     'reason': f'{failure_stage}: {exc}',
                 })
-            finally:
-                if upload_stream is not None:
-                    upload_stream.close()
-                if sftp is not None:
-                    try:
-                        sftp.remove(remote_archive)
-                    except Exception:
-                        pass
-                    try:
-                        sftp.close()
-                    except Exception:
-                        pass
-                if ssh_client is not None:
-                    try:
-                        ssh_client.close()
-                    except Exception:
-                        pass
             return pushed, errors
 
         for guest_results, guest_errors in _run_guest_transfer_tasks(
@@ -9321,8 +9413,10 @@ def instances_lxc_push(pid: str):
             pushed.extend(guest_results)
             errors.extend(guest_errors)
     finally:
+        if owns_batch:
+            batch.close()
         tar_stream.close()
-        _update_job_detail(pid, progress=100, message='Guest push completed')
+        _update_job_detail(pid, progress=100, transferProgress=None, transferDirection='', message='Guest push completed')
         _end_job(pid)
     return jsonify({'pushed': pushed, 'skipped': skipped, 'errors': errors})
 
@@ -9366,7 +9460,8 @@ def instances_lxc_pull(pid: str):
                 if guest_type == 'qemu':
                     tar_stream = _pull_tar_through_guest_agent(client, entry, paths)
                     try:
-                        prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'))
+                        prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'), _instance_username(proj, entry.get('index')))
+                        _transfer_bytes('Preparing download archive', 0)
                         with zip_lock:
                             output_zip.writestr(prefix.rstrip('/') + '/', b'')
                             file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
@@ -9396,7 +9491,13 @@ def instances_lxc_pull(pid: str):
                 # Change directory before invoking tar so the shell expands
                 # relative patterns against the container root, not /root (or
                 # another pct exec working directory).
-                inner_command = f"cd / && tar -cf - -- {quoted_paths}"
+                _transfer_bytes('Preparing download', 0)
+                inner_command = (
+                    "archive=$(mktemp /tmp/deployforge-pull-XXXXXXXX.tar) || exit 1; "
+                    "trap 'rm -f -- \"$archive\"' EXIT; "
+                    f'cd / && tar --exclude="${{archive#/}}" -cf "$archive" -- {quoted_paths} && '
+                    "printf 'TRANSFER_SIZE=%s\\n' \"$(stat -c %s -- \"$archive\")\" && cat -- \"$archive\""
+                )
                 command = (
                     f"pct exec {int(entry['vmid'])} -- sh -c "
                     f"{shlex.quote(inner_command)}"
@@ -9410,6 +9511,13 @@ def instances_lxc_pull(pid: str):
                 )
                 tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
                 try:
+                    header = stdout.readline()
+                    if isinstance(header, str):
+                        header = header.encode('utf-8', errors='replace')
+                    if not header.startswith(b'TRANSFER_SIZE='):
+                        raise RuntimeError('Guest archive size was not returned')
+                    archive_size = int(header.split(b'=', 1)[1])
+                    _transfer_bytes('Downloading from guest', 0, archive_size)
                     while True:
                         chunk = stdout.read(1024 * 1024)
                         if not chunk:
@@ -9417,12 +9525,14 @@ def instances_lxc_pull(pid: str):
                         if not isinstance(chunk, bytes):
                             chunk = str(chunk).encode('utf-8', errors='replace')
                         tar_stream.write(chunk)
+                        _transfer_bytes('Downloading from guest', tar_stream.tell(), archive_size)
                     stderr_raw = stderr.read()
                     stderr_text = stderr_raw.decode('utf-8', errors='replace') if isinstance(stderr_raw, bytes) else str(stderr_raw or '')
                     code = int(stdout.channel.recv_exit_status())
                     if code != 0:
                         raise RuntimeError(stderr_text.strip() or f'pct tar exited with {code}')
-                    prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'))
+                    prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'), _instance_username(proj, entry.get('index')))
+                    _transfer_bytes('Preparing download archive', 0)
                     with zip_lock:
                         output_zip.writestr(prefix.rstrip('/') + '/', b'')
                         file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
@@ -9469,7 +9579,7 @@ def instances_lxc_pull(pid: str):
             'size': len(zip_bytes),
             'label': 'Pulled Files',
         }
-    _update_job_detail(pid, progress=100, message='Guest pull completed')
+    _update_job_detail(pid, progress=100, transferProgress=None, transferDirection='', message='Guest pull completed')
     _end_job(pid)
     return jsonify({'pulled': pulled, 'skipped': skipped, 'errors': errors, 'outputs_zip': outputs_zip})
 

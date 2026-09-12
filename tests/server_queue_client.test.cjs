@@ -196,3 +196,50 @@ test('queue progress renders each job independently, escapes status, and handles
   assert.match(sandbox.renderRemoteQueueProgress({ progress: 0 }), /aria-valuenow="0"/);
   assert.match(sandbox.renderRemoteQueueProgress({ progress: 200 }), /width:100%/);
 });
+
+
+test('multipart upload reports progress before acceptance and surfaces proxy and network errors', async () => {
+  const window = browser(async () => json({ items: [] }));
+  let xhr;
+  window.XMLHttpRequest = class {
+    constructor() { xhr = this; this.upload = {}; }
+    open(method, url) { assert.equal(method, 'POST'); assert.equal(url, '/api/queue'); }
+    setRequestHeader() {}
+    send(body) { assert(body instanceof FormData); }
+  };
+  const files = [['part', new Blob(['model'])]];
+  const updates = [];
+  const pending = window.ServerQueue.submit('Push', [], { onUploadProgress: p => updates.push(p) }, files);
+  xhr.upload.onprogress({ loaded: 10, total: 20, lengthComputable: true });
+  assert.equal(updates[0].loaded, 10);
+  assert.equal(updates[0].total, 20);
+  assert.equal(window.ServerQueue.state().items.length, 0);
+  xhr.upload.onload();
+  assert.equal(updates[1].uploaded, true);
+  xhr.status = 202; xhr.responseText = JSON.stringify({ id: 7, label: 'Push', status: 'queued' });
+  xhr.onload();
+  assert.equal((await pending).id, 7);
+  assert.equal(window.ServerQueue.state().items.length, 1);
+  const rejected = window.ServerQueue.submit('Push', [], {}, files);
+  xhr.status = 413; xhr.responseText = '<html>Too large</html>'; xhr.onload();
+  await assert.rejects(rejected, /too large.*413/);
+  const disconnected = window.ServerQueue.submit('Push', [], {}, files);
+  xhr.onerror();
+  await assert.rejects(disconnected, /connection failed/);
+});
+
+test('queue displays byte percentage and guest name during transfers, with indeterminate extraction', () => {
+  const shell = fs.readFileSync('app/static/js/shell.js', 'utf8');
+  const helper = shell.slice(shell.indexOf('function renderRemoteQueueProgress('), shell.indexOf('function clearCompletedRemoteActions('));
+  const sandbox = { escapeHtml: value => String(value).replaceAll('<', '&lt;') };
+  vm.createContext(sandbox); vm.runInContext(helper, sandbox);
+  const html = sandbox.renderRemoteQueueProgress({ progress: 0, transferProgress: 42,
+    transferDirection: 'Downloading from guest', current: 'VM <1>', message: '42% (42 MiB / 100 MiB)' });
+  assert.match(html, /width:42%/);
+  assert.match(html, /Downloading from guest/);
+  assert.match(html, /VM &lt;1>/);
+  const extraction = sandbox.renderRemoteQueueProgress({ progress: 75, transferProgress: null,
+    transferDirection: 'Extracting in guest' });
+  assert.match(extraction, /progress-bar-animated/);
+  assert.doesNotMatch(extraction, /aria-valuenow/);
+});

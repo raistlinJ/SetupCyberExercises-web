@@ -113,6 +113,7 @@ async function submitServerGuestTransfer(label, descriptor, queueOptions) {
   const files = [];
   const payload = queueOptions.runtimePayload || (descriptor.payloadId ? await PersistentQueuePayloads.get(descriptor.payloadId) : null);
   if (descriptor.kind === 'push' && !payload?.files?.length) throw new Error('Upload files are unavailable');
+  let sharedFiles;
   for (const group of descriptor.groups || []) {
     const auth = await guestTransferAuthPayload(group.pid, group.targets);
     const body = { ...auth, targets: group.targets };
@@ -127,8 +128,11 @@ async function submitServerGuestTransfer(label, descriptor, queueOptions) {
         filePermissions: payload.filePermissions ?? descriptor.filePermissions ?? '',
       }));
       form.append('destination', destination);
-      payload.files.forEach(file => form.append('files', file.blob || file, file.name || 'upload'));
-      steps.push(ServerQueue.requestStep(url + `?destination=${encodeURIComponent(destination)}`, { method: 'POST', body: form }, files));
+      if (!sharedFiles) payload.files.forEach(file => form.append('files', file.blob || file, file.name || 'upload'));
+      const step = ServerQueue.requestStep(url + `?destination=${encodeURIComponent(destination)}`, { method: 'POST', body: form }, files);
+      if (sharedFiles) step.files = sharedFiles.map(pair => [...pair]);
+      else sharedFiles = step.files;
+      steps.push(step);
     } else {
       if (descriptor.kind === 'pull') body.paths = descriptor.paths;
       else if (descriptor.kind === 'delete') {
@@ -139,6 +143,7 @@ async function submitServerGuestTransfer(label, descriptor, queueOptions) {
     }
   }
   const job = await ServerQueue.submit(label, steps, queueOptions, files);
+  await queueOptions.onAccepted?.(job);
   if (descriptor.payloadId) await PersistentQueuePayloads.remove(descriptor.payloadId).catch(() => {});
   return finishServerVmAction(label, job);
 }

@@ -3820,7 +3820,7 @@ function openLxcPushModal() {
   const selected = getSelectedGuestEntries();
   if (!selected.length) return alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
   const summary = document.getElementById('lxc-push-summary');
-  if (summary) summary.textContent = `The selected content will be pushed to ${selected.length} guest${selected.length === 1 ? '' : 's'}. QEMU VMs use the guest agent; LXC containers use the configured Proxmox SSH connection.`;
+  if (summary) summary.textContent = `The selected content will be pushed to ${selected.length} guest${selected.length === 1 ? '' : 's'}. Uploads are staged once per Proxmox host using SSH and reused for its selected guests. QEMU uses a separate guest-agent transfer when SSH credentials are unavailable.`;
   const error = document.getElementById('lxc-push-error');
   if (error) { error.textContent = ''; error.classList.add('d-none'); }
   const modal = document.getElementById('lxcPushModal');
@@ -3898,6 +3898,7 @@ function wireLxcTransferModals() {
   if (pushButton && !pushButton._lxcTransferBound) {
     pushButton._lxcTransferBound = true;
     pushButton.addEventListener('click', async () => {
+      if (pushButton.disabled) return;
       const selectionType = document.querySelector('input[name="lxc-push-type"]:checked')?.value === 'folder' ? 'folder' : 'file';
       const files = selectionType === 'folder'
         ? Array.from(document.getElementById('lxc-push-folder')?.files || [])
@@ -3936,36 +3937,59 @@ function wireLxcTransferModals() {
           lastModified: Number(file.lastModified) || 0,
         })),
       };
-      if (useBrowserStorage) {
-        try {
-          await window.PersistentQueuePayloads.put(payloadId, runtimePayload);
-        } catch (storageError) {
-          return fail(`Could not save the upload in the persistent queue: ${storageError?.message || storageError}`);
+      const originalText = pushButton.textContent;
+      pushButton.disabled = true;
+      pushButton.textContent = 'Preparing upload…';
+      if (error) { error.textContent = ''; error.classList.add?.('d-none'); }
+      try {
+        if (useBrowserStorage) {
+          try {
+            await window.PersistentQueuePayloads.put(payloadId, runtimePayload);
+          } catch (storageError) {
+            return fail(`Could not save the upload in the persistent queue: ${storageError?.message || storageError}`);
+          }
         }
-      }
-      const modal = document.getElementById('lxcPushModal');
-      await hideLxcSetupModal(modal);
-      const transferLabel = selectionType === 'folder' ? 'Push Folder' : 'Push Files';
-      const descriptor = {
-        kind: 'push',
-        label: transferLabel,
-        destination,
-        ownerOnRemote,
-        filePermissions,
-        relativePaths,
-        selectionType,
-        payloadId,
-        groups,
-      };
-      const queueResult = await runQueued(`${transferLabel} (${guestCount} guests)`, async () => {
-        await executePersistedGuestTransfer(descriptor, runtimePayload);
-      }, {
-        projectId: groups[0]?.pid || PROJ?.id,
-        persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
-        runtimePayload,
-      });
-      if (payloadId && (queueResult?.status === 'canceled' || queueResult?.status === 'skipped')) {
-        try { await window.PersistentQueuePayloads.remove(payloadId); } catch { }
+        const modal = document.getElementById('lxcPushModal');
+        if (useBrowserStorage) await hideLxcSetupModal(modal);
+        const transferLabel = selectionType === 'folder' ? 'Push Folder' : 'Push Files';
+        const descriptor = {
+          kind: 'push',
+          label: transferLabel,
+          destination,
+          ownerOnRemote,
+          filePermissions,
+          relativePaths,
+          selectionType,
+          payloadId,
+          groups,
+        };
+        const queueResult = await runQueued(`${transferLabel} (${guestCount} guests)`, async () => {
+          await executePersistedGuestTransfer(descriptor, runtimePayload);
+        }, {
+          projectId: groups[0]?.pid || PROJ?.id,
+          persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
+          runtimePayload,
+          onUploadProgress: progress => {
+            pushButton.textContent = progress.uploaded ? 'Saving upload on server…'
+              : progress.total ? `Uploading to server… ${Math.floor(progress.loaded * 100 / progress.total)}%`
+              : `Uploading to server… ${Math.floor(progress.loaded / 1048576)} MiB`;
+          },
+          onAccepted: async () => {
+            await hideLxcSetupModal(modal);
+            pushButton.disabled = false;
+            pushButton.textContent = originalText;
+          },
+        });
+        if (payloadId && (queueResult?.status === 'canceled' || queueResult?.status === 'skipped')) {
+          try { await window.PersistentQueuePayloads.remove(payloadId); } catch { }
+        }
+      } catch (uploadError) {
+        fail(uploadError?.message || String(uploadError));
+        const modal = document.getElementById('lxcPushModal');
+        if (modal && window.bootstrap) bootstrap.Modal.getOrCreateInstance(modal).show();
+      } finally {
+        pushButton.disabled = false;
+        pushButton.textContent = originalText;
       }
     });
   }

@@ -1293,12 +1293,13 @@ function getRemoteQueueState(){
 }
 
 function renderRemoteQueueProgress(entry){
-  const raw = entry.progress;
+  const transferring = !!entry.transferDirection;
+  const raw = transferring ? entry.transferProgress : entry.progress;
   const hasPercent = raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw));
   const percent = hasPercent ? Math.max(0, Math.min(100, Number(raw))) : null;
   const value = hasPercent ? `${Math.round(percent)}%` : 'In progress';
-  const status = entry.cancelRequested ? 'Cancelling…' : 'Running';
-  const detail = entry.message || [entry.phase ? String(entry.phase).replace(/_/g, ' ') : '', entry.current].filter(Boolean).join(' · ');
+  const status = entry.cancelRequested ? 'Cancelling…' : escapeHtml(entry.transferDirection || 'Running');
+  const detail = (transferring && entry.current ? `${entry.current} · ${entry.message || ''}` : entry.message) || [entry.phase ? String(entry.phase).replace(/_/g, ' ') : '', entry.current].filter(Boolean).join(' · ');
   const step = Number(entry.step);
   const total = Number(entry.totalSteps);
   const steps = Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0

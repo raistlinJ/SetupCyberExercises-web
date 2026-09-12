@@ -44,6 +44,7 @@ function pushDialog(owner, permissions, selectionType = 'file', options = {}) {
   vm.runInContext(functionSource('wireLxcTransferModals', "document.addEventListener('DOMContentLoaded', wireLxcTransferModals)"), sandbox);
   sandbox.wireLxcTransferModals();
   return {
+    elements,
     async submit() { await elements.get('lxc-push-confirm').click(); return { saved, queued, error: elements.get('lxc-push-error').textContent }; },
   };
 }
@@ -51,7 +52,7 @@ function pushDialog(owner, permissions, selectionType = 'file', options = {}) {
 test('push dialog persists advanced options for files and folders', async () => {
   for (const type of ['file', 'folder']) {
     const { saved, queued, error } = await pushDialog(' www-data ', ' 0755 ', type).submit();
-    assert.equal(error, undefined);
+    assert.equal(error, '');
     assert.equal(saved.ownerOnRemote, 'www-data');
     assert.equal(saved.filePermissions, '0755');
     assert.equal(queued.persist.data.ownerOnRemote, 'www-data');
@@ -103,7 +104,7 @@ test('server uploads bypass failing or unavailable browser storage and send byte
         storageError: new Error('Failed to write blobs (InvalidBlob)'),
         noStorage,
       }).submit();
-      assert.equal(result.error, undefined);
+      assert.equal(result.error, '');
       assert.equal(result.saved, undefined);
       assert.equal(result.queued.persist.data.payloadId, null);
       const plan = JSON.parse(submission.get('plan'));
@@ -164,5 +165,66 @@ test('server and browser queue paths preserve advanced options when restored', a
       assert.equal(sent.filePermissions, options.filePermissions || '');
       assert.equal(sent.destination, '/opt/scenario');
     }
+  }
+});
+
+
+test('push displays submission errors and enables retry', async () => {
+  const dialog = pushDialog('', '', 'file', {
+    serverQueue: {}, runQueued: async () => { throw new Error('Upload rejected: too large'); },
+  });
+  const result = await dialog.submit();
+  assert.equal(result.error, 'Upload rejected: too large');
+  assert.equal(dialog.elements.get('lxc-push-confirm').disabled, false);
+});
+
+test('push immediately shows preparation and prevents duplicate submissions', async () => {
+  let release, calls = 0;
+  const dialog = pushDialog('', '', 'file', {
+    serverQueue: {}, runQueued: async (label, fn, options) => {
+      calls++;
+      options.onUploadProgress({ loaded: 50, total: 100 });
+      await new Promise(resolve => { release = resolve; });
+    },
+  });
+  const pending = dialog.submit();
+  const button = dialog.elements.get('lxc-push-confirm');
+  assert.equal(button.disabled, true);
+  assert.match(button.textContent, /50%/);
+  await dialog.submit();
+  assert.equal(calls, 1);
+  release();
+  await pending;
+  assert.equal(button.disabled, false);
+});
+
+test('multi-project push sends file bytes once and references them in every step', async () => {
+  let submitted;
+  const sandbox = {
+    FormData,
+    guestTransferAuthPayload: async pid => ({ username: pid }),
+    ServerQueue: {
+      requestStep(url, options, files) {
+        const step = { url, form: [], files: [] };
+        for (const [key, value] of options.body) {
+          if (typeof value === 'string') step.form.push([key, value]);
+          else { const id = `file-${files.length}`; files.push([id, value]); step.files.push([key, id]); }
+        }
+        return step;
+      },
+      async submit(label, steps, options, files) { submitted = { steps, files }; return { id: 1 }; },
+    },
+  };
+  vm.createContext(sandbox); vm.runInContext(plans, sandbox);
+  sandbox.finishServerVmAction = async () => {};
+  await sandbox.submitServerGuestTransfer('Push', {
+    kind: 'push', groups: ['a', 'b', 'c'].map(pid => ({ pid, targets: [{ name: pid }] })),
+    relativePaths: ['model.gguf'],
+  }, { runtimePayload: { destination: '/models', files: [{ blob: new Blob(['GGUF']), name: 'model.gguf' }] } });
+  assert.equal(submitted.files.length, 1);
+  assert.equal(submitted.steps.length, 3);
+  for (const [i, step] of submitted.steps.entries()) {
+    assert.equal(step.files[0][1], 'file-0');
+    assert.equal(JSON.parse(step.form[0][1]).username, ['a', 'b', 'c'][i]);
   }
 });

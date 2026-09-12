@@ -455,3 +455,171 @@ def test_progress_schema_migration_preserves_existing_work(tmp_path):
         with queue.connect() as db:
             row = dict(db.execute('SELECT * FROM actions WHERE id=1').fetchone())
         assert row == {'id': 1, 'status': 'queued', 'payload': 'accepted payload', 'progress_state': '{}'}
+
+
+def test_upload_storage_uses_bounded_reads_and_cleans_duplicates(harness, monkeypatch):
+    from pathlib import Path
+    from werkzeug.datastructures import FileStorage
+
+    app, client, *_ = harness
+    q = ActionQueue(app)
+    monkeypatch.setattr(q, 'start', lambda: None)
+
+    class BoundedStream(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 < size <= 1024 * 1024, 'Must never read an entire model into RAM'
+            return super().read(size)
+
+    content = b'GGUF' * (600 * 1024)
+    plan = {'token': 'disk-upload', 'steps': [{'method': 'POST', 'url': '/api/upload',
+            'form': [['destination', '/models']], 'files': [['files', 'model']]}]}
+    with app.test_request_context('/api/queue'):
+        session['user'] = 'alice'
+        row = q.submit('alice', plan, [('model', FileStorage(BoundedStream(content), filename='model.gguf'))])
+        duplicate = q.submit('alice', plan, [('model', FileStorage(BoundedStream(b'other'), filename='other.gguf'))])
+    assert row['id'] == duplicate['id']
+    with q.connect() as db:
+        uploaded = db.execute('SELECT * FROM uploads WHERE job=?', (row['id'],)).fetchone()
+    assert uploaded['body'] is None
+    assert Path(uploaded['path']).read_bytes() == content
+    assert len(list(Path(q.upload_dir).iterdir())) == 1
+    q.execute(row)
+    assert list(Path(q.upload_dir).iterdir()) == []
+    with q.connect() as db:
+        assert db.execute('SELECT status FROM actions WHERE id=?', (row['id'],)).fetchone()['status'] == 'completed'
+
+
+def test_failed_upload_copy_leaves_no_job_or_partial_file(harness, monkeypatch):
+    from pathlib import Path
+    from werkzeug.datastructures import FileStorage
+
+    app, *_ = harness
+    q = ActionQueue(app)
+    monkeypatch.setattr(q, 'start', lambda: None)
+
+    class FailedStream:
+        def read(self, size):
+            raise OSError('disk read failed')
+
+    with app.test_request_context('/api/queue'):
+        with pytest.raises(OSError, match='disk read failed'):
+            q.submit('alice', {'token': 'failed-copy', 'steps': [{'url': '/api/upload'}]},
+                     [('model', FileStorage(FailedStream(), filename='model.gguf'))])
+    assert list(Path(q.upload_dir).iterdir()) == []
+    with q.connect() as db:
+        assert not db.execute('SELECT id FROM actions').fetchall()
+
+
+def test_cancelling_waiting_upload_removes_disk_payload(harness):
+    from pathlib import Path
+
+    app, client, started, release, *_ = harness
+    enqueue(client, 'first')
+    assert started.wait(2)
+    plan = {'token': 'cancel-upload', 'steps': [{'method': 'POST', 'url': '/api/upload',
+            'form': [['destination', '/models']], 'files': [['files', 'model']]}]}
+    response = client.post('/api/queue', data={'plan': json.dumps(plan),
+                           'model': (io.BytesIO(b'GGUF'), 'model.gguf')})
+    assert response.status_code == 202
+    q = app.extensions['action_queue']
+    assert list(Path(q.upload_dir).iterdir())
+    assert client.post(f"/api/queue/{response.get_json()['id']}/cancel").status_code == 200
+    assert not list(Path(q.upload_dir).iterdir())
+    release.set()
+
+
+def test_worker_dispatches_multigigabyte_file_without_materializing_it(harness, monkeypatch):
+    from pathlib import Path
+
+    app, *_ = harness
+    q = ActionQueue(app)
+    monkeypatch.setattr(q, 'start', lambda: None)
+    size = 3 * 1024 ** 3
+
+    @app.post('/api/model-size')
+    def model_size():
+        upload = request.files['files']
+        assert upload.filename == 'model.gguf'
+        assert upload.stream.read(4) == b'GGUF'
+        upload.stream.seek(0, 2)
+        return jsonify(size=upload.stream.tell())
+
+    path = Path(q.upload_dir) / 'large-model'
+    with path.open('wb') as stream:
+        stream.write(b'GGUF')
+        stream.truncate(size)  # Sparse fixture: no multi-gigabyte allocation.
+    plan = {'token': 'large-model', 'steps': [{'method': 'POST', 'url': '/api/model-size',
+            'form': [], 'files': [['files', 'model']]}]}
+    with app.test_request_context('/api/queue'):
+        row = q.submit('alice', plan, [])
+    with q.connect() as db:
+        db.execute('INSERT INTO uploads (job, name, filename, path) VALUES (?, ?, ?, ?)',
+                   (row['id'], 'model', 'model.gguf', str(path)))
+    q.execute(row)
+    with q.connect() as db:
+        result = db.execute('SELECT status, result FROM actions WHERE id=?', (row['id'],)).fetchone()
+    assert result['status'] == 'completed'
+    assert json.loads(result['result'])['size'] == size
+    assert not path.exists()
+
+
+def test_push_batch_reuses_host_archive_across_project_steps(harness, monkeypatch):
+    from unittest.mock import MagicMock
+    from app.storage.projects import Project
+
+    app, client, *_ = harness
+    app.add_url_rule('/api/projects/<pid>/instances/actions/guest_push',
+                     view_func=api.instances_lxc_push, methods=['POST'])
+    ssh = MagicMock()
+    sftp = ssh.open_sftp.return_value
+    monkeypatch.setattr(api, '_block_when_remote', lambda *args: None)
+    monkeypatch.setattr(api, '_guest_transfer_context', lambda pid, body, **kwargs: (
+        Project(id=pid, name=pid), MagicMock(), 'https://node1:8006', 'secret',
+        [{'index': 1, 'name': pid, 'vmid': 101 if pid == 'a' else 102, 'node': 'node1', 'type': 'lxc'}], [], [],
+    ))
+    monkeypatch.setattr(api, '_lxc_transfer_ssh_host', lambda *args: 'node1')
+    connect = MagicMock(return_value=ssh)
+    monkeypatch.setattr(api, '_ssh_connect', connect)
+    commands = []
+
+    def execute(client, command, **kwargs):
+        sftp.remove.assert_not_called()
+        commands.append(command)
+        return 0, '', ''
+
+    monkeypatch.setattr(api, '_ssh_exec_result', execute)
+    plan = {'token': 'shared-project-upload', 'steps': [
+        {'method': 'POST', 'url': f'/api/projects/{pid}/instances/actions/guest_push',
+         'form': [['payload', json.dumps({'destination': '/models', 'relativePaths': ['model.gguf']})]],
+         'files': [['files', 'model']]} for pid in ('a', 'b')
+    ]}
+    response = client.post('/api/queue', data={'plan': json.dumps(plan),
+                           'model': (io.BytesIO(b'GGUF'), 'model.gguf')})
+    assert response.status_code == 202
+    assert wait_terminal(client, response.get_json()['id'])['status'] == 'completed'
+    connect.assert_called_once()
+    sftp.putfo.assert_called_once()
+    sftp.remove.assert_called_once()
+    ssh.close.assert_called_once()
+    assert len(commands) == 2
+    assert 'pct exec 101' in commands[0]
+    assert 'pct exec 102' in commands[1]
+
+
+def test_transfer_percentage_survives_queue_polling_and_clears_for_extraction(harness):
+    app, client, started, release, *_ = harness
+    job = enqueue(client, 'first').get_json()['id']
+    assert started.wait(2)
+    q = app.extensions['action_queue']
+    report = q.progress_reporter(job, 1)
+    report({'progress': 0, 'transferProgress': 42, 'transferDirection': 'Downloading from guest',
+            'current': 'model-vm', 'message': '42% (42 MiB / 100 MiB)'})
+    state = client.get(f'/api/queue/{job}').get_json()
+    assert state['transferProgress'] == 42
+    assert state['transferDirection'] == 'Downloading from guest'
+    assert state['progress'] == 0
+    report({'transferProgress': None, 'transferDirection': 'Preparing download archive'})
+    state = client.get(f'/api/queue/{job}').get_json()
+    assert state['transferProgress'] is None
+    assert state['transferDirection'] == 'Preparing download archive'
+    release.set()

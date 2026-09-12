@@ -481,7 +481,7 @@
               <label class="form-label" for="lxc-pull-paths">Guest paths</label>
               <textarea id="lxc-pull-paths" class="form-control font-monospace" rows="6"
                 placeholder="/etc/hosts&#10;/var/log/my-app&#10;/opt/data/*.json"></textarea>
-              <div class="form-text">Enter one absolute file, folder, or wildcard pattern per line. Supports shell-style <code>*</code>, <code>?</code>, and character patterns such as <code>[0-9]</code>. Results are zipped under one <code>vmname-vmid</code> directory per guest.</div>
+              <div class="form-text">Enter one absolute file, folder, or wildcard pattern per line. Supports shell-style <code>*</code>, <code>?</code>, and character patterns such as <code>[0-9]</code>. Results are zipped under one <code>vmname-vmid_username</code> directory per guest (username included when assigned).</div>
             </div>
             <div id="lxc-pull-error" class="text-danger small d-none" role="alert"></div>
           </div>
