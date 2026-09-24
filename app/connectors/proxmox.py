@@ -268,7 +268,7 @@ class ProxmoxClient:
             if vmid is None or not desired_vm_statuses:
                 return None
             current = self.get_qemu_status_current(node, vmid)
-            current_status = str(current.get('status') or current.get('qmpstatus') or '').strip().lower()
+            current_status = str(current.get('qmpstatus') or current.get('status') or '').strip().lower()
             if current_status in desired_vm_statuses:
                 return {
                     'status': 'stopped',
@@ -475,14 +475,15 @@ class ProxmoxClient:
     def reset_qemu(self, node: str, vmid: int) -> str:
         return self._qemu_status_action(node, vmid, 'reset')
 
-    # pause removed from UI; keep method removed to discourage use
-
     def resume_qemu(self, node: str, vmid: int) -> str:
         return self._qemu_status_action(node, vmid, 'resume')
 
     def suspend_qemu(self, node: str, vmid: int) -> str:
-        # Proxmox provides 'suspend' to RAM (requires guest agent); may not be supported everywhere
+        # Suspend without todisk pauses execution while retaining guest memory.
         return self._qemu_status_action(node, vmid, 'suspend')
+
+    def hibernate_qemu(self, node: str, vmid: int) -> str:
+        return self._qemu_status_action(node, vmid, 'suspend', data={'todisk': 1})
 
     def restore_snapshot_qemu(self, node: str, vmid: int, snapname: str, start_after: bool = False) -> str:
         s = self._ensure_session()

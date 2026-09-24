@@ -9,6 +9,33 @@ class CommandStatusTests(unittest.TestCase):
     def setUp(self):
         self.entry = {'name': 'alpha', 'index': 1}
 
+    def test_remaining_count_survives_command_validation_and_delay_updates(self):
+        for phase in ('commands', 'validation'):
+            updates = []
+            record = {'name': 'run_stored_cmds', 'queue_progress': updates.append}
+            with patch.dict(api._ACTIVE_JOBS, {'project:remaining-test': record}):
+                api._job_emit_batch_progress('remaining-test', phase, 'Running', 0, 3)
+                api._job_emit_command_status('remaining-test', self.entry, 1, 1, 'hostname')
+                api._job_emit_batch_progress('remaining-test', phase, 'Running', 1, 3)
+                api._job_emit_delay_status('remaining-test', self.entry, 2, 5)
+                api._job_emit_batch_progress('remaining-test', phase, 'Running', 3, 3)
+            self.assertEqual([u['message'].split(' · ')[0] for u in updates], [
+                '3/3 machines remaining', '3/3 machines remaining',
+                '2/3 machines remaining', '2/3 machines remaining', '0/3 machines remaining',
+            ])
+
+    def test_startup_count_tracks_finished_machines(self):
+        updates = []
+        record = {'name': 'run_startup_cmds', 'queue_progress': updates.append}
+        with patch.dict(api._ACTIVE_JOBS, {'project:remaining-test': record}):
+            for entry in api._job_items('remaining-test', [self.entry] * 2, 'commands', 'Running'):
+                api._job_emit_command_status('remaining-test', entry, 1, 1, 'hostname')
+        self.assertTrue(updates[0]['message'].startswith('2/2 machines remaining'))
+        self.assertTrue(updates[-1]['message'].startswith('0/2 machines remaining'))
+        commands = [u for u in updates if u.get('phase') == 'command']
+        self.assertTrue(commands[0]['message'].startswith('2/2 machines remaining'))
+        self.assertTrue(commands[1]['message'].startswith('1/2 machines remaining'))
+
     def test_sequence_metadata_in_detail(self):
         with patch.object(api, '_update_job_detail') as mock_update:
             api._job_emit_command_status(

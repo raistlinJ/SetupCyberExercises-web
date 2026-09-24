@@ -52,6 +52,9 @@ class _ClientStub:
     def list_pools(self):
         return [{'poolid': 'alice'}]
 
+    def get_qemu_status_current(self, node, vmid):
+        return {'status': 'running', 'qmpstatus': 'running'}
+
     def list_pool_members(self, poolid):
         return [
             {'id': 'qemu/101'},
@@ -64,6 +67,38 @@ class _ClientStub:
 
 
 class VmRefreshPoolMembershipApiTests(unittest.TestCase):
+
+    def test_refresh_distinguishes_saved_state_from_stopped(self):
+        class StoppedClient(_ClientStub):
+            def list_qemu_vms(self, node):
+                return [{'vmid': 101, 'name': 'WEB-set-1', 'status': 'stopped'}]
+
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', StoppedClient), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={
+                    ('node1', 101): {'lock': 'suspended', 'vmstate': 'local:state'},
+                }):
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+        self.assertEqual(response.status_code, 200)
+        detail = response.get_json()['instance_statuses'][0]['vm_details'][0]
+        self.assertEqual(detail['state'], 'suspended')
+        self.assertEqual(detail['power_state'], 'stopped')
+        self.assertTrue(detail['suspended_to_disk'])
+
+    def test_refresh_reads_paused_state_missing_from_inventory(self):
+        class PausedClient(_ClientStub):
+            def get_qemu_status_current(self, node, vmid):
+                return {'status': 'running', 'qmpstatus': 'paused' if vmid == 101 else 'running'}
+
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', PausedClient), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}):
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+        self.assertEqual(response.status_code, 200)
+        details = response.get_json()['instance_statuses'][0]['vm_details']
+        paused = next(item for item in details if item['vmid'] == 101)
+        self.assertEqual(paused['qmp_state'], 'paused')
+        self.assertEqual(paused['state'], 'paused')
 
     def setUp(self):
         os.environ['AUTH_ENABLE'] = '0'

@@ -209,14 +209,16 @@
               <div class="btn-group btn-group-sm">
                 <button id="act-power" type="button" class="btn btn-outline-primary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled
-                  title="Power on, suspend, or power off selected VMs">Power</button>
+                  title="Start, resume, pause, or power off selected VMs">Power</button>
                 <ul class="dropdown-menu">
                   <li><button class="dropdown-item" type="button" onclick="vmAction('start')"
-                      title="Start the selected VMs">Start</button></li>
+                      title="Start selected VMs or resume them if paused">Start</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('unlock')"
                     title="Unlock the selected VMs in Proxmox">Unlock</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('suspend')"
-                      title="Suspend the selected VMs">Suspend</button></li>
+                      title="Pause selected VMs; use Start to resume">Pause</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('hibernate')"
+                      title="Save VM state to disk; use Start to resume (QEMU VMs only)">Suspend</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('poweroff')"
                       title="Power off the selected VMs">Power Off</button></li>
                 </ul>

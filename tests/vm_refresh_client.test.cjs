@@ -47,3 +47,21 @@ test('failed multi-project refresh keeps saved containers visible and warns unti
   assert.equal(note.innerHTML, '');
   assert(markedLive.includes('one'));
 });
+
+test('paused execution state overrides running power state in badges, sorting, and actions', () => {
+  const sandbox = { escHtml: String };
+  vm.createContext(sandbox);
+  vm.runInContext(source.slice(source.indexOf('function mapProxmoxPowerState('), source.indexOf('function vmBuildFilterParts(')), sandbox);
+  vm.runInContext(source.slice(source.indexOf('function _vmDetailIsRunning('), source.indexOf('function filterRunningTargetsForProject(')), sandbox);
+  for (const state of ['paused', 'suspended']) {
+    const detail = { power_state: 'running', qmp_state: state };
+    assert.ok(sandbox.renderVmStateBadges(detail).includes(`>${state}<`));
+    assert.equal(sandbox.vmStateSortWeight(detail), 2);
+    assert.equal(sandbox._vmDetailIsRunning(detail), false);
+  }
+  const suspended = {power_state: 'stopped', qmp_state: 'stopped', suspended_to_disk: true, lock: 'suspended'};
+  assert.match(sandbox.renderVmStateBadges(suspended), />suspended</);
+  assert.equal(sandbox.vmStateSortWeight(suspended), 2);
+  assert.equal(sandbox._vmDetailIsRunning(suspended), false);
+  assert.equal(sandbox._vmDetailIsRunning({power_state: 'running', qmp_state: 'running'}), true);
+});

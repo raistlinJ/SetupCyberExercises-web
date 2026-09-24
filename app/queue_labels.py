@@ -5,7 +5,7 @@ from urllib.parse import unquote, urlsplit
 
 ACTION_LABELS = {
     'create': 'Create VMs', 'delete': 'Delete VMs', 'start': 'Start VMs',
-    'suspend': 'Suspend VMs', 'unlock': 'Unlock VMs', 'poweroff': 'Power off VMs',
+    'hibernate': 'Suspend VMs', 'suspend': 'Pause VMs', 'unlock': 'Unlock VMs', 'poweroff': 'Power off VMs',
     'snapshot': 'Create snapshots', 'restore': 'Restore snapshots',
     'apply_scenario': 'Apply scenario settings', 'fix_ageing': 'Fix bridge ageing',
     'purge_leftovers': 'Clean up remaining resources',

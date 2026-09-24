@@ -475,6 +475,7 @@ const VM_BATCH_STATUS_ACTIONS = new Set([
   'start',
   'unlock',
   'suspend',
+  'hibernate',
   'poweroff',
   'snapshot',
   'restore',
@@ -888,8 +889,7 @@ function mapProxmoxPowerState(raw) {
   if (!s) return mk('—', 'bg-secondary', 6);
   if (['running', 'ok'].includes(s)) return mk('running', 'bg-success', 0);
   if (['starting', 'prelaunch', 'booting', 'launching'].includes(s)) return mk('starting', 'bg-info text-dark', 1);
-  // 'paused' (Proxmox pause) no longer exposed via UI; keep as suspended-like if encountered
-  if (['paused', 'pause'].includes(s)) return mk('suspended', 'bg-warning text-dark', 2);
+  if (['paused', 'pause'].includes(s)) return mk('paused', 'bg-warning text-dark', 2);
   if (['suspended', 'suspend'].includes(s)) return mk('suspended', 'bg-warning text-dark', 2);
   if (['stopped', 'down', 'shutoff', 'off', 'halted'].includes(s)) return mk('stopped', 'bg-secondary', 3);
   if (['stopping', 'shutdown', 'shutting down'].includes(s)) return mk('stopping', 'bg-info text-dark', 4);
@@ -902,26 +902,29 @@ function mapProxmoxPowerState(raw) {
 function vmStateSortWeight(detail) {
   const d = detail || {};
   const qmpState = String(d.qmp_state || '').toLowerCase();
+  if (d.suspended_to_disk || d.lock === 'suspended') return 2;
   if (qmpState === 'io-error') return 5;
+  if (['paused', 'suspended'].includes(qmpState)) return 2;
   return mapProxmoxPowerState(d.power_state || d.state).weight;
 }
 
 function renderVmStateBadges(detail) {
   const d = detail || {};
   const badges = [];
-  const primaryRaw = d.power_state || d.state || d.qmp_state || '';
+  const qmpState = String(d.qmp_state || '').toLowerCase();
+  const primaryRaw = d.suspended_to_disk || d.lock === 'suspended' ? 'suspended' : ['paused', 'suspended'].includes(qmpState)
+    ? qmpState : (d.power_state || d.state || d.qmp_state || '');
   const primary = mapProxmoxPowerState(primaryRaw);
   if (!primary || primary.label === '—') {
     badges.push('<span class="text-muted">—</span>');
   } else {
     badges.push(`<span class="badge ${primary.cls}" title="${escHtml(String(primaryRaw || primary.label))}">${escHtml(primary.label)}</span>`);
   }
-  const qmpState = String(d.qmp_state || '').toLowerCase();
   if (qmpState === 'io-error') {
     badges.push('<span class="badge bg-danger" title="QMP status: io-error">I/O Error</span>');
   }
   const lockState = String(d.lock || '').trim();
-  if (lockState) {
+  if (lockState && lockState !== 'suspended') {
     badges.push(`<span class="badge bg-warning text-dark" title="${escHtml(`Lock: ${lockState}`)}">Locked</span>`);
   }
   return badges.join(' ');
@@ -4075,6 +4078,8 @@ function _findVmDetailForTarget(proj, target) {
 
 function _vmDetailIsRunning(detail) {
   if (!detail || typeof detail !== 'object') return false;
+  if (detail.suspended_to_disk || detail.lock === 'suspended') return false;
+  if (['paused', 'suspended'].includes(String(detail.qmp_state || detail.state || '').trim().toLowerCase())) return false;
   const mapped = mapProxmoxPowerState(detail.power_state || detail.state || detail.qmp_state || '');
   if (String(mapped?.label || '').toLowerCase() === 'running') return true;
   return String(detail.qmp_state || '').trim().toLowerCase() === 'running';
@@ -4635,6 +4640,8 @@ function deriveCredsRepairTargetsFromChecked(checked) {
 
 function friendlyActionName(action) {
   const map = {
+    suspend: 'Pause',
+    hibernate: 'Suspend',
     unlock: 'Unlock',
     nets_set: 'Set Network Interfaces',
     nets_remove: 'Remove Network Interfaces',
@@ -6719,14 +6726,15 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
       try { shell.endActionContext(true); } catch { }
       return;
     }
-    if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'validate' || action === 'apply_scenario') {
+    if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'hibernate' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'validate' || action === 'apply_scenario') {
       try { shell.beginActionContext(action.charAt(0).toUpperCase() + action.slice(1)); } catch { }
       try { (window.shell && shell.logInfo) ? shell.logInfo(`Action: ${action} on ${targets.length} target(s)`) : console.log('Action', action, 'on', targets); } catch { }
       const setProg = (pct, text, detail) => setAp(pct, text, detail);
       const verbMap = {
         start: ['Starting…', 'Starting', 'Started'],
         unlock: ['Unlocking…', 'Unlocking', 'Unlocked'],
-        suspend: ['Suspending…', 'Suspending', 'Suspended'],
+        suspend: ['Pausing…', 'Pausing', 'Paused'],
+        hibernate: ['Suspending…', 'Suspending', 'Suspended'],
         poweroff: ['Powering off…', 'Powering off', 'Powered off'],
         snapshot: ['Snapshotting…', 'Taking snapshot(s)', 'Snapshot(s) taken'],
         restore: ['Restoring…', 'Restoring snapshot(s)', 'Restored'],
@@ -6815,7 +6823,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
       }
       const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
       // Determine counts based on action response keys
-      const keyMap = { start: 'started', unlock: 'unlocked', suspend: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', validate: 'ran', apply_scenario: 'applied' };
+      const keyMap = { start: 'started', unlock: 'unlocked', suspend: 'suspended', hibernate: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', validate: 'ran', apply_scenario: 'applied' };
       const k = keyMap[action];
       let doneArr = Array.isArray(resp[k]) ? resp[k] : [];
       if (action === 'start') {
@@ -7470,7 +7478,7 @@ async function vmActionMultiExec(action, opts = {}) {
         ['applied', 'skipped', 'errors', 'infos'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
-      if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'validate') {
+      if (action === 'start' || action === 'unlock' || action === 'suspend' || action === 'hibernate' || action === 'poweroff' || action === 'snapshot' || action === 'restore' || action === 'run_startup_cmds' || action === 'run_stored_cmds' || action === 'validate') {
         setAp(Math.max(20, pct), 'Working…', `${action} in ${projName}…`);
         const shouldPollDetail = vmActionShouldPollStatus(action);
         let requestTargets = targets;

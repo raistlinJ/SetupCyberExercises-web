@@ -293,8 +293,8 @@ class ActionQueue:
             if len(json.loads(row['payload'])['steps']) > 1:
                 body = json.dumps({'results': results}).encode()
                 headers = {'Content-Type': 'application/json'}
-            if self.cancelled(job_id) and status == 'completed':
-                status = 'cancelled'
+            if self.cancelled(job_id):
+                status, error = 'cancelled', ''
             with self.connect() as db:
                 db.execute('''UPDATE actions SET status=?, finished=?, result=?, code=?, headers=?, error=?, payload=NULL WHERE id=?''',
                            (status, time.time(), body, code, json.dumps(headers), error, job_id))

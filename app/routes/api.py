@@ -1508,6 +1508,12 @@ def _update_job_detail(pid: str, *, job_key=None, **fields):
         if not rec:
             return
         rec.update(fields)
+        if rec.get('name') in {'run_startup_cmds', 'run_stored_cmds', 'start', 'suspend', 'hibernate'}:
+            total = rec.get('machine_total', 0)
+            if total and 'message' in fields:
+                remaining = max(0, total - rec.get('machine_completed', 0))
+                fields['message'] = f"{remaining}/{total} machines remaining · {fields['message']}"
+                rec['message'] = fields['message']
         report = rec.get('queue_progress')
     if report:
         # Pool threads use the captured reporter, without needing a Flask
@@ -1563,11 +1569,14 @@ def _job_items(pid, items, phase, verb, *, start=10, end=95, total=None, label=N
     callback = report or (lambda fields: _update_job_detail(pid, **fields))
     def report(fields):
         try:
+            if phase == 'commands':
+                fields.update(machine_total=total, machine_completed=completed)
             callback(fields)
         except Exception:
             LOG.exception('Could not publish operation progress')
     streaming = total is not None
     total = len(items) if total is None else total
+    completed = 0
     if total == 0:
         return
     initial = {'phase': phase, 'progress': start}
@@ -1579,6 +1588,7 @@ def _job_items(pid, items, phase, verb, *, start=10, end=95, total=None, label=N
         report({'phase': phase, 'progress': start + (end - start) * index / max(total, 1),
                 'current': current, 'message': f'{verb} {current}… {index}/{total} processed'})
         yield item
+        completed = index + 1
         counts = summary() if summary else ''
         report({'phase': phase, 'progress': start + (end - start) * (index + 1) / max(total, 1),
                 'current': current, 'message': f'{verb} · {index + 1}/{total} processed · {current}' + (f' · {counts}' if counts else '')})
@@ -1778,6 +1788,8 @@ def _job_emit_batch_progress(
         progress=progress,
         message=message,
         detail=detail_payload,
+        **({'machine_total': total_i, 'machine_completed': done_i}
+           if phase in {'commands', 'validation', 'starting', 'suspending'} else {}),
     )
 
 # --- Simple in-process job tracking helpers (re-added after cleanup) ---
@@ -2144,6 +2156,10 @@ def instances_refresh_vm(pid: str):
         running_vm_refs: Set[Tuple[str, int]] = set()
         agent_hint_by_ref: Dict[Tuple[str, int], Any] = {}
         vm_ref_types: Dict[Tuple[str, int], str] = {}
+        expected_names = {str(item.get('name') or '').lower()
+                          for items in expected.values() for item in items}
+        expected_ids = {item['vmid'] for items in expected.values() for item in items
+                        if item.get('vmid') is not None}
         
         # PERFORMANCE OPTIMIZATION: Fetch VMs and LXCs from all nodes in parallel
         def _fetch_node_vms(node_info):
@@ -2159,6 +2175,17 @@ def instances_refresh_vm(pid: str):
                 thread_client = ProxmoxClient(base_url=base_url, token=token or None, username=username, password=password, verify=verify)
                 try:
                     qemus = thread_client.list_qemu_vms(node) or []
+                    # The inventory endpoint can say running for a paused VM
+                    # and omit qmpstatus. Read the authoritative execution state
+                    # for this project's powered-on guests before publishing.
+                    for q in qemus:
+                        if (str(q.get('status') or '').lower() == 'running'
+                                and (str(q.get('name') or '').lower() in expected_names
+                                     or q.get('vmid') in expected_ids)):
+                            current = thread_client.get_qemu_status_current(node, int(q['vmid']))
+                            for key in ('status', 'qmpstatus'):
+                                if current.get(key):
+                                    q[key] = current[key]
                 except Exception as e:
                     err = RuntimeError(f'Could not list QEMU VMs on node {node}: {e}')
                 try:
@@ -2224,7 +2251,7 @@ def instances_refresh_vm(pid: str):
                             agent_hint_by_ref[(str(node), int(vmid_val))] = q.get('agent')
                             power_state = str(q.get('status') or '').strip().lower()
                             qmp_state = str(q.get('qmpstatus') or '').strip().lower()
-                            if power_state == 'running' or qmp_state == 'running':
+                            if (qmp_state or power_state) == 'running':
                                 running_vm_refs.add((str(node), int(vmid_val)))
                     except Exception:
                         pass
@@ -2547,9 +2574,10 @@ def instances_refresh_vm(pid: str):
                     'name': canon_name,
                     'vmid': vmid,
                     'type': matched.get('type') or 'qemu',
-                    'state': matched.get('state') or '',
+                    'state': 'suspended' if cfg.get('lock') == 'suspended' or cfg.get('vmstate') else (matched.get('state') or ''),
                     'power_state': matched.get('power_state') or matched.get('state') or '',
                     'qmp_state': matched.get('qmp_state') or '',
+                    'suspended_to_disk': bool(cfg.get('lock') == 'suspended' or cfg.get('vmstate')),
                     'nets': nets,
                     'node': node,
                     'template_id': tmpl_id,
@@ -5468,7 +5496,7 @@ def _vm_retry_state_matches(action: str, info: Dict[str, Any], cfg: Optional[Dic
     current_state = power_state or qmp_state or 'unknown'
 
     if action == 'start':
-        matched = power_state in ('running', 'starting', 'rebooting') or qmp_state in ('running', 'prelaunch')
+        matched = not ({power_state, qmp_state} & {'paused', 'suspended'}) and (power_state in ('running', 'starting', 'rebooting') or qmp_state in ('running', 'prelaunch'))
         return matched, ('vm is already running' if matched else f'current state is {current_state}')
     if action == 'suspend':
         matched = power_state in ('paused', 'suspended') or qmp_state in ('paused', 'suspended')
@@ -5702,6 +5730,7 @@ def instances_start(pid: str):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     started = []
     resumed = []
+    initial_errors = len(errors)
     pool_workers = _pool_workers_for(proj, len(mapped))
     total_mapped = len(mapped)
     if total_mapped > 0:
@@ -5711,14 +5740,22 @@ def instances_start(pid: str):
         _job_current(pid, 'start', 'Starting', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
-        st = (m.get('status') or '').lower()
         is_lxc = m.get('type') == 'lxc'
-        if st == 'suspended':
+        current = (client.get_lxc_status_current(m['node'], m['vmid']) if is_lxc
+                   else client.get_qemu_status_current(m['node'], m['vmid'])) or {}
+        states = {str(current.get(key) or '').strip().lower() for key in ('status', 'qmpstatus')}
+        saved_state = False
+        if not is_lxc and 'stopped' in states:
+            cfg = client.get_qemu_config(m['node'], m['vmid']) or {}
+            saved_state = cfg.get('lock') == 'suspended' or bool(cfg.get('vmstate'))
+        if saved_state or states & {'paused', 'suspended'}:
+            _job_current(pid, 'starting', 'Resuming', m)
             if is_lxc:
                 upid = client.resume_lxc(node=m['node'], vmid=m['vmid'])
             else:
                 upid = client.resume_qemu(node=m['node'], vmid=m['vmid'])
             client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['running'])
+            _invalidate_vm_config_cache_entries([(m['node'], m['vmid'])])
             return ('resumed', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
         if is_lxc:
             upid = client.start_lxc(node=m['node'], vmid=m['vmid'])
@@ -5744,7 +5781,7 @@ def instances_start(pid: str):
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'start failed: {e}' })
             finally:
                 if total_mapped > 0:
-                    done = len(started) + len(resumed) + len(errors)
+                    done = len(started) + len(resumed) + len(errors) - initial_errors
                     _job_emit_batch_progress(pid, 'starting', 'Starting', done, total_mapped, current=str(m.get('name') or ''), message=f'Start processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'started': started, 'resumed': resumed, 'skipped': skipped, 'errors': errors })
@@ -5897,9 +5934,12 @@ def instances_apply_scenario(pid: str):
     return jsonify({ 'applied': applied, 'skipped': skipped, 'errors': errors })
 
 
+@api_bp.route("/projects/<pid>/instances/actions/hibernate", methods=["POST"])
 @api_bp.route("/projects/<pid>/instances/actions/suspend", methods=["POST"])
 def instances_suspend(pid: str):
-    _start_job(pid, 'suspend')
+    to_disk = request.path.endswith('/hibernate')
+    verb = 'Suspending' if to_disk else 'Pausing'
+    _start_job(pid, 'hibernate' if to_disk else 'suspend')
     s = _store()
     proj = s.get(pid)
     if not proj:
@@ -5935,20 +5975,32 @@ def instances_suspend(pid: str):
     client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     suspended = []
+    processed = 0
+    initial_errors = len(errors)
     pool_workers = _pool_workers_for(proj, len(mapped))
     total_mapped = len(mapped)
     if total_mapped > 0:
-        _job_emit_batch_progress(pid, 'suspending', 'Suspending', 0, total_mapped, message=f'Suspending VM(s)… 0/{total_mapped} complete')
+        _job_emit_batch_progress(pid, 'suspending', verb, 0, total_mapped)
     def do_suspend(m):
-        _job_current(pid, 'suspend', 'Suspending', m)
+        _job_current(pid, 'suspending', verb, m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         is_lxc = m.get('type') == 'lxc'
-        if is_lxc:
+        if is_lxc and to_disk:
+            return ('skipped', {'index': m['index'], 'name': m['name'],
+                                'reason': 'Suspend to disk is supported for QEMU VMs only; use Pause for containers'})
+        if to_disk:
+            upid = client.hibernate_qemu(node=m['node'], vmid=m['vmid'])
+        elif is_lxc:
             upid = client.suspend_lxc(node=m['node'], vmid=m['vmid'])
         else:
             upid = client.suspend_qemu(node=m['node'], vmid=m['vmid'])
-        client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['suspended', 'stopped'])
+        if to_disk:
+            # Wait for successful task completion, not merely a stopped VM.
+            client._wait_task(m['node'], upid, timeout=1800)
+        else:
+            client._wait_task(m['node'], upid, timeout=600, vmid=m['vmid'], completed_vm_statuses=['paused', 'suspended'])
+        _invalidate_vm_config_cache_entries([(m['node'], m['vmid'])])
         return ('suspended', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
@@ -5957,7 +6009,7 @@ def instances_suspend(pid: str):
             m = future_map[fut]
             try:
                 kind, payload = fut.result()
-                suspended.append(payload)
+                (skipped if kind == 'skipped' else suspended).append(payload)
             except Exception as e:
                 if str(e) == 'cancelled':
                     errors.append({ 'reason': 'cancelled' })
@@ -5965,8 +6017,8 @@ def instances_suspend(pid: str):
                     errors.append({ 'index': m['index'], 'name': m['name'], 'reason': f'suspend failed: {e}' })
             finally:
                 if total_mapped > 0:
-                    done = len(suspended) + len(errors)
-                    _job_emit_batch_progress(pid, 'suspending', 'Suspending', done, total_mapped, current=str(m.get('name') or ''), message=f'Suspend processed for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
+                    processed += 1
+                    _job_emit_batch_progress(pid, 'suspending', verb, processed, total_mapped, current=str(m.get('name') or ''))
     _end_job(pid)
     return jsonify({ 'suspended': suspended, 'skipped': skipped, 'errors': errors })
 
@@ -8866,7 +8918,18 @@ def _ensure_linux_qemu_guest(client: ProxmoxClient, entry: Dict[str, Any]):
 _TRANSFER_PROGRESS = threading.local()
 
 
+class _GuestTransferCancelled(RuntimeError):
+    pass
+
+
+def _check_transfer_cancelled():
+    cancelled = getattr(_TRANSFER_PROGRESS, 'cancelled', None)
+    if cancelled and cancelled():
+        raise _GuestTransferCancelled('Transfer cancelled')
+
+
 def _transfer_bytes(direction, loaded, total=None):
+    _check_transfer_cancelled()
     report = getattr(_TRANSFER_PROGRESS, 'report', None)
     if report:
         report(direction, loaded, total)
@@ -8876,14 +8939,16 @@ def _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
                              destination, use_sudo, password):
     """Run the host-to-guest copy on Proxmox; only the script crosses SSH."""
     guest_archive = f"/tmp/deployforge-qemu-push-{uuid.uuid4().hex}.tar"
+    cancel_path = f"/tmp/deployforge-cancel-{uuid.uuid4().hex}"
     extract = (f"{_lxc_prepare_directory_command(destination)} && "
                f"tar --overwrite -xpf {shlex.quote(guest_archive)} -C {shlex.quote(destination)}")
     # qm limits stdin to 1 MiB. Each bounded chunk travels locally from the
     # staged host file through the guest agent, never back through this app.
-    script = f'''import json, subprocess, shlex
+    script = f'''import json, subprocess, shlex, os
 vmid = {int(entry['vmid'])!r}
 archive = {remote_archive!r}
 guest_archive = {guest_archive!r}
+cancel_path = {cancel_path!r}
 def run(command, data=None, timeout=120):
     args = ['qm', 'guest', 'exec', str(vmid), '--synchronous', '1', '--timeout', str(timeout)]
     if data is not None:
@@ -8898,35 +8963,59 @@ def run(command, data=None, timeout=120):
 try:
     run('rm -f -- ' + shlex.quote(guest_archive))
     with open(archive, 'rb') as stream:
-        previous_percent = -1
         while True:
+            if os.path.exists(cancel_path):
+                raise RuntimeError('Transfer cancelled')
             chunk = stream.read(512 * 1024)
             if not chunk:
                 break
             run('cat >> ' + shlex.quote(guest_archive), chunk)
-            percent = int(stream.tell() * 100 / {max(1, archive_size)})
-            if percent != previous_percent:
-                print('TRANSFER_BYTES=' + str(stream.tell()), flush=True)
-                previous_percent = percent
+            print('TRANSFER_BYTES=' + str(stream.tell()), flush=True)
     print('TRANSFER_EXTRACTING', flush=True)
+    if os.path.exists(cancel_path):
+        raise RuntimeError('Transfer cancelled')
     run({extract!r}, timeout={max(600, int(archive_size / (256 * 1024)) + 120)})
 finally:
     try:
         run('rm -f -- ' + shlex.quote(guest_archive))
     except Exception:
         pass
+    if os.path.exists(cancel_path):
+        os.unlink(cancel_path)
 '''
+    cancelled = False
     def report_line(line):
-        if line.startswith(b'TRANSFER_BYTES='):
-            _transfer_bytes('Copying to guest', int(line.split(b'=', 1)[1]), archive_size)
-        elif line.strip() == b'TRANSFER_EXTRACTING':
-            _transfer_bytes('Extracting in guest', 0)
+        nonlocal cancelled
+        if cancelled:
+            return
+        try:
+            if line.startswith(b'TRANSFER_BYTES='):
+                _transfer_bytes('Copying to guest', int(line.split(b'=', 1)[1]), archive_size)
+            elif line.strip() == b'TRANSFER_EXTRACTING':
+                _transfer_bytes('Extracting in guest', 0)
+        except _GuestTransferCancelled:
+            # Ask the host loop to stop, then drain its output so its finally
+            # block removes the guest archive before releasing the batch.
+            code, _, error = _ssh_exec_result(
+                ssh_client, f'touch -- {shlex.quote(cancel_path)}', timeout=30,
+                sudo=use_sudo, sudo_password=password,
+            )
+            if code != 0:
+                raise RuntimeError(error or 'Could not signal transfer cancellation')
+            cancelled = True
     _transfer_bytes('Copying to guest', 0, archive_size)
     code, _, error = _ssh_exec_result(
         ssh_client, f'python3 -c {shlex.quote(script)}',
         timeout=max(600, int(archive_size / (512 * 1024) + 1) * 150 + 720),
         sudo=use_sudo, sudo_password=password, on_stdout_line=report_line,
     )
+    if cancelled:
+        # Also remove a signal delivered just after the host's finally block.
+        _ssh_exec_result(
+            ssh_client, f'rm -f -- {shlex.quote(cancel_path)}', timeout=30,
+            sudo=use_sudo, sudo_password=password,
+        )
+        raise _GuestTransferCancelled('Transfer cancelled')
     if code != 0:
         raise RuntimeError(error or f'Host-to-QEMU transfer exited with {code}')
 
@@ -9108,6 +9197,7 @@ def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -
     tar_stream.seek(0)
     with tarfile.open(fileobj=tar_stream, mode='r:*') as archive:
         for member in archive:
+            _check_transfer_cancelled()
             member_name = str(member.name or '').replace('\\', '/').lstrip('/')
             member_name = posixpath.normpath(member_name)
             if not member_name or member_name in {'.', '..'} or member_name.startswith('../'):
@@ -9121,7 +9211,12 @@ def _copy_lxc_tar_into_zip(tar_stream, zip_file: zipfile.ZipFile, prefix: str) -
                 if source is None:
                     continue
                 with source, zip_file.open(archive_name, mode='w') as destination:
-                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    while True:
+                        _check_transfer_cancelled()
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
                 copied += 1
                 continue
             if member.issym():
@@ -9137,8 +9232,13 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
     """Publish byte progress from workers as well as completed guest counts."""
     if not mapped:
         return []
+    def machine_progress(completed, message):
+        if phase in {'guest_push', 'guest_pull'}:
+            return f'{len(mapped) - completed}/{len(mapped)} machines remaining · {message}'
+        return message
+
     _update_job_detail(pid, phase=phase, progress=0, total_steps=len(mapped),
-                       message=f'Processing {len(mapped)} guests')
+                       message=machine_progress(0, f'Processing {len(mapped)} guests'))
     results = [None] * len(mapped)
     lock = threading.Lock()
     completed = 0
@@ -9159,12 +9259,17 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
                 _update_job_detail(pid, phase=phase, current=str(entry.get('name') or ''),
                                    progress=min(99, int(completed * 100 / len(mapped))),
                                    transferProgress=percent, transferDirection=direction,
-                                   message=message)
+                                   message=machine_progress(completed, message))
         _TRANSFER_PROGRESS.report = report
+        _TRANSFER_PROGRESS.cancelled = lambda: _is_cancelled(pid)
         try:
+            _check_transfer_cancelled()
             return worker(entry)
+        except _GuestTransferCancelled:
+            return [], []
         finally:
             del _TRANSFER_PROGRESS.report
+            del _TRANSFER_PROGRESS.cancelled
 
     with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(mapped), hard_cap=0)) as pool:
         futures = {pool.submit(run, entry): position for position, entry in enumerate(mapped)}
@@ -9178,7 +9283,7 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
                     step=completed, total_steps=len(mapped),
                     progress=min(99, int(completed / len(mapped) * 100)),
                     transferProgress=None, transferDirection='',
-                    message=f'Processed {completed}/{len(mapped)} guests',
+                    message=machine_progress(completed, f'Processed {completed}/{len(mapped)} guests'),
                 )
     return results
 
@@ -9331,6 +9436,7 @@ def instances_lxc_push(pid: str):
                         _push_tar_through_guest_agent(client, entry, upload_stream, archive_size, destination)
                     failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
                     for command in metadata_commands:
+                        _check_transfer_cancelled()
                         _guest_agent_exec_checked(client, entry, ['/bin/sh', '-c', command])
                 else:
                     if guest_type == 'qemu':
@@ -9343,6 +9449,7 @@ def instances_lxc_push(pid: str):
                     # authentication boundaries or distinct cluster nodes.
                     key = (upload_key, str(entry.get('node') or ''), ssh_host, ssh_port, ssh_user, password)
                     with batch.host(key) as staged:
+                        _check_transfer_cancelled()
                         if 'error' in staged:
                             raise RuntimeError(staged['error'])
                         if 'ready' not in staged:
@@ -9380,6 +9487,7 @@ def instances_lxc_push(pid: str):
                                 raise RuntimeError(stderr_text or f'pct extract exited with {code}')
                         failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
                         for command in metadata_commands:
+                            _check_transfer_cancelled()
                             if guest_type == 'qemu':
                                 _guest_agent_exec_checked(client, entry, ['/bin/sh', '-c', command])
                             else:
@@ -9416,8 +9524,11 @@ def instances_lxc_push(pid: str):
         if owns_batch:
             batch.close()
         tar_stream.close()
-        _update_job_detail(pid, progress=100, transferProgress=None, transferDirection='', message='Guest push completed')
-        _end_job(pid)
+        cancelled = _is_cancelled(pid)
+        _update_job_detail(pid, transferProgress=None, transferDirection='',
+                           **({} if cancelled else {'progress': 100}),
+                           message='Guest push cancelled' if cancelled else 'Guest push completed')
+        _end_job(pid, status='cancelled' if cancelled else 'completed')
     return jsonify({'pushed': pushed, 'skipped': skipped, 'errors': errors})
 
 
@@ -9579,8 +9690,11 @@ def instances_lxc_pull(pid: str):
             'size': len(zip_bytes),
             'label': 'Pulled Files',
         }
-    _update_job_detail(pid, progress=100, transferProgress=None, transferDirection='', message='Guest pull completed')
-    _end_job(pid)
+    cancelled = _is_cancelled(pid)
+    _update_job_detail(pid, transferProgress=None, transferDirection='',
+                       **({} if cancelled else {'progress': 100}),
+                       message='Guest pull cancelled' if cancelled else 'Guest pull completed')
+    _end_job(pid, status='cancelled' if cancelled else 'completed')
     return jsonify({'pulled': pulled, 'skipped': skipped, 'errors': errors, 'outputs_zip': outputs_zip})
 
 
@@ -11351,8 +11465,24 @@ def instances_run_stored_cmds(pid: str):
         return ran, skipped, errors, zip_entries
 
     if mapped:
+        completed_machines = 0
+        progress_lock = threading.Lock()
+        _job_emit_batch_progress(pid, 'commands', 'Running commands', 0, len(mapped))
+
+        def run_with_progress(position, entry):
+            nonlocal completed_machines
+            try:
+                return _run_command_target(position, entry)
+            finally:
+                with progress_lock:
+                    completed_machines += 1
+                    _job_emit_batch_progress(
+                        pid, 'commands', 'Running commands', completed_machines, len(mapped),
+                        current=str(entry.get('name') or ''),
+                    )
+
         with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(mapped), hard_cap=0)) as pool:
-            futures = [pool.submit(_run_command_target, pos, m)
+            futures = [pool.submit(run_with_progress, pos, m)
                        for pos, m in enumerate(mapped, start=1)]
             for m, future in zip(mapped, futures):
                 try:
