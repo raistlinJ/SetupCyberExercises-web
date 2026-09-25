@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock
 
-from app.connectors.proxmox import ProxmoxClient
+from app.connectors.proxmox import ProxmoxClient, _decode_guest_output
 
 
 class ProxmoxGuestAgentFileTests(unittest.TestCase):
@@ -36,6 +36,31 @@ class ProxmoxGuestAgentFileTests(unittest.TestCase):
         payload = self.session.post.call_args.kwargs['json']
         self.assertEqual(payload['input-data'], 'YWxwaGE=')
         self.assertEqual(payload['command'][0], '/bin/sh')
+
+    def test_agent_exec_decodes_remote_error_quotes(self):
+        started = MagicMock(status_code=200, content=b'{}')
+        started.json.return_value = {'data': {'pid': 44}}
+        completed = MagicMock(status_code=200, content=b'{}')
+        error = 'chown: invalid user: ‘agentic’'
+        completed.json.return_value = {'data': {
+            'exited': 1, 'exitcode': 1,
+            'out-data': 'Uploaded café'.encode('utf-8').decode('latin-1'),
+            'err-data': error.encode('utf-8').decode('latin-1'),
+        }}
+        self.session.post.return_value = started
+        self.session.get.return_value = completed
+        result = self.client.agent_exec('node1', 101, ['chown', 'agentic', '/tmp/grader.py'], shell=False)
+        self.assertEqual(result['stderr'], error)
+        self.assertEqual(result['stdout'], 'Uploaded café')
+        self.assertEqual(result['exitcode'], 1)
+
+    def test_guest_output_preserves_unicode_and_malformed_sequences(self):
+        for text in ('ASCII error', 'café ‘agentic’ 中文 😀', 'literal â', '\xe0\x80\x80', '\xf4\xbf\xbf\xbf'):
+            with self.subTest(text=text):
+                self.assertEqual(_decode_guest_output(text), text)
+        mixed = '中文: ' + '‘café 😀’'.encode('utf-8').decode('latin-1')
+        self.assertEqual(_decode_guest_output(mixed), '中文: ‘café 😀’')
+        self.assertEqual(_decode_guest_output(None), '')
 
     def test_agent_file_read_requests_encoded_chunk_with_offset(self):
         response = MagicMock(status_code=200, content=b'{}')

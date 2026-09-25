@@ -4,7 +4,31 @@ import os
 import requests
 import time
 import logging
+import re
 from urllib.parse import urlsplit, urlunsplit
+
+
+def _decode_guest_output(value: Any) -> str:
+    """Normalize UTF-8 bytes exposed as Latin-1 characters by guest exec.
+
+    Repair only complete UTF-8 byte sequences, preserving already-decoded
+    Unicode, ASCII, and malformed sequences rather than dropping characters.
+    """
+    text = str(value or '')
+
+    def decode_match(match):
+        try:
+            return match.group().encode('latin-1').decode('utf-8')
+        except UnicodeError:
+            return match.group()
+
+    return re.sub(
+        r'[\u00c2-\u00df][\u0080-\u00bf]'
+        r'|[\u00e0-\u00ef][\u0080-\u00bf]{2}'
+        r'|[\u00f0-\u00f4][\u0080-\u00bf]{3}',
+        decode_match,
+        text,
+    )
 
 
 _DOCKER_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -768,8 +792,8 @@ class ProxmoxClient:
                         rs = s.get(status_url, params=params, timeout=10)
                         if rs.status_code < 400:
                             st = rs.json().get('data', {}) if rs.content else {}
-                            stdout = st.get('out-data') or ''
-                            stderr = st.get('err-data') or ''
+                            stdout = _decode_guest_output(st.get('out-data'))
+                            stderr = _decode_guest_output(st.get('err-data'))
                             exitcode_raw = st.get('exitcode')
                             if exitcode_raw not in (None, ''):
                                 try:
@@ -834,8 +858,8 @@ class ProxmoxClient:
                 done = True
 
             if done:
-                stdout = st.get('out-data') or ''
-                stderr = st.get('err-data') or ''
+                stdout = _decode_guest_output(st.get('out-data'))
+                stderr = _decode_guest_output(st.get('err-data'))
                 try:
                     stdout = stdout if isinstance(stdout, str) else str(stdout)
                 except Exception:

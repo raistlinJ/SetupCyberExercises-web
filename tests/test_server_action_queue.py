@@ -641,3 +641,31 @@ def test_queue_counts_survive_detail_updates_and_can_be_cleared(harness):
     assert state['itemTotal'] is None
     assert state['itemCompleted'] is None
     release.set()
+
+
+@pytest.mark.parametrize(('result', 'expected'), [
+    (b'', '2 steps completed successfully.'),
+    (b'\x89PNG\xff', '2 steps completed successfully.'),
+    (json.dumps({'results': [{'created': [{}, {}]}, {'created': [{}], 'skipped': [{}]}]}).encode(),
+     'Created: 3; Skipped: 1.'),
+    (b'{"message":"Settings saved."}', 'Settings saved.'),
+])
+def test_completed_result_summary_handles_empty_binary_and_multistep_results(result, expected):
+    from app.action_queue import result_summary
+    row = {'status': 'completed', 'label': 'Create VMs', 'error': '',
+           'result': result, 'total_steps': 2}
+    summary = result_summary(row)
+    assert summary.startswith('Completed: Create VMs.')
+    assert expected in summary
+
+
+@pytest.mark.parametrize('status', ['error', 'cancelled'])
+def test_result_summary_does_not_claim_failed_or_cancelled_work_succeeded(status):
+    from app.action_queue import result_summary
+    summary = result_summary({'status': status, 'label': 'Create VMs',
+                              'error': 'Connection lost' if status == 'error' else '',
+                              'result': b'', 'total_steps': 2})
+    assert ('Failed:' if status == 'error' else 'Cancelled:') in summary
+    assert 'successfully' not in summary
+    if status == 'error':
+        assert 'Connection lost' in summary

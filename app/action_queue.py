@@ -318,6 +318,51 @@ class ActionQueue:
             self.stopped.wait(0.25)
 
 
+def result_summary(row):
+    """Human-readable history, including actions with empty or binary responses."""
+    status = row['status']
+    if status not in {'completed', 'error', 'cancelled'}:
+        return ''
+    outcome = {'completed': 'Completed', 'error': 'Failed', 'cancelled': 'Cancelled'}[status]
+    summary = f"{outcome}: {queue_label(row['label']) or 'Action'}."
+    if row['error']:
+        summary += f" {row['error']}"
+    try:
+        result = json.loads(row['result'] or b'{}')
+    except (ValueError, UnicodeDecodeError, TypeError):
+        result = {}
+    counts = {}
+    messages = []
+
+    def collect(value):
+        if not isinstance(value, dict):
+            return
+        for key in ('created', 'updated', 'deleted', 'started', 'stopped',
+                    'restarted', 'restored', 'skipped', 'errors', 'uploaded',
+                    'downloaded', 'deleted_users', 'updated_users', 'deleted_pools'):
+            entries = value.get(key)
+            count = len(entries) if isinstance(entries, list) else entries
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                counts[key] = counts.get(key, 0) + count
+        message = value.get('message')
+        if isinstance(message, str) and message.strip() and message not in messages:
+            messages.append(message[:300])
+        children = value.get('results')
+        if isinstance(children, list):
+            for child in children:
+                collect(child)
+
+    collect(result)
+    if counts:
+        summary += ' ' + '; '.join(f"{key.replace('_', ' ').capitalize()}: {count}" for key, count in counts.items()) + '.'
+    elif messages:
+        summary += ' ' + ' '.join(messages[:3])
+    elif status == 'completed':
+        total = row['total_steps']
+        summary += f" {total} step{'s' if total != 1 else ''} completed successfully."
+    return summary
+
+
 def public_record(row):
     detail = json.loads(row['progress_state'] or '{}')
     step_progress = detail.get('progress')
@@ -328,7 +373,7 @@ def public_record(row):
         progress = round(100 * (row['step'] - 1 + step_progress / 100) / row['total_steps'], 1)
         progress = min(99, progress)
     return {'id': row['id'], 'label': queue_label(row['label']), 'projectId': row['project'],
-            'status': row['status'], 'createdAt': row['created'] * 1000,
+            'status': row['status'], 'summary': result_summary(row), 'createdAt': row['created'] * 1000,
             'startedAt': row['started'] * 1000 if row['started'] else None,
             'finishedAt': row['finished'] * 1000 if row['finished'] else None,
             'cancelRequested': bool(row['cancel']), 'errorMessage': row['error'],

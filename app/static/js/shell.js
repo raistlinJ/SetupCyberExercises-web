@@ -1885,6 +1885,7 @@ const ConsoleDock = (() => {
   }
 
   function renderQueue(){
+    const openResults = new Set(Array.from(body?.querySelectorAll('details[data-queue-result][open]') || [], el => el.dataset.queueResult));
     if (!body) return;
     if (!window.getRemoteQueueState) {
       refreshQueueModeLabelsFromState();
@@ -2041,7 +2042,10 @@ const ConsoleDock = (() => {
                   + `${finishedMeta}`
                   + `${cancelMeta}`
                   + `${errorMeta}`
-                  + (item.server ? `<a class="btn btn-sm btn-outline-secondary ms-auto" href="/api/queue/${item.id}/result" target="_blank" rel="noopener">View results</a>` : '')
+                  + `<details data-queue-result="${escapeHtml(String(item.id))}" class="queue-meta ms-auto"${openResults.has(String(item.id)) ? ' open' : ''}>`
+                  + `<summary>View results</summary>`
+                  + `<div class="small mt-2">${escapeHtml(item.summary || `${statusLabel}: ${item.label || 'Action'}.${item.errorMessage ? ' ' + item.errorMessage : ''}`)}</div>`
+                  + `</details>`
                   + `</li>`;
               }).join('')
             + `</ol>`
