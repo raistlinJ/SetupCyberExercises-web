@@ -144,6 +144,12 @@ class ActionQueue:
                         patch[key] = max(0, min(100, value)) if math.isfinite(value) else None
                     except (TypeError, ValueError):
                         patch[key] = None
+            for key in ('item_total', 'item_completed'):
+                if key in fields:
+                    try:
+                        patch[key] = max(0, int(fields[key])) if fields[key] is not None else None
+                    except (TypeError, ValueError, OverflowError):
+                        patch[key] = None
             with lock:
                 updated = {**state, **patch}
                 if updated == state:
@@ -173,7 +179,7 @@ class ActionQueue:
             rec = api._ACTIVE_JOBS.get(key)
             if not rec or rec.get('id') != result['job']:
                 raise ValueError('Background operation is no longer available')
-            report({key: rec.get(key) for key in ('progress', 'message', 'current')}
+            report({key: rec.get(key) for key in ('progress', 'message', 'current', 'item_total', 'item_completed')}
                    | {'phase': rec.get('phase') or rec.get('status')})
             state = rec.get('status')
             if state in {'completed', 'error', 'cancelled'}:
@@ -331,6 +337,8 @@ def public_record(row):
             'progress': progress, 'stepProgress': step_progress,
             'message': detail.get('message', ''), 'phase': detail.get('phase', ''),
             'current': detail.get('current', ''),
+            'itemTotal': detail.get('item_total'),
+            'itemCompleted': detail.get('item_completed'),
             'transferProgress': detail.get('transferProgress'),
             'transferDirection': detail.get('transferDirection', ''),
             'exclusive': True, 'lockProject': True, 'server': True}

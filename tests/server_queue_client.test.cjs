@@ -190,7 +190,8 @@ test('queue progress renders each job independently, escapes status, and handles
     const unknown = sandbox.renderRemoteQueueProgress({ label: 'Upload', progress, cancelRequested: true, phase: 'guest_push', current: 'vm2' });
     assert.match(unknown, /progress-bar-animated/);
     assert.match(unknown, /Cancelling/);
-    assert.match(unknown, /guest push · vm2/);
+    assert.match(unknown, /Current: vm2/);
+    assert.match(unknown, /guest push/);
     assert.doesNotMatch(unknown, /aria-valuenow|Cloning|70%/);
   }
   assert.match(sandbox.renderRemoteQueueProgress({ progress: 0 }), /aria-valuenow="0"/);
@@ -242,4 +243,26 @@ test('queue displays byte percentage and guest name during transfers, with indet
     transferDirection: 'Extracting in guest' });
   assert.match(extraction, /progress-bar-animated/);
   assert.doesNotMatch(extraction, /aria-valuenow/);
+});
+
+
+test('queue uses the same remaining and current fields for every operation', () => {
+  const shell = fs.readFileSync('app/static/js/shell.js', 'utf8');
+  const helper = shell.slice(shell.indexOf('function renderRemoteQueueProgress('), shell.indexOf('function clearCompletedRemoteActions('));
+  const sandbox = { escapeHtml: value => String(value).replaceAll('<', '&lt;').replaceAll('>', '&gt;') };
+  vm.createContext(sandbox); vm.runInContext(helper, sandbox);
+  for (const phase of ['cloning', 'commands', 'guest_push', 'guest_delete', 'ctfd_users']) {
+    const render = fields => sandbox.renderRemoteQueueProgress({ phase, itemTotal: 3, itemCompleted: 1,
+      current: '<vm>', message: 'Working', ...fields });
+    const html = render({});
+    assert.match(html, /Remaining: 2 of 3/);
+    assert.match(html, /Current: &lt;vm&gt;/);
+    assert.match(html, /Working/);
+    assert.match(render({ itemCompleted: 3 }), /Remaining: 0 of 3/);
+    assert.match(render({ itemCompleted: 7 }), /Remaining: 0 of 3/);
+    for (const itemTotal of [null, undefined, 0, NaN]) {
+      assert.doesNotMatch(render({ itemTotal }), /Remaining:/);
+    }
+    assert.doesNotMatch(render({ itemCompleted: null }), /Remaining:/);
+  }
 });

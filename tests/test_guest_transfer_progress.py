@@ -8,7 +8,7 @@ from app.routes import api
 from app.storage.projects import Project
 
 
-@pytest.mark.parametrize('phase', ['guest_push', 'guest_pull'])
+@pytest.mark.parametrize('phase', ['guest_push', 'guest_pull', 'guest_delete'])
 def test_byte_progress_is_independent_of_completed_guest_count(phase):
     updates = []
     entry = {'name': 'model-vm'}
@@ -18,16 +18,14 @@ def test_byte_progress_is_independent_of_completed_guest_count(phase):
         return [], []
     with patch.object(api, '_update_job_detail', side_effect=lambda pid, **fields: updates.append(fields)):
         api._run_guest_transfer_tasks(Project(id='p', name='p'), 'p', [entry] * 3, phase, transfer)
-    assert updates[0]['message'].startswith('3/3 machines remaining')
+    assert (updates[0]['item_completed'], updates[0]['item_total']) == (0, 3)
     completed_updates = [item for item in updates if 'step' in item]
-    assert [item['message'].split(' · ')[0] for item in completed_updates] == [
-        '2/3 machines remaining', '1/3 machines remaining', '0/3 machines remaining',
-    ]
+    assert [item['item_total'] - item['item_completed'] for item in completed_updates] == [2, 1, 0]
     uploading = next(item for item in updates if item.get('transferDirection') == 'Uploading to host')
     assert uploading['transferProgress'] == 50
     assert uploading['progress'] == 0
     assert '50%' in uploading['message']
-    assert uploading['message'].startswith('3/3 machines remaining')
+    assert uploading['item_total'] - uploading['item_completed'] == 3
     assert uploading['current'] == 'model-vm'
     extracting = next(item for item in updates if item.get('transferDirection') == 'Extracting in guest')
     assert extracting['transferProgress'] is None
@@ -79,13 +77,14 @@ def test_cancel_stops_active_transfer_and_skips_waiting_machines(phase):
             cleaned.append(entry['name'])
 
     with patch.object(api, '_is_cancelled', side_effect=lambda pid: cancelled), \
-            patch.object(api, '_update_job_detail'), \
+            patch.object(api, '_update_job_detail') as progress, \
             patch.object(api, '_pool_workers_for', return_value=1):
         results = api._run_guest_transfer_tasks(
             Project(id='p', name='p'), 'p', [{'name': str(i)} for i in range(5)], phase, transfer,
         )
     assert started == cleaned == ['0']
     assert results == [([], [])] * 5
+    assert all(call.kwargs['item_completed'] == 0 for call in progress.call_args_list)
 
 
 @pytest.mark.parametrize('direction', ['push', 'pull'])

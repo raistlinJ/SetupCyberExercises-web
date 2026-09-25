@@ -17,6 +17,7 @@ def test_batch_progress_counts_processed_items_and_keeps_credentials_private():
         if item['vmid'] == 101:
             errors.append('failed')
             continue
+    assert (reports[-1]['item_completed'], reports[-1]['item_total']) == (2, 2)
     assert '2/2 processed' in reports[-1]['message']
     assert '1 errors' in reports[-1]['message']
     assert reports[-1]['progress'] == 95
@@ -34,6 +35,7 @@ def test_interrupted_batch_does_not_count_unfinished_item():
     assert next(iterator) == 'first'
     iterator.close()
     assert reports[-1]['progress'] == 10
+    assert (reports[-1]['item_completed'], reports[-1]['item_total']) == (0, 2)
     assert '0/2 processed' in reports[-1]['message']
 
 
@@ -95,6 +97,7 @@ def test_ctfd_user_delete_reports_active_user_and_partial_errors(monkeypatch):
     assert response.status_code == 200
     assert 'Deleting CTFd user alice' in active[0]['message']
     assert 'Deleting CTFd user bob' in active[1]['message']
+    assert (reports[-1]['item_completed'], reports[-1]['item_total']) == (2, 2)
     assert '2/2 processed' in reports[-1]['message']
     assert '1 errors' in reports[-1]['message']
     assert 'secret' not in str(reports)
@@ -104,3 +107,16 @@ def test_empty_phase_keeps_previous_detail():
     reports = []
     assert list(api._job_items('p', [], 'network', 'Reloading', report=reports.append)) == []
     assert reports == []
+
+
+def test_batch_phase_resets_counts_and_nested_status_keeps_them():
+    api._start_job('progress-phases', 'delete')
+    try:
+        api._job_emit_batch_progress('progress-phases', 'deleting', 'Deleting', 3, 3)
+        api._job_emit_batch_progress('progress-phases', 'users', 'Removing users', 0, 2)
+        api._job_current('progress-phases', 'users', 'Removing user', {'username': 'alice'})
+        record = api._ACTIVE_JOBS[api._job_key('progress-phases')]
+        assert (record['item_completed'], record['item_total']) == (0, 2)
+        assert record['current'] == 'alice'
+    finally:
+        api._ACTIVE_JOBS.pop(api._job_key('progress-phases'), None)

@@ -1508,12 +1508,11 @@ def _update_job_detail(pid: str, *, job_key=None, **fields):
         if not rec:
             return
         rec.update(fields)
-        if rec.get('name') in {'run_startup_cmds', 'run_stored_cmds', 'start', 'suspend', 'hibernate'}:
-            total = rec.get('machine_total', 0)
-            if total and 'message' in fields:
-                remaining = max(0, total - rec.get('machine_completed', 0))
-                fields['message'] = f"{remaining}/{total} machines remaining · {fields['message']}"
-                rec['message'] = fields['message']
+        # Batch counts survive nested command, validation and delay messages.
+        # They describe processed items, never command ordinals or byte progress.
+        for key in ('item_total', 'item_completed'):
+            if key in rec:
+                fields[key] = rec[key]
         report = rec.get('queue_progress')
     if report:
         # Pool threads use the captured reporter, without needing a Flask
@@ -1569,8 +1568,7 @@ def _job_items(pid, items, phase, verb, *, start=10, end=95, total=None, label=N
     callback = report or (lambda fields: _update_job_detail(pid, **fields))
     def report(fields):
         try:
-            if phase == 'commands':
-                fields.update(machine_total=total, machine_completed=completed)
+            fields.update(item_total=total, item_completed=completed)
             callback(fields)
         except Exception:
             LOG.exception('Could not publish operation progress')
@@ -1788,8 +1786,7 @@ def _job_emit_batch_progress(
         progress=progress,
         message=message,
         detail=detail_payload,
-        **({'machine_total': total_i, 'machine_completed': done_i}
-           if phase in {'commands', 'validation', 'starting', 'suspending'} else {}),
+        item_total=total_i, item_completed=done_i,
     )
 
 # --- Simple in-process job tracking helpers (re-added after cleanup) ---
@@ -2147,7 +2144,7 @@ def instances_refresh_vm(pid: str):
         if not nodes:
             raise RuntimeError('No Proxmox nodes were returned; previous inventory retained')
         total_nodes = max(len(nodes), 1)
-        _update_job_detail(pid, job_key=refresh_key, phase='inventory', step=0, total_steps=total_nodes, progress=10, message=f'Scanning Proxmox nodes… 0/{total_nodes} complete')
+        _update_job_detail(pid, job_key=refresh_key, phase='inventory', step=0, total_steps=total_nodes, item_total=total_nodes, item_completed=0, progress=10, message=f'Scanning Proxmox nodes… 0/{total_nodes} complete')
         
         # Build maps of name -> details, vmid -> name, and lowercase-name -> canonical name
         name_map = {}
@@ -2212,6 +2209,7 @@ def instances_refresh_vm(pid: str):
                         job_key=refresh_key,
                         phase='inventory',
                         current=str(node or ''),
+                        item_total=total_nodes, item_completed=processed_nodes,
                         step=processed_nodes,
                         total_steps=total_nodes,
                         progress=int(round(10 + (processed_nodes / max(total_nodes, 1)) * 45)),
@@ -2470,7 +2468,7 @@ def instances_refresh_vm(pid: str):
     for i in range(1, instances + 1):
         try:
             pct = int(round(70 + (i / max(instances or 1, 1)) * 25)) if instances > 0 else 95
-            _update_job_detail(pid, job_key=refresh_key, phase='summarizing', current=f'Instance {i}', step=i, total_steps=max(instances, 1), progress=min(pct, 95), message=f'Compiling instance {i}/{max(instances, 1)}…')
+            _update_job_detail(pid, job_key=refresh_key, phase='summarizing', current=f'Instance {i}', item_total=instances, item_completed=i - 1, step=i, total_steps=max(instances, 1), progress=min(pct, 95), message=f'Compiling instance {i}/{max(instances, 1)}…')
         except Exception:
             pass
         entry = current.get(i) or { 'index': i, 'created': False, 'managers': {} }
@@ -2676,7 +2674,7 @@ def instances_refresh_vm(pid: str):
     # Log total refresh time for performance monitoring
     t_end = time.time()
     logging.info(f"VM refresh for project {pid} completed in {(t_end-t_start)*1000:.0f}ms")
-    _update_job_detail(pid, job_key=refresh_key, phase='done', step=max(instances, 1), total_steps=max(instances, 1), progress=100, message=f'Refresh completed: {len(out)} instance status entr{"y" if len(out) == 1 else "ies"}')
+    _update_job_detail(pid, job_key=refresh_key, phase='done', current='', item_total=instances, item_completed=instances, step=max(instances, 1), total_steps=max(instances, 1), progress=100, message=f'Refresh completed: {len(out)} instance status entr{"y" if len(out) == 1 else "ies"}')
     _end_job(pid, job_key=refresh_key)
     
     return jsonify({
@@ -3539,9 +3537,11 @@ def instances_create(pid: str):
             break
         batch = to_process[:max_jobs]
         to_process = to_process[max_jobs:]
-        _update_job_detail(pid, phase='cloning', message=f'Cloning batch ({len(batch)} VM(s))…', total_steps=len(targets))
+        _update_job_detail(pid, phase='cloning', message=f'Cloning batch ({len(batch)} VM(s))…', total_steps=len(targets),
+                           item_total=len(targets), item_completed=len(targets) - len(to_process) - len(batch))
         with ThreadPoolExecutor(max_workers=len(batch) or 1) as pool:
             futs = {pool.submit(process_target, t): t for t in batch}
+            batch_completed = 0
             for fut in as_completed(futs):
                 t = futs[fut]
                 try:
@@ -3596,13 +3596,15 @@ def instances_create(pid: str):
                     errors.append({'reason': f'create task failed: {e}'})
                 finally:
                     try:
-                        done = len(results) + len(skipped) + len(errors)
+                        batch_completed += 1
+                        done = len(targets) - len(to_process) - len(batch) + batch_completed
                         pct = int(min(60, (done / max(len(targets), 1)) * 60))
                         current_name, ordinal, total, progress_label = _target_progress_meta(t)
                         _update_job_detail(
                             pid,
                             phase='cloning',
                             step=done,
+                            item_total=len(targets), item_completed=done,
                             progress=pct,
                             current=current_name,
                             message=f'Cloned {progress_label}; {done}/{len(targets)} complete',
@@ -3918,7 +3920,8 @@ def instances_create(pid: str):
                 snapshot_tasks.append(r)
 
         if snapshot_tasks:
-            _update_job_detail(pid, phase='snapshotting', message=f'Creating post-network snapshots ({len(snapshot_tasks)} VMs)…')
+            _update_job_detail(pid, phase='snapshotting', message=f'Creating post-network snapshots ({len(snapshot_tasks)} VMs)…',
+                               item_total=len(snapshot_tasks), item_completed=0, current='')
             snapshot_workers = _pool_workers_for(proj, len(snapshot_tasks))
             def _do_post_snap(item):
                 try:
@@ -3959,6 +3962,7 @@ def instances_create(pid: str):
                             pid,
                             phase='snapshotting',
                             current=vm_name,
+                            item_total=len(snapshot_tasks), item_completed=snapshot_done,
                             step=snapshot_done,
                             total_steps=len(snapshot_tasks),
                             progress=_snapshot_progress(ordinal, len(snapshot_tasks), completed=snapshot_done),
@@ -9251,16 +9255,13 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
     """Publish byte progress from workers as well as completed guest counts."""
     if not mapped:
         return []
-    def machine_progress(completed, message):
-        if phase in {'guest_push', 'guest_pull'}:
-            return f'{len(mapped) - completed}/{len(mapped)} machines remaining · {message}'
-        return message
-
     _update_job_detail(pid, phase=phase, progress=0, total_steps=len(mapped),
-                       message=machine_progress(0, f'Processing {len(mapped)} guests'))
+                       item_total=len(mapped), item_completed=0, current='',
+                       message=f'Processing {len(mapped)} guests')
     results = [None] * len(mapped)
     lock = threading.Lock()
     completed = 0
+    cancelled_result = object()
 
     def run(entry):
         last = [None, -1, 0.0]
@@ -9278,14 +9279,14 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
                 _update_job_detail(pid, phase=phase, current=str(entry.get('name') or ''),
                                    progress=min(99, int(completed * 100 / len(mapped))),
                                    transferProgress=percent, transferDirection=direction,
-                                   message=machine_progress(completed, message))
+                                   item_total=len(mapped), item_completed=completed, message=message)
         _TRANSFER_PROGRESS.report = report
         _TRANSFER_PROGRESS.cancelled = lambda: _is_cancelled(pid)
         try:
             _check_transfer_cancelled()
             return worker(entry)
         except _GuestTransferCancelled:
-            return [], []
+            return cancelled_result
         finally:
             del _TRANSFER_PROGRESS.report
             del _TRANSFER_PROGRESS.cancelled
@@ -9294,7 +9295,11 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
         futures = {pool.submit(run, entry): position for position, entry in enumerate(mapped)}
         for future in as_completed(futures):
             position = futures[future]
-            results[position] = future.result()
+            result = future.result()
+            if result is cancelled_result:
+                results[position] = ([], [])
+                continue
+            results[position] = result
             with lock:
                 completed += 1
                 _update_job_detail(
@@ -9302,7 +9307,8 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
                     step=completed, total_steps=len(mapped),
                     progress=min(99, int(completed / len(mapped) * 100)),
                     transferProgress=None, transferDirection='',
-                    message=machine_progress(completed, f'Processed {completed}/{len(mapped)} guests'),
+                    item_total=len(mapped), item_completed=completed,
+                    message=f'Processed {completed}/{len(mapped)} guests',
                 )
     return results
 

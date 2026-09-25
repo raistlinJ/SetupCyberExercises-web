@@ -19,10 +19,9 @@ class CommandStatusTests(unittest.TestCase):
                 api._job_emit_batch_progress('remaining-test', phase, 'Running', 1, 3)
                 api._job_emit_delay_status('remaining-test', self.entry, 2, 5)
                 api._job_emit_batch_progress('remaining-test', phase, 'Running', 3, 3)
-            self.assertEqual([u['message'].split(' · ')[0] for u in updates], [
-                '3/3 machines remaining', '3/3 machines remaining',
-                '2/3 machines remaining', '2/3 machines remaining', '0/3 machines remaining',
-            ])
+            self.assertEqual([u['item_total'] - u['item_completed'] for u in updates],
+                             [3, 3, 2, 2, 0])
+            self.assertTrue(all(u['item_total'] == 3 for u in updates))
 
     def test_startup_count_tracks_finished_machines(self):
         updates = []
@@ -30,11 +29,11 @@ class CommandStatusTests(unittest.TestCase):
         with patch.dict(api._ACTIVE_JOBS, {'project:remaining-test': record}):
             for entry in api._job_items('remaining-test', [self.entry] * 2, 'commands', 'Running'):
                 api._job_emit_command_status('remaining-test', entry, 1, 1, 'hostname')
-        self.assertTrue(updates[0]['message'].startswith('2/2 machines remaining'))
-        self.assertTrue(updates[-1]['message'].startswith('0/2 machines remaining'))
+        self.assertEqual((updates[0]['item_completed'], updates[0]['item_total']), (0, 2))
+        self.assertEqual((updates[-1]['item_completed'], updates[-1]['item_total']), (2, 2))
         commands = [u for u in updates if u.get('phase') == 'command']
-        self.assertTrue(commands[0]['message'].startswith('2/2 machines remaining'))
-        self.assertTrue(commands[1]['message'].startswith('1/2 machines remaining'))
+        self.assertEqual(commands[0]['item_completed'], 0)
+        self.assertEqual(commands[1]['item_completed'], 1)
 
     def test_sequence_metadata_in_detail(self):
         with patch.object(api, '_update_job_detail') as mock_update:

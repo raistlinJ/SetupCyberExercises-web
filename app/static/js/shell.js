@@ -1299,7 +1299,15 @@ function renderRemoteQueueProgress(entry){
   const percent = hasPercent ? Math.max(0, Math.min(100, Number(raw))) : null;
   const value = hasPercent ? `${Math.round(percent)}%` : 'In progress';
   const status = entry.cancelRequested ? 'Cancelling…' : escapeHtml(entry.transferDirection || 'Running');
-  const detail = (transferring && entry.current ? `${entry.current} · ${entry.message || ''}` : entry.message) || [entry.phase ? String(entry.phase).replace(/_/g, ' ') : '', entry.current].filter(Boolean).join(' · ');
+  const detail = entry.message || (entry.phase ? String(entry.phase).replace(/_/g, ' ') : '');
+  const itemTotal = Number(entry.itemTotal);
+  const itemCompleted = Number(entry.itemCompleted);
+  const hasCounts = entry.itemTotal != null && entry.itemCompleted != null
+    && Number.isInteger(itemTotal) && itemTotal > 0 && Number.isInteger(itemCompleted) && itemCompleted >= 0;
+  const counts = hasCounts
+    ? `<div class="queue-meta queue-progress-remaining">Remaining: ${Math.max(0, itemTotal - itemCompleted)} of ${itemTotal}</div>` : '';
+  const current = entry.current
+    ? `<div class="queue-meta queue-progress-current">Current: ${escapeHtml(entry.current)}</div>` : '';
   const step = Number(entry.step);
   const total = Number(entry.totalSteps);
   const steps = Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0
@@ -1310,6 +1318,7 @@ function renderRemoteQueueProgress(entry){
     + `<div class="queue-progress-status"><span>${status}</span><span>${value}</span></div>`
     + `<div class="progress queue-progress-track" role="progressbar" aria-label="${escapeHtml(entry.label || 'Action')} progress" aria-valuemin="0" aria-valuemax="100"${ariaValue} aria-valuetext="${escapeHtml(hasPercent ? value : 'In progress; percentage unavailable')}">`
     + `<div class="progress-bar${animated}" style="width:${hasPercent ? percent : 100}%"></div></div>`
+    + counts + current
     + (detail ? `<div class="queue-meta queue-progress-detail" role="status">${escapeHtml(detail)}</div>` : '')
     + steps + `</div>`;
 }

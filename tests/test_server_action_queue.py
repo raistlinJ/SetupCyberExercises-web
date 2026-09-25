@@ -90,7 +90,7 @@ def harness(tmp_path):
         # Real action endpoints also report from pool threads without a Flask
         # request context. Keep the operation blocked so we can inspect it live.
         reporter = threading.Thread(target=lambda: api._update_job_detail(
-            'queue-test', progress=40, phase='cloning', current='vm1',
+            'queue-test', progress=40, phase='cloning', current='vm1', item_total=5, item_completed=2,
             message='Cloning vm1', detail={'password': 'must-not-be-published'}))
         reporter.start()
         reporter.join()
@@ -346,6 +346,8 @@ def test_worker_progress_is_shared_and_combined_across_plan_steps(harness):
     assert state['stepProgress'] == 40
     assert state['phase'] == 'cloning'
     assert state['current'] == 'vm1'
+    assert state['itemTotal'] == 5
+    assert state['itemCompleted'] == 2
     assert state['message'] == 'Cloning vm1'
     assert 'must-not-be-published' not in json.dumps(state)
     assert client.get('/api/queue').get_json()['items'][0]['progress'] == 70
@@ -622,4 +624,20 @@ def test_transfer_percentage_survives_queue_polling_and_clears_for_extraction(ha
     state = client.get(f'/api/queue/{job}').get_json()
     assert state['transferProgress'] is None
     assert state['transferDirection'] == 'Preparing download archive'
+    release.set()
+
+
+def test_queue_counts_survive_detail_updates_and_can_be_cleared(harness):
+    app, client, started, release, *_ = harness
+    job = enqueue(client, 'first').get_json()['id']
+    assert started.wait(2)
+    report = app.extensions['action_queue'].progress_reporter(job, 1)
+    report({'item_total': 5, 'item_completed': 2})
+    report({'current': 'vm3', 'message': 'Waiting for command'})
+    state = client.get(f'/api/queue/{job}').get_json()
+    assert (state['itemCompleted'], state['itemTotal']) == (2, 5)
+    report({'item_total': None, 'item_completed': None})
+    state = client.get(f'/api/queue/{job}').get_json()
+    assert state['itemTotal'] is None
+    assert state['itemCompleted'] is None
     release.set()

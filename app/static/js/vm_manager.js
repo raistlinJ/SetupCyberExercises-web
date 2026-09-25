@@ -3440,11 +3440,6 @@ function updateRefreshState() {
         : 'Select at least one existing LXC container or QEMU VM (refresh states first)';
     }
   } catch { }
-  // Enable Cancel button only while an action is in flight
-  try {
-    const cancelBtn = document.getElementById('act-cancel');
-    if (cancelBtn) cancelBtn.disabled = !ACTION_IN_FLIGHT;
-  } catch { }
   // Manage tooltip enable/disable
   try {
     if (wrap && window.bootstrap) {
@@ -7669,8 +7664,6 @@ async function vmCancelActions() {
   if (!PROJ) return;
   // Immediately reflect cancellation in UI so repeated clicks are suppressed
   try {
-    const cancelBtn = document.getElementById('act-cancel');
-    if (cancelBtn) cancelBtn.disabled = true;
     const modalCancelBtn = document.getElementById('action-progress-cancel-btn');
     if (modalCancelBtn) modalCancelBtn.disabled = true;
   } catch { }
