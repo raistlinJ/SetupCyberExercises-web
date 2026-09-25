@@ -39,8 +39,8 @@ class NetsSetRemoveApiTests(unittest.TestCase):
 
     def test_nets_set_idempotent_and_applies_network_once(self):
         existing_cfg = {
-            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=lab1,firewall=1',
-            'net1': 'e1000=11:22:33:44:55:66,bridge=wrong,firewall=1',
+            'net0': 'virtio=AA:BB:CC:DD:EE:FF,bridge=lab1,firewall=1',
+            'net1': 'vmxnet3=11:22:33:44:55:66,bridge=wrong,firewall=1',
             'net2': 'virtio=DE:AD:BE:EF:00:01,bridge=extra0',
         }
 
@@ -82,8 +82,31 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertNotIn('net0', options)
             self.assertIn('net1', options)
             self.assertIn('bridge=dmz1', options['net1'])
-            self.assertTrue(options['net1'].startswith('e1000='), options['net1'])
+            self.assertEqual(options['net1'], 'vmxnet3=11:22:33:44:55:66,bridge=dmz1,firewall=1')
             self.assertIn('firewall=1', options['net1'])
+
+    def test_nets_set_does_not_replace_adapters_when_config_read_fails(self):
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            prox_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            prox = prox_cls.return_value
+            prox.list_network.return_value = [{'iface': 'lab1'}, {'iface': 'dmz1'}]
+            prox.get_qemu_config.side_effect = RuntimeError('config unavailable')
+
+            resp = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/nets_set',
+                json={
+                    'baseUrl': 'https://proxmox.local',
+                    'username': 'root@pam',
+                    'password': 'secret',
+                    'targets': [{'index': 1, 'name': self.target_name}],
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json().get('errors'))
+        prox.set_qemu_options.assert_not_called()
 
     def test_nets_set_keeps_internet_connected_bridge_literal(self):
         self.project.vms[0].internal_network_adaptors = ['lab', 'vmbr0']

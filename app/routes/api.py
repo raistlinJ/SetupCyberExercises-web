@@ -2527,7 +2527,7 @@ def instances_refresh_vm(pid: str):
                                 tmpl_name = str(name_map.get(canon_name, {}).get('name', ''))
                             else:
                                 # Detect base template from disk config. Note: these prefixes refer to DISK device keys
-                                # (virtio/scsi/ide/sata), not NIC models. NIC default model is handled elsewhere and set to e1000.
+                                # (virtio/scsi/ide/sata), not NIC models. Existing NIC models are preserved when assigning bridges.
                                 for ck, cv in (cfg or {}).items():
                                     cks = str(ck)
                                     if not any(cks.startswith(p) for p in ('virtio', 'scsi', 'ide', 'sata')):
@@ -3878,11 +3878,11 @@ def instances_create(pid: str):
                         else:
                             netspecs.append(f"name=eth{i},bridge={b}")
                 else:
-                    netspecs = [f"e1000,bridge={b}" for b in expected]
-                    try:
-                        existing_cfg = client.get_qemu_config(node=node, vmid=vmid) or {}
-                    except Exception:
-                        existing_cfg = {}
+                    existing_cfg = client.get_qemu_config(node=node, vmid=vmid) or {}
+                    netspecs = [
+                        _qemu_net_spec_for_bridge(existing_cfg.get(f'net{i}'), b)
+                        for i, b in enumerate(expected)
+                    ]
                 
                 new_net_keys = [f"net{i}" for i in range(len(netspecs))]
                 existing_net_keys = [k for k in (existing_cfg or {}).keys() if str(k).startswith('net')]
@@ -6399,6 +6399,12 @@ def _build_corrected_net_spec(existing_spec: Any, expected_spec: str) -> str:
     return ','.join([t for t in new_tokens if str(t).strip()])
 
 
+def _qemu_net_spec_for_bridge(existing_spec: Any, bridge: str) -> str:
+    """Change the bridge while retaining the cloned NIC's model, MAC, and options."""
+    model = _parse_qemu_net_spec(existing_spec).get('model') or 'e1000'
+    return _build_corrected_net_spec(existing_spec, f"{model},bridge={bridge}")
+
+
 @api_bp.route("/projects/<pid>/instances/actions/nets_set", methods=["POST"])
 @api_bp.route("/projects/<pid>/instances/actions/nets_assign", methods=["POST"])
 def instances_nets_set(pid: str):
@@ -6554,13 +6560,6 @@ def instances_nets_set(pid: str):
         if not bridge_specs:
             return ('error', { 'index': idx, 'name': gen_name, 'reason': 'no adaptors configured' })
         is_lxc = (m.get('type') == 'lxc') or (getattr(cfg, 'vm_type', 'qemu') == 'lxc')
-        netspecs = []
-        for i, spec in enumerate(bridge_specs):
-            bname = spec.get('bridge') or ''
-            if is_lxc:
-                netspecs.append(f"name=eth{i},bridge={bname}")
-            else:
-                netspecs.append(f"e1000,bridge={bname}")
         try:
             thread_client = _make_thread_client()
             try:
@@ -6569,7 +6568,20 @@ def instances_nets_set(pid: str):
                 else:
                     existing_cfg = thread_client.get_qemu_config(node=node, vmid=vmid) or {}
             except Exception:
+                if not is_lxc:
+                    raise
                 existing_cfg = {}
+
+            if is_lxc:
+                netspecs = [
+                    f"name=eth{i},bridge={spec.get('bridge') or ''}"
+                    for i, spec in enumerate(bridge_specs)
+                ]
+            else:
+                netspecs = [
+                    _qemu_net_spec_for_bridge(existing_cfg.get(f'net{i}'), spec.get('bridge') or '')
+                    for i, spec in enumerate(bridge_specs)
+                ]
 
             desired_keys = [f'net{i}' for i in range(len(netspecs))]
             existing_net_keys = [k for k in (existing_cfg or {}).keys() if str(k).startswith('net')]
