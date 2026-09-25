@@ -8741,8 +8741,8 @@ def _safe_upload_relative_path(value: Any) -> str:
     return normalized
 
 
-def _lxc_prepare_directory_command(path: str) -> str:
-    """Build commands that create an absolute directory, replacing file conflicts."""
+def _lxc_prepare_directory_command(path: str, owner: str = '') -> str:
+    """Create the destination, assigning an optional owner only to new directories."""
     current = '/'
     commands: List[str] = []
     for component in [part for part in path.split('/') if part]:
@@ -8752,7 +8752,13 @@ def _lxc_prepare_directory_command(path: str) -> str:
             f"if {{ [ -e {quoted} ] || [ -L {quoted} ]; }} && [ ! -d {quoted} ]; "
             f"then rm -rf -- {quoted}; fi"
         )
-        commands.append(f"mkdir -p -- {quoted}")
+        if owner:
+            commands.append(
+                f"if [ ! -d {quoted} ]; then mkdir -p -- {quoted} && "
+                f"chown -- {shlex.quote(owner)} {quoted}; fi"
+            )
+        else:
+            commands.append(f"mkdir -p -- {quoted}")
     return ' && '.join(commands) or 'true'
 
 
@@ -8948,11 +8954,11 @@ def _transfer_bytes(direction, loaded, total=None):
 
 
 def _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
-                             destination, use_sudo, password):
+                             destination, use_sudo, password, owner=''):
     """Run the host-to-guest copy on Proxmox; only the script crosses SSH."""
     guest_archive = f"/tmp/deployforge-qemu-push-{uuid.uuid4().hex}.tar"
     cancel_path = f"/tmp/deployforge-cancel-{uuid.uuid4().hex}"
-    extract = (f"{_lxc_prepare_directory_command(destination)} && "
+    extract = (f"{_lxc_prepare_directory_command(destination, owner)} && "
                f"tar --overwrite -xpf {shlex.quote(guest_archive)} -C {shlex.quote(destination)}")
     # qm limits stdin to 1 MiB. Each bounded chunk travels locally from the
     # staged host file through the guest agent, never back through this app.
@@ -9038,6 +9044,7 @@ def _push_tar_through_guest_agent(
     tar_stream,
     archive_size: int,
     destination: str,
+    owner: str = '',
 ):
     _ensure_linux_qemu_guest(client, entry)
     guest_archive = f"/tmp/deployforge-qemu-push-{uuid.uuid4().hex}.tar"
@@ -9066,7 +9073,7 @@ def _push_tar_through_guest_agent(
             _transfer_bytes('Uploading to guest', tar_stream.tell(), archive_size)
         _transfer_bytes('Extracting in guest', 0)
         extract_command = (
-            f"{_lxc_prepare_directory_command(destination)} && "
+            f"{_lxc_prepare_directory_command(destination, owner)} && "
             f"tar --overwrite -xpf {quoted_archive} -C {shlex.quote(destination)}"
         )
         _guest_agent_exec_checked(
@@ -9445,7 +9452,7 @@ def instances_lxc_push(pid: str):
             try:
                 if guest_type == 'qemu' and not password:
                     with open(tar_stream.name, 'rb') as upload_stream:
-                        _push_tar_through_guest_agent(client, entry, upload_stream, archive_size, destination)
+                        _push_tar_through_guest_agent(client, entry, upload_stream, archive_size, destination, owner)
                     failure_stage = 'files uploaded, but setting remote ownership or permissions failed'
                     for command in metadata_commands:
                         _check_transfer_cancelled()
@@ -9484,10 +9491,10 @@ def instances_lxc_push(pid: str):
                         if guest_type == 'qemu':
                             method = 'qm-over-ssh'
                             _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
-                                                     destination, use_sudo, password)
+                                                     destination, use_sudo, password, owner)
                         else:
                             _transfer_bytes('Extracting in guest', 0)
-                            inner = (f"{_lxc_prepare_directory_command(destination)} && "
+                            inner = (f"{_lxc_prepare_directory_command(destination, owner)} && "
                                      f"tar --overwrite -xpf - -C {shlex.quote(destination)}")
                             pct_command = (f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
                                            f"< {shlex.quote(remote_archive)}")

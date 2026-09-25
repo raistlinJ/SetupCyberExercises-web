@@ -440,6 +440,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
                 chown_index = next(i for i, cmd in enumerate(commands) if cmd.startswith('chown '))
                 chmod_index = next(i for i, cmd in enumerate(commands) if cmd.startswith('chmod '))
                 self.assertTrue(any('tar --overwrite -xpf' in cmd for cmd in commands[:chown_index]))
+                self.assertTrue(any(f'chown -- {owner} ' in cmd for cmd in commands[:chown_index]))
                 self.assertGreater(chmod_index, chown_index)
                 files = [f"/srv/scenario files/{path}" for path in payload['relativePaths']]
                 self.assertEqual(shlex.split(commands[chown_index]), [
