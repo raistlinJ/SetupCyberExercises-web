@@ -306,6 +306,11 @@
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_access_disable')"
                       title="Disable user access to the selected VMs">Disable
                       User Accessibility</button></li>
+                  <li><hr class="dropdown-divider" /></li>
+                  <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('users_orchestration_enable')"
+                      title="Enroll the selected rows' PVE users in the orchestrator; access applies to the configured orchestrator instance">Enable orchestration access (dangerous)</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_orchestration_disable')"
+                      title="Remove the selected users' orchestrator enrollment across projects">Disable orchestration access</button></li>
                 </ul>
               </div>
             </div>
@@ -598,8 +603,9 @@
   <script src="/static/js/app.js?v=20260907a"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/vm_manager.js?v=20260910c"></script>
-  <script src="/static/js/server_vm_actions.js?v=20260910a"></script>
+  <script src="/static/js/orchestration_access.js?v=20260925a"></script>
+  <script src="/static/js/vm_manager.js?v=20260925a"></script>
+  <script src="/static/js/server_vm_actions.js?v=20260925a"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
@@ -769,6 +775,8 @@
         <p id="custom-command-summary" class="small text-muted"></p>
         <label for="custom-command-input" class="form-label">Command</label>
         <textarea id="custom-command-input" class="form-control font-monospace" rows="5" spellcheck="false" placeholder="Enter a command or script"></textarea>
+        <label for="custom-command-timeout" class="form-label mt-3">Timeout (seconds)</label>
+        <input id="custom-command-timeout" type="number" class="form-control" min="1" max="86400" step="1" value="60" required>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>

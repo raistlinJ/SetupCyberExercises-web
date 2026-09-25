@@ -4651,6 +4651,8 @@ function friendlyActionName(action) {
     users_perms: 'Set User Perms',
     users_creds_check: 'Check Credential Sync',
     users_creds_set: 'Set Credentials to Current List',
+    users_orchestration_enable: 'Enable orchestration access (dangerous)',
+    users_orchestration_disable: 'Disable orchestration access',
     users_access_enable: 'Enable User Accessibility',
     users_access_disable: 'Disable User Accessibility',
   };
@@ -5381,33 +5383,40 @@ function openStoredCommandsManagerForContext(ctx) {
 }
 
 let lastCustomCommand = '';
+let lastCustomCommandTimeoutSeconds = 60;
 
 function promptCustomCommand(options) {
   const modalEl = document.getElementById('customCommandModal');
   const input = document.getElementById('custom-command-input');
   const runBtn = document.getElementById('custom-command-run');
+  const timeoutInput = document.getElementById('custom-command-timeout');
   const count = countExplicitActionTargets(options);
   if (!count) { alert('Select at least one VM.'); return Promise.resolve(null); }
   document.getElementById('custom-command-summary').textContent =
     `Run this command on ${count} selected VM${count === 1 ? '' : 's'}.`;
   input.value = lastCustomCommand;
+  timeoutInput.value = options.customCommandTimeoutSeconds ?? lastCustomCommandTimeoutSeconds;
   runBtn.disabled = !input.value.trim();
   const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
   return new Promise(resolve => {
     let command = null;
-    const update = () => { runBtn.disabled = !input.value.trim(); };
+    const update = () => { runBtn.disabled = !input.value.trim() || !timeoutInput.checkValidity(); };
     const run = () => {
-      if (!input.value.trim()) return;
+      if (!input.value.trim() || !timeoutInput.reportValidity()) return;
+      options.customCommandTimeoutSeconds = Number(timeoutInput.value);
       command = input.value.trim();
       lastCustomCommand = command;
+      lastCustomCommandTimeoutSeconds = options.customCommandTimeoutSeconds;
       modal.hide();
     };
     const focus = () => input.focus();
     input.addEventListener('input', update);
+    timeoutInput.addEventListener('input', update);
     runBtn.addEventListener('click', run);
     modalEl.addEventListener('shown.bs.modal', focus, { once: true });
     modalEl.addEventListener('hidden.bs.modal', () => {
       input.removeEventListener('input', update);
+      timeoutInput.removeEventListener('input', update);
       runBtn.removeEventListener('click', run);
       modalEl.removeEventListener('shown.bs.modal', focus);
       input.value = '';
@@ -6240,6 +6249,18 @@ async function vmAction(action, opts) {
   }
   const liveStateDecision = await vmEnsureLiveStateBeforeAction(options);
   if (liveStateDecision !== 'continue') return;
+  if (action === 'users_orchestration_enable' || action === 'users_orchestration_disable') {
+    try {
+      const projects = multi
+        ? Object.entries(options.targetsByPid || {}).filter(([, targets]) => targets.length)
+          .map(([pid, targets]) => ({ project: guestTransferProject(pid), targets }))
+        : [{ project: actionProject, targets: options.targets }];
+      const plan = buildOrchestrationAccessPlan(projects, action === 'users_orchestration_enable');
+      if (!window.confirm(plan.message)) return;
+      options.orchestrationConfirmed = true;
+      options.orchestrationUsers = plan.expectedByProject;
+    } catch (error) { alert(error.message); return; }
+  }
   if (action === 'users_creds_set') {
     const confirmed = window.confirm(buildCredsSetConfirmationMessage(options));
     if (!confirmed) return;
@@ -6681,7 +6702,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
       try { shell.endActionContext(true); } catch { }
       return;
     }
-    if (action === 'users_create' || action === 'users_delete' || action === 'users_perms' || action === 'users_creds_check' || action === 'users_creds_set') {
+    if (action === 'users_create' || action === 'users_delete' || action === 'users_perms' || action === 'users_creds_check' || action === 'users_creds_set' || action === 'users_orchestration_enable' || action === 'users_orchestration_disable') {
       const actionTitle = friendlyActionName(action) || action;
       try { shell.beginActionContext(actionTitle); } catch { }
       const setProg = (pct, text, detail) => setAp(pct, text, detail);
@@ -6701,6 +6722,8 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
         apiPort: PROJ.proxmox_api_port || undefined,
         verifySSL: PROJ.proxmox_verify_ssl !== false,
         targets,
+        confirmed: opts.orchestrationConfirmed,
+        expectedUsers: opts.orchestrationUsers?.[String(PROJ.id)],
       });
       try { shell.step('User action response'); } catch { }
       const checkedCount = Array.isArray(resp?.checked) ? resp.checked.length : 0;
@@ -6777,7 +6800,10 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
       } else if (opts.selectedCommand) {
         payload.command = opts.selectedCommand;
       }
-      if (opts.customCommand) payload.customCommand = opts.customCommand;
+      if (opts.customCommand) {
+        payload.customCommand = opts.customCommand;
+        payload.customCommandTimeoutSeconds = opts.customCommandTimeoutSeconds ?? 60;
+      }
       if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
         payload.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({
           templateKey: entry.templateKey || '',
@@ -7275,7 +7301,10 @@ async function vmActionMultiExec(action, opts = {}) {
     } else if (opts.selectedCommand) {
       baseBody.command = opts.selectedCommand;
     }
-    if (opts.customCommand) baseBody.customCommand = opts.customCommand;
+    if (opts.customCommand) {
+      baseBody.customCommand = opts.customCommand;
+      baseBody.customCommandTimeoutSeconds = opts.customCommandTimeoutSeconds ?? 60;
+    }
     if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
       baseBody.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({
         templateKey: entry.templateKey || '',
@@ -7440,14 +7469,15 @@ async function vmActionMultiExec(action, opts = {}) {
         ['skipped', 'errors', 'notices', 'network_applied_nodes', 'network_apply_errors'].forEach(k => addArr(k, resp[k], projName));
         continue;
       }
-      if (action === 'users_create' || action === 'users_delete' || action === 'users_perms' || action === 'users_creds_check' || action === 'users_creds_set') {
+      if (action === 'users_create' || action === 'users_delete' || action === 'users_perms' || action === 'users_creds_check' || action === 'users_creds_set' || action === 'users_orchestration_enable' || action === 'users_orchestration_disable') {
         const actionVerb = action === 'users_create'
           ? 'Creating'
           : (action === 'users_delete'
             ? 'Deleting'
             : (action === 'users_creds_check' ? 'Checking' : (action === 'users_creds_set' ? 'Syncing' : 'Updating')));
         setAp(Math.max(20, pct), 'Working…', `${actionVerb} users in ${projName}…`);
-        const resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets });
+        const resp = await makeReq(`/instances/actions/${action}`, { ...baseBody, targets,
+          confirmed: opts.orchestrationConfirmed, expectedUsers: opts.orchestrationUsers?.[String(pid)] });
         ['created_users', 'created_pools', 'added_members', 'deleted_users', 'deleted_pools', 'updated_users', 'skipped', 'errors', 'notices'].forEach(k => addArr(k, resp[k], projName));
         addArr('checked', resp?.checked, projName);
         continue;

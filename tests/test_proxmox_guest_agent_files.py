@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.connectors.proxmox import ProxmoxClient, _decode_guest_output
 
@@ -36,6 +36,29 @@ class ProxmoxGuestAgentFileTests(unittest.TestCase):
         payload = self.session.post.call_args.kwargs['json']
         self.assertEqual(payload['input-data'], 'YWxwaGE=')
         self.assertEqual(payload['command'][0], '/bin/sh')
+
+    def test_agent_exec_large_timeout_keeps_polling_after_ten_minutes(self):
+        started = MagicMock(status_code=200, content=b'{}')
+        started.json.return_value = {'data': {'pid': 44}}
+        running = MagicMock(status_code=200, content=b'{}')
+        running.json.return_value = {'data': {'exited': 0}}
+        completed = MagicMock(status_code=200, content=b'{}')
+        completed.json.return_value = {'data': {'exited': 1, 'exitcode': 0}}
+        self.session.post.return_value = started
+        self.session.get.side_effect = [running, running, completed]
+        with patch('time.time', side_effect=[0, 72, 601, 700]), patch('time.sleep'):
+            result = self.client.agent_exec('node1', 101, 'sleep 700', timeout=12000)
+        self.assertEqual(result['exitcode'], 0)
+        self.assertEqual(self.session.get.call_count, 3)
+        self.session.post.assert_called_once()
+
+    def test_agent_exec_timeout_reports_actual_limit(self):
+        started = MagicMock(status_code=200, content=b'{}')
+        started.json.return_value = {'data': {'pid': 44}}
+        self.session.post.return_value = started
+        with patch('time.time', side_effect=[0, 72]):
+            with self.assertRaisesRegex(RuntimeError, r'configured timeout: 60s; elapsed: 72s'):
+                self.client.agent_exec('node1', 101, 'sleep 100', timeout=60)
 
     def test_agent_exec_decodes_remote_error_quotes(self):
         started = MagicMock(status_code=200, content=b'{}')

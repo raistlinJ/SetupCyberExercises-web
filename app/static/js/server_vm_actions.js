@@ -31,10 +31,17 @@ function buildServerVmSteps(action, options, projects) {
       add('delete', { deleteUsersAndPools: opts.deleteUsersAndPools, verifyCleanup: opts.verifyCleanup }, baseTargets);
     } else if (action === 'users_access_enable' || action === 'users_access_disable') {
       accessibility(action === 'users_access_enable');
+    } else if (action === 'users_orchestration_enable' || action === 'users_orchestration_disable') {
+      const expectedUsers = options.orchestrationUsers?.[String(project.id)];
+      if (options.orchestrationConfirmed !== true || !expectedUsers) throw new Error('Orchestration access requires confirmation');
+      add(action, { confirmed: true, expectedUsers });
     } else {
       const aliases = { nets_assign: 'nets_set', nets_clear: 'nets_remove', validate: 'run_stored_cmds' };
       const extra = {};
-      if (options.customCommand) extra.customCommand = options.customCommand;
+      if (options.customCommand) {
+        extra.customCommand = options.customCommand;
+        extra.customCommandTimeoutSeconds = options.customCommandTimeoutSeconds ?? 60;
+      }
       if (action === 'validate') extra.validateOnly = true;
       if (options.selectedCommands?.length) {
         extra.commands = options.selectedCommands.slice();

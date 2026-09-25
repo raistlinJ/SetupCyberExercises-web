@@ -820,7 +820,7 @@ class ProxmoxClient:
                         'stderr': stderr,
                         'timed_out': True,
                     }
-                raise RuntimeError("agent exec timed out")
+                raise RuntimeError(f"agent exec timed out (configured timeout: {timeout}s; elapsed: {elapsed:.0f}s)")
             remaining = max(1, timeout - int(elapsed))
             wait_secs = min(remaining, 15)
             params = {'pid': pid}
@@ -1022,6 +1022,55 @@ class ProxmoxClient:
             r = s.post(url, data=data, timeout=30)
         if r.status_code >= 400:
             raise RuntimeError(f"Proxmox update user error {r.status_code}: {r.text}")
+        return True
+
+    def ensure_group(self, groupid: str, comment: str = ''):
+        """Create an enrollment group if absent; never change its ACLs."""
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/groups"
+        def exists():
+            response = s.get(url, timeout=15)
+            if response.status_code >= 400:
+                raise RuntimeError(f'Cannot inspect Proxmox groups (HTTP {response.status_code})')
+            groups = response.json().get('data')
+            if not isinstance(groups, list):
+                raise RuntimeError('Invalid Proxmox groups response')
+            return any(isinstance(group, dict) and group.get('groupid') == groupid for group in groups)
+        if exists():
+            return False
+        response = s.post(url, data={'groupid': groupid, 'comment': comment}, timeout=30)
+        if response.status_code >= 400 and not exists():
+            raise RuntimeError(f'Cannot create Proxmox group (HTTP {response.status_code})')
+        return True
+
+    def set_user_group(self, userid: str, groupid: str, *, enabled: bool):
+        """Change only this enrollment membership, preserving other user settings."""
+        def groups_for_user():
+            user = self.get_user(userid)
+            if user is None:
+                raise ValueError('Proxmox user does not exist; create the user first')
+            groups = user.get('groups')
+            # A full user response must include membership; never treat an
+            # incomplete response as an empty set and erase other groups.
+            if isinstance(groups, str):
+                groups = [group for group in groups.split(',') if group]
+            if not isinstance(groups, list) or any(not isinstance(group, str) or not group for group in groups):
+                raise ValueError('Cannot determine existing Proxmox group membership')
+            return groups
+        groups = groups_for_user()
+        if (groupid in groups) == enabled:
+            return False
+        # PVE supports atomic append for enrollment. Removal submits a freshly
+        # read membership list because the API has no remove-one-group operation.
+        data = ({'groups': groupid, 'append': 1} if enabled else
+                {'groups': ','.join(group for group in groups if group != groupid), 'append': 0})
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/access/users/{requests.utils.quote(userid, safe='')}"
+        response = s.put(url, data=data, timeout=30)
+        if response.status_code >= 400:
+            raise RuntimeError(f'Cannot update Proxmox membership (HTTP {response.status_code})')
+        if (groupid in groups_for_user()) != enabled:
+            raise RuntimeError('Proxmox membership verification failed; refresh and retry')
         return True
 
     def get_role(self, roleid: str) -> Optional[Dict[str, Any]]:

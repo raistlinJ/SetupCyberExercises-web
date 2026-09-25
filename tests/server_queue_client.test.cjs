@@ -150,6 +150,24 @@ test('VM plans capture every project and all create/delete follow-ups before sub
   assert.equal(deletion[2].body.verifyCleanup, true);
 });
 
+test('custom command plans carry the default or selected timeout to every project', () => {
+  const sandbox = { deriveBaseVmName: (project, name) => name };
+  vm.createContext(sandbox); vm.runInContext(plans, sandbox);
+  const projects = ['one', 'two'].map(id => ({
+    project: { id }, targets: [{ index: 1, name: 'vm' }], auth: {},
+  }));
+  for (const timeout of [undefined, 125, 12000]) {
+    const steps = sandbox.buildServerVmSteps('run_stored_cmds', {
+      customCommand: 'hostname', customCommandTimeoutSeconds: timeout,
+    }, projects);
+    assert.equal(steps.length, 2);
+    for (const step of steps) {
+      assert.equal(step.body.customCommand, 'hostname');
+      assert.equal(step.body.customCommandTimeoutSeconds, timeout ?? 60);
+    }
+  }
+});
+
 test('wizard captures dynamically created project references and per-template accessibility', () => {
   const sandbox = {
     wizardNormalizeVmCreateOptions: value => value,

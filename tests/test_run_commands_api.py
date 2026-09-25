@@ -149,9 +149,44 @@ class RunCommandsApiTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
             self.assertEqual([call.kwargs['command'] for call in client.agent_exec.call_args_list], [command])
+            self.assertEqual(client.agent_exec.call_args.kwargs['timeout'], 60)
             self.assertEqual(len(response.get_json()['ran']), 1)
             self.assertIsNotNone(response.get_json().get('outputs_zip'))
             self.assertEqual(self.project.vms[0].stored_commands, [])
+
+    def test_custom_command_uses_requested_timeout(self):
+        self.project.vms[0].stored_commands = []
+        command = 'echo custom\nprintf "done\\n"'
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            client = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+            client.agent_exec.return_value = {'exitcode': 0, 'stdout': 'custom done', 'stderr': ''}
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={'username': 'root@pam', 'password': 'secret',
+                      'baseUrl': 'https://proxmox.local',
+                      'targets': [{'index': 1, 'name': self.target_name}],
+                      'customCommand': command, 'customCommandTimeoutSeconds': 12000},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual([call.kwargs['command'] for call in client.agent_exec.call_args_list], [command])
+            self.assertEqual(client.agent_exec.call_args.kwargs['timeout'], 12000)
+            self.assertEqual(len(response.get_json()['ran']), 1)
+            self.assertIsNotNone(response.get_json().get('outputs_zip'))
+            self.assertEqual(self.project.vms[0].stored_commands, [])
+
+    def test_custom_command_rejects_invalid_timeout(self):
+        for timeout in (0, -1, 1.5, True, '60', None, 86401):
+            with self.subTest(timeout=timeout), ExitStack() as stack:
+                for ctx in self._common_patches():
+                    stack.enter_context(ctx)
+                response = self.client.post(
+                    f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                    json={'customCommand': 'hostname', 'customCommandTimeoutSeconds': timeout},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('timeout', response.get_json()['error'])
 
     def test_commands_run_in_parallel_with_project_limit(self):
         mapped = [

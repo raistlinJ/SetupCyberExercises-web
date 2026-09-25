@@ -8268,6 +8268,112 @@ def instances_users_delete(pid: str):
     return jsonify(resp)
 
 
+ORCHESTRATOR_GROUP = 'caf-orchestrator'
+
+
+@api_bp.route('/projects/<pid>/instances/actions/users_orchestration_enable', methods=['POST'], defaults={'enable': True})
+@api_bp.route('/projects/<pid>/instances/actions/users_orchestration_disable', methods=['POST'], defaults={'enable': False})
+@_secure_route(required_roles=['admin'])
+def instances_users_orchestration(pid: str, enable: bool):
+    """Explicit user-level enrollment, not VM ACLs or role assignment."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get('confirmed') is not True:
+        return jsonify(error='Explicit orchestration access confirmation is required'), 400
+    proj = _store().get(pid)
+    if not proj:
+        return jsonify(error='Project not found'), 404
+    targets, expected = body.get('targets'), body.get('expectedUsers')
+    if not isinstance(targets, list) or not targets or not isinstance(expected, dict):
+        return jsonify(error='Selected VM rows and confirmed user identities are required'), 400
+    recipients = {}
+    selected_indices = set()
+    for target in targets:
+        if not isinstance(target, dict) or type(target.get('index')) is not int:
+            return jsonify(error='Invalid selected row'), 400
+        index = target['index']
+        normalized = _normalize_project_target(proj, target)
+        if (not normalized or not normalized['known_config'] or index < 1
+                or index > proj.instances or index > len(proj.credentials)):
+            return jsonify(error='Selected row is outside this project or has no credentials'), 400
+        username = str((proj.credentials[index - 1] or {}).get('username') or '').strip()
+        userid = username if '@' in username else username + '@pve'
+        if not username or len(userid) > 64 or re.search(r'[\s/:;!\x00-\x1f\x7f]', userid):
+            return jsonify(error='Selected row has an invalid Proxmox username'), 400
+        if expected.get(str(index)) != userid:
+            return jsonify(error='Selected user identities changed; review the selection and confirm again'), 409
+        selected_indices.add(str(index))
+        recipients.setdefault(userid, []).append(index)
+    if set(expected) != selected_indices:
+        return jsonify(error='Confirmed users must match the selected rows'), 400
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    username, password = body.get('username'), body.get('password')
+    token = None if username and password else (getattr(proj, 'proxmox_api_token', '') or None)
+    try:
+        endpoint = urlsplit(base_url or '')
+        if endpoint.scheme not in ('https', 'http') or not endpoint.hostname or endpoint.username or endpoint.password:
+            raise ValueError('Invalid Proxmox URL')
+        port = body.get('apiPort')
+        if port is not None:
+            if isinstance(port, bool) or not 1 <= int(port) <= 65535:
+                raise ValueError('Invalid Proxmox API port')
+            host = f'[{endpoint.hostname}]' if ':' in endpoint.hostname else endpoint.hostname
+            base_url = f'{endpoint.scheme}://{host}:{int(port)}'
+        if not token and not (username and password):
+            raise ValueError('Proxmox administrator credentials or API token are required')
+    except (TypeError, ValueError) as exc:
+        return jsonify(error=str(exc)), 400
+    client = ProxmoxClient(base_url=base_url, token=token, username=username, password=password,
+                           verify=body.get('verifySSL', getattr(proj, 'proxmox_verify_ssl', True)) is not False)
+    action = 'users_orchestration_enable' if enable else 'users_orchestration_disable'
+    actor = (getattr(current_app, 'current_user', lambda: None)() or {}).get('username', 'local')
+    result = {'group': ORCHESTRATOR_GROUP, 'updated_users': [], 'skipped': [], 'errors': [], 'notices': [
+        {'reason': 'User-level enrollment applies to every orchestrator instance using this PVE group, not only the selected VM rows. VM ACLs, pools and roles are unchanged.'}
+    ]}
+    _start_job(pid, action)
+    try:
+        if enable:
+            # Reusing a group that already grants native privileges could silently
+            # give enrollees host/VM administration rights. Require a dedicated group.
+            if any(entry.get('type') == 'group' and entry.get('ugid') == ORCHESTRATOR_GROUP
+                   for entry in client.list_acls()):
+                result['errors'].append({'reason': 'caf-orchestrator already has PVE ACL grants; use it only as a dedicated enrollment group before enabling access'})
+                return jsonify(result), 409
+            # Preflight every identity before making any membership changes.
+            for userid in recipients:
+                if client.get_user(userid) is None:
+                    result['errors'].append({'userid': userid, 'reason': 'Proxmox user does not exist; create the user first'})
+            if result['errors']:
+                return jsonify(result), 409
+            if _is_cancelled(pid):
+                result['cancelled'] = True
+                return jsonify(result)
+            client.ensure_group(ORCHESTRATOR_GROUP, 'Cyber-agent-flow orchestrator enrollment; no PVE ACL grants')
+        for userid in _job_items(pid, list(recipients), 'orchestration-access', 'Updating orchestration access for'):
+            if _is_cancelled(pid):
+                break
+            indices = sorted(set(recipients[userid]))
+            try:
+                changed = client.set_user_group(userid, ORCHESTRATOR_GROUP, enabled=enable)
+                entry = {'userid': userid, 'username': userid, 'indices': indices, 'index': indices[0],
+                         'group': ORCHESTRATOR_GROUP, 'orchestration_access': enable}
+                if changed:
+                    result['updated_users'].append(entry)
+                    LOG.info('Orchestration enrollment actor=%r project=%r user=%r enabled=%s', actor, pid, userid, enable)
+                else:
+                    result['skipped'].append(dict(entry, reason='Membership already matches the requested state'))
+            except Exception:
+                # Connector errors may contain upstream authentication details.
+                result['errors'].append({'userid': userid, 'indices': indices,
+                    'reason': 'Unable to change or verify membership; check PVE user/group management permissions and refresh before retrying'})
+        result['cancelled'] = _is_cancelled(pid)
+        return jsonify(result)
+    except Exception:
+        result['errors'].append({'reason': 'Unable to inspect or create the PVE enrollment group; check connectivity and user/group management permissions'})
+        return jsonify(result), 502
+    finally:
+        _end_job(pid, status='cancelled' if _is_cancelled(pid) else ('error' if result['errors'] else 'completed'))
+
+
 @api_bp.route("/projects/<pid>/instances/actions/users_access_sync", methods=["POST"])
 def instances_users_access_sync(pid: str):
     """Sync per-VM ACLs to match the current user accessibility setting.
@@ -8618,7 +8724,7 @@ def _execute_instance_command(proj, base_url, password, client, m, command_text,
                         out = stdout.channel.recv(4096).decode('utf-8', errors='ignore') if stdout.channel.recv_ready() else ''
                         err = stderr.channel.recv(4096).decode('utf-8', errors='ignore') if stderr.channel.recv_ready() else ''
                         return {'exitcode': None, 'stdout': out, 'stderr': err, 'timed_out': True}
-                    raise RuntimeError("agent exec timed out")
+                    raise RuntimeError(f"agent exec timed out (configured timeout: {timeout_value}s)")
                 time.sleep(1)
             
             code = stdout.channel.recv_exit_status()
@@ -8628,7 +8734,7 @@ def _execute_instance_command(proj, base_url, password, client, m, command_text,
             if code == 124: # timeout exit code
                 if return_partial_on_timeout:
                      return {'exitcode': None, 'stdout': out, 'stderr': err, 'timed_out': True}
-                raise RuntimeError("agent exec timed out")
+                raise RuntimeError(f"agent exec timed out (configured timeout: {timeout_value}s; pct exec returned exit code 124)")
                 
             return {'exitcode': code, 'stdout': out, 'stderr': err}
         finally:
@@ -10360,6 +10466,9 @@ def instances_run_stored_cmds(pid: str):
         if body.get('validateOnly'):
             return jsonify({'error': 'Custom commands cannot be combined with validation'}), 400
         custom_command = custom_command.strip()
+        custom_timeout = body.get('customCommandTimeoutSeconds', 60)
+        if type(custom_timeout) is not int or not 1 <= custom_timeout <= 86400:
+            return jsonify({'error': 'Custom command timeout must be a whole number between 1 and 86400 seconds'}), 400
     username = body.get('username') or None
     password = body.get('password') or None
     base_url = body.get('baseUrl') or proj.proxmox_url
@@ -10886,7 +10995,7 @@ def instances_run_stored_cmds(pid: str):
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
         steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
         if custom_command is not None:
-            steps = sanitize_start_command_steps([{'commands': [{'command': custom_command}]}])
+            steps = sanitize_start_command_steps([{'commands': [{'command': custom_command, 'timeout_seconds': custom_timeout}]}])
         validation_commands = _extract_validation_commands(vcfg)
         template_key = _make_template_key(proj, vcfg, base, m.get('name'))
 

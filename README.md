@@ -179,3 +179,15 @@ Challenges popup — Bulk visibility update
 ![Bulk Visibility Update](images/ctfd_challenges_bulk_visibility.svg)
 
 Tip: Replace the placeholder SVGs with real screenshots (keep filenames). PNGs work too if you update the links.
+
+## Orchestrator access
+
+In VM Manager, select rows and use **Users & Access → Enable orchestration access
+(dangerous)** to enroll their existing PVE users in `caf-orchestrator`. A matching
+**Disable orchestration access** operation removes enrollment. Both require an
+explicit confirmation naming the users; SCE administrators perform the change
+using their PVE administration credentials.
+
+Enrollment grants access to the configured orchestrator instance, not only the
+selected VMs. It does not assign ScenarioForge/CoreVM/participant roles or change
+VM ACLs. See [setup, scope, revocation and tests](docs/orchestration-access.md).

@@ -13,6 +13,8 @@ ACTION_LABELS = {
     'nets_remove': 'Remove network interfaces', 'nets_clear': 'Remove network interfaces',
     'users_create': 'Create users and permissions', 'users_delete': 'Delete users and pools',
     'users_perms': 'Set user permissions', 'users_access_sync': 'Sync user access',
+    'users_orchestration_enable': 'Enable orchestration access (dangerous)',
+    'users_orchestration_disable': 'Disable orchestration access',
     'users_creds_check': 'Check user credentials', 'users_creds_set': 'Sync user credentials',
     'run_startup_cmds': 'Run startup commands', 'run_stored_cmds': 'Run stored commands',
     'guest_push': 'Upload guest files', 'lxc_push': 'Upload container files',
