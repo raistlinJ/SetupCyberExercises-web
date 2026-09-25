@@ -44,7 +44,7 @@
           loaded: event.loaded, total: event.lengthComputable ? event.total : null,
         });
         xhr.upload.onload = () => options.onUploadProgress?.({ uploaded: true });
-        xhr.onerror = () => reject(new Error('Upload connection failed. Check the Queue before retrying.'));
+        xhr.onerror = () => reject(new Error('Upload failed. The file may have changed on disk. Please re-select it and upload again.'));
         xhr.onabort = () => reject(new Error('Upload interrupted. Check the Queue before retrying.'));
         xhr.onload = () => {
           if (xhr.status < 200 || xhr.status >= 300) {

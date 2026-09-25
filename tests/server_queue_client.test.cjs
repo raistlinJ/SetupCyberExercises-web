@@ -226,7 +226,7 @@ test('multipart upload reports progress before acceptance and surfaces proxy and
   await assert.rejects(rejected, /too large.*413/);
   const disconnected = window.ServerQueue.submit('Push', [], {}, files);
   xhr.onerror();
-  await assert.rejects(disconnected, /connection failed/);
+  await assert.rejects(disconnected, /file may have changed on disk.*re-select it/);
 });
 
 test('queue displays byte percentage and guest name during transfers, with indeterminate extraction', () => {
