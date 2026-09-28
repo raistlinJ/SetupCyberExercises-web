@@ -4,6 +4,7 @@ SQLite arbitrates claims across WSGI processes. A worker drains accepted plans
 without browser polling; request/session data is captured before acknowledging.
 """
 import io
+import base64
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import tempfile
 import shutil
 import threading
 import time
+import zipfile
 from contextlib import contextmanager, ExitStack
 from urllib.parse import quote, urlsplit
 
@@ -242,6 +244,7 @@ class ActionQueue:
         code, headers, body = 200, {'Content-Type': 'application/json'}, b'{}'
         results = []
         partial_errors = False
+        partial_error_message = 'VM creation reported errors; see results.'
         push_batch = GuestPushBatch()
         try:
             payload = json.loads(row['payload'])
@@ -285,12 +288,21 @@ class ActionQueue:
                             and urlsplit(step['url']).path.endswith('/instances/actions/create')
                             and isinstance(created_guests, list) and bool(created_guests)
                         )
-                        if not partial_create:
+                        # Independent pull steps should all finish, retaining
+                        # each project's archive even when some guests fail.
+                        partial_pull = (
+                            step['method'] == 'POST'
+                            and urlsplit(step['url']).path.endswith(('/instances/actions/guest_pull', '/instances/actions/lxc_pull'))
+                            and isinstance(result.get('outputs_zip'), dict)
+                        )
+                        if not partial_create and not partial_pull:
                             raise ValueError('Operation reported errors or unresolved templates; see results')
                         partial_errors = True
+                        if partial_pull:
+                            partial_error_message = 'Guest pull reported errors; see the summaries in the downloaded ZIP files.'
                 self.wait_for_child(step, result, job_id, report)
             if partial_errors and status == 'completed':
-                status, error = 'error', 'VM creation reported errors; see results.'
+                status, error = 'error', partial_error_message
         except Exception as exc:
             status, error = 'error', str(exc)
             self.app.logger.exception('Queued action %s failed', job_id)
@@ -363,6 +375,38 @@ def result_summary(row):
     return summary
 
 
+def result_log_sources(row):
+    """Find retained logs without decoding archives during queue polling."""
+    if row['status'] not in {'completed', 'error', 'cancelled'}:
+        return []
+    try:
+        result = json.loads(row['result'] or b'{}')
+    except (ValueError, UnicodeDecodeError, TypeError):
+        return []
+    sources = []
+
+    def collect(value):
+        if not isinstance(value, dict):
+            return
+        archive = value.get('outputs_zip')
+        if (isinstance(archive, dict) and archive.get('base64')
+                and str(archive.get('filename', '')).startswith(('stored_cmd_outputs_', 'startup_cmd_outputs_'))):
+            sources.append(archive)
+        for key in ('log', 'logs'):
+            log = value.get(key)
+            if isinstance(log, str) and log.strip():
+                sources.append(log)
+            elif isinstance(log, list) and log:
+                sources.append('\n'.join(entry if isinstance(entry, str) else json.dumps(entry, ensure_ascii=False) for entry in log))
+        children = value.get('results')
+        if isinstance(children, list):
+            for child in children:
+                collect(child)
+
+    collect(result)
+    return sources
+
+
 def public_record(row):
     detail = json.loads(row['progress_state'] or '{}')
     step_progress = detail.get('progress')
@@ -374,6 +418,7 @@ def public_record(row):
         progress = min(99, progress)
     return {'id': row['id'], 'label': queue_label(row['label']), 'projectId': row['project'],
             'status': row['status'], 'summary': result_summary(row), 'createdAt': row['created'] * 1000,
+            'logUrl': f"/api/queue/{row['id']}/log" if result_log_sources(row) else None,
             'startedAt': row['started'] * 1000 if row['started'] else None,
             'finishedAt': row['finished'] * 1000 if row['finished'] else None,
             'cancelRequested': bool(row['cancel']), 'errorMessage': row['error'],
@@ -467,6 +512,30 @@ def init_action_queue(app):
         headers = json.loads(row['headers'] or '{}')
         headers = {k: v for k, v in headers.items() if k.lower() in {'content-type', 'content-disposition', 'x-deployforge-auth-failure'}}
         return Response(row['result'] or b'{}', status=row['code'] or 200, headers=headers)
+
+    @bp.route('/<int:job_id>/log', methods=['GET'])
+    @_secure_route(api_key=False)
+    def full_log(job_id):
+        row = record(job_id)
+        if not row:
+            return jsonify(error='not found'), 404
+        sources = result_log_sources(row)
+        if not sources:
+            return jsonify(error='No retained log is available for this action'), 404
+        sections = [result_summary(row)]
+        try:
+            for source in sources:
+                if isinstance(source, str):
+                    sections.append(source)
+                    continue
+                with zipfile.ZipFile(io.BytesIO(base64.b64decode(source['base64'], validate=True))) as archive:
+                    for entry in archive.infolist():
+                        if not entry.is_dir() and entry.filename.endswith(('.txt', '.json')):
+                            sections.append(f"=== {entry.filename} ===\n" + archive.read(entry).decode('utf-8', errors='replace'))
+        except (ValueError, zipfile.BadZipFile, KeyError, RuntimeError):
+            return jsonify(error='The retained log archive could not be read'), 422
+        return Response('\n\n'.join(sections) + '\n', content_type='text/plain; charset=utf-8',
+                        headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
 
     @bp.route('/<int:job_id>/cancel', methods=['POST'])
     @_secure_route()

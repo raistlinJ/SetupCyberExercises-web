@@ -32,24 +32,23 @@ separate from these recipient accounts.
 
 **Enrollment is user-level, not limited to the selected VM rows or their pool.**
 Every orchestrator instance authenticating against this PVE environment and using
-this group will accept the enrolled user. The current orchestrator lets members
-see its configured lab dashboard and saved run summaries. Its WebUI remains
-read-only; future orchestration execution will allow host-mediated operations
-such as pushing/pulling files and running guest commands. That is why enrollment
-is explicitly labeled dangerous and requires confirmation.
+this group will accept the enrolled user. With orchestrator 0.6+, each user's VM
+choices are restricted to their effective VM.Audit permissions (including pool
+and group ACLs) on the orchestrator's node. Enrollment authorizes host-mediated
+guest operations on that entire eligible set, not just the rows selected in SCE.
+Results and VM role selections are private to the user. Older orchestrator
+versions do not provide this per-user isolation; upgrade the orchestrator too.
 
-This operation does not grant Proxmox Administrator, guest-exec privileges or a
-host shell. It changes no VM/pool ACLs, VM visibility settings, passwords, account
-enabled flags, or VM role assignments. It rejects enrollment if the group already
-has native PVE ACL grants, to avoid unintentionally inheriting extra privileges.
-Keep this group dedicated to application enrollment.
+This operation does not grant native Proxmox Administrator/VM.Monitor privileges
+or a host shell. It changes no VM/pool ACLs, VM visibility settings, passwords,
+account enabled flags, or VM role assignments. It rejects enrollment if the group
+already has native PVE ACL grants, avoiding unintended extra privileges. Keep
+this group dedicated to application enrollment. Group membership deliberately
+allows additional guest control through the orchestrator within the visible VM set.
 
-SCE does not decide which VM is ScenarioForge, CoreVM or the participant. The
-planned orchestrator UI will list authorized VMs and let the user assign those
-roles, updating the dashboard. Per-user VM/pool scoping and interactive role
-assignment are separate work and are not implemented by this enrollment operation.
-Do not interpret successful enrollment as per-user isolation in the current
-orchestrator instance.
+SCE does not decide which VM is ScenarioForge, CoreVM or the participant. Users
+assign those roles from their available VMs in the orchestrator WebUI. Current
+ACLs are checked before host operations; role selection is not a permanent grant.
 
 ## Revocation and existing permissions
 

@@ -20,7 +20,9 @@ test('confirmation names users and clearly describes user-wide grant and revocat
  assert.equal(plan.message.match(/alice@pve/g).length, 1);
  assert.match(plan.message, /Dangerous/);
  assert.match(plan.message, /not just the selected VM rows/);
- assert.match(plan.message, /current WebUI is read-only/);
+ assert.match(plan.message, /Orchestrator 0\.6\+/);
+ assert.match(plan.message, /PVE-visible VMs/);
+ assert.match(plan.message, /results private per user/);
  assert.match(sandbox.buildOrchestrationAccessPlan(projects(), false).message, /including access enrolled from other projects/);
 });
 

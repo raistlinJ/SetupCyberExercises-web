@@ -2008,7 +2008,7 @@ const ConsoleDock = (() => {
                 const status = (item.status || 'completed').toLowerCase();
                 let statusLabel = 'Completed';
                 let statusClass = 'text-success';
-                if (status === 'error') { statusLabel = 'Failed'; statusClass = 'text-danger'; }
+                if (status === 'error' || status === 'failed') { statusLabel = 'Failed'; statusClass = 'text-danger'; }
                 else if (status === 'cancelled' || status === 'canceled') { statusLabel = 'Cancelled'; statusClass = 'text-muted'; }
                 const durationMs = Number(item.durationMs);
                 let durationMeta = '';
@@ -2031,21 +2031,27 @@ const ConsoleDock = (() => {
                   ? '<span class="queue-meta text-muted">cancel requested</span>'
                   : '';
                 const errorMeta = (status === 'failed' || status === 'error') && item.errorMessage
-                  ? `<div class="queue-meta text-danger small">${escapeHtml(item.errorMessage)}</div>`
+                  ? `<div class="queue-meta queue-result-error text-danger small">${escapeHtml(item.errorMessage)}</div>`
                   : '';
                 return `<li class="queue-item queue-item-completed">`
                   + `<span class="queue-index">${idx+1}</span>`
+                  + `<div class="queue-completed-content"><div class="queue-completed-heading">`
                   + `<span class="queue-label">${escapeHtml(item.label || 'Completed action')}</span>`
-                  + `${proj}`
                   + `<span class="queue-meta ${statusClass}">${statusLabel}</span>`
+                  + `</div><div class="queue-completed-meta">`
+                  + `${proj}`
                   + `${durationMeta}`
                   + `${finishedMeta}`
                   + `${cancelMeta}`
+                  + `</div>`
                   + `${errorMeta}`
-                  + `<details data-queue-result="${escapeHtml(String(item.id))}" class="queue-meta ms-auto"${openResults.has(String(item.id)) ? ' open' : ''}>`
+                  + `<details data-queue-result="${escapeHtml(String(item.id))}" class="queue-results"${openResults.has(String(item.id)) ? ' open' : ''}>`
                   + `<summary>View results</summary>`
-                  + `<div class="small mt-2">${escapeHtml(item.summary || `${statusLabel}: ${item.label || 'Action'}.${item.errorMessage ? ' ' + item.errorMessage : ''}`)}</div>`
+                  + `<div class="queue-result-summary">${escapeHtml(item.summary || `${statusLabel}: ${item.label || 'Action'}.${item.errorMessage ? ' ' + item.errorMessage : ''}`)}</div>`
+                  + (item.server && item.logUrl === `/api/queue/${item.id}/log`
+                    ? `<a class="queue-log-link" href="${escapeHtml(item.logUrl)}" target="_blank" rel="noopener">View full log ↗</a>` : '')
                   + `</details>`
+                  + `</div>`
                   + `</li>`;
               }).join('')
             + `</ol>`

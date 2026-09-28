@@ -1522,6 +1522,7 @@ async function refreshVmView(opts) {
 }
 
 function renderMergedVmTable(rows) {
+  updateVmSelectionCount();
   const host = document.getElementById('vm-table'); if (!host) return;
   const f = (FILTER_TEXT || '').toLowerCase().trim();
   const allRows = Array.isArray(rows) ? rows : [];
@@ -2267,6 +2268,7 @@ function emitActionLogs(actionName, resp) {
 }
 
 function renderVmTable(proj) {
+  updateVmSelectionCount(proj ? [proj.id] : []);
   const host = document.getElementById('vm-table');
   if (!proj) { host.innerHTML = ''; return; }
   const projectKey = String(proj?.id ?? '__project__');
@@ -3394,7 +3396,23 @@ function isCurrentVmProject(project) {
   return !!(project && canonicalPid(project.id) && canonicalPid(project.id) === canonicalPid(PROJ?.id));
 }
 
+function updateVmSelectionCount(projectIds = getActivePids()) {
+  const host = document.getElementById('vm-selection-count');
+  if (!host) return;
+  const counts = new Map();
+  listSelectedEntries().forEach(entry => {
+    counts.set(entry.pidCanonical, (counts.get(entry.pidCanonical) || 0) + 1);
+  });
+  host.innerHTML = canonicalPidList(projectIds).map(pid => {
+    const project = (ALL_PROJECTS || []).find(item => canonicalPid(item.id) === pid)
+      || (canonicalPid(PROJ?.id) === pid ? PROJ : null);
+    const label = project?.name || pid;
+    return `<span class="border rounded px-2 py-1">${escHtml(label)}: <strong>${counts.get(pid) || 0} selected</strong></span>`;
+  }).join('');
+}
+
 function updateRefreshState() {
+  updateVmSelectionCount();
   const btn = document.getElementById('btn-refresh');
   const wrap = document.getElementById('refresh-wrapper');
   const colsBtn = document.getElementById('vm-cols-btn');
@@ -8240,6 +8258,13 @@ function showActionSummary(actionName, resp) {
           link.textContent = outputsZipInfos.length > 1 ? `Download ${archiveIndex + 1} (${sizeLabel})` : `Download (${sizeLabel})`;
           container.appendChild(link);
           body.appendChild(container);
+          if (archiveInfo.auto_download === true) {
+            link.click();
+            const note = document.createElement('div');
+            note.className = 'small text-muted mt-1';
+            note.textContent = 'Download requested automatically. If it did not start, use the link above. The ZIP includes the pull summary and log.';
+            container.appendChild(note);
+          }
           if (modalEl && window.bootstrap) {
             const cleanup = () => {
               try { URL.revokeObjectURL(url); } catch { }

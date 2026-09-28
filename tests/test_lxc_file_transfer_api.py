@@ -210,8 +210,13 @@ class LxcFileTransferApiTests(unittest.TestCase):
                         self.assertEqual(body['errors'][0]['index'], 3)
                         self.assertTrue(all(ssh.closed for ssh in connections))
                         if action == 'pull':
+                            self.assertTrue(body['outputs_zip']['auto_download'])
                             with zipfile.ZipFile(io.BytesIO(base64.b64decode(body['outputs_zip']['base64']))) as archive:
                                 self.assertIsNone(archive.testzip())
+                                summary = json.loads(archive.read('summary.json'))
+                                self.assertEqual(summary['errors'], body['errors'])
+                                self.assertEqual(summary['pulled'], body['pulled'])
+                                self.assertIn('[ERROR]', archive.read('summary.txt').decode())
                                 for i in (1, 2, 4):
                                     self.assertEqual(archive.read(f'guest-{i}-{100+i}/output.txt'), f'guest {i}'.encode())
 
@@ -666,6 +671,10 @@ class LxcFileTransferApiTests(unittest.TestCase):
             self.assertIn(f'{prefix}/etc/hosts', names)
             self.assertIn(f'{prefix}/var/log/app/output.log', names)
             self.assertEqual(archive.read(f'{prefix}/etc/hosts'), b'127.0.0.1 localhost\n')
+            summary = json.loads(archive.read('summary.json'))
+            self.assertEqual(summary['status'], 'completed')
+            self.assertEqual(summary['paths'], ['/etc/hosts', '/var/log/app'])
+            self.assertIn('[SUCCESS]', archive.read('summary.txt').decode())
         self.assertIn('pct exec 101 -- sh -c ', ssh.commands[0])
         self.assertIn('cd / && tar --exclude=', ssh.commands[0])
         self.assertIn('-- etc/hosts var/log/app', ssh.commands[0])
@@ -901,7 +910,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
         self.assertEqual(inner_arguments[path_index:path_index + 2], ['tmp/*.txt; touch /tmp/injected', '&&'])
         self.assertNotIn('touch', inner_arguments)
 
-    def test_pull_reports_failure_per_lxc_without_an_archive(self):
+    def test_failed_pull_downloads_a_report_archive(self):
         ssh = _Ssh(stderr=b'file not found', code=2)
         with patch('app.routes.api._block_when_remote', return_value=None), \
                 patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
@@ -919,7 +928,13 @@ class LxcFileTransferApiTests(unittest.TestCase):
         self.assertEqual(len(body['errors']), 1)
         self.assertEqual(body['errors'][0]['name'], self.target_name)
         self.assertIn('file not found', body['errors'][0]['reason'])
-        self.assertIsNone(body['outputs_zip'])
+        self.assertTrue(body['outputs_zip']['auto_download'])
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(body['outputs_zip']['base64']))) as archive:
+            self.assertEqual(set(archive.namelist()), {'summary.txt', 'summary.json'})
+            summary = json.loads(archive.read('summary.json'))
+            self.assertEqual(summary['errors'], body['errors'])
+            self.assertEqual(summary['status'], 'completed with errors')
+            self.assertIn('file not found', archive.read('summary.txt').decode())
 
     def test_non_lxc_target_is_skipped_without_ssh(self):
         with patch('app.routes.api._block_when_remote', return_value=None), \

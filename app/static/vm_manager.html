@@ -115,6 +115,11 @@
                   <input id="vm-filter-regex" class="form-check-input mt-0" type="checkbox"
                     title="Treat filter as JavaScript RegExp (case-insensitive)" aria-label="Regex" />
                   <span class="ms-1">Regex</span>
+                  <button type="button" class="btn btn-link btn-sm p-0 ms-2" data-bs-toggle="modal"
+                    data-bs-target="#vmRegexHelpModal" aria-label="Show regular expression examples"
+                    title="Regular expression examples">
+                    <i class="bi bi-info-circle" aria-hidden="true"></i>
+                  </button>
                 </span>
                 <button class="btn btn-outline-secondary" type="button" title="Clear filter"
                   onclick="vmClearFilter()">Clear</button>
@@ -185,6 +190,8 @@
                 </div>
               </div>
             </div>
+            <div id="vm-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status"
+              aria-live="polite" aria-atomic="true"></div>
             <!-- Actions toolbar -->
             <div class="d-flex flex-wrap gap-2 mb-3" id="vm-actions-bar">
               <!-- Lifecycle & Setup group -->
@@ -329,6 +336,59 @@
       </main>
     </div>
   </div>
+    <div class="modal fade" id="vmRegexHelpModal" tabindex="-1" aria-labelledby="vmRegexHelpTitle" aria-hidden="true">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="vmRegexHelpTitle">Regular expression examples</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <p>Enable <strong>Regex</strong>, then paste a pattern into the filter. Matching is case-insensitive.
+              Enter the pattern directly, without surrounding <code>/</code> characters.</p>
+            <p class="text-muted small">The filter searches the whole row, including VM names, project names,
+              usernames, and state information. These examples match wherever that text appears in a row.</p>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead><tr><th scope="col">Pattern</th><th scope="col">Example matches</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td><code class="text-break">\bname(?:1|2)(?!\d)\S*</code></td>
+                    <td><code>name1</code>, <code>name2</code>, <code>name1-lab</code>, and <code>name2-lab</code>.
+                      Excludes <code>name10</code>, <code>name20</code>, and <code>name123</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-break">\bname(?:1|2)\b</code></td>
+                    <td><code>name1</code> or <code>name2</code> as whole words; excludes <code>name1extra</code>.
+                      A hyphen counts as a word boundary, so <code>name1-lab</code> also matches.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-break">web|database</code></td>
+                    <td>Text containing either <code>web</code> or <code>database</code>, such as
+                      <code>web-server1</code> or <code>database2</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-break">\bweb\d+\b</code></td>
+                    <td><code>web1</code>, <code>web12</code>, or <code>web300</code>; excludes <code>web</code> alone.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-break">ubuntu\.22</code></td>
+                    <td><code>ubuntu.22</code>. Escaping the dot makes it literal; excludes <code>ubuntuX22</code>.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="small mb-0">In the first example, <code>\b</code> starts at a word boundary,
+              <code>(?:1|2)</code> chooses 1 or 2, <code>(?!\d)</code> prevents another digit immediately after it,
+              and <code>\S*</code> allows a suffix with no spaces. Use <code>\S*</code>, not <code>\S\*</code>:
+              <code>\*</code> matches a literal asterisk.</p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal fade" id="vmCreateOptionsModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog">
         <div class="modal-content">

@@ -188,6 +188,6 @@ In VM Manager, select rows and use **Users & Access → Enable orchestration acc
 explicit confirmation naming the users; SCE administrators perform the change
 using their PVE administration credentials.
 
-Enrollment grants access to the configured orchestrator instance, not only the
-selected VMs. It does not assign ScenarioForge/CoreVM/participant roles or change
-VM ACLs. See [setup, scope, revocation and tests](docs/orchestration-access.md).
+Enrollment is user-level, not restricted to the selected rows. Orchestrator 0.6+
+limits each user to their PVE-visible VMs and private results. SCE does not assign
+ScenarioForge/CoreVM/participant roles or change VM ACLs. See [setup, scope, revocation and tests](docs/orchestration-access.md).

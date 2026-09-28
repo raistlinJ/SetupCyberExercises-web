@@ -1,4 +1,6 @@
 import io
+import base64
+import zipfile
 import json
 import sqlite3
 import threading
@@ -9,6 +11,54 @@ from flask import Flask, jsonify, request, session
 
 from app.action_queue import ActionQueue, init_action_queue, public_record
 from app.routes import api
+
+
+@pytest.mark.parametrize('status', ['completed', 'error'])
+def test_queue_full_log_preserves_all_command_output_and_owner_access(harness, status):
+    app, client, *_ = harness
+    job = enqueue(client, 'logs').get_json()
+    wait_terminal(client, job['id'])
+    output = 'long output\n' * 1000 + '<script>literal output</script>\nEND OF LOG'
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        archive.writestr('vm1/step_01/cmd_01.txt', output)
+        archive.writestr('vm2/step_01/cmd_01.txt', 'STDERR: guest agent error')
+    result = {'outputs_zip': {'filename': 'stored_cmd_outputs_test.zip',
+                             'base64': base64.b64encode(buffer.getvalue()).decode()}}
+    with app.extensions['action_queue'].connect() as db:
+        db.execute('UPDATE actions SET result=?, status=? WHERE id=?',
+                   (json.dumps(result).encode(), status, job['id']))
+    record = client.get(f"/api/queue/{job['id']}").get_json()
+    response = client.get(record['logUrl'])
+    assert response.status_code == 200
+    assert response.mimetype == 'text/plain'
+    assert output in response.get_data(as_text=True)
+    assert 'STDERR: guest agent error' in response.get_data(as_text=True)
+    assert 'base64' not in response.get_data(as_text=True)
+    with client.session_transaction() as sess:
+        sess['user'] = 'bob'
+    assert client.get(record['logUrl']).status_code == 404
+
+
+@pytest.mark.parametrize('result, expected', [
+    ({'results': [{'log': ['first', 'last']}, {'logs': 'second step'}]}, 'first\nlast\n\nsecond step'),
+    ({'ok': True}, None),
+    ({'outputs_zip': {'filename': 'guest_pull_test.zip', 'base64': 'file-data'}}, None),
+])
+def test_queue_log_link_only_for_retained_logs(harness, result, expected):
+    app, client, *_ = harness
+    job = enqueue(client, 'log-availability').get_json()
+    wait_terminal(client, job['id'])
+    with app.extensions['action_queue'].connect() as db:
+        db.execute('UPDATE actions SET result=? WHERE id=?', (json.dumps(result).encode(), job['id']))
+    record = client.get(f"/api/queue/{job['id']}").get_json()
+    response = client.get(f"/api/queue/{job['id']}/log")
+    if expected:
+        assert record['logUrl']
+        assert expected in response.get_data(as_text=True)
+    else:
+        assert record['logUrl'] is None
+        assert response.status_code == 404
 
 
 @pytest.fixture
@@ -64,6 +114,9 @@ def harness(tmp_path):
     app.add_url_rule('/api/projects/<pid>/instances/actions/start',
                      view_func=api.instances_start, methods=['POST'])
 
+    app.add_url_rule('/api/projects/<pid>/instances/actions/run_stored_cmds',
+                     view_func=api.instances_run_stored_cmds, methods=['POST'])
+
     @app.post('/api/projects/import/start')
     def async_import():
         api._ACTIVE_JOBS[api._import_job_key('child')] = {'id': 'child', 'status': 'running'}
@@ -114,6 +167,25 @@ def harness(tmp_path):
 def enqueue(client, name, **extra):
     return client.post('/api/queue', json={'token': name, 'label': name,
         'steps': [{'method': 'POST', 'url': f'/api/work/{name}', 'body': {'captured': name}}], **extra})
+
+
+def test_failed_pull_retains_archives_and_finishes_other_projects(harness):
+    app, client, *_ = harness
+
+    def pull(pid):
+        return jsonify(errors=[{'reason': 'guest agent unavailable'}] if pid == 'one' else [],
+                       outputs_zip={'filename': f'{pid}.zip', 'base64': 'archive', 'auto_download': True})
+
+    app.add_url_rule('/api/projects/<pid>/instances/actions/guest_pull', view_func=pull, methods=['POST'])
+    job = enqueue(client, 'pull-projects', steps=[
+        {'method': 'POST', 'url': f'/api/projects/{pid}/instances/actions/guest_pull'}
+        for pid in ('one', 'two')
+    ]).get_json()
+    state = wait_terminal(client, job['id'])
+    assert state['status'] == 'error'
+    assert 'Guest pull reported errors' in state['errorMessage']
+    result = client.get(f"/api/queue/{job['id']}/result").get_json()
+    assert [entry['outputs_zip']['filename'] for entry in result['results']] == ['one.zip', 'two.zip']
 
 
 def wait_terminal(client, job_id):
@@ -669,3 +741,52 @@ def test_result_summary_does_not_claim_failed_or_cancelled_work_succeeded(status
     assert 'successfully' not in summary
     if status == 'error':
         assert 'Connection lost' in summary
+
+
+@pytest.mark.parametrize('guest_type', ['qemu', 'lxc'])
+@pytest.mark.parametrize('first_fails', [False, True])
+def test_commands_refresh_inventory_in_fifo_order_without_browser_refresh(harness, monkeypatch, guest_type, first_fails):
+    from types import SimpleNamespace
+    from app.storage.projects import Project, VMConfig
+
+    app, client, started, release, finished, calls = harness
+    project = Project(id='queue-test', name='Queue Test', tag='-lab-', vms=[VMConfig(name='alpha')])
+    monkeypatch.setattr(api, '_store', lambda: SimpleNamespace(get=lambda pid: project))
+    monkeypatch.setattr(api, '_runtime_store', lambda: None)
+    monkeypatch.setattr(api, 'ProxmoxClient', lambda **kwargs: object())
+    inventory = {'vmid': 101}
+    events = []
+
+    def refresh(_client):
+        events.append(('refresh', inventory['vmid']))
+        return {'alpha-lab-1': {'node': 'node1', 'vmid': inventory['vmid'], 'type': guest_type}}, None
+
+    def execute(proj, url, password, remote, target, command, timeout, **kwargs):
+        events.append((command, target['vmid']))
+        if command == 'first':
+            started.set()
+            assert release.wait(5)
+            inventory['vmid'] = 202
+            if first_fails:
+                raise RuntimeError('agent exec timed out (configured timeout: 60s)')
+        return {'exitcode': 0, 'stdout': command, 'stderr': ''}
+
+    monkeypatch.setattr(api, '_list_cluster_vms_by_name', refresh)
+    monkeypatch.setattr(api, '_execute_instance_command', execute)
+
+    def command_job(command):
+        return enqueue(client, command, steps=[{
+            'method': 'POST', 'url': '/api/projects/queue-test/instances/actions/run_stored_cmds',
+            'body': {'customCommand': command, 'customCommandTimeoutSeconds': 60,
+                     'username': 'root', 'password': 'test', 'baseUrl': 'https://proxmox.local',
+                     'targets': [{'index': 1, 'name': 'alpha-lab-1'}]},
+        }]).get_json()['id']
+
+    first = command_job('first')
+    assert started.wait(2)
+    second = command_job('second')
+    assert events == [('refresh', 101), ('first', 101)]
+    release.set()
+    assert wait_terminal(client, first)['status'] == ('error' if first_fails else 'completed')
+    assert wait_terminal(client, second)['status'] == 'completed'
+    assert events == [('refresh', 101), ('first', 101), ('refresh', 202), ('second', 202)]

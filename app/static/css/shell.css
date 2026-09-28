@@ -552,6 +552,20 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
 	overflow: auto;
 }
 .console-dock .queue-item .queue-meta { font-size: .75rem; color: rgba(203, 213, 225, .8); margin-left: .5rem; }
+.console-dock .queue-item-completed { align-items: flex-start; }
+.console-dock .queue-item-completed > .queue-index { flex-shrink: 0; }
+.console-dock .queue-completed-content { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.console-dock .queue-completed-heading,
+.console-dock .queue-completed-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .75rem; }
+.console-dock .queue-completed-heading { justify-content: space-between; }
+.console-dock .queue-item-completed .queue-meta { margin-left: 0; }
+.console-dock .queue-result-error { margin-top: .3rem; }
+.console-dock .queue-results { margin-top: .4rem; font-size: .8rem; }
+.console-dock .queue-results summary { cursor: pointer; width: fit-content; }
+.console-dock .queue-results[open] { border-top: 1px solid rgba(148, 163, 184, .2); padding-top: .4rem; }
+.console-dock .queue-result-summary { margin-top: .5rem; white-space: pre-wrap; }
+.console-dock .queue-log-link { display: inline-block; margin-top: .5rem; color: #93c5fd; text-decoration: underline; }
+.console-dock .queue-log-link:hover { color: #bfdbfe; }
 .console-dock .queue-item .queue-blocked { font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
 .console-dock .queue-index {
 	display: inline-flex;

@@ -5355,6 +5355,7 @@ def instances_purge_leftovers(pid: str):
 
 def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str, Any]], Optional[str]]:
     name_to_info: Dict[str, Dict[str, Any]] = {}
+    inventory_errors = []
     try:
         nodes = client.list_nodes() or []
 
@@ -5376,8 +5377,8 @@ def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str
                 try:
                     if hasattr(thread_client, 'list_lxc_vms'):
                         lxcs = thread_client.list_lxc_vms(node) or []
-                except Exception:
-                    pass
+                except Exception as exc:
+                    return (node, qemus, [], f"LXC inventory: {exc}")
                 return (node, qemus, lxcs, None)
             except Exception as e:
                 return (node, [], [], e)
@@ -5387,7 +5388,9 @@ def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str
             futures = [pool.submit(_fetch_node_vms, n) for n in nodes]
             for fut in as_completed(futures):
                 node, qemus, lxcs, err = fut.result()
-                if err or not node:
+                if err:
+                    inventory_errors.append(f"{node}: {err}")
+                if not node:
                     continue
                 for q in qemus:
                     nm = str((q or {}).get('name') or '')
@@ -5419,6 +5422,8 @@ def _list_cluster_vms_by_name(client: ProxmoxClient) -> Tuple[Dict[str, Dict[str
         import traceback
         traceback.print_exc()
         return {}, f'failed to list nodes: {e}'
+    if inventory_errors:
+        return name_to_info, "Failed to refresh guest inventory: " + "; ".join(sorted(inventory_errors))
     return name_to_info, None
 
 
@@ -9757,7 +9762,9 @@ def instances_lxc_pull(pid: str):
                     if isinstance(header, str):
                         header = header.encode('utf-8', errors='replace')
                     if not header.startswith(b'TRANSFER_SIZE='):
-                        raise RuntimeError('Guest archive size was not returned')
+                        stderr_raw = stderr.read()
+                        stderr_text = stderr_raw.decode('utf-8', errors='replace') if isinstance(stderr_raw, bytes) else str(stderr_raw or '')
+                        raise RuntimeError(stderr_text.strip() or 'Guest archive size was not returned')
                     archive_size = int(header.split(b'=', 1)[1])
                     _transfer_bytes('Downloading from guest', 0, archive_size)
                     while True:
@@ -9811,17 +9818,38 @@ def instances_lxc_pull(pid: str):
         ):
             pulled.extend(guest_results)
             errors.extend(guest_errors)
+        cancelled = _is_cancelled(pid)
+        generated_at = datetime.now(timezone.utc)
+        outcome = 'cancelled' if cancelled else ('completed with errors' if errors else 'completed')
+        log = [
+            f"Guest file pull: {outcome}",
+            f"Project: {getattr(proj, 'name', '') or pid} ({pid})",
+            f"Generated: {generated_at.isoformat()}",
+            'Requested paths: ' + ', '.join(paths),
+            f"Guests pulled: {len(pulled)}; skipped: {len(skipped)}; errors: {len(errors)}",
+        ]
+        for label, entries in (('SUCCESS', pulled), ('SKIPPED', skipped), ('ERROR', errors)):
+            for entry in entries:
+                identity = f"{entry.get('name') or 'Unknown guest'} (VMID {entry.get('vmid', '?')}, node {entry.get('node') or '?'})"
+                detail = (f"{entry.get('file_count', 0)} file(s) archived" if label == 'SUCCESS'
+                          else str(entry.get('reason') or entry.get('error') or 'No detail available'))
+                log.append(f'[{label}] {identity}: {detail}')
+        output_zip.writestr('summary.txt', '\n'.join(log) + '\n')
+        output_zip.writestr('summary.json', json.dumps({
+            'project_id': pid, 'project_name': getattr(proj, 'name', ''),
+            'generated_at': generated_at.isoformat(), 'status': outcome,
+            'paths': paths, 'pulled': pulled, 'skipped': skipped, 'errors': errors,
+            'log': log,
+        }, indent=2))
     zip_bytes = zip_stream.getvalue()
-    outputs_zip = None
-    if pulled:
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-        outputs_zip = {
-            'filename': f"{'guest' if include_qemu else 'lxc'}_pull_{timestamp}.zip",
-            'base64': base64.b64encode(zip_bytes).decode('ascii'),
-            'size': len(zip_bytes),
-            'label': 'Pulled Files',
-        }
-    cancelled = _is_cancelled(pid)
+    timestamp = generated_at.strftime('%Y%m%d_%H%M%S')
+    outputs_zip = {
+        'filename': f"{'guest' if include_qemu else 'lxc'}_pull_{_safe_file_stem(pid)}_{timestamp}.zip",
+        'base64': base64.b64encode(zip_bytes).decode('ascii'),
+        'size': len(zip_bytes),
+        'label': 'Pulled Files and Summary',
+        'auto_download': True,
+    }
     _update_job_detail(pid, transferProgress=None, transferDirection='',
                        **({} if cancelled else {'progress': 100}),
                        message='Guest pull cancelled' if cancelled else 'Guest pull completed')
