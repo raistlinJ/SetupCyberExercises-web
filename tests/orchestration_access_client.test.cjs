@@ -19,6 +19,9 @@ test('confirmation names users and clearly describes user-wide grant and revocat
  assert.deepEqual(plain(plan.expectedByProject), { p1: { 1: 'alice@pve' }, p2: { 1: 'charlie@pve' } });
  assert.equal(plan.message.match(/alice@pve/g).length, 1);
  assert.match(plan.message, /Dangerous/);
+ assert.match(plan.message, /caf-orchestration and caf-maintainers/);
+ assert.match(plan.message, /updating and rolling back Cyber-agent-flow and ScenarioForge/);
+ assert.match(sandbox.buildOrchestrationAccessPlan(projects(), false).message, /caf-orchestration, caf-maintainers and the legacy caf-orchestrator/);
  assert.match(plan.message, /not just the selected VM rows/);
  assert.match(plan.message, /Orchestrator 0\.6\+/);
  assert.match(plan.message, /PVE-visible VMs/);

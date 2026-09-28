@@ -8273,7 +8273,9 @@ def instances_users_delete(pid: str):
     return jsonify(resp)
 
 
-ORCHESTRATOR_GROUP = 'caf-orchestrator'
+ORCHESTRATOR_GROUP = 'caf-orchestration'
+ORCHESTRATOR_MAINTENANCE_GROUP = 'caf-maintainers'
+LEGACY_ORCHESTRATOR_GROUP = 'caf-orchestrator'
 
 
 @api_bp.route('/projects/<pid>/instances/actions/users_orchestration_enable', methods=['POST'], defaults={'enable': True})
@@ -8331,17 +8333,21 @@ def instances_users_orchestration(pid: str, enable: bool):
                            verify=body.get('verifySSL', getattr(proj, 'proxmox_verify_ssl', True)) is not False)
     action = 'users_orchestration_enable' if enable else 'users_orchestration_disable'
     actor = (getattr(current_app, 'current_user', lambda: None)() or {}).get('username', 'local')
-    result = {'group': ORCHESTRATOR_GROUP, 'updated_users': [], 'skipped': [], 'errors': [], 'notices': [
-        {'reason': 'User-level enrollment applies to every orchestrator instance using this PVE group, not only the selected VM rows. VM ACLs, pools and roles are unchanged.'}
+    groups = [ORCHESTRATOR_GROUP, ORCHESTRATOR_MAINTENANCE_GROUP]
+    if not enable:
+        groups.append(LEGACY_ORCHESTRATOR_GROUP)
+    result = {'group': ORCHESTRATOR_GROUP, 'groups': groups, 'updated_users': [], 'skipped': [], 'errors': [], 'notices': [
+        {'reason': 'User-level orchestration and application maintenance enrollment applies to every orchestrator instance using these PVE groups, not only the selected VM rows. VM ACLs, pools and roles are unchanged.'}
     ]}
     _start_job(pid, action)
     try:
         if enable:
             # Reusing a group that already grants native privileges could silently
             # give enrollees host/VM administration rights. Require a dedicated group.
-            if any(entry.get('type') == 'group' and entry.get('ugid') == ORCHESTRATOR_GROUP
-                   for entry in client.list_acls()):
-                result['errors'].append({'reason': 'caf-orchestrator already has PVE ACL grants; use it only as a dedicated enrollment group before enabling access'})
+            conflicts = sorted({entry.get('ugid') for entry in client.list_acls()
+                                if entry.get('type') == 'group' and entry.get('ugid') in groups})
+            if conflicts:
+                result['errors'].append({'reason': f'{", ".join(conflicts)} already has PVE ACL grants; use these only as dedicated enrollment groups before enabling access'})
                 return jsonify(result), 409
             # Preflight every identity before making any membership changes.
             for userid in recipients:
@@ -8352,24 +8358,33 @@ def instances_users_orchestration(pid: str, enable: bool):
             if _is_cancelled(pid):
                 result['cancelled'] = True
                 return jsonify(result)
-            client.ensure_group(ORCHESTRATOR_GROUP, 'Cyber-agent-flow orchestrator enrollment; no PVE ACL grants')
+            for group in groups:
+                client.ensure_group(group, 'Cyber-agent-flow orchestration/application maintenance enrollment; no PVE ACL grants')
         for userid in _job_items(pid, list(recipients), 'orchestration-access', 'Updating orchestration access for'):
             if _is_cancelled(pid):
                 break
             indices = sorted(set(recipients[userid]))
-            try:
-                changed = client.set_user_group(userid, ORCHESTRATOR_GROUP, enabled=enable)
-                entry = {'userid': userid, 'username': userid, 'indices': indices, 'index': indices[0],
-                         'group': ORCHESTRATOR_GROUP, 'orchestration_access': enable}
-                if changed:
-                    result['updated_users'].append(entry)
-                    LOG.info('Orchestration enrollment actor=%r project=%r user=%r enabled=%s', actor, pid, userid, enable)
-                else:
-                    result['skipped'].append(dict(entry, reason='Membership already matches the requested state'))
-            except Exception:
-                # Connector errors may contain upstream authentication details.
-                result['errors'].append({'userid': userid, 'indices': indices,
-                    'reason': 'Unable to change or verify membership; check PVE user/group management permissions and refresh before retrying'})
+            changed_groups, failed_groups = [], []
+            # Finish all groups for this user, even when one fails, so revocation
+            # still attempts maintenance and legacy access removal.
+            for group in groups:
+                try:
+                    if client.set_user_group(userid, group, enabled=enable):
+                        changed_groups.append(group)
+                        LOG.info('Orchestration enrollment actor=%r project=%r user=%r group=%r enabled=%s', actor, pid, userid, group, enable)
+                except Exception:
+                    # Connector errors may contain upstream authentication details.
+                    failed_groups.append(group)
+            entry = {'userid': userid, 'username': userid, 'indices': indices, 'index': indices[0],
+                     'group': ORCHESTRATOR_GROUP, 'groups': groups, 'changed_groups': changed_groups,
+                     'orchestration_access': enable}
+            if failed_groups:
+                result['errors'].append(dict(entry, failed_groups=failed_groups,
+                    reason='Unable to change or verify all memberships; changes listed in changed_groups remain applied. Check PVE user/group management permissions and refresh before retrying'))
+            elif changed_groups:
+                result['updated_users'].append(entry)
+            else:
+                result['skipped'].append(dict(entry, reason='Membership already matches the requested state'))
         result['cancelled'] = _is_cancelled(pid)
         return jsonify(result)
     except Exception:

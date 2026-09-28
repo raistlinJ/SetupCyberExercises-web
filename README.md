@@ -183,7 +183,7 @@ Tip: Replace the placeholder SVGs with real screenshots (keep filenames). PNGs w
 ## Orchestrator access
 
 In VM Manager, select rows and use **Users & Access → Enable orchestration access
-(dangerous)** to enroll their existing PVE users in `caf-orchestrator`. A matching
+(dangerous)** to enroll their existing PVE users in `caf-orchestration` and `caf-maintainers` (including application update/rollback access). A matching
 **Disable orchestration access** operation removes enrollment. Both require an
 explicit confirmation naming the users; SCE administrators perform the change
 using their PVE administration credentials.

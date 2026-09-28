@@ -1,8 +1,9 @@
 import unittest
 from contextlib import ExitStack
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from app import create_app
+from app.connectors.proxmox import ProxmoxClient
 from app.storage.projects import Project, VMConfig
 from test_users_access_sync_api import _StoreStub
 
@@ -42,8 +43,11 @@ class OrchestrationAccessTests(unittest.TestCase):
     def test_enable_deduplicates_selected_users_and_only_enrolls(self):
         result = self.post()
         self.assertEqual(result.status_code, 200)
-        self.client.ensure_group.assert_called_once()
-        self.client.set_user_group.assert_called_once_with('alice@pve', 'caf-orchestrator', enabled=True)
+        self.assertEqual([c.args[0] for c in self.client.ensure_group.call_args_list], ['caf-orchestration', 'caf-maintainers'])
+        self.assertEqual(self.client.set_user_group.call_args_list, [
+            call('alice@pve', 'caf-orchestration', enabled=True),
+            call('alice@pve', 'caf-maintainers', enabled=True)])
+        self.assertEqual(result.json['groups'], ['caf-orchestration', 'caf-maintainers'])
         for name in ('create_user', 'update_user', 'set_acl', 'set_acl_user_vm', 'set_acl_user_pool', 'create_role'):
             getattr(self.client, name).assert_not_called()
         self.assertEqual(result.json['updated_users'][0]['indices'], [1])
@@ -53,7 +57,9 @@ class OrchestrationAccessTests(unittest.TestCase):
     def test_disable_is_user_wide_and_does_not_create_group(self):
         result = self.post(False)
         self.assertEqual(result.status_code, 200)
-        self.client.set_user_group.assert_called_once_with('alice@pve', 'caf-orchestrator', enabled=False)
+        self.assertEqual(self.client.set_user_group.call_args_list, [
+            call('alice@pve', group, enabled=False)
+            for group in ['caf-orchestration', 'caf-maintainers', 'caf-orchestrator']])
         self.client.ensure_group.assert_not_called()
         self.client.delete_user.assert_not_called()
         self.client.delete_pool.assert_not_called()
@@ -92,21 +98,24 @@ class OrchestrationAccessTests(unittest.TestCase):
         self.client.create_user.assert_not_called()
 
     def test_group_with_native_pve_acl_is_not_reused(self):
-        self.client.list_acls.return_value = [{'type': 'group', 'ugid': 'caf-orchestrator', 'roleid': 'Administrator', 'path': '/'}]
-        self.assertEqual(self.post().status_code, 409)
-        self.client.ensure_group.assert_not_called()
-        self.client.set_user_group.assert_not_called()
+        for group in ('caf-orchestration', 'caf-maintainers'):
+            self.client.list_acls.return_value = [{'type': 'group', 'ugid': group, 'roleid': 'Administrator', 'path': '/'}]
+            self.assertEqual(self.post().status_code, 409)
+            self.client.ensure_group.assert_not_called()
+            self.client.set_user_group.assert_not_called()
         # Removing enrollment must remain possible even with an unsafe group.
         self.assertEqual(self.post(False).status_code, 200)
 
     def test_partial_failure_is_reported_without_secrets(self):
         self.body.update(targets=[{'index': 1, 'name': 'app-set-1'}, {'index': 2, 'name': 'app-set-2'}],
                          expectedUsers={'1': 'alice@pve', '2': 'bob@pve'})
-        self.client.set_user_group.side_effect = [True, RuntimeError('PRIVATE PASSWORD host-secret')]
+        self.client.set_user_group.side_effect = [True, True, True, RuntimeError('PRIVATE PASSWORD host-secret')]
         result = self.post()
         self.assertEqual(result.status_code, 200)
         self.assertEqual(len(result.json['updated_users']), 1)
         self.assertEqual(len(result.json['errors']), 1)
+        self.assertEqual(result.json['errors'][0]['changed_groups'], ['caf-orchestration'])
+        self.assertEqual(result.json['errors'][0]['failed_groups'], ['caf-maintainers'])
         self.assertNotIn('host-secret', result.text)
         self.end.assert_called_once_with(self.project.id, status='error')
 
@@ -130,10 +139,50 @@ class OrchestrationAccessTests(unittest.TestCase):
             result = self.post()
         self.assertEqual(result.status_code, 200)
         self.assertTrue(result.json['cancelled'])
-        self.client.set_user_group.assert_called_once_with('alice@pve', 'caf-orchestrator', enabled=True)
+        self.assertEqual(self.client.set_user_group.call_args_list, [
+            call('alice@pve', 'caf-orchestration', enabled=True),
+            call('alice@pve', 'caf-maintainers', enabled=True)])
         self.end.assert_called_once_with(self.project.id, status='cancelled')
 
     def test_explicit_admin_credentials_take_precedence_over_saved_token(self):
         self.project.proxmox_api_token = 'existing-token'
         self.post()
         self.assertIsNone(self.factory.call_args.kwargs['token'])
+
+    def test_existing_enrollment_still_adds_missing_maintenance_access(self):
+        self.client.set_user_group.side_effect = [False, True]
+        result = self.post()
+        self.assertEqual(result.json['updated_users'][0]['changed_groups'], ['caf-maintainers'])
+        self.assertEqual(result.json['errors'], [])
+
+    def test_revocation_attempts_all_groups_after_failure(self):
+        self.client.set_user_group.side_effect = [RuntimeError('PRIVATE'), True, True]
+        result = self.post(False)
+        self.assertEqual(self.client.set_user_group.call_count, 3)
+        self.assertEqual(result.json['updated_users'], [])
+        self.assertEqual(result.json['errors'][0]['failed_groups'], ['caf-orchestration'])
+        self.assertEqual(result.json['errors'][0]['changed_groups'], ['caf-maintainers', 'caf-orchestrator'])
+        self.assertNotIn('PRIVATE', result.text)
+
+    def test_enable_repeat_and_disable_preserve_unrelated_memberships(self):
+        # Use the real membership connector with a stateful PVE transport stub.
+        memberships = {'students', 'other', 'caf-orchestrator'}
+        connector = ProxmoxClient(base_url='https://pve.lab', token='test-token')
+        transport = MagicMock()
+
+        def put(url, *, data, timeout):
+            requested = set(filter(None, data['groups'].split(',')))
+            if not data['append']:
+                memberships.clear()
+            memberships.update(requested)
+            return MagicMock(status_code=200)
+
+        transport.put.side_effect = put
+        with patch.object(connector, '_ensure_session', return_value=transport), \
+                patch.object(connector, 'get_user', side_effect=lambda user: {'groups': sorted(memberships)}):
+            self.client.set_user_group.side_effect = connector.set_user_group
+            self.assertEqual(len(self.post().json['updated_users']), 1)
+            self.assertEqual(memberships, {'students', 'other', 'caf-orchestrator', 'caf-orchestration', 'caf-maintainers'})
+            self.assertEqual(len(self.post().json['skipped']), 1)
+            self.assertEqual(len(self.post(False).json['updated_users']), 1)
+            self.assertEqual(memberships, {'students', 'other'})

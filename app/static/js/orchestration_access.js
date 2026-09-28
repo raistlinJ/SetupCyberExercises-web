@@ -19,7 +19,7 @@ function buildOrchestrationAccessPlan(projects, enabled) {
   if (!labels.size) throw new Error('Select at least one VM row');
   const recipients = [...labels].join('\n');
   const description = enabled
-    ? 'Dangerous: add these existing PVE users to caf-orchestrator. This grants access to every orchestrator instance using this group, not just the selected VM rows. Orchestrator 0.6+ permits host-mediated guest commands and file transfers on the user’s PVE-visible VMs and keeps results private per user. Older versions may expose a shared lab view. Native PVE permissions and host shell access are unchanged.'
-    : 'Remove these users from caf-orchestrator. This revokes their access to every orchestrator instance using this group, including access enrolled from other projects. It does not disable their PVE accounts, change VM permissions, or stop running jobs.';
+    ? 'Dangerous: add these existing PVE users to caf-orchestration and caf-maintainers. This also permits updating and rolling back Cyber-agent-flow and ScenarioForge on eligible VMs, affecting everyone using those applications. This grants access to every orchestrator instance using these groups, not just the selected VM rows. Orchestrator 0.6+ permits host-mediated guest commands and file transfers on the user’s PVE-visible VMs and keeps results private per user. Older versions may expose a shared lab view. Native PVE permissions and host shell access are unchanged.'
+    : 'Remove these users from caf-orchestration, caf-maintainers and the legacy caf-orchestrator group. This revokes orchestration and application maintenance access. This revokes their access to every orchestrator instance using these groups, including access enrolled from other projects. It does not disable their PVE accounts, change VM permissions, or stop running jobs.';
   return { expectedByProject, message: `${description}\n\nUsers:\n${recipients}\n\nContinue?` };
 }
