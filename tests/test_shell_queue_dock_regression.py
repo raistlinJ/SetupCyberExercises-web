@@ -23,3 +23,11 @@ def test_queue_changes_refresh_dock_labels_while_closed():
 
     assert "document.addEventListener('remote-queue-changed'" in source
     assert "refreshQueueModeLabelsFromState();" in source
+
+
+def test_finished_queue_items_offer_a_download_next_to_full_log():
+    source = SHELL_JS.read_text(encoding="utf-8")
+    assert 'item.logUrl === `/api/queue/${item.id}/log`' in source
+    assert '?download=1' in source
+    assert 'download="queue-${escapeHtml(String(item.id))}-log.txt"' in source
+    assert '>Download log</a>' in source

@@ -65,3 +65,86 @@ test('paused execution state overrides running power state in badges, sorting, a
   assert.equal(sandbox._vmDetailIsRunning(suspended), false);
   assert.equal(sandbox._vmDetailIsRunning({power_state: 'running', qmp_state: 'running'}), true);
 });
+
+const singleRefreshSource = source.slice(source.indexOf('async function vmRefresh(opts)'), source.indexOf('\nfunction _vmExpectedBridgeName'));
+
+for (const switchDuringRefresh of [false, true]) {
+  test(`post-unlock refresh stays scoped to original project (switch during request: ${switchDuringRefresh})`, async () => {
+    const original = { id: 'one', name: 'One', proxmox_url: 'https://one', instance_statuses: ['locked'] };
+    const other = { id: 'two', name: 'Two', instance_statuses: ['other inventory'] };
+    const cached = { ...original };
+    const rendered = [];
+    const requests = [];
+    const noop = () => {};
+    const sandbox = {
+      PROJ: switchDuringRefresh ? original : other,
+      SELECTED_PIDS: ['two', 'three'], ALL_PROJECTS: [cached, other],
+      window: { PROJ_CACHE: { one: { ...original } } },
+      shell: {}, console: { log: noop, error: noop }, canonicalPid: String,
+      runQueued: async (label, work, opts) => { assert.equal(opts.projectId, 'one'); await work(); },
+      hydrateProxCredsFromPersisted: async pid => { assert.equal(pid, 'one'); return { username: 'operator', password: 'secret' }; },
+      http: async (method, path, body) => {
+        requests.push({ path, body });
+        sandbox.PROJ = other;
+        return { instance_statuses: ['unlocked'] };
+      },
+      vmApplyServerResources: noop, vmMarkLiveRefreshed: noop,
+      showVmInlineProgress: noop, updateVmInlineProgress: noop, hideVmInlineProgress: noop,
+      renderVmTable: p => rendered.push(p.id),
+      alert: message => assert.fail(message),
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(singleRefreshSource, sandbox);
+    await sandbox.vmRefresh({ project: original, forceRefresh: true, showProgressDialog: false });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].path, '/api/projects/one/instances/refresh/vm');
+    assert.equal(requests[0].body.forceRefresh, true);
+    assert.equal(requests[0].body.baseUrl, 'https://one');
+    assert.deepEqual(original.instance_statuses, ['unlocked']);
+    assert.deepEqual(cached.instance_statuses, ['unlocked']);
+    assert.deepEqual(sandbox.window.PROJ_CACHE.one.instance_statuses, ['unlocked']);
+    assert.deepEqual(other.instance_statuses, ['other inventory']);
+    assert.deepEqual(rendered, []);
+  });
+}
+
+test('unlock completion schedules a forced refresh even after switching projects', async () => {
+  const calls = [];
+  const original = { id: 'one' };
+  const start = source.indexOf('    // Always refresh after any action');
+  const end = source.indexOf('\n  }\n}', start);
+  const sandbox = { action: 'unlock', PROJ: original, Promise, window: {},
+    isCurrentVmProject: () => false, vmRefresh: opts => calls.push(opts) };
+  vm.createContext(sandbox);
+  vm.runInContext(source.slice(start, end), sandbox);
+  await Promise.resolve();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].project, original);
+  assert.equal(calls[0].forceRefresh, true);
+});
+
+test('server inventory updates hidden project caches and merged rows without touching another project', () => {
+  const one = { id: 'one', instance_statuses: ['locked'] };
+  const two = { id: 'two', instance_statuses: ['untouched'] };
+  const row = { pid: 'one', index: 1, vmName: 'alpha', detail: { lock: 'backup' } };
+  const rendered = [];
+  const sandbox = {
+    PROJ: two, ALL_PROJECTS: [one, two], SELECTED_PIDS: [], canonicalPid: String,
+    window: { PROJ_CACHE: { one: { ...one } }, __MERGED_ROWS__: [row] },
+    vmApplyServerResources() {}, vmMarkLiveRefreshed() {},
+    renderVmTable: () => assert.fail('other project must not render'),
+    renderMergedVmTable: rows => rendered.push(rows),
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(source.slice(source.indexOf('function vmApplyQueuedInventory('), source.indexOf('async function vmRefresh(opts)')), sandbox);
+  const result = { instance_statuses: [{ index: 1, vm_details: [{ name: 'alpha', lock: '' }] }] };
+  sandbox.vmApplyQueuedInventory('one', result);
+  assert.equal(one.instance_statuses, result.instance_statuses);
+  assert.equal(sandbox.window.PROJ_CACHE.one.instance_statuses, result.instance_statuses);
+  assert.deepEqual(two.instance_statuses, ['untouched']);
+  sandbox.SELECTED_PIDS = ['one', 'two'];
+  sandbox.vmApplyQueuedInventory('one', result);
+  assert.equal(row.detail.lock, '');
+  assert.equal(row.status, 'created');
+  assert.equal(rendered.length, 1);
+});

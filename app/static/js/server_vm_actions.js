@@ -111,7 +111,7 @@ async function finishServerVmAction(label, job) {
   if (state.status === 'error') summary.errors = [...(summary.errors || []), { reason: state.errorMessage }];
   showActionSummary(label, summary);
   emitActionLogs(label, summary);
-  Promise.resolve(vmRefresh({ showProgressDialog: false })).catch(() => {});
+  // The server queues and coalesces inventory refreshes for the affected projects.
   return { status: state.status, job };
 }
 
@@ -153,4 +153,44 @@ async function submitServerGuestTransfer(label, descriptor, queueOptions) {
   await queueOptions.onAccepted?.(job);
   if (descriptor.payloadId) await PersistentQueuePayloads.remove(descriptor.payloadId).catch(() => {});
   return finishServerVmAction(label, job);
+}
+
+// Queue polling continues across project/page navigation. Consume each completed
+// inventory result once; never launch a second live refresh from the browser.
+const appliedServerInventory = new Set();
+const pendingServerInventory = new Set();
+async function applyCompletedServerInventory() {
+  if (typeof vmApplyQueuedInventory !== 'function') return;
+  const completed = window.ServerQueue?.state().completed || [];
+  // Only the newest successful refresh for each project is useful on page load.
+  const latest = new Map();
+  for (const job of completed) {
+    if (!job.inventoryRefresh || job.status !== 'completed') continue;
+    if (!latest.has(job.projectId) || latest.get(job.projectId).id < job.id) latest.set(job.projectId, job);
+  }
+  const jobs = [...latest.values()].filter(job =>
+    !appliedServerInventory.has(job.id) && !pendingServerInventory.has(job.id));
+  if (!jobs.length) return;
+  jobs.forEach(job => pendingServerInventory.add(job.id));
+  try {
+    // Read the current saved inventory, since a manual refresh may be newer
+    // than a retained queue result. This does not contact Proxmox again.
+    const response = await ServerQueue.nativeFetch('/api/projects', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('Could not load refreshed inventory');
+    const projects = (await response.json()).projects || [];
+    for (const job of jobs) {
+      const newer = (window.ServerQueue.state().completed || []).some(item =>
+        item.inventoryRefresh && item.status === 'completed' && item.projectId === job.projectId && item.id > job.id);
+      const project = projects.find(project => String(project.id) === String(job.projectId));
+      if (!newer && project) vmApplyQueuedInventory(job.projectId, project);
+      appliedServerInventory.add(job.id);
+    }
+  } catch (error) {
+    window.shell?.logError?.(error.message || error);
+  } finally {
+    jobs.forEach(job => pendingServerInventory.delete(job.id));
+  }
+}
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('remote-queue-changed', () => { applyCompletedServerInventory().catch(() => {}); });
 }

@@ -6067,7 +6067,12 @@ def instances_unlock(pid: str):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
-    client = ProxmoxClient(base_url=base_url, token=getattr(proj,'proxmox_api_token','') or None, username=username, password=password, verify=verify)
+    if not password or not (username or getattr(proj, 'proxmox_ssh_user', '')):
+        _end_job(pid)
+        return jsonify({'error': 'Unlock requires Proxmox host SSH username/password credentials; connect in the Proxmox login dialog first. Non-root users need sudo access.'}), 400
+    ssh_user = _proxmox_ssh_username(proj, username)
+    ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
+    client = ProxmoxClient(base_url=base_url, token=getattr(proj, 'proxmox_api_token', '') or None, username=username, password=password, verify=verify)
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     unlocked = []
     pool_workers = _pool_workers_for(proj, len(mapped))
@@ -6080,11 +6085,22 @@ def instances_unlock(pid: str):
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
         is_lxc = m.get('type') == 'lxc'
-        if is_lxc:
-            upid = client.unlock_lxc(node=m['node'], vmid=m['vmid'])
-        else:
-            upid = client.unlock_qemu(node=m['node'], vmid=m['vmid'])
-        client._wait_task(m['node'], upid, timeout=600)
+        command = f"{'pct' if is_lxc else 'qm'} unlock {int(m['vmid'])}"
+        host = _lxc_transfer_ssh_host(proj, base_url, m['node'])
+        ssh_client = _ssh_connect(host, ssh_port, ssh_user, password)
+        try:
+            code, _output, stderr_text = _ssh_exec_result(
+                ssh_client, command, timeout=600,
+                sudo=ssh_user.lower() != 'root', sudo_password=password)
+            if code != 0:
+                raise RuntimeError(stderr_text or f'{command} exited with {code}')
+        finally:
+            ssh_client.close()
+        _invalidate_vm_config_cache_entries([(m['node'], m['vmid'])])
+        config = (client.get_lxc_config if is_lxc else client.get_qemu_config)(
+            node=m['node'], vmid=m['vmid'])
+        if config.get('lock'):
+            raise RuntimeError(f"lock is still {config['lock']}")
         return ('unlocked', { 'index': m['index'], 'name': m['name'], 'vmid': m['vmid'], 'node': m['node'] })
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:

@@ -45,7 +45,7 @@ def test_queue_full_log_preserves_all_command_output_and_owner_access(harness, s
     ({'ok': True}, None),
     ({'outputs_zip': {'filename': 'guest_pull_test.zip', 'base64': 'file-data'}}, None),
 ])
-def test_queue_log_link_only_for_retained_logs(harness, result, expected):
+def test_queue_log_available_even_without_command_output(harness, result, expected):
     app, client, *_ = harness
     job = enqueue(client, 'log-availability').get_json()
     wait_terminal(client, job['id'])
@@ -53,12 +53,12 @@ def test_queue_log_link_only_for_retained_logs(harness, result, expected):
         db.execute('UPDATE actions SET result=? WHERE id=?', (json.dumps(result).encode(), job['id']))
     record = client.get(f"/api/queue/{job['id']}").get_json()
     response = client.get(f"/api/queue/{job['id']}/log")
+    assert record['logUrl']
+    assert response.status_code == 200
+    assert 'Completed:' in response.get_data(as_text=True)
+    assert 'base64' not in response.get_data(as_text=True).lower()
     if expected:
-        assert record['logUrl']
         assert expected in response.get_data(as_text=True)
-    else:
-        assert record['logUrl'] is None
-        assert response.status_code == 404
 
 
 @pytest.fixture
@@ -790,3 +790,179 @@ def test_commands_refresh_inventory_in_fifo_order_without_browser_refresh(harnes
     assert wait_terminal(client, first)['status'] == ('error' if first_fails else 'completed')
     assert wait_terminal(client, second)['status'] == 'completed'
     assert events == [('refresh', 101), ('first', 101), ('refresh', 202), ('second', 202)]
+
+@pytest.fixture
+def inventory_queue(tmp_path, monkeypatch):
+    app = Flask(__name__)
+    app.config.update(TESTING=True, SECRET_KEY='test', DATA_DIR=str(tmp_path))
+    calls = []
+
+    @app.post('/api/projects/<pid>/instances/actions/<action>')
+    def action(pid, action):
+        calls.append((pid, action))
+        if request.json.get('fail'):
+            return jsonify(errors=[{'reason': 'partial failure'}])
+        return jsonify(ok=True)
+
+    @app.post('/api/projects/<pid>/instances/refresh/vm')
+    def refresh(pid):
+        calls.append((pid, 'refresh'))
+        assert request.json == {'username': 'operator@pam', 'password': 'secret', 'forceRefresh': True}
+        assert session['user'] == 'alice'
+        return jsonify(instance_statuses=[])
+
+    queue = ActionQueue(app)
+    monkeypatch.setattr(queue, 'start', lambda: None)
+    counter = iter(range(100))
+
+    def submit(operations):
+        with app.test_request_context('/'):
+            session['user'] = 'alice'
+            return queue.submit('alice', {'token': str(next(counter)), 'projectId': operations[0][0],
+                'steps': [{'method': 'POST', 'url': f'/api/projects/{pid}/instances/actions/{action}',
+                           'body': {'username': 'operator@pam', 'password': 'secret', 'fail': fail}}
+                          for pid, action, fail in operations]}, [])
+
+    def drain():
+        for _ in range(30):
+            row = queue.claim()
+            if row is None:
+                return
+            queue.execute(row)
+        pytest.fail('refresh queue did not drain (possible refresh loop)')
+
+    return queue, submit, drain, calls
+
+
+@pytest.mark.parametrize('action', ['create', 'delete', 'start', 'unlock', 'suspend', 'hibernate',
+    'poweroff', 'snapshot', 'restore', 'nets_set', 'nets_remove', 'apply_scenario',
+    'run_startup_cmds', 'run_stored_cmds', 'users_create', 'users_delete', 'users_access_sync',
+    'users_orchestration_enable', 'guest_push', 'guest_delete', 'guest_pull'])
+def test_every_vm_operation_gets_one_forced_refresh(inventory_queue, action):
+    queue, submit, drain, calls = inventory_queue
+    submit([('one', action, False)])
+    drain()
+    assert calls == [('one', action), ('one', 'refresh')]
+    with queue.connect() as db:
+        records = db.execute('SELECT * FROM actions ORDER BY id').fetchall()
+        assert len(records) == 2
+        assert all(row['payload'] is None for row in records)
+        assert public_record(records[-1])['inventoryRefresh'] is True
+
+
+def test_refresh_coalesces_queued_jobs_and_all_steps_per_project(inventory_queue):
+    queue, submit, drain, calls = inventory_queue
+    submit([('one', 'unlock', False), ('two', 'unlock', False)])
+    submit([('one', 'start', False), ('one', 'snapshot', False)])
+    drain()
+    assert calls == [('one', 'unlock'), ('two', 'unlock'), ('one', 'start'), ('one', 'snapshot'),
+                     ('one', 'refresh'), ('two', 'refresh')]
+
+
+def test_new_work_queued_after_refresh_is_scheduled_still_coalesces(inventory_queue):
+    queue, submit, drain, calls = inventory_queue
+    submit([('one', 'unlock', False)])
+    queue.execute(queue.claim())
+    submit([('one', 'start', False)])
+    drain()
+    assert calls == [('one', 'unlock'), ('one', 'start'), ('one', 'refresh')]
+
+
+def test_failed_job_refreshes_before_next_operation_then_refreshes_at_end(inventory_queue):
+    queue, submit, drain, calls = inventory_queue
+    submit([('one', 'unlock', True), ('two', 'start', False)])
+    submit([('one', 'start', False)])
+    drain()
+    assert calls == [('one', 'unlock'), ('one', 'refresh'), ('one', 'start'), ('one', 'refresh')]
+
+
+def test_cancelled_waiting_work_does_not_lose_deferred_refresh(inventory_queue):
+    queue, submit, drain, calls = inventory_queue
+    submit([('one', 'unlock', False)])
+    other = submit([('one', 'start', False)])
+    queue.execute(queue.claim())
+    with queue.connect() as db:
+        db.execute("UPDATE actions SET status='cancelled', payload=NULL WHERE id=?", (other['id'],))
+    drain()
+    assert calls == [('one', 'unlock'), ('one', 'refresh')]
+
+
+def test_pending_refresh_survives_worker_recreation(inventory_queue):
+    queue, submit, drain, calls = inventory_queue
+    submit([('one', 'unlock', False)])
+    queue.execute(queue.claim())
+    restarted = ActionQueue(queue.app)
+    row = restarted.claim()
+    assert row is not None
+    restarted.execute(row)
+    assert restarted.claim() is None
+    assert calls == [('one', 'unlock'), ('one', 'refresh')]
+
+
+def test_refresh_target_extraction_keeps_only_connection_data():
+    steps = [{'method': 'POST', 'url': '/api/projects/project%20one/instances/actions/guest_push',
+              'form': [['payload', json.dumps({'username': 'operator', 'password': 'secret',
+                                               'destination': '/tmp', 'targets': [{'vmid': 101}]})]]},
+             {'method': 'POST', 'url': '/api/projects/one/instances/actions/start/retry-check'},
+             {'method': 'POST', 'url': '/api/projects/one/instances/refresh/vm'}]
+    assert ActionQueue.refresh_targets(steps) == {'project one': {'username': 'operator', 'password': 'secret'}}
+
+
+@pytest.mark.parametrize('status', ['completed', 'error', 'cancelled'])
+def test_queue_download_contains_summary_details_for_every_outcome(harness, status):
+    app, client, *_ = harness
+    job = enqueue(client, 'download-summary').get_json()
+    wait_terminal(client, job['id'])
+    result = {'results': [
+        {'unlocked': [{'name': 'alpha', 'node': 'node1', 'vmid': 101}]},
+        {'skipped': [{'name': 'beta', 'reason': 'already unlocked'}],
+         'errors': [{'name': 'gamma', 'reason': 'sudo denied'}],
+         'ran': [{'name': 'delta', 'commands': [{'cmd': 'hostname', 'exitcode': 1,
+                                               'stderr_preview': 'command failed'}]}],
+         'password': 'must-not-export', 'outputs_zip': {'filename': 'guest_pull.zip', 'base64': 'encoded-file-data'}}]}
+    with app.extensions['action_queue'].connect() as db:
+        db.execute('UPDATE actions SET result=?, status=?, error=? WHERE id=?',
+                   (json.dumps(result).encode(), status, 'Operation reported errors' if status == 'error' else '', job['id']))
+    record = client.get(f"/api/queue/{job['id']}").get_json()
+    response = client.get(record['logUrl'] + '?download=1')
+    assert response.status_code == 200
+    assert response.mimetype == 'text/plain'
+    assert response.headers['Content-Disposition'] == f'attachment; filename="queue-{job["id"]}-log.txt"'
+    text = response.get_data(as_text=True)
+    for expected in ('Unlocked:', 'alpha', 'node1', '101', 'beta', 'already unlocked',
+                     'gamma', 'sudo denied', 'hostname', 'command failed'):
+        assert expected in text
+    assert 'must-not-export' not in text
+    assert 'encoded-file-data' not in text
+    if status == 'error':
+        assert 'Operation reported errors' in text
+    # Download is still available after rebuilding the queue service from disk.
+    app.extensions['action_queue'].close()
+    app.extensions['action_queue'] = ActionQueue(app)
+    assert client.get(record['logUrl'] + '?download=1').get_data() == response.get_data()
+    with client.session_transaction() as sess:
+        sess['user'] = 'bob'
+    assert client.get(record['logUrl'] + '?download=1').status_code == 404
+
+
+def test_corrupt_command_archive_does_not_hide_summary_log(harness):
+    app, client, *_ = harness
+    job = enqueue(client, 'bad-log-archive').get_json()
+    wait_terminal(client, job['id'])
+    result = {'errors': [{'name': 'alpha', 'reason': 'operation failed'}],
+              'outputs_zip': {'filename': 'stored_cmd_outputs_bad.zip', 'base64': 'not-an-archive'}}
+    with app.extensions['action_queue'].connect() as db:
+        db.execute('UPDATE actions SET result=? WHERE id=?', (json.dumps(result).encode(), job['id']))
+    response = client.get(f"/api/queue/{job['id']}/log?download=1")
+    assert response.status_code == 200
+    assert 'operation failed' in response.get_data(as_text=True)
+    assert 'could not be read' in response.get_data(as_text=True)
+
+
+def test_queue_log_is_not_available_until_finished(harness):
+    app, client, started, release, *_ = harness
+    job = enqueue(client, 'first').get_json()
+    assert started.wait(2)
+    assert client.get(f"/api/queue/{job['id']}").get_json()['logUrl'] is None
+    assert client.get(f"/api/queue/{job['id']}/log?download=1").status_code == 409
+    release.set()

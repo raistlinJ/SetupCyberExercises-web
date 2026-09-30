@@ -2049,7 +2049,7 @@ const ConsoleDock = (() => {
                   + `<summary>View results</summary>`
                   + `<div class="queue-result-summary">${escapeHtml(item.summary || `${statusLabel}: ${item.label || 'Action'}.${item.errorMessage ? ' ' + item.errorMessage : ''}`)}</div>`
                   + (item.server && item.logUrl === `/api/queue/${item.id}/log`
-                    ? `<a class="queue-log-link" href="${escapeHtml(item.logUrl)}" target="_blank" rel="noopener">View full log ↗</a>` : '')
+                    ? `<a class="queue-log-link" href="${escapeHtml(item.logUrl)}" target="_blank" rel="noopener">View full log ↗</a> <a class="queue-log-link" href="${escapeHtml(item.logUrl)}?download=1" download="queue-${escapeHtml(String(item.id))}-log.txt">Download log</a>` : '')
                   + `</details>`
                   + `</div>`
                   + `</li>`;

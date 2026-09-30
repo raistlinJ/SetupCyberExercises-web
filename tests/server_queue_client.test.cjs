@@ -284,3 +284,41 @@ test('queue uses the same remaining and current fields for every operation', () 
     assert.doesNotMatch(render({ itemCompleted: null }), /Remaining:/);
   }
 });
+
+test('completed server refreshes update original projects once without new live refreshes', async () => {
+  const completed = [
+    { id: 4, projectId: 'one', inventoryRefresh: true, status: 'completed' },
+    { id: 3, projectId: 'one', inventoryRefresh: true, status: 'completed' },
+    { id: 5, projectId: 'two', inventoryRefresh: true, status: 'completed' },
+    { id: 6, projectId: 'three', inventoryRefresh: true, status: 'error' },
+  ];
+  const requests = [], applied = [];
+  const ServerQueue = {
+    state: () => ({ completed }),
+    nativeFetch: async path => {
+      requests.push(path);
+      return json({ projects: [{ id: 'one', instance_statuses: ['fresh one'] }, { id: 'two', instance_statuses: ['fresh two'] }] });
+    },
+  };
+  const sandbox = { ServerQueue, window: { ServerQueue }, vmApplyQueuedInventory: (pid, data) => applied.push([pid, data.instance_statuses]) };
+  vm.createContext(sandbox);
+  vm.runInContext(plans, sandbox);
+  await Promise.all([sandbox.applyCompletedServerInventory(), sandbox.applyCompletedServerInventory()]);
+  await sandbox.applyCompletedServerInventory();
+  assert.deepEqual(requests, ['/api/projects']);
+  assert.deepEqual(applied, [['one', ['fresh one']], ['two', ['fresh two']]]);
+});
+
+test('operation completion no longer launches a browser refresh', async () => {
+  let summaries = 0;
+  const sandbox = {
+    ServerQueue: { wait: async () => ({ status: 'completed' }), nativeFetch: async () => json({ unlocked: [] }) },
+    mergeVmActionSummaryData: (a, b) => ({ ...a, ...b }),
+    showActionSummary: () => summaries++, emitActionLogs() {},
+    vmRefresh: () => assert.fail('server owns the refresh'),
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(plans, sandbox);
+  await sandbox.finishServerVmAction('Unlock', { id: 1 });
+  assert.equal(summaries, 1);
+});

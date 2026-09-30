@@ -481,8 +481,9 @@ class ProxmoxClient:
     def start_qemu(self, node: str, vmid: int) -> str:
         return self._qemu_status_action(node, vmid, 'start')
 
-    def unlock_qemu(self, node: str, vmid: int) -> str:
-        return self._qemu_status_action(node, vmid, 'unlock')
+    def unlock_qemu(self, node: str, vmid: int) -> Optional[str]:
+        """Remove the config lock; return a task ID when Proxmox runs asynchronously."""
+        return self.set_qemu_options(node, vmid, {'delete': 'lock', 'skiplock': 1})
 
     def stop_qemu(self, node: str, vmid: int) -> str:
         return self._qemu_status_action(node, vmid, 'stop')
@@ -658,10 +659,9 @@ class ProxmoxClient:
     def start_lxc(self, node: str, vmid: int) -> str:
         return self._lxc_status_action(node, vmid, 'start')
 
-    def unlock_lxc(self, node: str, vmid: int) -> str:
-        # Note: Proxmox API doesn't officially expose /status/unlock for LXC like it does for QEMU in all versions.
-        # But we'll map it to 'unlock' here to match QEMU. If it fails, API routes can handle or ignore.
-        return self._lxc_status_action(node, vmid, 'unlock')
+    def unlock_lxc(self, node: str, vmid: int) -> Optional[str]:
+        """Remove the config lock; LXC config updates normally complete synchronously."""
+        return self.set_lxc_options(node, vmid, {'delete': 'lock', 'skiplock': 1})
 
     def stop_lxc(self, node: str, vmid: int) -> str:
         return self._lxc_status_action(node, vmid, 'stop')

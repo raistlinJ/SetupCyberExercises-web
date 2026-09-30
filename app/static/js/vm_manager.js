@@ -1906,6 +1906,33 @@ async function importProjectSidebarWithFlags(opts) {
   }
 }
 
+// Apply server-owned refresh results without starting another live inventory scan.
+function vmApplyQueuedInventory(pid, resp) {
+  const id = canonicalPid(pid);
+  const statuses = resp.instance_statuses || [];
+  const projects = [...(ALL_PROJECTS || []), PROJ, window.PROJ_CACHE?.[id]];
+  for (const project of projects) {
+    if (project && canonicalPid(project.id) === id) project.instance_statuses = statuses;
+  }
+  vmApplyServerResources(id, resp.server_resources);
+  vmMarkLiveRefreshed(id);
+  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) {
+    const rows = window.__MERGED_ROWS__ || [];
+    const byIndex = new Map(statuses.map(status => [Number(status.index), status]));
+    for (const row of rows) {
+      if (canonicalPid(row.pid) !== id) continue;
+      const status = byIndex.get(Number(row.index));
+      row.instStatus = status;
+      row.detail = status?.vm_details?.find(detail => detail.name === row.vmName) || null;
+      row.status = row.detail ? 'created' : 'missing';
+      row.user_access = row.detail?.user_access ?? null;
+    }
+    if (SELECTED_PIDS.some(pid => canonicalPid(pid) === id)) renderMergedVmTable(rows);
+  } else if (PROJ && canonicalPid(PROJ.id) === id) {
+    renderVmTable(PROJ);
+  }
+}
+
 async function vmRefresh(opts) {
   const forceRefresh = (() => {
     try {
@@ -1924,14 +1951,15 @@ async function vmRefresh(opts) {
       return true;
     }
   })();
-  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) { try { await refreshVmView({ forceRefresh, showProgressDialog }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
-  if (!PROJ) { alert('Load a project first.'); return; }
+  const project = opts?.project || PROJ;
+  if (!opts?.project && Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) { try { await refreshVmView({ forceRefresh, showProgressDialog }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
+  if (!project) { alert('Load a project first.'); return; }
   const refreshProject = {
-    id: PROJ.id,
-    name: PROJ.name,
-    proxmox_url: PROJ.proxmox_url,
-    proxmox_api_port: PROJ.proxmox_api_port,
-    proxmox_verify_ssl: PROJ.proxmox_verify_ssl,
+    id: project.id,
+    name: project.name,
+    proxmox_url: project.proxmox_url,
+    proxmox_api_port: project.proxmox_api_port,
+    proxmox_verify_ssl: project.proxmox_verify_ssl,
   };
   const label = `Refresh VMs for project ${refreshProject?.name || refreshProject?.id || ''}`.trim();
   await runQueued(label, async () => {
@@ -1971,6 +1999,14 @@ async function vmRefresh(opts) {
       try { shell.step('HTTP response received'); } catch { }
       try { vmApplyServerResources(refreshPid, resp?.server_resources); } catch { }
       vmMarkLiveRefreshed(refreshPid);
+      // Keep the original project's cached inventory current even after navigation.
+      const statuses = resp.instance_statuses || [];
+      project.instance_statuses = statuses;
+      for (const cached of (ALL_PROJECTS || [])) {
+        if (canonicalPid(cached.id) === canonicalPid(refreshPid)) cached.instance_statuses = statuses;
+      }
+      const cachedProject = window.PROJ_CACHE?.[refreshPid];
+      if (cachedProject) cachedProject.instance_statuses = statuses;
       // Only update if we're still viewing the same project
       if (PROJ && PROJ.id === refreshPid) {
         PROJ.instance_statuses = resp.instance_statuses || [];
@@ -1982,7 +2018,7 @@ async function vmRefresh(opts) {
         try { shell.step('Statuses stored & logged'); } catch { }
         renderVmTable(PROJ);
       } else {
-        try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: completed but project changed, discarding results') : console.log('VM Refresh: project changed, discarding'); } catch { }
+        try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: saved inventory for the original project') : console.log('VM Refresh: original project inventory updated'); } catch { }
       }
       try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM Refresh: done') : console.log('VM Refresh: done'); } catch { }
       try { shell.endActionContext(true); } catch { }
@@ -6471,9 +6507,8 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
       try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden', 'true'); } } catch { }
       try { hideActionProgress(); } catch { }
       try {
-        const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-        if (isCurrentVmProject(PROJ)) {
-          Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+        if (!window.ServerQueue) {
+          Promise.resolve().then(() => vmRefresh({ project: PROJ, forceRefresh: true, showProgressDialog: false })).catch(() => { });
         }
       } catch { }
     }
@@ -7032,9 +7067,8 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
     try { hideActionProgress(); } catch { }
     // Always refresh after any action (even on failure) but do not block UI while pending
     try {
-      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-      if (isCurrentVmProject(PROJ)) {
-        Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+      if (!window.ServerQueue) {
+        Promise.resolve().then(() => vmRefresh({ project: PROJ, forceRefresh: true, showProgressDialog: false })).catch(() => { });
       }
     } catch { }
   }
@@ -7293,8 +7327,12 @@ async function vmActionMultiExec(action, opts = {}) {
     try { if (topProg) { topProg.classList.add('d-none'); topProg.setAttribute('aria-hidden', 'true'); } } catch { }
     try { hideActionProgress(); } catch { }
     try {
-      const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-      Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+      if (!window.ServerQueue) {
+        for (const pid of pids) {
+          const project = byId[canonicalPid(pid)];
+          if (project) Promise.resolve().then(() => vmRefresh({ project, forceRefresh: true, showProgressDialog: false })).catch(() => { });
+        }
+      }
     } catch { }
     return;
   }
@@ -7656,8 +7694,12 @@ async function vmActionMultiExec(action, opts = {}) {
   try { const prog = document.getElementById('vm-progress'); if (prog) { prog.classList.add('d-none'); prog.setAttribute('aria-hidden', 'true'); } } catch { }
   try { hideActionProgress(); } catch { }
   try {
-    const forceRefresh = (action === 'nets_set' || action === 'nets_remove' || action === 'nets_assign' || action === 'nets_clear' || action === 'apply_scenario');
-    Promise.resolve().then(() => vmRefresh({ forceRefresh, showProgressDialog: false })).catch(() => { });
+    if (!window.ServerQueue) {
+      for (const pid of pids) {
+        const project = byId[canonicalPid(pid)];
+        if (project) Promise.resolve().then(() => vmRefresh({ project, forceRefresh: true, showProgressDialog: false })).catch(() => { });
+      }
+    }
   } catch { }
 }
 

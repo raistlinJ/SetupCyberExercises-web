@@ -1,4 +1,7 @@
-"""Server-owned FIFO actions. HTTP threads only submit work or read its result.
+"""Server-owned FIFO actions with coalesced inventory refreshes.
+
+Failure refreshes take priority; successful refreshes follow pending project work.
+HTTP threads only submit work or read its result.
 
 SQLite arbitrates claims across WSGI processes. A worker drains accepted plans
 without browser polling; request/session data is captured before acknowledging.
@@ -15,7 +18,7 @@ import threading
 import time
 import zipfile
 from contextlib import contextmanager, ExitStack
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from flask import Blueprint, Response, g, jsonify, request, session
 from werkzeug.datastructures import MultiDict, FileStorage
@@ -124,10 +127,74 @@ class ActionQueue:
                 except ProcessLookupError:
                     db.execute("UPDATE actions SET status='error', error='Server worker stopped during execution; action was not replayed', finished=?, payload=NULL WHERE id=?", (time.time(), row['id']))
                     self.delete_uploads(db, row['id'])
-            row = db.execute("SELECT * FROM actions WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+            queued = db.execute("SELECT * FROM actions WHERE status='queued' ORDER BY id").fetchall()
+            row = None
+            # Failure refreshes run next. Successful operations share a refresh
+            # after all accepted work for the affected project has finished.
+            for candidate in queued:
+                plan = json.loads(candidate['payload'])
+                if plan.get('refreshImmediate'):
+                    row = candidate
+                    break
+            if row is None:
+                for candidate in queued:
+                    plan = json.loads(candidate['payload'])
+                    pid = plan.get('refreshProject')
+                    if pid and any(
+                        other['id'] != candidate['id'] and pid in self.refresh_targets(json.loads(other['payload'])['steps'])
+                        for other in queued
+                    ):
+                        continue
+                    row = candidate
+                    break
             if row:
                 db.execute("UPDATE actions SET status='running', started=?, worker=? WHERE id=?", (time.time(), os.getpid(), row['id']))
             return row
+
+    @staticmethod
+    def refresh_targets(steps):
+        targets = {}
+        for step in steps:
+            parts = urlsplit(step['url']).path.strip('/').split('/')
+            if (step.get('method') != 'POST' or len(parts) != 6
+                    or parts[:2] != ['api', 'projects'] or parts[3:5] != ['instances', 'actions']
+                    or parts[5] in {'cancel', 'status', 'create-preflight', 'retry-check'}):
+                continue
+            body = step.get('body') or {}
+            if 'form' in step:
+                try:
+                    body = json.loads(dict(step['form']).get('payload') or '{}')
+                except (ValueError, TypeError):
+                    body = {}
+            if not isinstance(body, dict):
+                body = {}
+            targets[unquote(parts[2])] = {key: body[key] for key in
+                ('username', 'password', 'baseUrl', 'apiPort', 'verifySSL') if key in body}
+        return targets
+
+    def schedule_refreshes(self, row, payload, steps, failed):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for pid, auth in self.refresh_targets(steps).items():
+                refresh_payload = {**payload, 'steps': [{
+                    'method': 'POST', 'url': f'/api/projects/{quote(pid, safe="")}/instances/refresh/vm',
+                    'body': {**auth, 'forceRefresh': True},
+                }], 'refreshProject': pid, 'refreshImmediate': failed}
+                existing = None
+                for candidate in db.execute("SELECT * FROM actions WHERE owner=? AND project=? AND status='queued'", (row['owner'], pid)):
+                    previous = json.loads(candidate['payload'])
+                    if previous.get('refreshProject') == pid:
+                        existing = candidate
+                        refresh_payload['refreshImmediate'] |= bool(previous.get('refreshImmediate'))
+                        break
+                if existing:
+                    db.execute('UPDATE actions SET payload=? WHERE id=?', (json.dumps(refresh_payload), existing['id']))
+                else:
+                    db.execute("""INSERT INTO actions
+                        (owner, token, label, project, status, created, payload, total_steps)
+                        VALUES (?, ?, ?, ?, 'queued', ?, ?, 1)""",
+                        (row['owner'], f"refresh:{row['id']}:{pid}", f'Refresh VMs for project {pid}',
+                         pid, time.time(), json.dumps(refresh_payload)))
 
     def progress_reporter(self, job_id, step_number):
         state = {}
@@ -246,8 +313,9 @@ class ActionQueue:
         partial_errors = False
         partial_error_message = 'VM creation reported errors; see results.'
         push_batch = GuestPushBatch()
+        attempted_steps = []
+        payload = json.loads(row['payload'])
         try:
-            payload = json.loads(row['payload'])
             for index, step in enumerate(payload['steps']):
                 if self.cancelled(job_id):
                     status = 'cancelled'
@@ -266,6 +334,7 @@ class ActionQueue:
                 operation = request_label(step['method'], step['url'], step.get('body'))
                 report({'phase': 'starting', 'progress': None, 'current': '',
                         'message': f'Step {index + 1}/{len(payload["steps"])} · {operation}…'})
+                attempted_steps.append(step)
                 code, headers, body = self.dispatch(step, payload, job_id, report, push_batch)
                 try:
                     result = json.loads(body)
@@ -313,6 +382,7 @@ class ActionQueue:
                 headers = {'Content-Type': 'application/json'}
             if self.cancelled(job_id):
                 status, error = 'cancelled', ''
+            self.schedule_refreshes(row, payload, attempted_steps, status != 'completed')
             with self.connect() as db:
                 db.execute('''UPDATE actions SET status=?, finished=?, result=?, code=?, headers=?, error=?, payload=NULL WHERE id=?''',
                            (status, time.time(), body, code, json.dumps(headers), error, job_id))
@@ -375,6 +445,44 @@ def result_summary(row):
     return summary
 
 
+def result_details(row):
+    """Readable summary details from retained responses, never request credentials."""
+    try:
+        result = json.loads(row['result'] or b'{}')
+    except (ValueError, UnicodeDecodeError, TypeError):
+        return ''
+    hidden = {'base64', 'password', 'passwd', 'vm_pass', 'proxmox_api_token',
+              'token', 'api_key', 'secret', 'authorization', 'cookie', 'csrfpreventiontoken'}
+    lines = []
+
+    def render(value, indent=0):
+        prefix = '  ' * indent
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key.lower() in hidden or key in {'log', 'logs'}:
+                    continue
+                label = key.replace('_', ' ').capitalize()
+                if isinstance(item, (dict, list)):
+                    if item:
+                        lines.append(f'{prefix}{label}:')
+                        render(item, indent + 1)
+                else:
+                    text = '' if item is None else str(item)
+                    lines.append(f'{prefix}{label}: {text}')
+        elif isinstance(value, list):
+            for index, item in enumerate(value, 1):
+                if isinstance(item, (dict, list)):
+                    lines.append(f'{prefix}- Item {index}:')
+                    render(item, indent + 1)
+                else:
+                    lines.append(f'{prefix}- {item}')
+        else:
+            lines.append(f'{prefix}{value}')
+
+    render(result)
+    return '\n'.join(lines)
+
+
 def result_log_sources(row):
     """Find retained logs without decoding archives during queue polling."""
     if row['status'] not in {'completed', 'error', 'cancelled'}:
@@ -418,12 +526,13 @@ def public_record(row):
         progress = min(99, progress)
     return {'id': row['id'], 'label': queue_label(row['label']), 'projectId': row['project'],
             'status': row['status'], 'summary': result_summary(row), 'createdAt': row['created'] * 1000,
-            'logUrl': f"/api/queue/{row['id']}/log" if result_log_sources(row) else None,
+            'logUrl': f"/api/queue/{row['id']}/log" if row['status'] in {'completed', 'error', 'cancelled'} else None,
             'startedAt': row['started'] * 1000 if row['started'] else None,
             'finishedAt': row['finished'] * 1000 if row['finished'] else None,
             'cancelRequested': bool(row['cancel']), 'errorMessage': row['error'],
             'durationMs': (row['finished'] - row['started']) * 1000 if row['finished'] and row['started'] else None,
             'step': row['step'], 'totalSteps': row['total_steps'],
+            'inventoryRefresh': str(row['token']).startswith('refresh:'),
             'progress': progress, 'stepProgress': step_progress,
             'message': detail.get('message', ''), 'phase': detail.get('phase', ''),
             'current': detail.get('current', ''),
@@ -519,23 +628,28 @@ def init_action_queue(app):
         row = record(job_id)
         if not row:
             return jsonify(error='not found'), 404
-        sources = result_log_sources(row)
-        if not sources:
-            return jsonify(error='No retained log is available for this action'), 404
-        sections = [result_summary(row)]
-        try:
-            for source in sources:
-                if isinstance(source, str):
-                    sections.append(source)
-                    continue
+        if row['status'] in {'queued', 'running'}:
+            return jsonify(error='Action is still pending'), 409
+        sections = [f"Queue item #{job_id} — {queue_label(row['label'])}",
+                    f"Project: {row['project'] or '(none)'}", result_summary(row)]
+        details = result_details(row)
+        if details:
+            sections.append('Summary details\n' + details)
+        for source in result_log_sources(row):
+            if isinstance(source, str):
+                sections.append(source)
+                continue
+            try:
                 with zipfile.ZipFile(io.BytesIO(base64.b64decode(source['base64'], validate=True))) as archive:
                     for entry in archive.infolist():
                         if not entry.is_dir() and entry.filename.endswith(('.txt', '.json')):
                             sections.append(f"=== {entry.filename} ===\n" + archive.read(entry).decode('utf-8', errors='replace'))
-        except (ValueError, zipfile.BadZipFile, KeyError, RuntimeError):
-            return jsonify(error='The retained log archive could not be read'), 422
-        return Response('\n\n'.join(sections) + '\n', content_type='text/plain; charset=utf-8',
-                        headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
+            except (ValueError, zipfile.BadZipFile, KeyError, RuntimeError):
+                sections.append('The retained command output archive could not be read; summary details are preserved above.')
+        headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
+        if request.args.get('download') == '1':
+            headers['Content-Disposition'] = f'attachment; filename="queue-{job_id}-log.txt"'
+        return Response('\n\n'.join(sections) + '\n', content_type='text/plain; charset=utf-8', headers=headers)
 
     @bp.route('/<int:job_id>/cancel', methods=['POST'])
     @_secure_route()

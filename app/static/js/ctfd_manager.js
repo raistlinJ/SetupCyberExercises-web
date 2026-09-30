@@ -4009,6 +4009,22 @@ function mapRowStatus(raw) {
   return { label: 'n/a', cls: 'badge bg-secondary', weight: 3 };
 }
 
+function updateCtfdSelectionCount(project = PROJ) {
+  const host = document.getElementById('ctfd-selection-count');
+  if (!host) return;
+  const multi = Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
+  const pids = multi ? CTFD_SELECTED_PIDS.map(String) : (project ? [String(project.id)] : []);
+  host.innerHTML = [...new Set(pids)].map(pid => {
+    const proj = multi ? (CTFD_ALL_PROJECTS || []).find(item => String(item.id) === pid) : project;
+    const instances = Number(proj?.instances || 0);
+    let count = 0;
+    for (let index = 1; index <= instances; index++) {
+      if (multi ? CTFD_SELECTED_KEYS.has(`${pid}:${index}`) : CTFD_SELECTED_INDICES.has(index)) count++;
+    }
+    return `<span class="border rounded px-2 py-1">${escHtml(String(proj?.name || pid))}: <strong>${count} selected</strong></span>`;
+  }).join('');
+}
+
 function renderCtfdTable(proj) {
   // If multiple projects selected, delegate to merged renderer
   try {
@@ -4016,6 +4032,7 @@ function renderCtfdTable(proj) {
       return ctfdRenderTableMerged();
     }
   } catch { }
+  updateCtfdSelectionCount(proj);
   const host = document.getElementById('ctfd-table');
   if (!host) return;
   if (!proj) {
@@ -4309,6 +4326,7 @@ function renderCtfdTable(proj) {
           cb.checked = CTFD_SELECTED_INDICES.has(idx);
         });
         // Persist selection
+        updateCtfdSelectionCount();
         if (PROJ) writeCtfdUiState(PROJ.id, { selectedIndices: Array.from(CTFD_SELECTED_INDICES) });
       });
     }
@@ -4320,6 +4338,7 @@ function renderCtfdTable(proj) {
         const allSel = (CTFD_LAST_VISIBLE_INDICES.length > 0) && CTFD_LAST_VISIBLE_INDICES.every(i => CTFD_SELECTED_INDICES.has(i));
         const hdr = document.getElementById('ctfd-chk-all'); if (hdr) hdr.checked = allSel;
         // Persist selection
+        updateCtfdSelectionCount();
         if (PROJ) writeCtfdUiState(PROJ.id, { selectedIndices: Array.from(CTFD_SELECTED_INDICES) });
       });
     });
@@ -4331,7 +4350,7 @@ function ctfdRenderTableMerged() {
   const host = document.getElementById('ctfd-table');
   if (!host) return;
   const pids = Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS.slice() : [];
-  if (!pids.length) { host.innerHTML = '<div class="text-muted">Select projects to merge.</div>'; return; }
+  if (!pids.length) { updateCtfdSelectionCount(null); host.innerHTML = '<div class="text-muted">Select projects to merge.</div>'; return; }
   // Build rows by merging credentials layout across selected projects
   // We rely on PROJ for column preferences when single; for multi, use a shared 'multi' key.
   try { CTFD_COLS = readCtfdCols('multi'); const ids = ['project', 'cred', 'team', 'user_points', 'team_points', 'user_last', 'team_last']; ids.forEach(id => { const el = document.getElementById(`ctfd-col-${id}`); if (el) el.checked = !!CTFD_COLS[id]; }); } catch { }
@@ -4340,6 +4359,7 @@ function ctfdRenderTableMerged() {
     const raw = sessionStorage.getItem('toolhub.ctfd.mgr.selectedKeys.v1') || '[]';
     const arr = JSON.parse(raw); if (Array.isArray(arr)) CTFD_SELECTED_KEYS = new Set(arr);
   } catch { }
+  updateCtfdSelectionCount();
   // Construct a merged flat row list
   const rows = [];
   const byId = {}; (CTFD_ALL_PROJECTS || []).forEach(p => byId[String(p.id)] = p);
@@ -4513,6 +4533,7 @@ function ctfdRenderTableMerged() {
             const key = String(cb.getAttribute('data-key') || '');
             cb.checked = CTFD_SELECTED_KEYS.has(key);
           });
+          updateCtfdSelectionCount();
           sessionStorage.setItem('toolhub.ctfd.mgr.selectedKeys.v1', JSON.stringify(Array.from(CTFD_SELECTED_KEYS)));
         } catch { }
       });
@@ -4523,6 +4544,7 @@ function ctfdRenderTableMerged() {
         if (cb.checked) CTFD_SELECTED_KEYS.add(key); else CTFD_SELECTED_KEYS.delete(key);
         const allSel2 = (CTFD_LAST_VISIBLE_KEYS.length > 0) && CTFD_LAST_VISIBLE_KEYS.every(k => CTFD_SELECTED_KEYS.has(k));
         const hdr = document.getElementById('ctfd-chk-all-multi'); if (hdr) hdr.checked = allSel2;
+        updateCtfdSelectionCount();
         sessionStorage.setItem('toolhub.ctfd.mgr.selectedKeys.v1', JSON.stringify(Array.from(CTFD_SELECTED_KEYS)));
       });
     });
@@ -5808,6 +5830,7 @@ async function ctfdEnsureLiveStateBeforeAction(targetPids) {
 }
 function normalizeUrl(s) { if (!s) return ''; return /^https?:\/\//i.test(s) ? s : `https://${s}`; }
 function updateCtfdControlsEnabled() {
+  updateCtfdSelectionCount();
   const btnLogin = document.getElementById('btn-ctfd-login');
   const refresh = document.getElementById('btn-ctfd-refresh');
   const wrap = document.getElementById('ctfd-refresh-wrapper');
