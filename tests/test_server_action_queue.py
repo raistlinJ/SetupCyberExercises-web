@@ -837,7 +837,7 @@ def inventory_queue(tmp_path, monkeypatch):
 @pytest.mark.parametrize('action', ['create', 'delete', 'start', 'unlock', 'suspend', 'hibernate',
     'poweroff', 'snapshot', 'restore', 'nets_set', 'nets_remove', 'apply_scenario',
     'run_startup_cmds', 'run_stored_cmds', 'users_create', 'users_delete', 'users_access_sync',
-    'users_orchestration_enable', 'guest_push', 'guest_delete', 'guest_pull'])
+    'users_orchestration_enable', 'guest_push', 'guest_delete', 'guest_pull', 'file_transfer'])
 def test_every_vm_operation_gets_one_forced_refresh(inventory_queue, action):
     queue, submit, drain, calls = inventory_queue
     submit([('one', action, False)])
@@ -966,3 +966,69 @@ def test_queue_log_is_not_available_until_finished(harness):
     assert client.get(f"/api/queue/{job['id']}").get_json()['logUrl'] is None
     assert client.get(f"/api/queue/{job['id']}/log?download=1").status_code == 409
     release.set()
+
+
+@pytest.mark.parametrize('direction', ['upload', 'download'])
+@pytest.mark.parametrize('enabled', [True, False])
+@pytest.mark.parametrize('write_fails', [True, False])
+def test_queued_vm_transfer_policy_updates_notes_reports_outcome_and_refreshes(harness, monkeypatch, direction, enabled, write_fails):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from app.storage.projects import Project, VMConfig
+    from app.file_transfer import read_policy
+
+    app, client, started, release, finished, calls = harness
+    app.current_user = lambda: {'username': session['user'], 'roles': ['admin']} if session.get('user') else None
+    project = Project(id='queue-test', name='Lab', proxmox_url='https://node.test',
+                      vms=[VMConfig(name='web', viewable_to_user=True)])
+    monkeypatch.setattr(api, '_store', lambda: SimpleNamespace(get=lambda pid: project))
+    target = {'index': 1, 'name': 'web-set-1', 'node': 'node', 'vmid': 101, 'type': 'qemu'}
+    monkeypatch.setattr(api, '_resolve_targets_to_vm_info', lambda *args: ([target], [], []))
+    upstream = Mock()
+    upstream.get_qemu_config.return_value = {'digest': 'abc', 'description': 'Human notes\n{"AccessForge":{"file_upload":true,"file_download":true}}'}
+
+    def write(**kwargs):
+        started.set()
+        assert release.wait(5)
+        if write_fails:
+            raise RuntimeError('VM.Config.Options denied')
+
+    upstream.set_qemu_options.side_effect = write
+    monkeypatch.setattr(api, 'ProxmoxClient', lambda **kwargs: upstream)
+    app.add_url_rule('/api/projects/<pid>/instances/actions/file_transfer', view_func=api.instances_file_transfer, methods=['POST'])
+
+    @app.post('/api/projects/<pid>/instances/refresh/vm')
+    def refresh_transfer_policy(pid):
+        calls.append(('refresh', pid))
+        return jsonify(instance_statuses=[])
+
+    job = enqueue(client, f'policy-{direction}-{enabled}', projectId=project.id, steps=[{
+        'method': 'POST', 'url': f'/api/projects/{project.id}/instances/actions/file_transfer',
+        'body': {'targets': [target], 'username': 'root@pam', 'password': 'secret', f'file_{direction}': enabled},
+    }]).get_json()
+    try:
+        assert started.wait(2)
+        active = client.get(f"/api/queue/{job['id']}").get_json()
+        assert active['status'] == 'running'
+        assert active['phase'] == 'file_transfer'
+        assert active['current'].startswith('web-set-1')
+    finally:
+        release.set()
+    state = wait_terminal(client, job['id'])
+    assert state['status'] == ('error' if write_fails else 'completed')
+    result = client.get(f"/api/queue/{job['id']}/result").get_json()
+    if write_fails:
+        assert result['errors'][0]['reason'] == 'VM.Config.Options denied'
+    else:
+        assert len(result['infos']) == 1
+        assert f"{direction.capitalize()} {'enabled' if enabled else 'disabled'}" in result['infos'][0]['reason']
+        written = upstream.set_qemu_options.call_args.kwargs['options']
+        assert written['digest'] == 'abc'
+        assert 'Human notes' in written['description']
+        policy = read_policy(written['description'])
+        assert policy[f'file_{direction}'] is enabled
+        assert policy[f"file_{'download' if direction == 'upload' else 'upload'}"] is True
+    deadline = time.monotonic() + 2
+    while ('refresh', project.id) not in calls and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert calls.count(('refresh', project.id)) == 1

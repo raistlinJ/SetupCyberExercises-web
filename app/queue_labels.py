@@ -21,6 +21,7 @@ ACTION_LABELS = {
     'guest_pull': 'Download guest files', 'lxc_pull': 'Download container files',
     'guest_delete': 'Delete guest files', 'lxc_delete': 'Delete container files',
     'reset_ageing_cache': 'Reset bridge ageing cache',
+    'file_transfer': 'Update VM transfer policy',
 }
 
 
@@ -42,6 +43,12 @@ def request_label(method, url, body=None):
         if not tail:
             return {'GET': 'Load project', 'DELETE': 'Delete project'}.get(method, 'Save project settings')
         if tail[:2] == ['instances', 'actions'] and len(tail) > 2:
+            if tail[2] == 'file_transfer' and isinstance(body, dict):
+                flags = [(direction, body['file_' + direction]) for direction in ('upload', 'download')
+                         if isinstance(body.get('file_' + direction), bool)]
+                if len(flags) == 1:
+                    direction, enabled = flags[0]
+                    return f"{'Enable' if enabled else 'Disable'} VM {direction}"
             return ACTION_LABELS.get(tail[2], 'Run VM action')
         if tail[:2] == ['instances', 'refresh']:
             return 'Refresh VM inventory'

@@ -17647,7 +17647,9 @@ def instances_file_transfer(pid):
                            verify=body.get('verifySSL', proj.proxmox_verify_ssl is not False))
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     result = {'infos': [], 'skipped': skipped, 'errors': errors}
-    for target in mapped:
+    for target in _job_items(pid, mapped, 'file_transfer', 'Updating VM transfer policy',
+                             report=_queue_progress_reporter(),
+                             summary=lambda: f"{len(result['infos'])} updated, {len(result['errors'])} errors"):
         try:
             if target.get('type') != 'qemu':
                 result['skipped'].append({'name': target['name'], 'reason': 'SPICE file transfer requires a QEMU VM'})
@@ -17669,8 +17671,11 @@ def instances_file_transfer(pid):
             if config.get('digest'):
                 options['digest'] = config['digest']
             client.set_qemu_options(node=target['node'], vmid=int(target['vmid']), options=options)
-            result['infos'].append({'name': target['name'], 'vmid': target['vmid'], 'reason': 'File transfer policy updated'})
+            details = '; '.join(f"{direction.capitalize()} {'enabled' if policy['file_' + direction] else 'disabled'}"
+                                for direction in ('upload', 'download'))
+            result['infos'].append({'name': target['name'], 'vmid': target['vmid'], 'reason': details})
         except Exception as exc:
             result['errors'].append({'name': target['name'], 'reason': str(exc)})
     _VM_CONFIG_CACHE.clear()
+    result['message'] = f"Updated file transfer policy on {len(result['infos'])} VM(s)."
     return jsonify(result)

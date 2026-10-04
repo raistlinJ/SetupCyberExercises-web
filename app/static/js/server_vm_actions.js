@@ -29,6 +29,9 @@ function buildServerVmSteps(action, options, projects) {
       const opts = normalizeVmDeleteOptions(options.deleteOptions);
       if (opts.disableUserAccessibility) accessibility(false);
       add('delete', { deleteUsersAndPools: opts.deleteUsersAndPools, verifyCleanup: opts.verifyCleanup }, baseTargets);
+    } else if (/^file_(upload|download)_(enable|disable)$/.test(action)) {
+      const [, direction, operation] = /^file_(upload|download)_(enable|disable)$/.exec(action);
+      add('file_transfer', { ['file_' + direction]: operation === 'enable' });
     } else if (action === 'users_access_enable' || action === 'users_access_disable') {
       accessibility(action === 'users_access_enable');
     } else if (action === 'users_orchestration_enable' || action === 'users_orchestration_disable') {

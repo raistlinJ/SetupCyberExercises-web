@@ -322,3 +322,63 @@ test('operation completion no longer launches a browser refresh', async () => {
   await sandbox.finishServerVmAction('Unlock', { id: 1 });
   assert.equal(summaries, 1);
 });
+
+
+test('all VM transfer policy actions submit through the server queue for single and multiple projects', async () => {
+  for (const direction of ['upload', 'download']) {
+    for (const enable of [true, false]) {
+      for (const multi of [false, true]) {
+        const accepted = [], summaries = [], logs = [];
+        const projects = (multi ? ['one', 'two'] : ['one']).map(id => ({ id, name: id, proxmox_url: `https://${id}.test`, proxmox_api_port: 8006, proxmox_verify_ssl: false }));
+        const nativeFetch = async (url, opts = {}) => {
+          if (url === '/api/queue' && opts.method === 'POST') {
+            accepted.push(JSON.parse(opts.body));
+            return json({ id: 1, status: 'queued' }, 202);
+          }
+          if (url === '/api/queue') return json({ items: [] });
+          if (url === '/api/queue/1') return json({ id: 1, status: 'completed' });
+          if (url === '/api/queue/1/result') return json({ results: projects.map(project => ({ infos: [{ name: project.id, reason: 'Policy updated' }] })) });
+          assert.fail(`Unexpected direct request ${url}`);
+        };
+        const window = { fetch: nativeFetch, location: { href: 'http://localhost/vm-manager', origin: 'http://localhost' }, shell: { logError: message => assert.fail(message) } };
+        window.window = window;
+        const sandbox = { window, document: { addEventListener() {}, dispatchEvent() {} }, CustomEvent: class {}, Headers, FormData, Blob, URL,
+          setTimeout: fn => setTimeout(fn, 0), setInterval() {}, console,
+          deriveBaseVmName: (_project, name) => name,
+          guestTransferProject: pid => projects.find(project => project.id === pid), hasAuthForProject: () => true,
+          readProxCreds: pid => ({ username: pid, password: 'secret' }),
+          mergeVmActionSummaryData: (a, b) => ({ infos: [...(a.infos || []), ...(b.infos || [])] }),
+          showActionSummary: (label, result) => summaries.push({ label, result }), emitActionLogs: (label, result) => logs.push({ label, result }),
+        };
+        vm.createContext(sandbox);
+        vm.runInContext(source, sandbox);
+        sandbox.ServerQueue = window.ServerQueue;
+        vm.runInContext(plans, sandbox);
+        window.submitServerVmAction = sandbox.submitServerVmAction;
+        const action = `file_${direction}_${enable ? 'enable' : 'disable'}`;
+        const targetsByPid = { one: [{ index: 1, name: 'web-set-1' }, { index: 2, name: 'web-set-2' }], two: [{ index: 3, name: 'db-set-3' }] };
+        const label = `${enable ? 'Enable' : 'Disable'} VM ${direction}`;
+        const result = await window.ServerQueue.run(label, () => assert.fail('Must use the durable server plan'), {
+          projectId: 'one', persist: { key: 'vm-manager-action-v1', data: { action, projectId: 'one', options: multi ? { targetsByPid } : { targets: targetsByPid.one } } },
+        });
+        assert.equal(result.status, 'completed');
+        assert.equal(accepted.length, 1);
+        assert.equal(accepted[0].label, label);
+        assert.equal(accepted[0].steps.length, projects.length);
+        for (const [index, step] of accepted[0].steps.entries()) {
+          const pid = projects[index].id;
+          assert.equal(step.method, 'POST');
+          assert.equal(step.url, `/api/projects/${pid}/instances/actions/file_transfer`);
+          assert.equal(step.body[`file_${direction}`], enable);
+          assert.equal(Object.hasOwn(step.body, `file_${direction === 'upload' ? 'download' : 'upload'}`), false);
+          assert.deepEqual(step.body.targets, targetsByPid[pid]);
+          assert.equal(step.body.username, pid);
+          assert.equal(step.body.baseUrl, projects[index].proxmox_url);
+        }
+        assert.equal(summaries.length, 1);
+        assert.equal(summaries[0].result.infos.length, projects.length);
+        assert.equal(logs.length, 1);
+      }
+    }
+  }
+});

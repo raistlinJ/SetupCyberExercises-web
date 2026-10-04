@@ -37,3 +37,11 @@ def test_existing_history_is_formatted_without_payload_or_replaying_actions():
                error='', step=1, total_steps=1, progress_state='{}')
     assert public_record(row)['label'] == 'Save VM settings · agentic-VM'
     assert row['label'].startswith('PATCH ')
+
+
+@pytest.mark.parametrize('direction', ['upload', 'download'])
+@pytest.mark.parametrize('enabled', [True, False])
+def test_vm_transfer_queue_title_describes_direction_and_operation(direction, enabled):
+    step = {'method': 'POST', 'url': '/api/projects/p/instances/actions/file_transfer',
+            'body': {f'file_{direction}': enabled, 'password': 'secret', 'targets': []}}
+    assert queue_label(None, [step]) == f"{'Enable' if enabled else 'Disable'} VM {direction}"
