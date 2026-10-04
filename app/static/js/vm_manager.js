@@ -968,6 +968,11 @@ function vmBuildFilterParts(rowLike) {
     ? _coerceEnabled(row.user_access, false)
     : _coerceEnabled(row.viewable_to_user, true);
   parts.push(effAccess ? 'user access granted' : 'user access not granted');
+  const transferProject = (ALL_PROJECTS || []).find(project => canonicalPid(project.id) === canonicalPid(row.pid)) || PROJ;
+  const transferPolicy = vmTransferPolicy(row, transferProject);
+  for (const direction of ['upload', 'download']) {
+    parts.push(`${direction}-${transferPolicy['file_' + direction] ? 'enabled' : 'disabled'}`);
+  }
 
   // Pool tooltip semantics
   try {
@@ -8357,7 +8362,7 @@ function showActionSummary(actionName, resp) {
 }
 
 
-function vmTransferIcons(row, project) {
+function vmTransferPolicy(row, project) {
   const config = project?.vms?.find(vm => vm.name === row.baseName) || {};
   let policy = {file_upload: config.file_upload === true, file_download: config.file_download === true};
   if (row.detail) {
@@ -8371,11 +8376,19 @@ function vmTransferIcons(row, project) {
     }
   }
   const accessible = row.user_access != null ? _coerceEnabled(row.user_access, false) : _coerceEnabled(row.viewable_to_user, true);
+  return {
+    file_upload: accessible && policy.file_upload === true,
+    file_download: accessible && policy.file_download === true,
+  };
+}
+
+function vmTransferIcons(row, project) {
+  const policy = vmTransferPolicy(row, project);
   const arrows = ['upload', 'download'].map(direction => {
-    const enabled = accessible && policy['file_' + direction] === true;
+    const enabled = policy['file_' + direction];
     const icon = direction === 'upload' ? 'arrow-up' : 'arrow-down';
     const title = `${direction === 'upload' ? 'Upload' : 'Download'} VM policy: ${enabled ? 'Enabled' : 'Disabled'}${row.detail ? '' : ' (configuration; refresh to verify VM policy)'}. Transfers also require the console service to enable this direction.`;
-    return `<i class="bi bi-${icon} ${enabled ? 'text-success' : 'text-secondary'}" title="${escHtml(title)}" aria-label="${escHtml(title)}"></i>`;
+    return `<i class="bi bi-${icon} ${enabled ? 'text-success' : 'text-secondary'}" title="${escHtml(title)}" aria-label="${escHtml(title)}"></i><span class="visually-hidden">${direction}-${enabled ? 'enabled' : 'disabled'}</span>`;
   }).join('');
   return `<span class="vm-transfer-icons d-inline-flex flex-nowrap align-items-center ms-1" style="font-size: .85em; gap: 1px; line-height: 1; vertical-align: middle;" role="group" aria-label="VM upload and download policies">${arrows}</span>`;
 }
