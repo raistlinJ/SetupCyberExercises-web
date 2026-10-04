@@ -1729,7 +1729,7 @@ function renderMergedVmTable(rows) {
           `<div class="ms-2">${credExtras}</div>` +
           `</div>` +
           `</td>` : '') : '') +
-        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}${accessIcon}${vmTransferIcons(r, (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(r.pid)))}</td>` : '') +
+        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}<span class="d-inline-flex flex-nowrap align-items-center">${accessIcon}${vmTransferIcons(r, (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(r.pid)))}</span></td>` : '') +
         (VM_COLS.state ? `<td>${stateHtml}</td>` : '') +
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
@@ -2582,7 +2582,7 @@ function renderVmTable(proj) {
           `<div class=\"ms-2\">${credExtras}</div>` +
           `</div>` +
           `</td>` : '') : '') +
-        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}${accessIcon}${vmTransferIcons(r, PROJ)}</td>` : '') +
+        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}<span class="d-inline-flex flex-nowrap align-items-center">${accessIcon}${vmTransferIcons(r, PROJ)}</span></td>` : '') +
         (VM_COLS.state ? `<td>${stateHtml}</td>` : '') +
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
@@ -8371,12 +8371,13 @@ function vmTransferIcons(row, project) {
     }
   }
   const accessible = row.user_access != null ? _coerceEnabled(row.user_access, false) : _coerceEnabled(row.viewable_to_user, true);
-  return ['upload', 'download'].map(direction => {
+  const arrows = ['upload', 'download'].map(direction => {
     const enabled = accessible && policy['file_' + direction] === true;
     const icon = direction === 'upload' ? 'arrow-up' : 'arrow-down';
     const title = `${direction === 'upload' ? 'Upload' : 'Download'} VM policy: ${enabled ? 'Enabled' : 'Disabled'}${row.detail ? '' : ' (configuration; refresh to verify VM policy)'}. Transfers also require the console service to enable this direction.`;
-    return `<i class="bi bi-${icon} ms-1 ${enabled ? 'text-success' : 'text-secondary'}" title="${escHtml(title)}" aria-label="${escHtml(title)}"></i>`;
+    return `<i class="bi bi-${icon} ${enabled ? 'text-success' : 'text-secondary'}" title="${escHtml(title)}" aria-label="${escHtml(title)}"></i>`;
   }).join('');
+  return `<span class="vm-transfer-icons d-inline-flex flex-nowrap align-items-center ms-1" style="font-size: .85em; gap: 1px; line-height: 1; vertical-align: middle;" role="group" aria-label="VM upload and download policies">${arrows}</span>`;
 }
 
 async function vmTransferAction(project, action, targets) {
