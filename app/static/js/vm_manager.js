@@ -1729,7 +1729,7 @@ function renderMergedVmTable(rows) {
           `<div class="ms-2">${credExtras}</div>` +
           `</div>` +
           `</td>` : '') : '') +
-        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}${accessIcon}</td>` : '') +
+        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}${accessIcon}${vmTransferIcons(r, (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(r.pid)))}</td>` : '') +
         (VM_COLS.state ? `<td>${stateHtml}</td>` : '') +
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
@@ -2582,7 +2582,7 @@ function renderVmTable(proj) {
           `<div class=\"ms-2\">${credExtras}</div>` +
           `</div>` +
           `</td>` : '') : '') +
-        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}${accessIcon}</td>` : '') +
+        (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}${accessIcon}${vmTransferIcons(r, PROJ)}</td>` : '') +
         (VM_COLS.state ? `<td>${stateHtml}</td>` : '') +
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
@@ -4707,6 +4707,10 @@ function friendlyActionName(action) {
     users_creds_set: 'Set Credentials to Current List',
     users_orchestration_enable: 'Enable orchestration access (dangerous)',
     users_orchestration_disable: 'Disable orchestration access',
+    file_upload_enable: 'Enable VM Upload',
+    file_upload_disable: 'Disable VM Upload',
+    file_download_enable: 'Enable VM Download',
+    file_download_disable: 'Disable VM Download',
     users_access_enable: 'Enable User Accessibility',
     users_access_disable: 'Disable User Accessibility',
   };
@@ -6391,6 +6395,15 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
     : listSelectedEntriesForPid(PROJ.id);
   if (!selected.length) { alert('Select at least one VM row in this project.'); return; }
 
+  if (/^file_(upload|download)_(enable|disable)$/.test(action)) {
+    if (!hasAuthForProject(PROJ)) { alert('Please log in to Proxmox first.'); return; }
+    try {
+      const result = await vmTransferAction(PROJ, action, selected);
+      showActionSummary(friendlyActionName(action), result);
+      await vmRefresh({project: PROJ, forceRefresh: true, showProgressDialog: false});
+    } catch (error) { alert('File transfer action failed: ' + error.message); }
+    return;
+  }
   // Configuration-only actions: toggle whether VM templates are user-accessible.
   if (action === 'users_access_enable' || action === 'users_access_disable') {
     const enable = action === 'users_access_enable';
@@ -7153,6 +7166,20 @@ async function vmActionMultiExec(action, opts = {}) {
     byPid.get(entry.pid).push({ index: Number(entry.index), name: entry.name });
   }
   if (byPid.size === 0) { alert('No valid selections.'); return; }
+  if (/^file_(upload|download)_(enable|disable)$/.test(action)) {
+    const result = {infos: [], errors: [], skipped: []};
+    for (const [pid, targets] of byPid) {
+      const project = (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(pid));
+      try {
+        if (!project || !hasAuthForPid(pid)) throw new Error('Missing project or Proxmox credentials');
+        const response = await vmTransferAction(project, action, targets);
+        for (const key of ['infos', 'errors', 'skipped']) result[key].push(...(response[key] || []));
+      } catch (error) { result.errors.push({project: pid, reason: error.message}); }
+    }
+    showActionSummary(friendlyActionName(action), result);
+    await vmRefresh({forceRefresh: true, showProgressDialog: false});
+    return;
+  }
   // Validate auth for actions.
   for (const pid of byPid.keys()) {
     if (!hasAuthForPid(pid)) {
@@ -8327,4 +8354,40 @@ function showActionSummary(actionName, resp) {
     // Fall back silently if the modal can't be shown
     try { console.warn('Failed to show action summary', e); } catch { }
   }
+}
+
+
+function vmTransferIcons(row, project) {
+  const config = project?.vms?.find(vm => vm.name === row.baseName) || {};
+  let policy = {file_upload: config.file_upload === true, file_download: config.file_download === true};
+  if (row.detail) {
+    policy = {file_upload: false, file_download: false};
+    // AccessForge writes a separate, namespaced JSON object in VM notes.
+    const matches = typeof row.detail.description === 'string' ? (row.detail.description.match(/\{\s*"AccessForge"\s*:\s*\{[^{}]*\}\s*\}/g) || []) : [];
+    if (matches.length === 1) {
+      try { const data = JSON.parse(matches[0]).AccessForge;
+        policy = {file_upload: data.file_upload === true, file_download: data.file_download === true};
+      } catch { }
+    }
+  }
+  const accessible = row.user_access != null ? _coerceEnabled(row.user_access, false) : _coerceEnabled(row.viewable_to_user, true);
+  return ['upload', 'download'].map(direction => {
+    const enabled = accessible && policy['file_' + direction] === true;
+    const icon = direction === 'upload' ? 'arrow-up' : 'arrow-down';
+    const title = `${direction === 'upload' ? 'Upload' : 'Download'} VM policy: ${enabled ? 'Enabled' : 'Disabled'}${row.detail ? '' : ' (configuration; refresh to verify VM policy)'}. Transfers also require the console service to enable this direction.`;
+    return `<i class="bi bi-${icon} ms-1 ${enabled ? 'text-success' : 'text-secondary'}" title="${escHtml(title)}" aria-label="${escHtml(title)}"></i>`;
+  }).join('');
+}
+
+async function vmTransferAction(project, action, targets) {
+  const match = /^file_(upload|download)_(enable|disable)$/.exec(action);
+  const direction = match[1], enable = match[2] === 'enable';
+  const sess = readProxCreds(project.id) || {};
+  const response = await http('POST', `/api/projects/${encodeURIComponent(project.id)}/instances/actions/file_transfer`, {
+    targets, ['file_' + direction]: enable,
+    username: sess.username || undefined, password: sess.password || undefined,
+    baseUrl: project.proxmox_url, apiPort: project.proxmox_api_port,
+    verifySSL: project.proxmox_verify_ssl !== false,
+  });
+  return response;
 }

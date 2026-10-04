@@ -328,6 +328,8 @@ class VMConfig:
     vmid: Optional[int] = None
     vm_type: str = "qemu"  # 'qemu' or 'lxc'
     viewable_to_user: bool = True
+    file_upload: bool = False
+    file_download: bool = False
     start_commands: List[StartCommandStep] = field(default_factory=list)
     stored_commands: List[StartCommandStep] = field(default_factory=list)
     validation_commands: List[Dict[str, Any]] = field(default_factory=list)
@@ -821,6 +823,8 @@ class ProjectStore:
                 base["viewable_to_user"] = _coerce_enabled(base.get("viewable_to_user"), True)
             except Exception:
                 base["viewable_to_user"] = True
+            for direction in ("file_upload", "file_download"):
+                base[direction] = _coerce_enabled(base.get(direction), False)
             # Normalize vmid to int if present
             if base.get("vmid") is not None:
                 try:
@@ -1105,6 +1109,8 @@ class ProjectStore:
                 for k in [
                     "vmid",
                     "viewable_to_user",
+                    "file_upload",
+                    "file_download",
                     "start_commands",
                     "stored_commands",
                     "validation_commands",
@@ -1159,6 +1165,7 @@ class ProjectStore:
                                        vmid=vm.vmid,
                                        vm_type=getattr(vm, 'vm_type', 'qemu'),
                                        viewable_to_user=vm.viewable_to_user,
+                                       file_upload=vm.file_upload, file_download=vm.file_download,
                                        start_commands=sanitize_start_command_steps(vm.start_commands),
                                        stored_commands=sanitize_start_command_steps(vm.stored_commands),
                                        validation_commands=sanitize_validation_commands(getattr(vm, 'validation_commands', [])),

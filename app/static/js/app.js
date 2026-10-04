@@ -6510,12 +6510,16 @@ function renderProjectCard(p) {
           <input id="vm-name-input-${p.id}-${i}" class="form-control form-control-sm d-none" value="${escHtml(v.name)}"
                  onkeydown="vmNameKey('${p.id}',${i}, event)" />
         </div>
-        <div class="d-flex align-items-center gap-2">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
           <button class="btn btn-sm btn-outline-secondary" onclick="startVmRename('${p.id}',${i})">Rename</button>
           <div class="form-check form-switch">
             <input class="form-check-input" type="checkbox" ${v.viewable_to_user ? 'checked' : ''} onchange="saveVM('${p.id}','${escHtml(v.name)}', {viewable_to_user: this.checked})">
             <label class="form-check-label">User-Accessible</label>
           </div>
+          ${v.viewable_to_user && v.vm_type !== 'lxc' ? `<div class="d-flex gap-2 small" title="VM policy; transfers also require the console service to enable the direction, guest agents and Proxmox permissions">
+            <label class="form-check"><input class="form-check-input" type="checkbox" ${v.file_upload ? 'checked' : ''} onchange="saveVM('${p.id}','${escHtml(v.name)}', {file_upload: this.checked})"> Upload</label>
+            <label class="form-check"><input class="form-check-input" type="checkbox" ${v.file_download ? 'checked' : ''} onchange="saveVM('${p.id}','${escHtml(v.name)}', {file_download: this.checked})"> Download</label>
+          </div>` : ''}
           <button class="btn btn-sm btn-outline-danger" onclick="removeVM('${p.id}','${escHtml(v.name)}')">Remove</button>
         </div>
       </div>
@@ -7862,6 +7866,21 @@ async function saveVM(id, name, fields, opts = {}) {
   try {
     if (!silent) { try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: saving VM ${name}`) : console.log('Saving VM', name); } catch { } }
     await http('PATCH', `/api/projects/${id}/vms/${encodeURIComponent(name)}`, fields);
+    if (['file_upload', 'file_download', 'viewable_to_user'].some(key => Object.prototype.hasOwnProperty.call(fields, key))) {
+      const project = (window.PROJ_CACHE || {})[id];
+      const sess = typeof readProxCreds === 'function' ? (readProxCreds(id) || {}) : {};
+      try {
+        const sync = await http('POST', `/api/projects/${encodeURIComponent(id)}/instances/actions/file_transfer`, {
+          templates: [name], username: sess.username || undefined, password: sess.password || undefined,
+          baseUrl: project?.proxmox_url, apiPort: project?.proxmox_api_port,
+          verifySSL: project?.proxmox_verify_ssl !== false,
+        });
+        if (sync.errors?.length) throw new Error(sync.errors.map(e => e.reason).join('; '));
+      } catch (error) {
+        await loadProjects();
+        throw new Error('Configuration saved, but VM policies were not fully applied: ' + error.message);
+      }
+    }
     if (configuredVmidChanged) clearProxmoxApplicationSession(id);
     if (!silent) {
       loadProjects();

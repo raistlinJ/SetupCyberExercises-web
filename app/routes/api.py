@@ -44,6 +44,8 @@ from ..storage.runtime import RuntimeStore
 from ..storage.secrets import encrypt_str as _enc_secret, decrypt_str as _dec_secret
 from ..storage.user_secrets import UserSecretsStore
 
+from ..file_transfer import config_policy, write_policy, read_policy
+
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
 
@@ -3228,6 +3230,12 @@ def instances_create(pid: str):
             skip_snap = False
         skip_snap = bool(skip_snap) or (not take_snapshot)
         
+        if not is_lxc:
+            policy_cfg = client.get_qemu_config(node=node, vmid=int(newid)) or {}
+            client.set_qemu_options(node=node, vmid=int(newid), options={
+                'description': write_policy(policy_cfg.get('description'), config_policy(cfg)),
+                **({'digest': policy_cfg['digest']} if policy_cfg.get('digest') else {}),
+            })
         if apply_scenario:
             try:
                 cfg_user = getattr(cfg, 'vm_user', None)
@@ -5913,6 +5921,7 @@ def instances_apply_scenario(pid: str):
         if is_lxc:
             client.set_lxc_options(node=node, vmid=int(vmid), options={'description': new_desc})
         else:
+            new_desc = write_policy(new_desc, config_policy(cfg))
             client.set_qemu_options(node=node, vmid=int(vmid), options={'description': new_desc})
         return ('applied', { 'index': m['index'], 'name': m['name'], 'vmid': vmid, 'node': node })
 
@@ -8411,6 +8420,7 @@ def instances_users_orchestration(pid: str, enable: bool):
 
 
 @api_bp.route("/projects/<pid>/instances/actions/users_access_sync", methods=["POST"])
+@_secure_route(required_roles=['admin'])
 def instances_users_access_sync(pid: str):
     """Sync per-VM ACLs to match the current user accessibility setting.
 
@@ -8586,6 +8596,16 @@ def instances_users_access_sync(pid: str):
             name = str(m.get('name') or '')
         except Exception:
             continue
+        if not enable and m.get('type') == 'qemu':
+            try:
+                vm_config = client.get_qemu_config(node=m['node'], vmid=vmid) or {}
+                options = {'description': write_policy(vm_config.get('description'), {'file_upload': False, 'file_download': False})}
+                if vm_config.get('digest'):
+                    options['digest'] = vm_config['digest']
+                client.set_qemu_options(node=m['node'], vmid=vmid, options=options)
+                _invalidate_vm_config_cache_entries([(m['node'], vmid)])
+            except Exception as exc:
+                errors.append({'name': name, 'reason': f'Could not revoke file transfer policy: {exc}'})
         # Find credential username for this instance index
         try:
             cred = (proj.credentials or [])[idx-1] if idx-1 < len(proj.credentials or []) else None
@@ -16172,6 +16192,25 @@ def remove_vm(pid: str, name: str):
 @_secure_route()
 def update_vm(pid: str, name: str):
     data = request.get_json(force=True) or {}
+    policy_change = any(key in data for key in ("file_upload", "file_download"))
+    if policy_change or "viewable_to_user" in data:
+        if current_app.config.get('AUTH_ENABLE'):
+            user = getattr(current_app, 'current_user', lambda: None)() or {}
+            if 'admin' not in {str(role).lower() for role in user.get('roles', [])}:
+                return jsonify(error="Only administrators can change VM transfer policy or accessibility."), 403
+    if policy_change:
+        for direction in ("upload", "download"):
+            key = "file_" + direction
+            if key in data:
+                if not isinstance(data[key], bool):
+                    return jsonify(error=key + " must be a boolean"), 400
+        project = _store().get(pid)
+        vm = next((v for v in (project.vms if project else []) if v.name == name), None)
+        if vm and vm.vm_type == 'lxc' and any(data.get(key) is True for key in ('file_upload', 'file_download')):
+            return jsonify(error="File transfer requires a QEMU VM"), 400
+        accessible = _coerce_enabled(data.get('viewable_to_user'), vm.viewable_to_user if vm else False)
+        if not accessible and any(data.get(key) is True for key in ("file_upload", "file_download")):
+            return jsonify(error="Enable User-Accessible before enabling file transfers."), 400
     # basic type normalization
     if "internet_connected_adapters" in data and "internet_connected_adaptors" not in data:
         data["internet_connected_adaptors"] = data.get("internet_connected_adapters")
@@ -16225,6 +16264,11 @@ def update_vm(pid: str, name: str):
             fields["vmid"] = data.get("vmid")
         if "viewable_to_user" in data:
             fields["viewable_to_user"] = _coerce_enabled(data.get("viewable_to_user"), True)
+        for key in ("file_upload", "file_download"):
+            if key in data:
+                fields[key] = data[key]
+        if fields.get("viewable_to_user") is False:
+            fields["file_upload"] = fields["file_download"] = False
         if "start_commands" in data:
             fields["start_commands"] = data.get("start_commands")
         if "stored_commands" in data:
@@ -17553,3 +17597,80 @@ def ctfd_challenges_visibility(pid: str):
         return jsonify({'ok': False, 'error': msg, 'logs': getattr(locals().get('client', {}), 'logs', [])}), 502
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e), 'logs': getattr(locals().get('client', {}), 'logs', [])}), 500
+
+
+@api_bp.route("/projects/<pid>/instances/actions/file_transfer", methods=["POST"])
+@_secure_route(required_roles=['admin'])
+def instances_file_transfer(pid):
+    proj = _store().get(pid)
+    if not proj:
+        return jsonify(error="Project not found"), 404
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(error="Invalid transfer request"), 400
+    requested = {key: body[key] for key in ("file_upload", "file_download") if key in body}
+    for key, value in requested.items():
+        if not isinstance(value, bool):
+            return jsonify(error=key + " must be a boolean"), 400
+    templates = body.get('templates')
+    targets = body.get('targets')
+    if templates is not None:
+        if not isinstance(templates, list) or not templates:
+            return jsonify(error="No templates provided"), 400
+        if any(name not in {vm.name for vm in proj.vms} for name in templates):
+            return jsonify(error="Unknown VM template"), 400
+        targets = [{'index': index, 'name': vm.name}
+                   for index in range(1, max(1, int(proj.instances or 0)) + 1)
+                   for vm in proj.vms if vm.name in templates]
+    if not isinstance(targets, list) or not targets:
+        return jsonify(error="No VM targets provided"), 400
+    base_url = body.get('baseUrl') or proj.proxmox_url
+    username, password = body.get('username'), body.get('password')
+    token = getattr(proj, 'proxmox_api_token', '') or None
+    if not base_url or not (token or (username and password)):
+        return jsonify(error="Missing Proxmox credentials"), 400
+    parsed = urlparse(base_url)
+    port = body.get('apiPort') or getattr(proj, 'proxmox_api_port', None)
+    if port:
+        try:
+            host = parsed.hostname or ''
+            port = int(port)
+            if not host or not 1 <= port <= 65535:
+                raise ValueError('Invalid Proxmox address')
+            if ':' in host:
+                host = f'[{host}]'
+            base_url = urlunparse((parsed.scheme or 'https', f'{host}:{port}', '', '', '', ''))
+        except (ValueError, TypeError):
+            return jsonify(error="Invalid Proxmox address or API port"), 400
+    client = ProxmoxClient(base_url=base_url, token=None if username and password else token,
+                           username=username, password=password,
+                           verify=body.get('verifySSL', proj.proxmox_verify_ssl is not False))
+    mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
+    result = {'infos': [], 'skipped': skipped, 'errors': errors}
+    for target in mapped:
+        try:
+            if target.get('type') != 'qemu':
+                result['skipped'].append({'name': target['name'], 'reason': 'SPICE file transfer requires a QEMU VM'})
+                continue
+            normalized = _normalize_project_target(proj, target)
+            vm = next(v for v in proj.vms if v.name == normalized['base_name'])
+            config = client.get_qemu_config(node=target['node'], vmid=int(target['vmid'])) or {}
+            if requested:
+                # Preserve the other direction from this VM's current policy, not template defaults.
+                policy = read_policy(config.get('description'))
+                if not vm.viewable_to_user and any(requested.values()):
+                    raise ValueError('Enable User-Accessible first')
+                policy.update(requested)
+                if not vm.viewable_to_user:
+                    policy = {'file_upload': False, 'file_download': False}
+            else:
+                policy = config_policy(vm)
+            options = {'description': write_policy(config.get('description'), policy)}
+            if config.get('digest'):
+                options['digest'] = config['digest']
+            client.set_qemu_options(node=target['node'], vmid=int(target['vmid']), options=options)
+            result['infos'].append({'name': target['name'], 'vmid': target['vmid'], 'reason': 'File transfer policy updated'})
+        except Exception as exc:
+            result['errors'].append({'name': target['name'], 'reason': str(exc)})
+    _VM_CONFIG_CACHE.clear()
+    return jsonify(result)

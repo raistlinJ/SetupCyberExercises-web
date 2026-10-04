@@ -191,3 +191,33 @@ using their PVE administration credentials.
 Enrollment is user-level, not restricted to the selected rows. Orchestrator 0.6+
 limits each user to their PVE-visible VMs and private results. SCE does not assign
 ScenarioForge/CoreVM/participant roles or change VM ACLs. See [setup, scope, revocation and tests](docs/orchestration-access.md).
+
+
+## Per-VM console file transfer
+
+SCE-web manages upload/download policy through the project's existing Proxmox connection. It does not contact `cit_vm_accessor` or need a console URL or certificate configuration. Policies can be enabled or disabled while the console is unavailable or its global transfer switches are off.
+
+`cit_vm_accessor` still requires `ENABLE_VM_FILE_UPLOAD=true` and/or `ENABLE_VM_FILE_DOWNLOAD=true` in its Compose environment to permit actual transfers. Both default to `false`. A direction is allowed only when both its global switch and the VM's Notes policy permit it. SCE-web's controls and arrows indicate VM policy, not the console deployment's global state.
+
+Rebuild/recreate SCE-web after upgrading; recreate the console after changing its global switches:
+
+```bash
+# In SCE-web:
+docker compose up --build -d app
+# In cit_vm_accessor, after changing global transfer switches:
+docker compose up --build -d proxclient
+```
+
+In **Configuration**, QEMU VM templates marked **User-Accessible** show **Upload** and **Download** checkboxes. Administrators can save these defaults and synchronize them to all existing instance VMs of that template using the active Proxmox credentials or project API token. Failed synchronization is reported; verify live policy in VM Manager after resolving it. New clones receive explicit defaults, and applying scenario notes reapplies them. Unchecking User-Accessible clears both defaults and revokes transfer policy when access is synchronized.
+
+In **VM Manager**, ↑ and ↓ next to the glasses indicate upload/download policy (green enabled, gray disabled). Before live inventory is refreshed, these reflect template configuration; after refresh they reflect each VM's Notes. The operations dropdown provides separate enable/disable actions for each direction, including multi-project selections. These actions modify only selected VM instances, preserve the other direction and template defaults, and refresh the inventory.
+
+Policies are stored as a separate JSON object in Proxmox VM Notes:
+
+```json
+{"AccessForge": {"file_upload": true, "file_download": false}}
+```
+
+Human notes, scenario metadata and credentials are preserved. Updates use the Proxmox configuration digest when available so concurrent edits are rejected instead of overwritten. Only authorized administrators should edit these policies or have Proxmox VM-note write access.
+
+`cit_vm_accessor` enforces the policy on the server: downloads check it before each chunk; SPICE uploads are inspected by the bridge and checked at transfer start and during transfer. Missing or unreadable policy denies transfers. Existing VMs without policy remain disabled until configured. Reconnect an already-open console after enabling a previously disabled upload policy. SPICE and QEMU guest agents are still required for their respective directions, and download users still need the Proxmox guest-agent file-read privilege. This does not grant new Proxmox privileges or govern clipboard text and external clients.
