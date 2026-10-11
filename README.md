@@ -182,6 +182,11 @@ Tip: Replace the placeholder SVGs with real screenshots (keep filenames). PNGs w
 
 ## Orchestrator access
 
+This feature is disabled by default. Add `ORCHESTRATION_PERMISSIONS_ENABLE=1` to
+the project's `.env`, restart the app, and refresh VM Manager to enable it. When
+the flag is absent or off, both orchestration controls are hidden and the API
+rejects enrollment changes. The same startup flag is passed through Docker Compose.
+
 In VM Manager, select rows and use **Users & Access → Enable orchestration access
 (dangerous)** to enroll their existing PVE users in `caf-orchestration` and `caf-maintainers` (including application update/rollback access). A matching
 **Disable orchestration access** operation removes enrollment. Both require an
@@ -221,3 +226,114 @@ Policies are stored as a separate JSON object in Proxmox VM Notes:
 Human notes, scenario metadata and credentials are preserved. Updates use the Proxmox configuration digest when available so concurrent edits are rejected instead of overwritten. Only authorized administrators should edit these policies or have Proxmox VM-note write access.
 
 `cit_vm_accessor` enforces the policy on the server: downloads check it before each chunk; SPICE uploads are inspected by the bridge and checked at transfer start and during transfer. Missing or unreadable policy denies transfers. Existing VMs without policy remain disabled until configured. Reconnect an already-open console after enabling a previously disabled upload policy. SPICE and QEMU guest agents are still required for their respective directions, and download users still need the Proxmox guest-agent file-read privilege. This does not grant new Proxmox privileges or govern clipboard text and external clients.
+
+## Optional agent plugin
+
+Set `AGENT_PLUGIN_ENABLE=1` when starting DeployForge to load the **agent** plugin.
+For local startup, put `AGENT_PLUGIN_ENABLE=1` in the project's `.env`, then run
+`uv run -m app`. The app automatically loads that file before reading its
+configuration; explicitly set environment variables take precedence. Restart the
+app after changing `.env`, then refresh VM Manager.
+It is disabled by default: its backend routes and browser script are only loaded
+when enabled. With Docker Compose, run:
+
+```sh
+AGENT_PLUGIN_ENABLE=1 docker compose up -d --build app
+```
+
+Select existing QEMU VMs or LXC containers in VM Manager, then choose
+**Commands → Plugins → agent** (Plugins is a section in the dropdown). Configure the HTTP/HTTPS OpenAI-compatible base URL, API key
+(if needed), certificate verification, and model; **Fetch** discovers models via
+`/models`, or you can enter a model ID manually. The endpoint must support
+`/chat/completions` function tools. URLs without a path get `/v1`; explicit gateway
+paths are preserved. Endpoints are reached from the app server (in Docker, use
+`host.docker.internal` for a service on the host).
+
+The dialog includes context window, turn limit, command timeout, LLM request
+timeout, response token limit, and optional temperature. The endpoint is an
+HTTP/HTTPS URL, validated for both Fetch and Run. Form settings, prompts and
+assignment Markdown are remembered in the browser when you run or close the
+dialog. The API key is remembered for the browser tab, including page reloads.
+Selected assignment and attachment files are retained in the browser's IndexedDB
+and restored when you reopen the dialog, including after navigation or a reload.
+The server queue temporarily retains request credentials to
+execute accepted work and removes its request payload and uploads when finished,
+as it does for other queued operations. Results and downloaded evidence are
+retained in queue history.
+
+Paste an assignment as Markdown or load a `.md` file. Optionally attach test
+scripts/reference files (25 MiB total, unique filenames) for the agent to push.
+For example:
+
+> Grade the attached assignment. Verify x.py, y.py, and z.md are in
+> /home/student/assignment. Run the required tests. If files are missing, search
+> /home/student and /tmp quickly and report their actual locations. Do not modify
+> student submissions. Return the assignment rubric with scores, evidence, and
+> feedback for every criterion.
+
+Each guest gets an independent conversation. Tools run commands in that guest,
+push an attached file or generated text to an absolute path, and pull files or
+folders. QEMU requires a working guest agent; LXC uses the existing Proxmox SSH
+connection and requires its password. Existing guest transfer policies and the
+application's local/remote run-mode restrictions apply. Shell commands execute
+with the existing guest execution privileges. During grading, the agent is
+instructed to inspect and test without repairing submissions unless requested.
+
+When the plugin is enabled, Configuration → Advanced includes **Max parallel
+agents** for each project. It defaults to 1 and accepts whole numbers from 1 to 5.
+Agent runs process up to that many selected guests at once, with separate
+transcripts and report folders; projects in a queued run are still processed in
+queue order. Advanced job limits must be positive, and delay fields cannot be
+negative (zero delay is allowed).
+
+Rubrics include criterion, pass/fail/unknown status, score, maximum score,
+evidence, and feedback. Unknown checks and exhausted turn budgets mark the report
+incomplete; a failing student criterion remains a completed grading result.
+A final model turn is reserved for rubric submission after the configured limit.
+Context budgeting conservatively estimates tokens and drops entire older tool
+rounds when necessary; full evidence remains in the transcript. Large assignments
+may require a larger context window. Pulled text previews are bounded.
+The response-token limit scales with the selected context window; it has no fixed
+16,384-token cap. For example, a 65,536-token context accepts a 32,768-token response
+limit. The conversation and tools must still fit in the remaining context budget.
+Context is editable without a fixed model ceiling. **Fetch** discovers context
+and output limits from model metadata, with read-only runtime discovery for
+LM Studio, Ollama and llama.cpp. Loaded context takes precedence over the model's
+advertised maximum. **Use provider max** selects the discovered context and
+refreshes it when the queued run starts; reported output limits are also checked.
+The form remembers this choice. If the endpoint does not report a usable limit,
+enter the context configured in your runtime manually. The initial 16,384 value
+is a form default, not a discovered model limit. Selecting a larger budget does
+not reload or change the server's model configuration.
+
+Runs stay in the server queue when you close the dialog or navigate away. The
+**Run agent** button submits the job, closes the setup dialog when accepted, and
+automatically opens its live transcript. Reopen that window from the queue item's
+**Live transcript** or **Transcript** button. The
+guest's robot icon flashes while its agent run is queued or running; click it to
+open a live transcript filtered to that guest. Queue also offers **Live transcript**.
+The viewer shows prompts, streamed model responses, reasoning fields returned by
+the endpoint, and tool calls/results. Closing the viewer leaves the run active.
+Transcript events are saved on the server and replayed when you reopen the viewer
+or reload the page. Endpoints returning ordinary JSON responses are also supported,
+with each response displayed when it arrives.
+
+Runs can be cancelled from the dialog, transcript viewer, or Queue. Cancellation
+is checked between calls and streamed chunks; a running command or stalled request
+may finish or time out first. When a run finishes, its guest rubrics open in the
+Queue dock under **Completed → View results**. The agent setup dialog is for run
+configuration; results, transcripts and downloads remain in the completed queue
+item, including after navigation or a reload. **Download report & files** provides
+Markdown and JSON
+rubrics and a subdirectory for each guest using the same name as Pull:
+`<guest-name>-<vmid>_<username>` (username omitted when unavailable). Each guest
+folder contains `rubric.md`, `report.json`, `transcript.json`, `events.json` (live
+transcript events), and `output.log`. The root contains `results.html`, a standalone
+HTML results page with scores, evidence, feedback and links to the extracted files,
+alongside `rubrics.md` and `rubrics.json`.
+Full pulled evidence is included directly under `pulled/01/`, `pulled/02/`, etc.,
+preserving its guest paths without requiring a nested ZIP extraction. Cancelled
+and unresolved guests also receive their own report/log folders. Open Queue's
+completed item to view or download a retained run; **Transcript**, **View full log**
+and **Download log** retain the conversation and tool evidence. The raw
+result (including the ZIP) is available at `/api/queue/<id>/result` for the owner.

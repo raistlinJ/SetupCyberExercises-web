@@ -11,6 +11,7 @@ let PROJ = null;
 let ALL_PROJECTS = [];
 let SELECTED_PIDS = [];
 let FILTER_TEXT = '';
+let FILTER_SELECTED_ONLY = false;
 let FILTER_IS_REGEX = false;
 let SELECTED_ROWS = new Set();
 let SORT_STATE = { key: 'index', dir: 'asc' };
@@ -250,9 +251,9 @@ function vmEnsureScrollPersistence() {
 document.addEventListener('DOMContentLoaded', vmEnsureScrollPersistence);
 
 // Column visibility per project
-let VM_COLS = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true };
+let VM_COLS = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true };
 function vmColsKey(pid) { return `toolhub.vm.mgr.cols.${pid}`; }
-function readVmCols(pid) { try { const base = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true }; const raw = JSON.parse(sessionStorage.getItem(vmColsKey(pid)) || '{}') || {}; return { ...base, ...raw }; } catch { return { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true }; } }
+function readVmCols(pid) { try { const base = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true }; const raw = JSON.parse(sessionStorage.getItem(vmColsKey(pid)) || '{}') || {}; return { ...base, ...raw }; } catch { return { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true }; } }
 function writeVmCols(pid, obj) { try { sessionStorage.setItem(vmColsKey(pid), JSON.stringify(obj || {})); } catch { } }
 
 // Lightweight HTTP helper (fallback if global http() not provided on this page)
@@ -851,7 +852,7 @@ function enforceRefreshDisabledOnConnChange() {
 // Wire up column toggles for VM table
 function wireVmCols() {
   try {
-    const ids = ['project', 'name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets'];
+    const ids = ['project', 'name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot'];
     ids.forEach(id => {
       const el = document.getElementById(`vm-col-${id}`);
       if (!el) return;
@@ -1076,7 +1077,7 @@ async function vmLoadProjectById(pid) {
   try { await hydrateProxCredsFromPersisted(PROJ.id); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   try { Promise.resolve(vmRefreshServerResources(PROJ)).catch(() => { }); } catch { }
-  try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
+  try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   renderVmTable(proj);
   updateRefreshState();
@@ -1248,11 +1249,42 @@ async function setupProjectsSelector() {
 function vmIsMulti() { return Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1; }
 function getActivePids() { if (vmIsMulti()) return canonicalPidList(SELECTED_PIDS.slice()); const cur = getCurrentPid(); return cur ? [cur] : []; }
 
+function vmUpdateFilterControls() {
+  const input = document.getElementById('vm-filter');
+  const regex = document.getElementById('vm-filter-regex');
+  const selected = document.getElementById('vm-filter-selected');
+  const notice = document.getElementById('vm-selected-filter-notice');
+  if (input) input.disabled = FILTER_SELECTED_ONLY;
+  if (regex) regex.disabled = FILTER_SELECTED_ONLY;
+  if (selected) selected.checked = FILTER_SELECTED_ONLY;
+  if (notice) notice.classList.toggle('d-none', !FILTER_SELECTED_ONLY);
+  if (FILTER_SELECTED_ONLY) document.getElementById('vm-filter-error')?.classList.add('d-none');
+}
+function vmSetSelectedFilter(enabled) {
+  FILTER_SELECTED_ONLY = !!enabled;
+  vmUpdateFilterControls();
+  if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []);
+  else renderVmTable(PROJ);
+}
+function vmFilterSelectedRows(rows) {
+  return rows.filter(r => SELECTED_ROWS.has(r.key || `${r.pid}|${r.index}|${r.vmName}`));
+}
+
+function vmHasScreenshot(detail) {
+  return /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(String(detail?.screenshot || ''));
+}
+function vmFilterScreenshotRows(rows) {
+  document.getElementById('vm-filter-error')?.classList.add('d-none');
+  return rows.filter(row => vmHasScreenshot(row.detail));
+}
+
 function vmClearFilter() {
   try {
     const el = document.getElementById('vm-filter');
     if (el) el.value = '';
     FILTER_TEXT = '';
+    FILTER_SELECTED_ONLY = false;
+    vmUpdateFilterControls();
   } catch { }
   try { if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
 }
@@ -1280,7 +1312,7 @@ async function refreshVmView(opts) {
   const startPids = getActivePids();
   const pids = startPids.slice();
   if (pids.length <= 1) { const id = pids[0]; if (!id) return; await vmLoadProjectById(id); return; }
-  const refreshKey = `multi::${forceRefresh ? 'force' : 'normal'}::${canonicalPidList(pids).join('|')}`;
+  const refreshKey = `multi::${forceRefresh ? 'force' : 'normal'}::${canonicalPidList(pids).join('|')}::${JSON.stringify(opts?.targetsByPid || null)}::${!!opts?.updateScreenshots}`;
   const activeRefresh = VM_MULTI_REFRESH_PROMISES.get(refreshKey);
   if (activeRefresh) {
     return activeRefresh;
@@ -1394,10 +1426,14 @@ async function refreshVmView(opts) {
           apiPort: project.proxmox_api_port || undefined,
           verifySSL: project.proxmox_verify_ssl !== false,
           forceRefresh: forceRefresh || undefined,
+          targets: opts?.targetsByPid?.[canonicalPid(pid)] || opts?.targets,
+          updateScreenshots: !!opts?.updateScreenshots,
         };
-        resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
+        if (!opts?.targetsByPid || opts.targetsByPid[canonicalPid(pid)]?.length) {
+          resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
+        }
         try { vmApplyServerResources(pid, resp?.server_resources); } catch { }
-        vmMarkLiveRefreshed(pid);
+        if (!opts?.targetsByPid && !opts?.targets) vmMarkLiveRefreshed(pid);
       } catch (e) {
         refreshErrors.push(`${project.name || pid}: ${e?.message || e}`);
         try { (window.shell && shell.logWarn) ? shell.logWarn(`Refresh failed for ${project?.name || pid}; showing saved inventory: ${e?.message || e}`) : console.warn('Refresh failed', pid, e); } catch { }
@@ -1526,6 +1562,10 @@ async function refreshVmView(opts) {
   }
 }
 
+function vmAgentStatusControl(pid, index, name, icon) {
+  return `<span data-agent-indicator data-project-id="${escHtml(String(pid || ''))}" data-instance-index="${Number(index)}" data-guest-name="${escHtml(String(name || ''))}">${icon}</span>`;
+}
+
 function renderMergedVmTable(rows) {
   updateVmSelectionCount();
   const host = document.getElementById('vm-table'); if (!host) return;
@@ -1536,7 +1576,9 @@ function renderMergedVmTable(rows) {
     return;
   }
   let filtered = allRows;
-  if (f) {
+  if (FILTER_SELECTED_ONLY) filtered = vmFilterSelectedRows(allRows);
+  else if (f === 'screenshot') filtered = vmFilterScreenshotRows(allRows);
+  else if (f) {
     if (FILTER_IS_REGEX) {
       let re = null; try { re = new RegExp(FILTER_TEXT, 'i'); } catch { re = null; }
       const errEl = document.getElementById('vm-filter-error'); if (re) { if (errEl) errEl.classList.add('d-none'); filtered = allRows.filter(r => re.test(vmBuildFilterHaystack(r))); } else { if (errEl) errEl.classList.remove('d-none'); filtered = []; }
@@ -1547,7 +1589,7 @@ function renderMergedVmTable(rows) {
   }
   if (!filtered.length) {
     const hasFilter = !!f;
-    const reason = hasFilter ? 'No VMs match the current filter.' : 'No VM entries were returned for the selected projects.';
+    const reason = FILTER_SELECTED_ONLY ? 'No selected VMs. Clear the filter to show all VMs.' : hasFilter ? 'No VMs match the current filter.' : 'No VM entries were returned for the selected projects.';
     host.innerHTML = `<div class="alert alert-warning mb-0">${reason}</div>`;
     return;
   }
@@ -1599,6 +1641,7 @@ function renderMergedVmTable(rows) {
     (VM_COLS.id ? '<th role="button" aria-sort="' + ariaSort('id') + '" onclick="vmSortBy(\'id\')">ID' + sortIcon('id') + '</th>' : '') +
     (VM_COLS.node ? '<th role="button" aria-sort="' + ariaSort('node') + '" onclick="vmSortBy(\'node\')">Node Name' + sortIcon('node') + '</th>' : '') +
     (VM_COLS.template ? '<th role="button" aria-sort="' + ariaSort('template') + '" onclick="vmSortBy(\'template\')">TemplateName/ID' + sortIcon('template') + '</th>' : '') +
+    (VM_COLS.screenshot ? '<th>Screenshot</th>' : '') +
     (VM_COLS.nets ? '<th>Adaptors</th>' : '') +
     '</tr></thead><tbody>';
   // Render groups with a single credentials cell per group
@@ -1646,7 +1689,7 @@ function renderMergedVmTable(rows) {
         const both = [tn, tid].filter(Boolean).join(' ');
         const hasValidationCommands = resolveValidationConfiguredFlag(r, d);
         if (!hasValidationCommands) {
-          return `${both || '—'}<div class="mt-1"><span class="d-inline-flex align-items-center gap-1 text-muted" title="Validation commands not configured"><i class="bi bi-robot"></i><i class="bi bi-dash-circle-fill small"></i></span></div>`;
+          return `${both || '—'}<div class="mt-1">${vmAgentStatusControl(r.pid, r.index, r.vmName, '<span class="d-inline-flex align-items-center gap-1 text-muted" title="Validation commands not configured"><i class="bi bi-robot"></i><i class="bi bi-dash-circle-fill small"></i></span>')}</div>`;
         }
         const agentEnabled = !!(d && d.qemu_agent_enabled);
         const validationState = String(d?.qemu_agent_validation_state || '').trim().toLowerCase();
@@ -1661,7 +1704,7 @@ function renderMergedVmTable(rows) {
         } else {
           agentIcon = '<span class="d-inline-flex align-items-center gap-1 text-warning" title="QEMU Guest Agent on, not validated"><i class="bi bi-robot"></i><i class="bi bi-exclamation-circle-fill small"></i></span>';
         }
-        return `${both || '—'}<div class="mt-1">${agentIcon}</div>`;
+        return `${both || '—'}<div class="mt-1">${vmAgentStatusControl(r.pid, r.index, r.vmName, agentIcon)}</div>`;
       })();
       const effAccess = (r.user_access !== undefined && r.user_access !== null) ? _coerceEnabled(r.user_access, false) : _coerceEnabled(r.viewable_to_user, true);
       const accessIcon = effAccess
@@ -1739,6 +1782,7 @@ function renderMergedVmTable(rows) {
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
         (VM_COLS.template ? `<td>${templateHtml}</td>` : '') +
+        (VM_COLS.screenshot ? `<td>${vmScreenshotCell(d)}</td>` : '') +
         (VM_COLS.nets ? `<td>${adaptorsCell}</td>` : '') +
         `</tr>`;
       first = false;
@@ -1746,6 +1790,7 @@ function renderMergedVmTable(rows) {
   }
   html += '</tbody></table>';
   host.innerHTML = html;
+  document.dispatchEvent(new CustomEvent('vm-table-rendered'));
   vmEnsureScrollPersistence();
   // Wire header checkbox and row checkboxes
   try {
@@ -1763,6 +1808,7 @@ function renderMergedVmTable(rows) {
       cb.addEventListener('change', (e) => {
         const key = String(e.target.getAttribute('data-key'));
         if (e.target.checked) SELECTED_ROWS.add(key); else SELECTED_ROWS.delete(key);
+        if (FILTER_SELECTED_ONLY) renderMergedVmTable(rows);
         updateRefreshState();
       });
     });
@@ -1913,6 +1959,8 @@ async function importProjectSidebarWithFlags(opts) {
 
 // Apply server-owned refresh results without starting another live inventory scan.
 function vmApplyQueuedInventory(pid, resp) {
+  // A manual batch publishes its complete table once all projects finish.
+  if (window.__VM_REFRESH_VIEW_PENDING__) return;
   const id = canonicalPid(pid);
   const statuses = resp.instance_statuses || [];
   const projects = [...(ALL_PROJECTS || []), PROJ, window.PROJ_CACHE?.[id]];
@@ -1957,7 +2005,7 @@ async function vmRefresh(opts) {
     }
   })();
   const project = opts?.project || PROJ;
-  if (!opts?.project && Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) { try { await refreshVmView({ forceRefresh, showProgressDialog }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
+  if (!opts?.project && Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) { try { await refreshVmView({ ...opts, forceRefresh, showProgressDialog }); } catch (e) { alert('Refresh failed: ' + (e && e.message ? e.message : e)); } return; }
   if (!project) { alert('Load a project first.'); return; }
   const refreshProject = {
     id: project.id,
@@ -1994,6 +2042,8 @@ async function vmRefresh(opts) {
         apiPort: refreshProject.proxmox_api_port || undefined,
         verifySSL: refreshProject.proxmox_verify_ssl !== false,
         forceRefresh: forceRefresh || undefined,
+        targets: opts?.targets,
+        updateScreenshots: !!opts?.updateScreenshots,
       };
       try { shell.step('Prepared refresh body'); } catch { }
       setProg(15, 'Submitting…', 'Requesting live VM inventory from Proxmox…');
@@ -2003,7 +2053,7 @@ async function vmRefresh(opts) {
       const resp = await http('POST', `/api/projects/${refreshPid}/instances/refresh/vm`, body);
       try { shell.step('HTTP response received'); } catch { }
       try { vmApplyServerResources(refreshPid, resp?.server_resources); } catch { }
-      vmMarkLiveRefreshed(refreshPid);
+      if (!opts?.targets) vmMarkLiveRefreshed(refreshPid);
       // Keep the original project's cached inventory current even after navigation.
       const statuses = resp.instance_statuses || [];
       project.instance_statuses = statuses;
@@ -2342,7 +2392,9 @@ function renderVmTable(proj) {
   // Apply filter
   const f = (FILTER_TEXT || '').toLowerCase().trim();
   let filtered = rows;
-  if (f) {
+  if (FILTER_SELECTED_ONLY) filtered = vmFilterSelectedRows(rows);
+  else if (f === 'screenshot') filtered = vmFilterScreenshotRows(rows);
+  else if (f) {
     if (FILTER_IS_REGEX) {
       let re = null;
       try { re = new RegExp(FILTER_TEXT, 'i'); } catch { re = null; }
@@ -2360,6 +2412,10 @@ function renderVmTable(proj) {
       if (errEl) errEl.classList.add('d-none');
       filtered = rows.filter(r => vmBuildFilterHaystack(r).toLowerCase().includes(f));
     }
+  }
+  if (FILTER_SELECTED_ONLY && !filtered.length) {
+    host.innerHTML = '<div class="alert alert-info mb-0">No selected VMs. Clear the filter to show all VMs.</div>';
+    return;
   }
   // Sort rows (we'll sort within instance groups so credentials can be row-spanned once per instance)
   const compareRows = (a, b) => {
@@ -2444,6 +2500,7 @@ function renderVmTable(proj) {
   if (VM_COLS.id) html += '<th role="button" aria-sort="' + ariaSort('id') + '" onclick="vmSortBy(\'id\')">ID' + sortIcon('id') + '</th>';
   if (VM_COLS.node) html += '<th role="button" aria-sort="' + ariaSort('node') + '" onclick="vmSortBy(\'node\')">Node Name' + sortIcon('node') + '</th>';
   if (VM_COLS.template) html += '<th role="button" aria-sort="' + ariaSort('template') + '" onclick="vmSortBy(\'template\')">TemplateName/ID' + sortIcon('template') + '</th>';
+  if (VM_COLS.screenshot) html += '<th>Screenshot</th>';
   if (VM_COLS.nets) html += '<th>Adaptors</th>';
   html += '</tr></thead><tbody>';
   for (const idx of instanceOrder) {
@@ -2464,7 +2521,7 @@ function renderVmTable(proj) {
         const both = [tn, tid].filter(Boolean).join(' ');
         const hasValidationCommands = resolveValidationConfiguredFlag(r, d);
         if (!hasValidationCommands) {
-          return `${both || '—'}<div class="mt-1"><span class="d-inline-flex align-items-center gap-1 text-muted" title="Validation commands not configured"><i class="bi bi-robot"></i><i class="bi bi-dash-circle-fill small"></i></span></div>`;
+          return `${both || '—'}<div class="mt-1">${vmAgentStatusControl(PROJ.id, r.index, r.vmName, '<span class="d-inline-flex align-items-center gap-1 text-muted" title="Validation commands not configured"><i class="bi bi-robot"></i><i class="bi bi-dash-circle-fill small"></i></span>')}</div>`;
         }
         const isLxc = d && String(d.type).toLowerCase() === 'lxc';
         const agentEnabled = !!(d && d.qemu_agent_enabled);
@@ -2482,7 +2539,7 @@ function renderVmTable(proj) {
         } else {
           agentIcon = `<span class="d-inline-flex align-items-center gap-1 text-warning" title="${execName} ready, not validated"><i class="bi bi-robot"></i><i class="bi bi-exclamation-circle-fill small"></i></span>`;
         }
-        return `${both || '—'}<div class="mt-1">${agentIcon}</div>`;
+        return `${both || '—'}<div class="mt-1">${vmAgentStatusControl(PROJ.id, r.index, r.vmName, agentIcon)}</div>`;
       })();
       const effAccess = (r.user_access !== undefined && r.user_access !== null) ? _coerceEnabled(r.user_access, false) : _coerceEnabled(r.viewable_to_user, true);
       const accessIcon = effAccess
@@ -2592,6 +2649,7 @@ function renderVmTable(proj) {
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
         (VM_COLS.template ? `<td>${templateHtml}</td>` : '') +
+        (VM_COLS.screenshot ? `<td>${vmScreenshotCell(d)}</td>` : '') +
         (VM_COLS.nets ? `<td>${adaptorsCell}</td>` : '') +
         `</tr>`;
       first = false;
@@ -2599,6 +2657,7 @@ function renderVmTable(proj) {
   }
   html += '</tbody></table>';
   host.innerHTML = html;
+  document.dispatchEvent(new CustomEvent('vm-table-rendered'));
   vmEnsureScrollPersistence();
   // Wire row checkboxes and header checkbox
   const all = host.querySelector('#chk-all');
@@ -2615,6 +2674,7 @@ function renderVmTable(proj) {
     cb.addEventListener('change', (e) => {
       const key = String(e.target.getAttribute('data-key'));
       if (e.target.checked) SELECTED_ROWS.add(key); else SELECTED_ROWS.delete(key);
+      if (FILTER_SELECTED_ONLY) renderVmTable(PROJ);
       updateRefreshState();
     });
   });
@@ -2743,6 +2803,8 @@ window.addEventListener('DOMContentLoaded', () => {
   // Select/Deselect all buttons
   // Removed Select All / Deselect All page buttons
   // Filter input
+  document.getElementById('vm-filter-selected')?.addEventListener('change', e => vmSetSelectedFilter(e.target.checked));
+  vmUpdateFilterControls();
   const filter = document.getElementById('vm-filter');
   if (filter) filter.addEventListener('input', (e) => { FILTER_TEXT = e.target.value || ''; try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); } });
   const filterRegex = document.getElementById('vm-filter-regex');
@@ -2779,7 +2841,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // Wire column chooser
   wireVmCols();
   // Reflect saved columns on project select
-  document.addEventListener('project-selected', (e) => { try { const pid = e.detail || ''; if (!pid) return; VM_COLS = readVmCols(pid); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { } });
+  document.addEventListener('project-selected', (e) => { try { const pid = e.detail || ''; if (!pid) return; VM_COLS = readVmCols(pid); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { } });
   (function () {
     let timer = null;
     function key() { try { return `toolhub.vm.mgr.auto.${PROJ ? PROJ.id : 'none'}`; } catch { return 'toolhub.vm.mgr.auto.none'; } }
@@ -8404,4 +8466,39 @@ async function vmTransferAction(project, action, targets) {
     verifySSL: project.proxmox_verify_ssl !== false,
   });
   return response;
+}
+
+function vmScreenshotCell(detail) {
+  const src = String(detail?.screenshot || '');
+  const message = detail?.screenshot_error || 'Not captured';
+  if (!vmHasScreenshot(detail)) return `<span class="small text-muted">${escHtml(message)}</span>`;
+  const stale = detail.screenshot_stale !== false;
+  const title = [stale ? 'Saved screenshot — not updated in the latest refresh' : 'Screenshot from the latest refresh', detail.screenshot_at].filter(Boolean).join(' · ');
+  return `<img src="${src}" alt="${stale ? 'Saved VM display screenshot (not current)' : 'VM display screenshot'}" style="width:128px;height:80px;object-fit:contain;${stale ? 'filter:grayscale(1);opacity:.5' : ''}" class="rounded border" loading="lazy" title="${escHtml(title)}">`;
+}
+function vmShowRefreshOptions() {
+  const selected = listSelectedEntries().filter(e => getActivePids().map(canonicalPid).includes(e.pidCanonical));
+  const option = document.getElementById('vm-refresh-selected');
+  option.disabled = !selected.length;
+  option.checked = !!selected.length;
+  document.getElementById('vm-refresh-all').checked = !selected.length;
+  document.getElementById('vm-refresh-screenshots').checked = false;
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('vmRefreshModal')).show();
+}
+async function vmConfirmRefresh() {
+  const selectedOnly = document.getElementById('vm-refresh-selected').checked;
+  const activePids = getActivePids().map(canonicalPid);
+  const entries = listSelectedEntries().filter(e => activePids.includes(e.pidCanonical));
+  if (selectedOnly && !entries.length) return;
+  const targetsByPid = {};
+  for (const e of entries) (targetsByPid[e.pidCanonical] ||= []).push({index:e.index, name:e.name});
+  const opts = {forceRefresh:true, updateScreenshots:document.getElementById('vm-refresh-screenshots').checked};
+  if (selectedOnly) { opts.targetsByPid = targetsByPid; opts.targets = targetsByPid[canonicalPid(PROJ?.id)] || []; }
+  bootstrap.Modal.getInstance(document.getElementById('vmRefreshModal')).hide();
+  window.__VM_REFRESH_VIEW_PENDING__ = true;
+  try {
+    await vmRefresh(opts);
+  } finally {
+    window.__VM_REFRESH_VIEW_PENDING__ = false;
+  }
 }

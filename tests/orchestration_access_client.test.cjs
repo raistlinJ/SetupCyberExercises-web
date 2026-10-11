@@ -90,3 +90,23 @@ test('the actual menu handler persists reviewed users for single and multi-proje
   if (multi) assert.deepEqual(plain(options.orchestrationUsers.p2), { 1: 'charlie@pve' });
  }
 });
+
+test('orchestration entries and divider are shown only for a true server feature flag', async () => {
+ for (const mode of ['enabled', 'disabled', 'missing', 'invalid', 'http-error', 'network-error']) {
+  const controls = Array.from({ length: 3 }, () => ({ hidden: true, classList: { toggle: function(name, hidden) { this.hidden = hidden; } } }));
+  const page = vm.createContext({
+   document: { querySelectorAll: selector => { assert.equal(selector, '[data-orchestration-permissions]'); return controls; } },
+   fetch: async url => {
+    assert.equal(url, '/api/features');
+    if (mode === 'network-error') throw Error('Network unavailable');
+    return { ok: mode !== 'http-error', json: async () => ({ orchestration_permissions: mode === 'enabled' ? true : mode === 'disabled' ? false : mode === 'invalid' ? 'true' : undefined }) };
+   },
+  });
+  vm.runInContext(fs.readFileSync('app/static/js/orchestration_access.js', 'utf8'), page);
+  await page.initializeOrchestrationAccessVisibility();
+  controls.forEach(control => {
+   assert.equal(control.hidden, mode !== 'enabled');
+   assert.equal(control.classList.hidden, mode !== 'enabled');
+  });
+ }
+});

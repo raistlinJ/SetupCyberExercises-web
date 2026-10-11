@@ -722,3 +722,13 @@ body.console-dock-open .shell-container { padding-bottom: calc(var(--console-hei
     color: #10b981;
     background-color: rgba(16, 185, 129, 0.1);
 }
+
+/* A queued/running LLM agent can be reopened independently of its setup dialog. */
+body.console-dock-open #agentTranscriptModal .modal-dialog,
+body.console-dock-open #agentModal .modal-dialog { height: calc(100% - var(--console-height, 220px) - 96px); }
+[data-agent-indicator].agent-has-transcript { cursor: pointer; border-radius: 4px; }
+.agent-queue-reports p, .agent-queue-reports td { white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-agent-indicator].agent-has-transcript:focus-visible { outline: 2px solid #60a5fa; outline-offset: 3px; }
+.agent-running .bi-robot { color: #60a5fa !important; animation: agent-running-pulse 1.2s ease-in-out infinite; }
+@keyframes agent-running-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .agent-running .bi-robot { animation: none; } }

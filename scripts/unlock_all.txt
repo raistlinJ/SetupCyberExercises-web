@@ -1,0 +1,21 @@
+#!/bin/bash
+
+echo "🔍 Scanning for locked VMs and containers..."
+
+# Unlock QEMU VMs
+for VMID in $(qm list | awk 'NR>1 {print $1}'); do
+    if qm config $VMID | grep -q "^lock:"; then
+        echo "🔓 Unlocking VM $VMID"
+        qm unlock $VMID
+    fi
+done
+
+# Unlock LXC containers
+for CTID in $(pct list | awk 'NR>1 {print $1}'); do
+    if pct config $CTID | grep -q "^lock:"; then
+        echo "🔓 Unlocking CT $CTID"
+        pct unlock $CTID
+    fi
+done
+
+echo "🎉 All done."

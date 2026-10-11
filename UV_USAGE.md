@@ -46,6 +46,12 @@ PORT=8080 DATA_DIR="$(pwd)/data" python -m app
 uv run python -m app
 ```
 
+The app automatically loads the project-root `.env` before reading its
+configuration, including when started with `uv run -m app`. For example, setting
+`AGENT_PLUGIN_ENABLE=1` in `.env` enables **Commands → agent** after startup.
+Environment variables explicitly set in your shell override `.env` values.
+Restart the app and refresh VM Manager after changing the plugin setting.
+
 ## Development Workflow
 
 ### Install with development dependencies
@@ -73,7 +79,7 @@ uv pip sync requirements-lock.txt
 uv run python -m app
 
 # Run with environment variables
-uv run --env PORT=8081 --env DATA_DIR=./data python -m app
+PORT=8081 DATA_DIR=./data uv run -m app
 
 # Run tests (if you add pytest)
 uv run pytest

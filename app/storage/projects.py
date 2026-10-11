@@ -389,6 +389,7 @@ class Project:
     proxmox_max_create_jobs: int = 5
     proxmox_snapshot_delay_seconds: float = 5.0
     proxmox_update_delay_seconds: float = 0.5
+    agent_max_parallel_agents: int = 1
     proxmox_use_linked_clones: bool = True
     proxmox_assign_rollback_on_non_viewable: bool = True
     proxmox_clone_timeout_seconds: int = 1800
@@ -1002,6 +1003,37 @@ class ProjectStore:
             allp[project.id] = asdict(project)
             self._write_all(allp)
         return project
+
+    def update_vm_inventory(self, pid: str, statuses: list, screenshot_targets=None) -> Project:
+        """Merge inventory with screenshots saved by overlapping refreshes.
+
+        None means this request captured all displays; an empty set means no
+        displays were requested. Match identity so reused VM IDs stay separate.
+        """
+        with self._write_lock:
+            project = self.get(pid)
+            if not project:
+                raise KeyError("Project not found")
+            latest = {(int(entry.get('index', 0)), str(detail.get('name') or '').lower(),
+                       detail.get('node'), detail.get('vmid')): detail
+                      for entry in project.instance_statuses or []
+                      for detail in entry.get('vm_details', [])}
+            keys = ('screenshot', 'screenshot_at', 'screenshot_error', 'screenshot_stale')
+            for entry in statuses:
+                index = int(entry.get('index', 0))
+                for detail in entry.get('vm_details', []):
+                    name = str(detail.get('name') or '').lower()
+                    saved = latest.get((index, name, detail.get('node'), detail.get('vmid')), {})
+                    requested = screenshot_targets is None or (index, name) in screenshot_targets
+                    if not requested:
+                        for key in keys:
+                            detail.pop(key, None)
+                            if key in saved:
+                                detail[key] = saved[key]
+                    if not requested and detail.get('screenshot'):
+                        detail['screenshot_stale'] = True
+            project.instance_statuses = statuses
+            return self.upsert(project)
 
     def update_audio(self, pid: str, audio: Dict[str, Any]) -> Project:
         with self._write_lock:

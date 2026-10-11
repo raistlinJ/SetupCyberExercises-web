@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+set -e
+
+echo "========================================="
+echo " Starting Proxmox Pool Purge Script"
+echo "========================================="
+
+# Fetch all existing Pool IDs
+pools=$(pvesh get /pools --output-format json | jq -r '.[].poolid')
+
+if [ -z "$pools" ]; then
+    echo "No resource pools found."
+    exit 0
+fi
+
+for pool in $pools; do
+    echo "-----------------------------------------"
+    echo "Processing Pool: [$pool]"
+    echo "-----------------------------------------"
+
+    # Fetch pool details
+    members_json=$(pvesh get /pools/"$pool" --output-format json)
+
+    # Extract all VMIDs into a comma-separated list
+    vmids=$(echo "$members_json" | jq -r '[.members[] | select(.vmid != null) | .vmid] | join(",")')
+    
+    # Extract all Storage IDs into a comma-separated list
+    storages=$(echo "$members_json" | jq -r '[.members[] | select(.storage != null) | .storage] | join(",")')
+
+    # Remove VMs if any exist in the pool
+    if [ ! -z "$vmids" ]; then
+        echo "--> Detaching VMs/LXCs ($vmids) from pool..."
+        pvesh set /pools/"$pool" -vms "$vmids" -delete 1
+    fi
+
+    # Remove Storage if any exists in the pool
+    if [ ! -z "$storages" ]; then
+        echo "--> Detaching Storage elements ($storages) from pool..."
+        pvesh set /pools/"$pool" -storage "$storages" -delete 1
+    fi
+
+    # Delete the empty pool container
+    echo "--> Deleting empty pool: [$pool]..."
+    pvesh delete /pools/"$pool"
+    echo "Success: Pool [$pool] removed completely."
+done
+
+echo "========================================="
+echo " All Proxmox resource pools have been purged!"
+echo "========================================="

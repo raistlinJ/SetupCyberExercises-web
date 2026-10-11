@@ -1,6 +1,11 @@
 # Orchestrator enrollment from SCE-web
 
-The VM Manager's **Users & Access** menu includes:
+Set `ORCHESTRATION_PERMISSIONS_ENABLE=1` in the project-root `.env` and restart
+SCE-web to enable these operations. The flag is disabled by default; when absent
+or off, the menu controls are hidden and both API actions are rejected.
+Refresh VM Manager after restarting.
+
+When enabled, the VM Manager's **Users & Access** menu includes:
 
 - **Enable orchestration access (dangerous)**
 - **Disable orchestration access**

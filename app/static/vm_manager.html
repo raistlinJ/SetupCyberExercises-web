@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="vm-manager-document">
 
 <head>
   <meta charset="utf-8" />
@@ -7,11 +7,43 @@
   <title>DeployForge — VM Manager</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-  <link href="/static/css/shell.css?v=20260910a" rel="stylesheet">
+  <link href="/static/css/shell.css?v=20261009-agent-results" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
+  <style>
+    .vm-table-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: center; gap: .75rem; }
+    .vm-filter-group { min-width: 0; }
+    .vm-filter-group .form-control { min-width: 100px; }
+    .vm-table-tools { display: flex; align-items: center; gap: .5rem; white-space: nowrap; }
+    .vm-auto-control { width: 124px; }
+    .vm-filter-options { min-width: 220px; }
+    #vm-table { overscroll-behavior: contain; }
+    @media (min-width: 768px) {
+      html.vm-manager-document { height: 100%; overflow: hidden; }
+      body.vm-manager-page { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
+      body.vm-manager-page > .app-banner { flex-shrink: 0; }
+      body.vm-manager-page > .shell-container { flex: 1 1 0; padding-bottom: 52px; }
+      body.vm-manager-page.console-dock-open > .shell-container { padding-bottom: var(--console-height); }
+      .vm-manager-page > .shell-container > .row { flex-wrap: nowrap; }
+      .vm-manager-page .shell-content { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+      .vm-manager-page .shell-content > .d-flex { flex-shrink: 0; }
+      .vm-manager-page .shell-content > .card { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+      .vm-manager-page .shell-content > .card > .card-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+      .vm-manager-page .card-body > * { flex-shrink: 0; }
+      .vm-manager-page #vm-table { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; }
+    }
+    @media (min-width: 768px) and (max-height: 600px) {
+      .vm-manager-page .shell-content { overflow: auto; }
+      .vm-manager-page .shell-content > .card { flex: 0 0 auto; }
+      .vm-manager-page #vm-table { max-height: 40vh; }
+    }
+    @media (max-width: 1000px) {
+      .vm-table-toolbar { grid-template-columns: 1fr; }
+      .vm-table-tools { flex-wrap: wrap; }
+    }
+  </style>
 </head>
 
-<body class="shell-body">
+<body class="shell-body vm-manager-page">
   <header class="app-banner">
     <div class="container-fluid d-flex align-items-center justify-content-between py-2">
       <div class="d-flex align-items-center gap-2">
@@ -106,34 +138,39 @@
                 role="progressbar" style="width: 100%" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100">
                 Refreshing…</div>
             </div>
-            <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-              <div class="input-group input-group-sm" style="max-width: 460px;">
-                <span class="input-group-text">Filter</span>
-                <input id="vm-filter" type="text" class="form-control" placeholder="Text or RegExp (when enabled)"
-                  title="Filter rows by text; enable Regex for advanced matching" />
-                <span class="input-group-text">
-                  <input id="vm-filter-regex" class="form-check-input mt-0" type="checkbox"
-                    title="Treat filter as JavaScript RegExp (case-insensitive)" aria-label="Regex" />
-                  <span class="ms-1">Regex</span>
-                  <button type="button" class="btn btn-link btn-sm p-0 ms-2" data-bs-toggle="modal"
-                    data-bs-target="#vmRegexHelpModal" aria-label="Show regular expression examples"
-                    title="Regular expression examples">
-                    <i class="bi bi-info-circle" aria-hidden="true"></i>
-                  </button>
-                </span>
-                <button class="btn btn-outline-secondary" type="button" title="Clear filter"
-                  onclick="vmClearFilter()">Clear</button>
+            <div class="vm-table-toolbar mb-2">
+              <div class="input-group input-group-sm vm-filter-group">
+                <input id="vm-filter" type="text" class="form-control" placeholder="Filter VMs…"
+                  aria-label="Filter VMs" title="Filter rows by text; type screenshot to show VMs with saved screenshots; use Options for Regex or selected VMs" />
+                <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown"
+                  data-bs-auto-close="outside" aria-expanded="false" title="Filter options">Options</button>
+                <div class="dropdown-menu p-3 vm-filter-options">
+                  <div class="form-check mb-2">
+                    <input id="vm-filter-selected" class="form-check-input" type="checkbox" aria-describedby="vm-selected-filter-notice">
+                    <label for="vm-filter-selected" class="form-check-label">Show only selected</label>
+                  </div>
+                  <div class="d-flex align-items-center justify-content-between">
+                    <div class="form-check">
+                      <input id="vm-filter-regex" class="form-check-input" type="checkbox" title="Treat filter as JavaScript RegExp (case-insensitive)">
+                      <label for="vm-filter-regex" class="form-check-label">Regex</label>
+                    </div>
+                    <button type="button" class="btn btn-link btn-sm p-0" data-bs-toggle="modal"
+                      data-bs-target="#vmRegexHelpModal" aria-label="Show regular expression examples" title="Regular expression examples">
+                      <i class="bi bi-info-circle" aria-hidden="true"></i>
+                    </button>
+                  </div>
+                </div>
+                <button class="btn btn-outline-secondary" type="button" title="Clear all filters" onclick="vmClearFilter()">Clear</button>
               </div>
-              <span id="vm-filter-error" class="text-danger small d-none">Invalid regular expression</span>
-              <div class="d-flex align-items-center gap-2">
+              <div class="vm-table-tools">
                 <button id="btn-prox-login" class="btn btn-sm btn-outline-primary"
-                  title="Update Proxmox URL/ports and credentials">Re-authenticate to Proxmox</button>
+                  title="Update Proxmox URL/ports and credentials">Proxmox login</button>
                 <span id="refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip"
                   data-bs-placement="left" title="Please authenticate to Proxmox first.">
                   <button id="btn-refresh" class="btn btn-sm btn-outline-secondary"
-                    onclick="vmRefresh({forceRefresh:true})" disabled>Refresh States</button>
+                    onclick="vmShowRefreshOptions()" disabled>Refresh VMs</button>
                 </span>
-                <div class="input-group input-group-sm" style="width: 200px;">
+                <div class="input-group input-group-sm vm-auto-control">
                   <span class="input-group-text">Auto</span>
                   <select id="vm-auto-interval" class="form-select"
                     title="Automatically refresh at an interval (requires Proxmox auth)">
@@ -146,10 +183,11 @@
                 </div>
                 <span id="vm-auto-badge" class="badge bg-secondary align-self-center ms-1"
                   title="Auto-refresh status">Off</span>
-                <div class="btn-group btn-group-sm ms-2">
+                <div class="btn-group btn-group-sm">
                   <button id="vm-cols-btn" type="button" class="btn btn-outline-secondary dropdown-toggle"
                     data-bs-toggle="dropdown" aria-expanded="false">Columns</button>
                   <ul class="dropdown-menu p-2 small" id="vm-cols-menu" style="min-width: 240px;">
+<li class="form-check"><input class="form-check-input" type="checkbox" id="vm-col-screenshot" checked><label class="form-check-label" for="vm-col-screenshot">Screenshot</label></li>
                     <li class="form-check">
                       <input class="form-check-input" type="checkbox" id="vm-col-project" checked>
                       <label class="form-check-label" for="vm-col-project">Project</label>
@@ -189,6 +227,10 @@
                   </ul>
                 </div>
               </div>
+            </div>
+            <div class="d-flex align-items-center gap-2 small">
+              <span id="vm-selected-filter-notice" class="badge bg-warning text-dark d-none mb-2" role="status">Showing only selected VMs · Clear to show all</span>
+              <span id="vm-filter-error" class="text-danger d-none mb-2">Invalid regular expression</span>
             </div>
             <div id="vm-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status"
               aria-live="polite" aria-atomic="true"></div>
@@ -318,17 +360,18 @@
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_access_disable')"
                       title="Disable user access to the selected VMs">Disable
                       User Accessibility</button></li>
-                  <li><hr class="dropdown-divider" /></li>
-                  <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('users_orchestration_enable')"
+                  <li data-orchestration-permissions class="d-none" hidden><hr class="dropdown-divider" /></li>
+                  <li data-orchestration-permissions data-plugin-section="caf" class="d-none" hidden><h6 class="dropdown-header">Plugins</h6></li>
+                  <li data-orchestration-permissions class="d-none" hidden><button class="dropdown-item text-danger" type="button" onclick="vmAction('users_orchestration_enable')"
                       title="Enroll the selected rows' PVE users in the orchestrator; access applies to the configured orchestrator instance">Enable orchestration access (dangerous)</button></li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_orchestration_disable')"
+                  <li data-orchestration-permissions class="d-none" hidden><button class="dropdown-item" type="button" onclick="vmAction('users_orchestration_disable')"
                       title="Remove the selected users' orchestrator enrollment across projects">Disable orchestration access</button></li>
                 </ul>
               </div>
             </div>
             <div id="vm-config-only-alert" class="alert alert-info py-2 px-3 small mb-3" role="alert">
               Showing project configuration only. VM states and metrics will appear as <code>n/a</code> until you log in
-              to Proxmox and press <em>Refresh States</em>.
+              to Proxmox and press <em>Refresh VMs</em>.
             </div>
 
             <div id="vm-skipped-note" class="mb-2"></div>
@@ -661,16 +704,17 @@
   <!-- Settings modal injected via creds.js -->
   <script src="/static/js/creds.js?v=20251116b"></script>
   <script src="/static/js/auth.js?v=20251116b"></script>
-  <script src="/static/js/shell.js?v=20260930a"></script>
+  <script src="/static/js/shell.js?v=20261009-agent-results"></script>
   <script src="/static/js/server_queue.js?v=20260907e"></script>
   <script src="/static/js/server_workflows.js?v=20260907a"></script>
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
-  <script src="/static/js/app.js?v=20260907a"></script>
+  <script src="/static/js/app.js?v=20261009-agent-parallel"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/orchestration_access.js?v=20260925a"></script>
-  <script src="/static/js/vm_manager.js?v=20261004c"></script>
+  <script src="/static/js/orchestration_access.js?v=20261009-flags"></script>
+  <script src="/static/js/vm_manager.js?v=20261009-agent-live"></script>
   <script src="/static/js/server_vm_actions.js?v=20261004a"></script>
+  <script src="/static/js/plugin_loader.js?v=20261009-agent-no-dock"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
@@ -947,6 +991,13 @@
     });
     document.addEventListener('auth-changed', e => { const u = e.detail?.user; const nameEl = document.getElementById('banner-username'); if (nameEl) nameEl.textContent = u ? u.username : 'anonymous'; });
   </script>
-</body>
+<div class="modal fade" id="vmRefreshModal" tabindex="-1" aria-labelledby="vm-refresh-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content">
+<div class="modal-header"><h5 class="modal-title" id="vm-refresh-title">Refresh VMs</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+<div class="modal-body"><fieldset><legend class="fs-6">Refresh scope</legend>
+<div class="form-check"><input type="radio" class="form-check-input" name="vm-refresh-scope" id="vm-refresh-selected"><label class="form-check-label" for="vm-refresh-selected">Selected VMs only</label></div>
+<div class="form-check"><input type="radio" class="form-check-input" name="vm-refresh-scope" id="vm-refresh-all" checked><label class="form-check-label" for="vm-refresh-all">All VMs in active projects</label></div></fieldset>
+<div class="form-check mt-3"><input type="checkbox" class="form-check-input" id="vm-refresh-screenshots"><label class="form-check-label" for="vm-refresh-screenshots">Update screenshots</label></div><div class="form-text">Capture a display preview for running QEMU VMs (up to 240 × 150). Containers do not have a graphical display.</div></div>
+<div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="vmConfirmRefresh()">Refresh</button></div>
+</div></div></div></body>
 
 </html>

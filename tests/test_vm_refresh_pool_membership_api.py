@@ -100,6 +100,54 @@ class VmRefreshPoolMembershipApiTests(unittest.TestCase):
         self.assertEqual(paused['qmp_state'], 'paused')
         self.assertEqual(paused['state'], 'paused')
 
+    def test_selected_refresh_preserves_other_details_and_captures_only_selected(self):
+        previous = {'name': 'db-set-1', 'vmid': 102, 'node': 'node1', 'state': 'old', 'screenshot': 'old-image'}
+        self.project.instance_statuses = [{'index': 1, 'vm_details': [previous], 'managers': {}}]
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', _ClientStub), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}), \
+                patch('app.connectors.vm_screenshot.capture', return_value='data:image/jpeg;base64,YQ==') as capture:
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={
+                'targets': [{'index': 1, 'name': 'web-set-1'}], 'updateScreenshots': True})
+        self.assertEqual(response.status_code, 200)
+        details = response.get_json()['instance_statuses'][0]['vm_details']
+        self.assertEqual(next(d for d in details if d['vmid'] == 102), {**previous, 'screenshot_stale': True})
+        self.assertEqual(next(d for d in details if d['vmid'] == 101)['screenshot'], 'data:image/jpeg;base64,YQ==')
+        self.assertFalse(next(d for d in details if d['vmid'] == 101)['screenshot_stale'])
+        capture.assert_called_once()
+
+    def test_normal_refresh_retains_existing_screenshot(self):
+        self.project.instance_statuses = [{'index': 1, 'vm_details': [
+            {'name': 'web-set-1', 'vmid': 101, 'node': 'node1', 'screenshot': 'saved-image'}], 'managers': {}}]
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', _ClientStub), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}), \
+                patch('app.connectors.vm_screenshot.capture') as capture:
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+        self.assertEqual(response.status_code, 200)
+        details = response.get_json()['instance_statuses'][0]['vm_details']
+        self.assertEqual(next(d for d in details if d['vmid'] == 101)['screenshot'], 'saved-image')
+        self.assertTrue(next(d for d in details if d['vmid'] == 101)['screenshot_stale'])
+        capture.assert_not_called()
+
+    def test_screenshots_capture_concurrently_and_return_complete_inventory(self):
+        import threading
+        barrier = threading.Barrier(2)
+        def capture_display(*args):
+            barrier.wait(timeout=3)
+            return 'data:image/jpeg;base64,YQ=='
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', _ClientStub), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}), \
+                patch('app.connectors.vm_screenshot.capture', side_effect=capture_display):
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={
+                'targets': [{'index': 1, 'name': 'web-set-1'}, {'index': 1, 'name': 'db-set-1'}],
+                'updateScreenshots': True})
+        self.assertEqual(response.status_code, 200)
+        details = response.get_json()['instance_statuses'][0]['vm_details']
+        self.assertEqual(len(details), 2)
+        self.assertTrue(all(d.get('screenshot') == 'data:image/jpeg;base64,YQ==' for d in details))
+
     def setUp(self):
         os.environ['AUTH_ENABLE'] = '0'
         self.tmp = tempfile.TemporaryDirectory()

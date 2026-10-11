@@ -23,3 +23,19 @@ function buildOrchestrationAccessPlan(projects, enabled) {
     : 'Remove these users from caf-orchestration, caf-maintainers and the legacy caf-orchestrator group. This revokes orchestration and application maintenance access. This revokes their access to every orchestrator instance using these groups, including access enrolled from other projects. It does not disable their PVE accounts, change VM permissions, or stop running jobs.';
   return { expectedByProject, message: `${description}\n\nUsers:\n${recipients}\n\nContinue?` };
 }
+
+// Enrollment controls stay hidden until startup configuration explicitly enables them.
+async function initializeOrchestrationAccessVisibility() {
+  let enabled = false;
+  try {
+    const response = await fetch('/api/features', { credentials: 'same-origin' });
+    if (response.ok) enabled = (await response.json()).orchestration_permissions === true;
+  } catch { }
+  document.querySelectorAll('[data-orchestration-permissions]').forEach(element => {
+    element.hidden = !enabled;
+    element.classList.toggle('d-none', !enabled);
+  });
+}
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  initializeOrchestrationAccessVisibility();
+}

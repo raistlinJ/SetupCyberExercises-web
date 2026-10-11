@@ -17,6 +17,7 @@ ACTION_LABELS = {
     'users_orchestration_disable': 'Disable orchestration access',
     'users_creds_check': 'Check user credentials', 'users_creds_set': 'Sync user credentials',
     'run_startup_cmds': 'Run startup commands', 'run_stored_cmds': 'Run stored commands',
+    'agent': 'Run agent',
     'guest_push': 'Upload guest files', 'lxc_push': 'Upload container files',
     'guest_pull': 'Download guest files', 'lxc_pull': 'Download container files',
     'guest_delete': 'Delete guest files', 'lxc_delete': 'Delete container files',

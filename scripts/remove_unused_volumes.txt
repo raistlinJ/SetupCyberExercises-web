@@ -1,0 +1,5 @@
+lvscan  | grep inactive | awk -F "'" '{print $2}' | xargs lvremove
+
+Remove all except list - Note that this is dangerous; especially if data, swap, and root are not specified in the following command:
+lvscan  | grep -Evw -- 'data|swap|root|100|101|104|105|121' | awk -F "'" '{print $2}' | xargs lvremove -y
+

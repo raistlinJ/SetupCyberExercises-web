@@ -20,7 +20,8 @@ import zipfile
 from contextlib import contextmanager, ExitStack
 from urllib.parse import quote, unquote, urlsplit
 
-from flask import Blueprint, Response, g, jsonify, request, session
+from flask import Blueprint, Response, g, jsonify, request, session, send_file
+from werkzeug.utils import secure_filename
 from werkzeug.datastructures import MultiDict, FileStorage
 from .queue_labels import queue_label, request_label
 from .guest_push_batch import GuestPushBatch
@@ -46,11 +47,17 @@ class ActionQueue:
                 UNIQUE(owner, token))''')
             db.execute('''CREATE TABLE IF NOT EXISTS uploads (
                 job INTEGER, name TEXT, filename TEXT, content_type TEXT, body BLOB)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS action_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, job INTEGER NOT NULL,
+                created REAL NOT NULL, event TEXT NOT NULL)''')
+            db.execute('CREATE INDEX IF NOT EXISTS action_events_job_seq ON action_events(job, seq)')
             # Existing queues are migrated without dropping accepted work.
             db.execute('BEGIN IMMEDIATE')
             columns = {row['name'] for row in db.execute('PRAGMA table_info(actions)')}
             if 'progress_state' not in columns:
                 db.execute("ALTER TABLE actions ADD COLUMN progress_state TEXT NOT NULL DEFAULT '{}'")
+            if 'agent_state' not in columns:
+                db.execute("ALTER TABLE actions ADD COLUMN agent_state TEXT NOT NULL DEFAULT '{}'")
             upload_columns = {row['name'] for row in db.execute('PRAGMA table_info(uploads)')}
             if 'path' not in upload_columns:
                 db.execute('ALTER TABLE uploads ADD COLUMN path TEXT')
@@ -82,6 +89,24 @@ class ActionQueue:
         payload = json.dumps({'steps': plan['steps'], 'session': dict(session),
                               'api_key': request.headers.get('X-API-Key') or request.args.get('api_key')})
         staged = []
+        agent_state = {'targets': []}
+        for step in plan['steps']:
+            parts = urlsplit(step['url']).path.strip('/').split('/')
+            if len(parts) != 6 or parts[:2] != ['api', 'projects'] or parts[3:] != ['instances', 'actions', 'agent']:
+                continue
+            agent_state['enabled'] = True
+            body = step.get('body') or {}
+            if 'form' in step:
+                try:
+                    body = json.loads(dict(step['form']).get('payload') or '{}')
+                except (ValueError, TypeError):
+                    body = {}
+            if not isinstance(body, dict):
+                continue
+            for target in body.get('targets', []) if isinstance(body.get('targets'), list) else []:
+                if isinstance(target, dict) and type(target.get('index')) is int and isinstance(target.get('name'), str):
+                    agent_state['targets'].append({'projectId': unquote(parts[2]), 'index': target['index'],
+                                                  'name': target['name'], 'type': str(target.get('type', ''))})
         try:
             # Copy in bounded chunks before taking SQLite's write lock.
             for name, file in uploads:
@@ -90,9 +115,9 @@ class ActionQueue:
                     shutil.copyfileobj(file.stream, target, length=1024 * 1024)
             with self.connect() as db:
                 db.execute('''INSERT OR IGNORE INTO actions
-                    (owner, token, label, project, status, created, payload, total_steps)
-                    VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)''',
-                    (owner, plan['token'], queue_label(plan.get('label'), plan['steps']), plan.get('projectId', ''), time.time(), payload, len(plan['steps'])))
+                    (owner, token, label, project, status, created, payload, total_steps, agent_state)
+                    VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)''',
+                    (owner, plan['token'], queue_label(plan.get('label'), plan['steps']), plan.get('projectId', ''), time.time(), payload, len(plan['steps']), json.dumps(agent_state)))
                 inserted = db.execute('SELECT changes()').fetchone()[0]
                 row = db.execute('SELECT * FROM actions WHERE owner=? AND token=?', (owner, plan['token'])).fetchone()
                 if inserted:
@@ -196,6 +221,19 @@ class ActionQueue:
                         (row['owner'], f"refresh:{row['id']}:{pid}", f'Refresh VMs for project {pid}',
                          pid, time.time(), json.dumps(refresh_payload)))
 
+    def append_event(self, job_id, event):
+        # Agent callers redact before publishing. Store incrementally so clients
+        # can reconnect without owning, interrupting or replaying the operation.
+        event = {key: value for key, value in event.items() if key not in {'id', 'createdAt'}}
+        encoded = json.dumps(event, ensure_ascii=False)
+        if len(encoded) > 256 * 1024:
+            event = {**event, 'data': None, 'text': encoded[:240 * 1024], 'truncated': True}
+            encoded = json.dumps(event, ensure_ascii=False)
+        with self.connect() as db:
+            db.execute('''INSERT INTO action_events(job, created, event)
+                          SELECT id, ?, ? FROM actions WHERE id=? AND status='running' ''',
+                       (time.time(), encoded, job_id))
+
     def progress_reporter(self, job_id, step_number):
         state = {}
         lock = threading.Lock()
@@ -297,6 +335,7 @@ class ActionQueue:
                 g.guest_push_upload_keys = tuple((field, key) for field, key in step.get('files', []))
                 g.action_queue_cancelled = lambda: self.cancelled(job_id)
                 g.action_queue_progress = report
+                g.action_queue_event = lambda event: self.append_event(job_id, event)
                 response = self.app.full_dispatch_request()
                 response.direct_passthrough = False
                 try:
@@ -344,6 +383,11 @@ class ActionQueue:
                 if code >= 400:
                     raise ValueError((result.get('error') if isinstance(result, dict) else None) or f'HTTP {code}')
                 if isinstance(result, dict):
+                    if result.get('agent_failed'):
+                        # Every selected project's report must be retained, even
+                        # when one guest cannot be graded.
+                        partial_errors = True
+                        partial_error_message = 'Agent reported incomplete or failed checks; see guest rubrics.'
                     if result.get('ok') is False or result.get('ambiguous'):
                         raise ValueError('Operation reported errors or unresolved templates; see results')
                     if result.get('errors') or result.get('network_apply_errors'):
@@ -515,8 +559,38 @@ def result_log_sources(row):
     return sources
 
 
+def retained_agent_results(row):
+    """Read completed agent reports and ZIPs from server-owned results only."""
+    retained = {'reports': [], 'archives': []}
+    if row['status'] not in {'completed', 'error', 'cancelled'}:
+        return retained
+    try:
+        result = json.loads(row['result'] or b'{}')
+    except (ValueError, UnicodeDecodeError, TypeError):
+        return retained
+
+    def collect(value):
+        if not isinstance(value, dict):
+            return
+        reports = value.get('reports')
+        if isinstance(reports, list):
+            retained['reports'].extend({key: report[key] for key in
+                ('name', 'vmid', 'index', 'type', 'status', 'rubric', 'score', 'max_score', 'error') if key in report}
+                for report in reports if isinstance(report, dict))
+            archive = value.get('outputs_zip')
+            if isinstance(archive, dict) and isinstance(archive.get('base64'), str) and archive['base64']:
+                retained['archives'].append(archive)
+        for child in value.get('results', []) if isinstance(value.get('results'), list) else []:
+            collect(child)
+
+    collect(result)
+    return retained
+
+
 def public_record(row):
     detail = json.loads(row['progress_state'] or '{}')
+    agent = json.loads(row['agent_state'] or '{}') if 'agent_state' in row.keys() else {}
+    agent_results = retained_agent_results(row) if agent.get('enabled') or queue_label(row['label']) == 'Run agent' else {'reports': [], 'archives': []}
     step_progress = detail.get('progress')
     progress = None
     if row['status'] == 'completed':
@@ -527,6 +601,12 @@ def public_record(row):
     return {'id': row['id'], 'label': queue_label(row['label']), 'projectId': row['project'],
             'status': row['status'], 'summary': result_summary(row), 'createdAt': row['created'] * 1000,
             'logUrl': f"/api/queue/{row['id']}/log" if row['status'] in {'completed', 'error', 'cancelled'} else None,
+            'liveTranscriptUrl': f"/api/queue/{row['id']}/transcript" if agent.get('enabled') else None,
+            'agentTargets': agent.get('targets', []) if agent.get('enabled') else [],
+            'agentReportsUrl': f"/api/queue/{row['id']}/agent-reports" if agent_results['reports'] or agent_results['archives'] else None,
+            'agentDownloads': [{'filename': secure_filename(archive.get('filename', '')) or f'agent_reports_{index + 1}.zip',
+                                'url': f"/api/queue/{row['id']}/agent-files/{index}"}
+                               for index, archive in enumerate(agent_results['archives'])],
             'startedAt': row['started'] * 1000 if row['started'] else None,
             'finishedAt': row['finished'] * 1000 if row['finished'] else None,
             'cancelRequested': bool(row['cancel']), 'errorMessage': row['error'],
@@ -621,6 +701,65 @@ def init_action_queue(app):
         headers = json.loads(row['headers'] or '{}')
         headers = {k: v for k, v in headers.items() if k.lower() in {'content-type', 'content-disposition', 'x-deployforge-auth-failure'}}
         return Response(row['result'] or b'{}', status=row['code'] or 200, headers=headers)
+
+    @bp.get('/<int:job_id>/agent-reports')
+    @_secure_route(api_key=False)
+    def agent_reports(job_id):
+        row = record(job_id)
+        if not row:
+            return jsonify(error='not found'), 404
+        if row['status'] in {'queued', 'running'}:
+            return jsonify(error='Agent is still pending'), 409
+        retained = retained_agent_results(row)
+        response = jsonify(reports=retained['reports'])
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    @bp.get('/<int:job_id>/agent-files/<int:archive_index>')
+    @_secure_route(api_key=False)
+    def agent_files(job_id, archive_index):
+        row = record(job_id)
+        if not row:
+            return jsonify(error='not found'), 404
+        if row['status'] in {'queued', 'running'}:
+            return jsonify(error='Agent is still pending'), 409
+        archives = retained_agent_results(row)['archives']
+        if archive_index >= len(archives):
+            return jsonify(error='not found'), 404
+        archive = archives[archive_index]
+        try:
+            content = base64.b64decode(archive['base64'], validate=True)
+            with zipfile.ZipFile(io.BytesIO(content)):
+                pass
+        except (ValueError, zipfile.BadZipFile):
+            return jsonify(error='The retained report archive could not be read'), 422
+        filename = secure_filename(archive.get('filename', '')) or f'agent_reports_{archive_index + 1}.zip'
+        response = send_file(io.BytesIO(content), mimetype='application/zip', as_attachment=True, download_name=filename, max_age=0)
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+    @bp.get('/<int:job_id>/transcript')
+    @_secure_route(api_key=False)
+    def transcript(job_id):
+        row = record(job_id)
+        if not row:
+            return jsonify(error='not found'), 404
+        try:
+            cursor = int(request.args.get('after', '0'))
+            if cursor < 0:
+                raise ValueError()
+        except ValueError:
+            return jsonify(error='Invalid transcript cursor'), 400
+        with queue().connect() as db:
+            entries = db.execute('SELECT seq, created, event FROM action_events WHERE job=? AND seq>? ORDER BY seq LIMIT 501',
+                                 (job_id, cursor)).fetchall()
+        events = [{'id': entry['seq'], 'createdAt': entry['created'] * 1000, **json.loads(entry['event'])}
+                  for entry in entries[:500]]
+        response = jsonify(events=events, nextCursor=events[-1]['id'] if events else cursor,
+                           hasMore=len(entries) > 500, job=public_record(row))
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     @bp.route('/<int:job_id>/log', methods=['GET'])
     @_secure_route(api_key=False)

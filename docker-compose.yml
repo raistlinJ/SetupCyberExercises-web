@@ -35,6 +35,8 @@ services:
     environment:
       - PORT=8080
       - DATA_DIR=/data
+      - AGENT_PLUGIN_ENABLE=${AGENT_PLUGIN_ENABLE:-0}
+      - ORCHESTRATION_PERMISSIONS_ENABLE=${ORCHESTRATION_PERMISSIONS_ENABLE:-0}
       - DOCKER_HOST_ALIAS=host.docker.internal
     volumes:
       - ./data:/data

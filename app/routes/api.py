@@ -18,6 +18,7 @@ import string
 import logging
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
 from flask import g, Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import re
@@ -2072,6 +2073,13 @@ def instances_refresh_vm(pid: str):
         data = request.get_json(force=True) or {}
     except Exception:
         data = {}
+    targets = data.get('targets')
+    if targets is not None and (not isinstance(targets, list) or not targets or any(
+            not isinstance(t, dict) or not isinstance(t.get('index'), int) or not isinstance(t.get('name'), str)
+            for t in targets)):
+        return jsonify({'error': 'targets must be a non-empty list of VM index/name pairs'}), 400
+    selected = {(t['index'], t['name'].lower()) for t in targets} if targets is not None else None
+    update_screenshots = bool(data.get('updateScreenshots'))
     force_refresh = False
     try:
         force_refresh = bool(data.get('forceRefresh'))
@@ -2139,6 +2147,11 @@ def instances_refresh_vm(pid: str):
             if spec_name or spec_vmid is not None:
                 exp.append({ 'name': spec_name, 'vmid': spec_vmid, 'viewable': bool(viewable), 'validation_configured': bool(validation_configured) })
         expected[i] = exp
+    if selected is not None:
+        valid_targets = {(i, str(spec.get('name') or '').lower())
+                         for i, specs in expected.items() for spec in specs}
+        if not selected.issubset(valid_targets):
+            return jsonify({'error': 'Selected VMs are not in this project configuration'}), 400
     client = ProxmoxClient(base_url=base_url, token=token or None, username=username, password=password, verify=verify)
     try:
         t_start = time.time()
@@ -2156,7 +2169,8 @@ def instances_refresh_vm(pid: str):
         agent_hint_by_ref: Dict[Tuple[str, int], Any] = {}
         vm_ref_types: Dict[Tuple[str, int], str] = {}
         expected_names = {str(item.get('name') or '').lower()
-                          for items in expected.values() for item in items}
+                          for i, items in expected.items() for item in items
+                          if selected is None or (i, str(item.get('name') or '').lower()) in selected}
         expected_ids = {item['vmid'] for items in expected.values() for item in items
                         if item.get('vmid') is not None}
         
@@ -2310,8 +2324,10 @@ def instances_refresh_vm(pid: str):
         return re.sub(r"[^A-Za-z0-9_-]+", "", base)
 
     matched_vm_refs: List[Tuple[str, int]] = []
-    for instance_specs in expected.values():
+    for instance_index, instance_specs in expected.items():
         for spec in instance_specs:
+            if selected is not None and (instance_index, str(spec.get('name') or '').lower()) not in selected:
+                continue
             spec_name = spec.get('name')
             matched = name_map.get(spec_name)
             if not matched and spec_name:
@@ -2467,15 +2483,22 @@ def instances_refresh_vm(pid: str):
     # Update statuses
     current = { int((e or {}).get('index', 0)): e for e in (proj.instance_statuses or []) }
     out = []
+    screenshot_jobs = []
     for i in range(1, instances + 1):
         try:
             pct = int(round(70 + (i / max(instances or 1, 1)) * 25)) if instances > 0 else 95
             _update_job_detail(pid, job_key=refresh_key, phase='summarizing', current=f'Instance {i}', item_total=instances, item_completed=i - 1, step=i, total_steps=max(instances, 1), progress=min(pct, 95), message=f'Compiling instance {i}/{max(instances, 1)}…')
         except Exception:
             pass
+        if selected is not None and not any(index == i for index, _ in selected):
+            if i in current:
+                out.append(current[i])
+            continue
         entry = current.get(i) or { 'index': i, 'created': False, 'managers': {} }
         mgrs = entry.get('managers') or {}
         names = expected[i]
+        previous_details = {str(d.get('name') or '').lower(): d for d in entry.get('vm_details', [])}
+
         # Pre-compute per-instance userid/poolid for access reporting
         userid = None
         poolid = None
@@ -2493,6 +2516,13 @@ def instances_refresh_vm(pid: str):
         count = 0
         found_details = []
         for spec in names:
+            spec_key = str(spec.get('name') or '').lower()
+            previous = previous_details.get(spec_key)
+            if selected is not None and (i, spec_key) not in selected:
+                if previous:
+                    found_details.append(previous)
+                    count += 1
+                continue
             # Match clones by their expected name; do NOT match by configured template VMID
             matched = None
             spec_vmid = spec.get('vmid')
@@ -2592,6 +2622,21 @@ def instances_refresh_vm(pid: str):
                     # Effective access for the instance user (credential username)
                     'user_access': _effective_user_access(userid, int(vmid), poolid) if (userid and vmid is not None) else None,
                 })
+                detail = found_details[-1]
+                if previous and previous.get('vmid') == vmid and previous.get('node') == node:
+                    for key in ('screenshot', 'screenshot_at', 'screenshot_error', 'screenshot_stale'):
+                        if key in previous:
+                            detail[key] = previous[key]
+                if update_screenshots:
+                    detail.pop('screenshot', None)
+                    detail.pop('screenshot_at', None)
+                    detail.pop('screenshot_error', None)
+                    if detail['type'] != 'qemu':
+                        detail['screenshot_error'] = 'No graphical display'
+                    elif detail['power_state'] != 'running':
+                        detail['screenshot_error'] = 'VM is not running'
+                    else:
+                        screenshot_jobs.append((detail, node, vmid))
                 if node and vmid is not None:
                     validation_result = None
                     try:
@@ -2670,8 +2715,36 @@ def instances_refresh_vm(pid: str):
         except Exception:
             pass
         out.append(entry)
-    proj.instance_statuses = out
-    s.upsert(proj)
+    if screenshot_jobs:
+        def capture_display(job):
+            detail, node, vmid = job
+            try:
+                from ..connectors.vm_screenshot import capture
+                screenshot_client = ProxmoxClient(base_url=base_url, token=token or None,
+                                                  username=username, password=password, verify=verify)
+                detail['screenshot'] = capture(screenshot_client, node, vmid)
+                detail['screenshot_at'] = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
+                detail['screenshot_stale'] = False
+            except Exception:
+                detail['screenshot_error'] = 'Display capture unavailable'
+        _update_job_detail(pid, job_key=refresh_key, phase='screenshots', progress=95,
+                           message=f'Capturing {len(screenshot_jobs)} display preview(s)…')
+        with ThreadPoolExecutor(max_workers=min(4, len(screenshot_jobs))) as executor:
+            list(executor.map(capture_display, screenshot_jobs))
+    for entry in out:
+        for detail in entry.get('vm_details', []):
+            refreshed_screenshot = update_screenshots and (selected is None or
+                (int(entry.get('index', 0)), str(detail.get('name') or '').lower()) in selected)
+            if detail.get('screenshot') and not refreshed_screenshot:
+                detail['screenshot_stale'] = True
+    inventory_writer = getattr(s, 'update_vm_inventory', None)
+    if callable(inventory_writer):
+        screenshot_targets = (selected if selected is not None else None) if update_screenshots else set()
+        proj = inventory_writer(pid, out, screenshot_targets=screenshot_targets)
+        out = proj.instance_statuses
+    else:
+        proj.instance_statuses = out
+        s.upsert(proj)
     
     # Log total refresh time for performance monitoring
     t_end = time.time()
@@ -8308,6 +8381,8 @@ LEGACY_ORCHESTRATOR_GROUP = 'caf-orchestrator'
 @_secure_route(required_roles=['admin'])
 def instances_users_orchestration(pid: str, enable: bool):
     """Explicit user-level enrollment, not VM ACLs or role assignment."""
+    if not current_app.config.get('ORCHESTRATION_PERMISSIONS_ENABLE', False):
+        return jsonify(error='Orchestration permissions are disabled; set ORCHESTRATION_PERMISSIONS_ENABLE=1 and restart the app'), 403
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or body.get('confirmed') is not True:
         return jsonify(error='Explicit orchestration access confirmation is required'), 400
@@ -13289,6 +13364,16 @@ def _zip_has_manifest(path: str) -> bool:
 
 def _validate_project_fields(data: dict) -> list:
     errors = []
+    for key, maximum in (("proxmox_max_create_jobs", None), ("agent_max_parallel_agents", 5)):
+        if key in data:
+            value = data[key]
+            if type(value) is not int or value < 1 or (maximum is not None and value > maximum):
+                errors.append(f"{key} must be a whole number " + (f"between 1 and {maximum}" if maximum else "at least 1"))
+    for key in ("proxmox_snapshot_delay_seconds", "proxmox_update_delay_seconds"):
+        if key in data:
+            value = data[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                errors.append(f"{key} must be a non-negative finite number")
     def port_ok(v):
         try:
             iv = int(v)
@@ -13561,7 +13646,7 @@ def create_project():
         # Advanced Proxmox
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
         "proxmox_qmrestore_path", "proxmox_storage_volume",
-    "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
+    "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds", "proxmox_update_delay_seconds", "agent_max_parallel_agents",
     "proxmox_use_linked_clones",
     "instance_statuses",
     "vms",
@@ -13617,7 +13702,7 @@ def update_project(pid: str):
         # Advanced Proxmox
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
         "proxmox_qmrestore_path", "proxmox_storage_volume",
-    "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds",
+    "proxmox_max_create_jobs", "proxmox_snapshot_delay_seconds", "proxmox_update_delay_seconds", "agent_max_parallel_agents",
     "proxmox_use_linked_clones", "proxmox_assign_rollback_on_non_viewable",
     "instance_statuses",
     ]:

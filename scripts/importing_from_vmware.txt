@@ -1,0 +1,16 @@
+Linux -- Everything is default except:
+-*Display: VMWare Compatible memory=128
+-Make sure Hard Disk is ide; if it's not, detach it and then reattach as ide
+-Make sure OS Type is Linux 6.x-2.6 kernel
+-Make sure ide Hard Disk is first and enabled in Boot Order
+
+Windows (setup with nvme/uefi on VMware - which is the default)
+Bios: OVMF (UEFI)
+EFI Disk (defaults)
+Hard Disk (ide0)
+Options -- 
+OS Type MS Windows 11/2022/2025
+Boot order (No boot device selected -- or specify ide0 / doesn't seem to matter)
+
+Networking
+-if hub behavior is required for any reason, the proxmox bridge needs to have the ageing set to 0; otherwise it behaves like a switch

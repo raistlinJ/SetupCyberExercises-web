@@ -11,7 +11,7 @@ from test_users_access_sync_api import _StoreStub
 class OrchestrationAccessTests(unittest.TestCase):
     def setUp(self):
         self.app = create_app()
-        self.app.config.update(TESTING=True, AUTH_ENABLE=True, API_KEY=None)
+        self.app.config.update(TESTING=True, AUTH_ENABLE=True, API_KEY=None, ORCHESTRATION_PERMISSIONS_ENABLE=True)
         self.app.current_user = lambda: {'username': 'admin', 'roles': ['admin']}
         self.web = self.app.test_client()
         self.project = Project(id='orchestration-test', name='Lab')
@@ -39,6 +39,16 @@ class OrchestrationAccessTests(unittest.TestCase):
         action = 'enable' if enable else 'disable'
         return self.web.post(f'/api/projects/{self.project.id}/instances/actions/users_orchestration_{action}',
                              json=self.body if body is None else body)
+
+    def test_disabled_feature_blocks_both_actions_before_any_remote_work(self):
+        self.app.config['ORCHESTRATION_PERMISSIONS_ENABLE'] = False
+        self.assertEqual(self.web.get('/api/features').json, {'orchestration_permissions': False})
+        for enable in (True, False):
+            result = self.post(enable)
+            self.assertEqual(result.status_code, 403)
+            self.assertIn('ORCHESTRATION_PERMISSIONS_ENABLE=1', result.json['error'])
+        self.factory.assert_not_called()
+        self.end.assert_not_called()
 
     def test_enable_deduplicates_selected_users_and_only_enrolls(self):
         result = self.post()

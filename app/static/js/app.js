@@ -7,6 +7,19 @@ const UI_SETTINGS_KEY_LEGACY = 'toolhub.settings.v1';
 window.PROJ_CACHE = window.PROJ_CACHE || {};
 window.MATERIAL_PENDING = window.MATERIAL_PENDING || {};
 
+let configAgentPluginEnabled = false;
+function applyAgentConfigurationVisibility(root = document) {
+  root.querySelectorAll('[data-agent-configuration]').forEach(section => {
+    section.hidden = !configAgentPluginEnabled;
+    section.classList.toggle('d-none', !configAgentPluginEnabled);
+    section.querySelectorAll('input').forEach(input => { input.disabled = !configAgentPluginEnabled; });
+  });
+}
+fetch('/api/plugins', { credentials: 'same-origin' }).then(response => response.ok ? response.json() : null).then(result => {
+  configAgentPluginEnabled = !!result?.plugins?.some(plugin => plugin.name === 'agent');
+  applyAgentConfigurationVisibility();
+}).catch(() => {});
+
 const START_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
 const STORED_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', steps: [] };
 const VALIDATION_COMMAND_MODAL_STATE = { pid: null, idx: null, vmName: '', commands: [] };
@@ -5269,6 +5282,8 @@ function debounceProjectSave(pid, field, delay = 600) {
 async function autoSaveProjectField(pid) {
   const card = document.getElementById('proj-card-' + pid);
   if (!card) return;
+  const invalidNumber = Array.from(card.querySelectorAll('[data-project-number]:not(:disabled)')).find(input => !input.checkValidity());
+  if (invalidNumber) { invalidNumber.reportValidity(); return; }
   // Build minimal payload from current DOM values (respect disabled future fields)
   const tagVal = document.getElementById(`cfg-${pid}-tag`)?.value || '';
   if (!isValidTag(tagVal)) { return; }
@@ -5292,6 +5307,8 @@ async function autoSaveProjectField(pid) {
     proxmox_use_linked_clones: !!(document.getElementById(`cfg-${pid}-proxmox_use_linked_clones`)?.checked),
     proxmox_assign_rollback_on_non_viewable: !!(document.getElementById(`cfg-${pid}-proxmox_assign_rollback_on_non_viewable`)?.checked),
   };
+  const agentLimit = document.getElementById(`cfg-${pid}-agent_max_parallel_agents`);
+  if (configAgentPluginEnabled && agentLimit && !agentLimit.disabled) payload.agent_max_parallel_agents = Number(agentLimit.value);
   // Optional future fields (skip if disabled)
   const optIds = ['keycloak_url', 'keycloak_port', 'keycloak_nodename', 'challenge_url', 'challenge_port'];
   optIds.forEach(id => {
@@ -6835,15 +6852,20 @@ function renderProjectCard(p) {
             </div>
             <div class="col-md-3">
               <label class="form-label" title="Limit concurrent create jobs">Max Create Jobs</label>
-              <input id="cfg-${p.id}-proxmox_max_create_jobs" type="number" class="form-control form-control-sm" value="${p.proxmox_max_create_jobs ?? 5}" oninput="debounceProjectSave('${p.id}','proxmox_max_create_jobs')" />
+              <input id="cfg-${p.id}-proxmox_max_create_jobs" type="number" min="1" step="1" required data-project-number class="form-control form-control-sm" value="${p.proxmox_max_create_jobs ?? 5}" oninput="debounceProjectSave('${p.id}','proxmox_max_create_jobs')" />
             </div>
             <div class="col-md-3">
               <label class="form-label mb-1">Snapshot Delay (s)</label>
-              <input id="cfg-${p.id}-proxmox_snapshot_delay_seconds" type="number" step="0.1" class="form-control form-control-sm" value="${p.proxmox_snapshot_delay_seconds ?? 5.0}" oninput="debounceProjectSave('${p.id}','proxmox_snapshot_delay_seconds')" />
+              <input id="cfg-${p.id}-proxmox_snapshot_delay_seconds" type="number" min="0" step="0.1" required data-project-number class="form-control form-control-sm" value="${p.proxmox_snapshot_delay_seconds ?? 5.0}" oninput="debounceProjectSave('${p.id}','proxmox_snapshot_delay_seconds')" />
             </div>
             <div class="col-md-3 mb-2">
               <label class="form-label mb-1">VM Update Delay (s)</label>
-              <input id="cfg-${p.id}-proxmox_update_delay_seconds" type="number" step="0.1" class="form-control form-control-sm" value="${p.proxmox_update_delay_seconds ?? 0.5}" oninput="debounceProjectSave('${p.id}','proxmox_update_delay_seconds')" />
+              <input id="cfg-${p.id}-proxmox_update_delay_seconds" type="number" min="0" step="0.1" required data-project-number class="form-control form-control-sm" value="${p.proxmox_update_delay_seconds ?? 0.5}" oninput="debounceProjectSave('${p.id}','proxmox_update_delay_seconds')" />
+            </div>
+            <div class="col-md-3 mb-2 d-none" data-agent-configuration hidden>
+              <label class="form-label mb-1" for="cfg-${p.id}-agent_max_parallel_agents">Max parallel agents</label>
+              <input id="cfg-${p.id}-agent_max_parallel_agents" type="number" min="1" max="5" step="1" required disabled data-project-number class="form-control form-control-sm" value="${p.agent_max_parallel_agents ?? 1}" oninput="debounceProjectSave('${p.id}','agent_max_parallel_agents')" />
+              <div class="form-text">Selected guests running at once (1–5).</div>
             </div>
             <div class="col-md-6 mb-2">
               <label class="form-label">Use Linked Clones</label>
@@ -7068,6 +7090,7 @@ function renderProjectCard(p) {
   });
   // Initialize credential download button and controls state on first render
   setTimeout(() => { updateCredDownloadState(p.id); updateCredControls(p.id); }, 0);
+  applyAgentConfigurationVisibility(col);
   return col;
 }
 

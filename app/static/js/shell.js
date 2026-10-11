@@ -1331,6 +1331,23 @@ function clearCompletedRemoteActions(){
   _remoteQueue_emit();
 }
 
+function agentQueueTranscriptButton(entry) {
+  const id = Number(entry?.id);
+  if (!Number.isInteger(id) || id < 1 || entry.liveTranscriptUrl !== `/api/queue/${id}/transcript`) return '';
+  const active = ['queued', 'running'].includes(entry.status);
+  return `<button type="button" class="btn btn-sm btn-outline-primary me-2 ${active ? 'agent-running' : ''}" data-act="q-agent-transcript" data-id="${id}" title="Open agent transcript"><i class="bi bi-robot" aria-hidden="true"></i> ${active ? 'Live transcript' : 'Transcript'}</button>`;
+}
+
+function agentQueueResultContent(entry) {
+  const id = Number(entry?.id);
+  if (!Number.isInteger(id) || id < 1 || entry.agentReportsUrl !== `/api/queue/${id}/agent-reports`) return '';
+  const downloads = (Array.isArray(entry.agentDownloads) ? entry.agentDownloads : []).map((archive, index) => {
+    if (archive.url !== `/api/queue/${id}/agent-files/${index}`) return '';
+    return `<a class="btn btn-sm btn-outline-info me-2 mt-2" href="${archive.url}" download="${escapeHtml(archive.filename)}">Download report &amp; files${entry.agentDownloads.length > 1 ? ` · ${escapeHtml(archive.filename)}` : ''}</a>`;
+  }).join('');
+  return `<div class="agent-queue-downloads">${downloads}</div><div class="agent-queue-reports" data-agent-report="${id}" data-agent-report-url="${entry.agentReportsUrl}">Open results to load the guest reports.</div>`;
+}
+
 const ACTION_PROGRESS_DEFAULT_STATE = Object.freeze({
   active: false,
   visible: false,
@@ -1585,6 +1602,61 @@ function formatArgs(args){
 
 const ConsoleDock = (() => {
   let el, body, toggleBtn, dropBtn, dropMenu, titleEl, autoScroll = true;
+  const agentReportCache = new Map(), observedAgentJobs = new Set(), pendingAgentResults = new Set();
+
+  function showAgentResults(id) {
+    id = Number(id); if (!Number.isInteger(id) || id < 1) return;
+    pendingAgentResults.add(String(id));
+    setMode('queue'); setOpen(true);
+    body?.querySelector(`details[data-queue-result="${id}"]`)?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function renderAgentReports(host, reports) {
+    host.replaceChildren();
+    const text = (tag, value) => { const node = document.createElement(tag); node.textContent = String(value ?? ''); return node; };
+    if (!reports.length) { host.textContent = 'No guest report was retained for this run.'; return; }
+    for (const report of reports) {
+      const section = document.createElement('section'); section.className = 'border rounded p-2 mt-3';
+      section.appendChild(text('h6', `${report.name || 'Guest'} · ${report.status || 'unknown'}${report.rubric ? ` · ${report.score}/${report.max_score}` : ''}`));
+      section.appendChild(text('p', report.rubric?.summary || report.error || 'Run ended before a rubric was submitted.'));
+      if (Array.isArray(report.rubric?.criteria) && report.rubric.criteria.length) {
+        const wrapper = document.createElement('div'); wrapper.className = 'table-responsive';
+        const table = document.createElement('table'); table.className = 'table table-sm table-dark small mb-0';
+        const head = document.createElement('thead'), headings = document.createElement('tr');
+        ['Criterion', 'Status', 'Score', 'Evidence', 'Feedback'].forEach(value => headings.appendChild(text('th', value)));
+        head.appendChild(headings); table.appendChild(head);
+        const rows = document.createElement('tbody');
+        report.rubric.criteria.forEach(criterion => {
+          const row = document.createElement('tr');
+          [criterion.criterion, criterion.status, `${criterion.score}/${criterion.max_score}`, criterion.evidence, criterion.feedback].forEach(value => row.appendChild(text('td', value)));
+          rows.appendChild(row);
+        });
+        table.appendChild(rows); wrapper.appendChild(table); section.appendChild(wrapper);
+      }
+      host.appendChild(section);
+    }
+  }
+
+  function loadAgentReports(details) {
+    if (!details.open) return;
+    const host = details.querySelector('[data-agent-report]'); if (!host) return;
+    const id = host.dataset.agentReport;
+    const cached = agentReportCache.get(id);
+    if (cached?.reports) { renderAgentReports(host, cached.reports); return; }
+    host.textContent = 'Loading guest reports…';
+    if (cached?.promise) return;
+    const entry = {};
+    agentReportCache.set(id, entry);
+    entry.promise = (window.ServerQueue?.nativeFetch || window.fetch)(host.dataset.agentReportUrl, { credentials: 'same-origin' })
+      .then(async response => {
+        if (!response.ok) throw new Error('Could not load retained guest reports.');
+        const result = await response.json(); entry.reports = Array.isArray(result.reports) ? result.reports : [];
+        body?.querySelectorAll(`[data-agent-report="${id}"]`).forEach(current => renderAgentReports(current, entry.reports));
+      }).catch(error => {
+        agentReportCache.delete(id);
+        body?.querySelectorAll(`[data-agent-report="${id}"]`).forEach(current => { current.textContent = error.message; });
+      });
+  }
   // Include debug level, default off to reduce noise
   let state = { open: false, height: 220, search: '', tsUTC: false, mode: 'console', levels: { debug:false, log:true, info:true, warn:true, error:true, success:true } };
   const orig = { log: console.log, warn: console.warn, error: console.error, info: console.info };
@@ -1886,6 +1958,7 @@ const ConsoleDock = (() => {
 
   function renderQueue(){
     const openResults = new Set(Array.from(body?.querySelectorAll('details[data-queue-result][open]') || [], el => el.dataset.queueResult));
+    pendingAgentResults.forEach(id => openResults.add(id)); pendingAgentResults.clear();
     if (!body) return;
     if (!window.getRemoteQueueState) {
       refreshQueueModeLabelsFromState();
@@ -1966,6 +2039,7 @@ const ConsoleDock = (() => {
                   + `${cancelNote}`
                   + `<div class="queue-actions mt-2">`
                   + `${progressButton}`
+                  + agentQueueTranscriptButton(entry)
                   + `<button type="button" class="btn btn-sm btn-outline-danger" data-act="q-cancel-active" data-id="${entry.id}" ${disableCancel}>Cancel</button>`
                   + `</div>`
                   + `</div>`;
@@ -1990,6 +2064,7 @@ const ConsoleDock = (() => {
                   + `${queuedMeta}`
                   + `${blockedNote}`
                   + `${restoringNote}`
+                  + agentQueueTranscriptButton(item)
                   + `<button type="button" class="btn btn-sm btn-outline-danger ms-auto" data-act="q-cancel" data-id="${item.id}">Cancel</button>`
                   + `</li>`;
               }).join('')
@@ -2045,11 +2120,13 @@ const ConsoleDock = (() => {
                   + `${cancelMeta}`
                   + `</div>`
                   + `${errorMeta}`
+                  + agentQueueTranscriptButton(item)
                   + `<details data-queue-result="${escapeHtml(String(item.id))}" class="queue-results"${openResults.has(String(item.id)) ? ' open' : ''}>`
                   + `<summary>View results</summary>`
                   + `<div class="queue-result-summary">${escapeHtml(item.summary || `${statusLabel}: ${item.label || 'Action'}.${item.errorMessage ? ' ' + item.errorMessage : ''}`)}</div>`
                   + (item.server && item.logUrl === `/api/queue/${item.id}/log`
                     ? `<a class="queue-log-link" href="${escapeHtml(item.logUrl)}" target="_blank" rel="noopener">View full log ↗</a> <a class="queue-log-link" href="${escapeHtml(item.logUrl)}?download=1" download="queue-${escapeHtml(String(item.id))}-log.txt">Download log</a>` : '')
+                  + agentQueueResultContent(item)
                   + `</details>`
                   + `</div>`
                   + `</li>`;
@@ -2062,6 +2139,10 @@ const ConsoleDock = (() => {
     }
     html += '</div>';
     body.innerHTML = html;
+    body.querySelectorAll('details[data-queue-result]').forEach(details => {
+      details.addEventListener('toggle', () => loadAgentReports(details));
+      if (details.open) loadAgentReports(details);
+    });
     const btn = body.querySelector('[data-act="q-refresh"]'); if (btn) btn.addEventListener('click', () => {
       if (window.ServerQueue) window.ServerQueue.refresh().catch(() => {});
       else renderQueue();
@@ -2085,6 +2166,14 @@ const ConsoleDock = (() => {
       });
     });
     const clearCompletedBtn = body.querySelector('[data-act="q-clear-completed"]');
+    body.querySelectorAll('[data-act="q-agent-transcript"]').forEach(button => {
+      button.addEventListener('click', event => {
+        event.preventDefault(); event.stopPropagation();
+        const id = Number(button.dataset.id);
+        if (window.AgentTranscript) window.AgentTranscript.open(id);
+        else window.location.href = `/static/vm_manager.html?agentJob=${id}`;
+      });
+    });
     if (clearCompletedBtn) {
       clearCompletedBtn.addEventListener('click', () => {
         try { window.clearCompletedRemoteActions && window.clearCompletedRemoteActions(); } catch {}
@@ -2160,10 +2249,22 @@ const ConsoleDock = (() => {
     refreshQueueModeLabelsFromState();
     renderAll();
     hookConsole();
+    const initialQueue = window.getRemoteQueueState?.() || {};
+    [...(initialQueue.activeItems || []), ...(initialQueue.items || [])].forEach(job => {
+      if (job.liveTranscriptUrl) observedAgentJobs.add(job.id);
+    });
     try {
       document.addEventListener('remote-queue-changed', () => {
         refreshQueueModeLabelsFromState();
+        const queue = window.getRemoteQueueState?.() || {};
+        [...(queue.activeItems || []), ...(queue.items || [])].forEach(job => {
+          if (job.liveTranscriptUrl) observedAgentJobs.add(job.id);
+        });
+        const finished = (queue.completed || []).filter(job => observedAgentJobs.has(job.id));
+        finished.forEach(job => { observedAgentJobs.delete(job.id); pendingAgentResults.add(String(job.id)); });
+        if (finished.length) { setMode('queue'); setOpen(true); }
         if (state.mode === 'queue') renderAll();
+        if (finished.length) body?.querySelector(`details[data-queue-result="${finished[0].id}"]`)?.scrollIntoView({ block: 'nearest' });
       });
     } catch {}
     try {
@@ -2220,7 +2321,7 @@ const ConsoleDock = (() => {
     } catch {}
   }
 
-  return { init, append, clear, setOpen, toggle, setLevel, setMode };
+  return { init, append, clear, setOpen, toggle, setLevel, setMode, showAgentResults };
 })();
 
 function log(level, message){ ConsoleDock.append(level||'info', [message]); }
@@ -2293,6 +2394,7 @@ window.shell = {
   logDebug,
   enableConsoleDebug,
   showQueuePanel,
+  showAgentResults: id => ConsoleDock.showAgentResults(id),
   beginActionContext,
   endActionContext,
   step,

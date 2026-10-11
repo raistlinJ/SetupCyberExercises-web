@@ -528,7 +528,7 @@ def test_progress_schema_migration_preserves_existing_work(tmp_path):
         queue = ActionQueue(app)
         with queue.connect() as db:
             row = dict(db.execute('SELECT * FROM actions WHERE id=1').fetchone())
-        assert row == {'id': 1, 'status': 'queued', 'payload': 'accepted payload', 'progress_state': '{}'}
+        assert row == {'id': 1, 'status': 'queued', 'payload': 'accepted payload', 'progress_state': '{}', 'agent_state': '{}'}
 
 
 def test_upload_storage_uses_bounded_reads_and_cleans_duplicates(harness, monkeypatch):
@@ -1032,3 +1032,112 @@ def test_queued_vm_transfer_policy_updates_notes_reports_outcome_and_refreshes(h
     while ('refresh', project.id) not in calls and time.monotonic() < deadline:
         time.sleep(.01)
     assert calls.count(('refresh', project.id)) == 1
+
+
+def test_agent_queue_metadata_and_transcript_replay_are_owner_private(harness, monkeypatch):
+    app, client, *_ = harness
+    monkeypatch.setattr(ActionQueue, 'start', lambda self: None)
+    app.add_url_rule('/api/projects/p/instances/actions/agent', methods=['POST'],
+                     view_func=lambda: jsonify(ok=True), endpoint='agent_test')
+    job = enqueue(client, 'stream-agent', steps=[{
+        'method': 'POST', 'url': '/api/projects/p/instances/actions/agent',
+        'body': {'targets': [{'index': 1, 'name': 'vm-one', 'type': 'qemu'}], 'password': 'private-secret',
+                 'llm': {'api_key': 'private-llm-key'}, 'prompt': 'Do not expose this in queue metadata'}}]).get_json()
+    assert job['agentTargets'] == [{'projectId': 'p', 'index': 1, 'name': 'vm-one', 'type': 'qemu'}]
+    assert job['liveTranscriptUrl'] == f"/api/queue/{job['id']}/transcript"
+    assert 'private-secret' not in json.dumps(job)
+    assert 'private-llm-key' not in json.dumps(job)
+    q = app.extensions['action_queue']
+    q.claim()
+    q.append_event(job['id'], {'kind': 'prompt', 'text': 'Grade files', 'guest': 'vm-one'})
+    first = client.get(job['liveTranscriptUrl']).get_json()
+    assert first['job']['status'] == 'running'
+    assert first['events'][0]['text'] == 'Grade files'
+    cursor = first['nextCursor']
+    q.append_event(job['id'], {'kind': 'reasoning', 'text': 'Checking file location', 'guest': 'vm-one'})
+    second = client.get(f"{job['liveTranscriptUrl']}?after={cursor}").get_json()
+    assert [event['kind'] for event in second['events']] == ['reasoning']
+    with client.session_transaction() as sess:
+        sess['user'] = 'other-user'
+    assert client.get(job['liveTranscriptUrl']).status_code == 404
+    with client.session_transaction() as sess:
+        sess['user'] = 'alice'
+    with q.connect() as db:
+        db.execute("UPDATE actions SET status='completed' WHERE id=?", (job['id'],))
+    q.append_event(job['id'], {'kind': 'response', 'text': 'Late output must not be inserted'})
+    final = client.get(job['liveTranscriptUrl']).get_json()
+    assert len(final['events']) == 2
+    assert final['job']['status'] == 'completed'
+    assert client.get(f"{job['liveTranscriptUrl']}?after=-1").status_code == 400
+
+
+def test_live_transcript_paginates_without_losing_cursor(harness, monkeypatch):
+    app, client, *_ = harness
+    monkeypatch.setattr(ActionQueue, 'start', lambda self: None)
+    job = enqueue(client, 'paginate-stream').get_json()
+    q = app.extensions['action_queue']
+    with q.connect() as db:
+        db.executemany('INSERT INTO action_events(job,created,event) VALUES (?,?,?)',
+                       [(job['id'], time.time(), json.dumps({'kind': 'response', 'text': str(i)})) for i in range(502)])
+    first = client.get(f"/api/queue/{job['id']}/transcript").get_json()
+    assert len(first['events']) == 500 and first['hasMore']
+    second = client.get(f"/api/queue/{job['id']}/transcript?after={first['nextCursor']}").get_json()
+    assert [event['text'] for event in second['events']] == ['500', '501']
+    assert not second['hasMore']
+
+
+@pytest.mark.parametrize('status', ['completed', 'error', 'cancelled'])
+def test_retained_agent_reports_and_zip_downloads_are_owner_scoped(harness, status):
+    app, client, *_ = harness
+    job = enqueue(client, 'agent-artifacts').get_json()
+    wait_terminal(client, job['id'])
+    payloads = []
+    archives = []
+    for project in ('one', 'two'):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as archive:
+            archive.writestr('results.html', f'<h1>{project}</h1>')
+            archive.writestr(f'{project}/output.log', 'retained evidence')
+        archives.append(stream.getvalue())
+        payloads.append({'reports': [{'name': project, 'status': status, 'rubric': None,
+                                     'events': [{'text': 'not needed in report preview'}]}],
+                         'outputs_zip': {'filename': f'agent_reports_{project}.zip',
+                                         'base64': base64.b64encode(stream.getvalue()).decode()}})
+    with app.extensions['action_queue'].connect() as db:
+        db.execute('UPDATE actions SET result=?,status=?,label=?,agent_state=? WHERE id=?',
+                   (json.dumps({'results': payloads}).encode(), status, 'Run agent', '{"enabled":true}', job['id']))
+    record = client.get(f"/api/queue/{job['id']}").get_json()
+    assert 'base64' not in json.dumps(record)
+    reports = client.get(record['agentReportsUrl'])
+    assert reports.status_code == 200
+    assert [report['name'] for report in reports.get_json()['reports']] == ['one', 'two']
+    assert all('events' not in report for report in reports.get_json()['reports'])
+    assert reports.headers['Cache-Control'] == 'no-store'
+    assert len(record['agentDownloads']) == 2
+    for index, download in enumerate(record['agentDownloads']):
+        response = client.get(download['url'])
+        assert response.status_code == 200
+        assert response.mimetype == 'application/zip'
+        assert response.data == archives[index]
+        assert 'attachment' in response.headers['Content-Disposition']
+        assert download['filename'] in response.headers['Content-Disposition']
+        assert response.headers['Cache-Control'] == 'no-store'
+    assert client.get(f"/api/queue/{job['id']}/agent-files/2").status_code == 404
+    with client.session_transaction() as accepted:
+        accepted['user'] = 'bob'
+    assert client.get(record['agentReportsUrl']).status_code == 404
+    assert all(client.get(download['url']).status_code == 404 for download in record['agentDownloads'])
+
+
+def test_agent_download_requires_completion_and_handles_invalid_archive(harness):
+    app, client, started, release, *_ = harness
+    job = enqueue(client, 'first').get_json()
+    assert started.wait(2)
+    assert client.get(f"/api/queue/{job['id']}/agent-reports").status_code == 409
+    assert client.get(f"/api/queue/{job['id']}/agent-files/0").status_code == 409
+    release.set()
+    wait_terminal(client, job['id'])
+    with app.extensions['action_queue'].connect() as db:
+        db.execute('UPDATE actions SET result=? WHERE id=?',
+                   (json.dumps({'reports': [], 'outputs_zip': {'filename': 'bad.zip', 'base64': 'not a zip'}}).encode(), job['id']))
+    assert client.get(f"/api/queue/{job['id']}/agent-files/0").status_code == 422

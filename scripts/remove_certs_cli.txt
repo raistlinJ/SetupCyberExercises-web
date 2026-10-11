@@ -1,0 +1,5 @@
+try removing the files '/etc/pve/local/pveproxy-ssl.pem' and '/etc/pve/local/pveproxy-ssl.key'
+if they exist (even though they are empty) pveproxy will try to read cert+key from there - if they are not there it will fall back to the certs for cluster communication
+
+run `pvecm updatecerts --force` afterwards
+systemctl restart pveproxy

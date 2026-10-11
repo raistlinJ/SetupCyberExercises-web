@@ -1,9 +1,15 @@
 import os
 import tempfile
+from dotenv import load_dotenv
 from flask import Flask, send_from_directory
+
+_DOTENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
 
 
 def create_app():
+    # Module and WSGI entry points bypass Flask CLI's dotenv loading. Resolve
+    # from the app package so startup also works outside the project directory.
+    load_dotenv(_DOTENV_PATH, override=False)
     app = Flask(__name__, static_folder="static", static_url_path="/static")
     # Capture env-provided secret key (persisted later once DATA_DIR is known)
     env_secret_key = os.environ.get('SECRET_KEY')
@@ -593,6 +599,24 @@ def create_app():
     # Register blueprints
     from .routes.api import api_bp
     app.register_blueprint(api_bp, url_prefix="/api")
+    # Optional plugins are imported and registered only when enabled at startup.
+    agent_enabled = os.environ.get('AGENT_PLUGIN_ENABLE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+    app.config['AGENT_PLUGIN_ENABLE'] = agent_enabled
+    app.config['ORCHESTRATION_PERMISSIONS_ENABLE'] = os.environ.get(
+        'ORCHESTRATION_PERMISSIONS_ENABLE', '0'
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    if agent_enabled:
+        from .agent_plugin import register_agent_plugin
+        register_agent_plugin(app)
+
+    @app.get('/api/plugins')
+    def plugins():
+        return {'plugins': [{'name': 'agent', 'script': '/static/js/agent_plugin.js?v=20261009-agent-no-dock'}] if agent_enabled else []}
+
+    @app.get('/api/features')
+    def features():
+        return {'orchestration_permissions': app.config['ORCHESTRATION_PERMISSIONS_ENABLE']}
+
     from .action_queue import init_action_queue
     init_action_queue(app)
 

@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# Print usage helper function
+usage() {
+    echo "Usage: $0 --remove-all | ID1 ID2 ID3 ..."
+    echo "  --remove-all      Deletes ALL virtual machines (except templates) without exception."
+    echo "  ID1 ID2 ...       List of VM IDs to keep (all others will be deleted)."
+    exit 1
+}
+
+# Ensure at least one argument is provided
+if [ $# -eq 0 ]; then
+    echo "Error: Missing arguments."
+    usage
+fi
+
+remove_all=false
+keep_ids=()
+
+# Parse arguments
+if [ "$1" == "--remove-all" ]; then
+    if [ $# -gt 1 ]; then
+        echo "Error: Cannot combine --remove-all with specific IDs."
+        usage
+    fi
+    remove_all=true
+else
+    keep_ids=("$@")
+fi
+
+# Fetch all current VM IDs from Proxmox
+all_ids=$(qm list | awk 'NR>1 {print $1}')
+
+if [ -z "$all_ids" ]; then
+    echo "No VMs found on this host."
+    exit 0
+fi
+
+# Warning and confirmation prompt
+echo "WARNING: This action will permanently delete VMs (Templates will be skipped)."
+read -p "Are you absolutely sure you want to proceed? (y/N): " confirm
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    echo "Operation canceled."
+    exit 0
+fi
+
+# Main execution loop
+for id in $all_ids; do
+    # Safety Guard: Check if the VM is a template
+    if qm config "$id" 2>/dev/null | grep -q "^template: 1"; then
+        echo "Skipping VM $id (Detected as a Template)."
+        continue
+    fi
+
+    keep=0
+    
+    if [ "$remove_all" = false ]; then
+        for kid in "${keep_ids[@]}"; do
+            if [ "$id" -eq "$kid" ] 2>/dev/null; then
+                keep=1
+                break
+            fi
+        done
+    fi
+    
+    if [ "$keep" -eq 0 ]; then
+        echo "Stopping and destroying VM $id..."
+        qm stop "$id" --skiplock 2>/dev/null
+        qm destroy "$id" --purge 1
+    else
+        echo "Keeping VM $id."
+    fi
+done
+
+echo "Cleanup complete."

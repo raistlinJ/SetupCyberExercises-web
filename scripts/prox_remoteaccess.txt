@@ -1,0 +1,29 @@
+CREATE:
+create user (pam and system)
+	useradd myuser
+	pvesh create /access/users/ --userid myuser@pam --password myuser123
+create pool
+	pvesh create /pools/ --poolid myuserpool
+give user /pool/<user/ PVEPoolUser and PVEVMUser
+	pvesh put /access/acl --path /pool/myuserpool --users myuser@pam --roles PVEPoolUser PVEVMUser --propogate 1
+clone vms into pool
+	pvesh create /nodes/arlsouth1/qemu/2000/clone --newid 1234 --full 0 --pool myuserpool
+add vm into pool
+	pvesh set /pools/ --poolid myuserpool --allow-move 1 --vms 1234
+
+
+REMOVE:
+del user (pam and system)
+	userdel myuser
+	pvesh delete /access/users/myuser@pam
+get all vms in pool
+	pvesh get /pools/ --poolid myuserpool
+del pool
+	pvesh delete /pools/myuserpool
+
+
+conns create IntroDynamicIDA arlsouth3.utep.edu:8006 --itype template --name AnalysisMachineWindows --username <user@pam> --password <password> --creds_file C:/Users/Acosta/cs4177_users.txt
+
+conns create IntroDynamicIDA arlsouth3.utep.edu:8006 --itype template --name AnalysisMachineWindows --username <user@pam> --password <password>
+
+challenges create IntroDynamicIDA arlsouth5.utep.edu <username> <password> https C:/Users/Acosta/cs4177_users.txt set all
