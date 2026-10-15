@@ -611,7 +611,7 @@ def create_app():
 
     @app.get('/api/plugins')
     def plugins():
-        return {'plugins': [{'name': 'agent', 'script': '/static/js/agent_plugin.js?v=20261009-agent-no-dock'}] if agent_enabled else []}
+        return {'plugins': [{'name': 'agent', 'script': '/static/js/agent_plugin.js?v=20261015-agent-tabs'}] if agent_enabled else []}
 
     @app.get('/api/features')
     def features():

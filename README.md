@@ -249,8 +249,18 @@ Select existing QEMU VMs or LXC containers in VM Manager, then choose
 paths are preserved. Endpoints are reached from the app server (in Docker, use
 `host.docker.internal` for a service on the host).
 
-The dialog includes context window, turn limit, command timeout, LLM request
-timeout, response token limit, and optional temperature. The endpoint is an
+Choose **Per guest** for a separate conversation and rubric for each selected
+guest, or **Across selected guests** for one conversation spanning the whole
+selection, even across projects. In the shared mode, every command or transfer
+names one selected guest. The agent can compare observations, reuse findings,
+answer informational questions, and perform requested changes. It returns an
+overall answer plus an outcome for each guest. The turn limit applies to the
+whole shared conversation, so larger selections may need more turns and context.
+
+The dialog separates connection and run settings under **Configuration** from
+the prompt, assignment and attachments under **Prompt & assignment**. It includes
+context window, turn limit, command timeout, LLM request timeout, response token
+limit, and optional temperature. The endpoint is an
 HTTP/HTTPS URL, validated for both Fetch and Run. Form settings, prompts and
 assignment Markdown are remembered in the browser when you run or close the
 dialog. The API key is remembered for the browser tab, including page reloads.
@@ -271,25 +281,30 @@ For example:
 > student submissions. Return the assignment rubric with scores, evidence, and
 > feedback for every criterion.
 
-Each guest gets an independent conversation. Tools run commands in that guest,
-push an attached file or generated text to an absolute path, and pull files or
-folders. QEMU requires a working guest agent; LXC uses the existing Proxmox SSH
-connection and requires its password. Existing guest transfer policies and the
-application's local/remote run-mode restrictions apply. Shell commands execute
-with the existing guest execution privileges. During grading, the agent is
-instructed to inspect and test without repairing submissions unless requested.
+In Per guest mode, each guest gets an independent conversation. Both modes can
+run commands in a selected guest, push an attached file or generated text to an
+absolute path, and pull files or folders from absolute guest paths. Ask for a
+pull in the prompt; no separate agent option is needed. The model receives
+bounded text previews, while complete pulled files are retained in the run's
+downloadable ZIP. QEMU requires a working guest agent; LXC uses the existing
+Proxmox SSH connection and requires its password. Existing guest transfer
+policies and the application's local/remote run-mode restrictions apply. Shell
+commands execute with the existing guest execution privileges. During grading,
+the agent is instructed to inspect and test without repairing submissions unless
+requested.
 
 When the plugin is enabled, Configuration → Advanced includes **Max parallel
 agents** for each project. It defaults to 1 and accepts whole numbers from 1 to 5.
-Agent runs process up to that many selected guests at once, with separate
+Per guest runs process up to that many selected guests at once, with separate
 transcripts and report folders; projects in a queued run are still processed in
-queue order. Advanced job limits must be positive, and delay fields cannot be
+queue order. Across selected guests uses one conversation and dispatches guest
+tools one at a time. Advanced job limits must be positive, and delay fields cannot be
 negative (zero delay is allowed).
 
-Rubrics include criterion, pass/fail/unknown status, score, maximum score,
+In Per guest mode, rubrics include criterion, pass/fail/unknown status, score, maximum score,
 evidence, and feedback. Unknown checks and exhausted turn budgets mark the report
 incomplete; a failing student criterion remains a completed grading result.
-A final model turn is reserved for rubric submission after the configured limit.
+A final model turn is reserved for the rubric or shared result after the configured limit.
 Context budgeting conservatively estimates tokens and drops entire older tool
 rounds when necessary; full evidence remains in the transcript. Large assignments
 may require a larger context window. Pulled text previews are bounded.
@@ -313,27 +328,28 @@ automatically opens its live transcript. Reopen that window from the queue item'
 guest's robot icon flashes while its agent run is queued or running; click it to
 open a live transcript filtered to that guest. Queue also offers **Live transcript**.
 The viewer shows prompts, streamed model responses, reasoning fields returned by
-the endpoint, and tool calls/results. Closing the viewer leaves the run active.
+the endpoint, and tool calls/results as readable text. Closing the viewer leaves the run active.
 Transcript events are saved on the server and replayed when you reopen the viewer
 or reload the page. Endpoints returning ordinary JSON responses are also supported,
 with each response displayed when it arrives.
 
 Runs can be cancelled from the dialog, transcript viewer, or Queue. Cancellation
 is checked between calls and streamed chunks; a running command or stalled request
-may finish or time out first. When a run finishes, its guest rubrics open in the
+may finish or time out first. When a run finishes, its results open in the
 Queue dock under **Completed → View results**. The agent setup dialog is for run
 configuration; results, transcripts and downloads remain in the completed queue
-item, including after navigation or a reload. **Download report & files** provides
-Markdown and JSON
-rubrics and a subdirectory for each guest using the same name as Pull:
+item, including after navigation or a reload. In Per guest mode, **Download report & files** provides
+plain text, Markdown and JSON rubrics and a subdirectory for each guest using the same name as Pull:
 `<guest-name>-<vmid>_<username>` (username omitted when unavailable). Each guest
-folder contains `rubric.md`, `report.json`, `transcript.json`, `events.json` (live
+folder contains `report.txt`, `rubric.md`, `report.json`, `transcript.json`, `events.json` (live
 transcript events), and `output.log`. The root contains `results.html`, a standalone
 HTML results page with scores, evidence, feedback and links to the extracted files,
-alongside `rubrics.md` and `rubrics.json`.
+alongside `reports.txt`, `rubrics.md` and `rubrics.json`.
 Full pulled evidence is included directly under `pulled/01/`, `pulled/02/`, etc.,
 preserving its guest paths without requiring a nested ZIP extraction. Cancelled
-and unresolved guests also receive their own report/log folders. Open Queue's
+and unresolved guests also receive their own report/log folders. Across selected
+guests instead includes `summary.md`, `shared_transcript.json`, `shared_events.json`,
+`reports.md`, `reports.json`, and per-guest `report.md` files grouped by project. Open Queue's
 completed item to view or download a retained run; **Transcript**, **View full log**
 and **Download log** retain the conversation and tool evidence. The raw
 result (including the ZIP) is available at `/api/queue/<id>/result` for the owner.

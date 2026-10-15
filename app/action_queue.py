@@ -92,7 +92,9 @@ class ActionQueue:
         agent_state = {'targets': []}
         for step in plan['steps']:
             parts = urlsplit(step['url']).path.strip('/').split('/')
-            if len(parts) != 6 or parts[:2] != ['api', 'projects'] or parts[3:] != ['instances', 'actions', 'agent']:
+            per_guest = len(parts) == 6 and parts[:2] == ['api', 'projects'] and parts[3:] == ['instances', 'actions', 'agent']
+            collective = parts == ['api', 'plugins', 'agent', 'collective']
+            if not per_guest and not collective:
                 continue
             agent_state['enabled'] = True
             body = step.get('body') or {}
@@ -103,10 +105,14 @@ class ActionQueue:
                     body = {}
             if not isinstance(body, dict):
                 continue
-            for target in body.get('targets', []) if isinstance(body.get('targets'), list) else []:
-                if isinstance(target, dict) and type(target.get('index')) is int and isinstance(target.get('name'), str):
-                    agent_state['targets'].append({'projectId': unquote(parts[2]), 'index': target['index'],
-                                                  'name': target['name'], 'type': str(target.get('type', ''))})
+            groups = body.get('groups', []) if collective else [{'projectId': unquote(parts[2]), 'targets': body.get('targets', [])}]
+            for group in groups if isinstance(groups, list) else []:
+                if not isinstance(group, dict) or not isinstance(group.get('projectId'), str):
+                    continue
+                for target in group.get('targets', []) if isinstance(group.get('targets'), list) else []:
+                    if isinstance(target, dict) and type(target.get('index')) is int and isinstance(target.get('name'), str):
+                        agent_state['targets'].append({'projectId': group['projectId'], 'index': target['index'],
+                                                      'name': target['name'], 'type': str(target.get('type', ''))})
         try:
             # Copy in bounded chunks before taking SQLite's write lock.
             for name, file in uploads:
@@ -561,7 +567,7 @@ def result_log_sources(row):
 
 def retained_agent_results(row):
     """Read completed agent reports and ZIPs from server-owned results only."""
-    retained = {'reports': [], 'archives': []}
+    retained = {'reports': [], 'archives': [], 'summary': ''}
     if row['status'] not in {'completed', 'error', 'cancelled'}:
         return retained
     try:
@@ -574,8 +580,10 @@ def retained_agent_results(row):
             return
         reports = value.get('reports')
         if isinstance(reports, list):
+            if isinstance(value.get('summary'), str) and value['summary']:
+                retained['summary'] = value['summary']
             retained['reports'].extend({key: report[key] for key in
-                ('name', 'vmid', 'index', 'type', 'status', 'rubric', 'score', 'max_score', 'error') if key in report}
+                ('projectId', 'name', 'vmid', 'index', 'type', 'status', 'summary', 'rubric', 'score', 'max_score', 'error') if key in report}
                 for report in reports if isinstance(report, dict))
             archive = value.get('outputs_zip')
             if isinstance(archive, dict) and isinstance(archive.get('base64'), str) and archive['base64']:
@@ -711,7 +719,7 @@ def init_action_queue(app):
         if row['status'] in {'queued', 'running'}:
             return jsonify(error='Agent is still pending'), 409
         retained = retained_agent_results(row)
-        response = jsonify(reports=retained['reports'])
+        response = jsonify(reports=retained['reports'], summary=retained['summary'])
         response.headers['Cache-Control'] = 'no-store'
         return response
 

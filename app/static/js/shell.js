@@ -1611,14 +1611,15 @@ const ConsoleDock = (() => {
     body?.querySelector(`details[data-queue-result="${id}"]`)?.scrollIntoView({ block: 'nearest' });
   }
 
-  function renderAgentReports(host, reports) {
+  function renderAgentReports(host, reports, summary = '') {
     host.replaceChildren();
     const text = (tag, value) => { const node = document.createElement(tag); node.textContent = String(value ?? ''); return node; };
+    if (summary) { const section = document.createElement('section'); section.className = 'border rounded p-2 mt-3'; section.appendChild(text('h6', 'Overall result')); section.appendChild(text('p', summary)); host.appendChild(section); }
     if (!reports.length) { host.textContent = 'No guest report was retained for this run.'; return; }
     for (const report of reports) {
       const section = document.createElement('section'); section.className = 'border rounded p-2 mt-3';
-      section.appendChild(text('h6', `${report.name || 'Guest'} · ${report.status || 'unknown'}${report.rubric ? ` · ${report.score}/${report.max_score}` : ''}`));
-      section.appendChild(text('p', report.rubric?.summary || report.error || 'Run ended before a rubric was submitted.'));
+      section.appendChild(text('h6', `${report.name || 'Guest'}${report.projectId ? ` · ${report.projectId}` : ''} · ${report.status || 'unknown'}${report.rubric ? ` · ${report.score}/${report.max_score}` : ''}`));
+      section.appendChild(text('p', report.rubric?.summary || report.summary || report.error || 'Run ended before a result was submitted.'));
       if (Array.isArray(report.rubric?.criteria) && report.rubric.criteria.length) {
         const wrapper = document.createElement('div'); wrapper.className = 'table-responsive';
         const table = document.createElement('table'); table.className = 'table table-sm table-dark small mb-0';
@@ -1642,7 +1643,7 @@ const ConsoleDock = (() => {
     const host = details.querySelector('[data-agent-report]'); if (!host) return;
     const id = host.dataset.agentReport;
     const cached = agentReportCache.get(id);
-    if (cached?.reports) { renderAgentReports(host, cached.reports); return; }
+    if (cached?.reports) { renderAgentReports(host, cached.reports, cached.summary); return; }
     host.textContent = 'Loading guest reports…';
     if (cached?.promise) return;
     const entry = {};
@@ -1650,8 +1651,8 @@ const ConsoleDock = (() => {
     entry.promise = (window.ServerQueue?.nativeFetch || window.fetch)(host.dataset.agentReportUrl, { credentials: 'same-origin' })
       .then(async response => {
         if (!response.ok) throw new Error('Could not load retained guest reports.');
-        const result = await response.json(); entry.reports = Array.isArray(result.reports) ? result.reports : [];
-        body?.querySelectorAll(`[data-agent-report="${id}"]`).forEach(current => renderAgentReports(current, entry.reports));
+        const result = await response.json(); entry.reports = Array.isArray(result.reports) ? result.reports : []; entry.summary = result.summary || '';
+        body?.querySelectorAll(`[data-agent-report="${id}"]`).forEach(current => renderAgentReports(current, entry.reports, entry.summary));
       }).catch(error => {
         agentReportCache.delete(id);
         body?.querySelectorAll(`[data-agent-report="${id}"]`).forEach(current => { current.textContent = error.message; });

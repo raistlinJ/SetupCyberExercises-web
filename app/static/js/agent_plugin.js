@@ -30,23 +30,32 @@
     <div class="modal-header"><h5 class="modal-title" id="agent-title">agent</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body">
       <p id="agent-selection" class="small text-muted"></p>
-      <form id="agent-form">
-        <div class="row g-3">
+      <form id="agent-form" novalidate>
+        <ul class="nav nav-tabs mb-3" id="agent-tabs" role="tablist">
+          <li class="nav-item" role="presentation"><button class="nav-link active" id="agent-config-tab" data-bs-toggle="tab" data-bs-target="#agent-config-pane" type="button" role="tab" aria-controls="agent-config-pane" aria-selected="true">Configuration</button></li>
+          <li class="nav-item" role="presentation"><button class="nav-link" id="agent-task-tab" data-bs-toggle="tab" data-bs-target="#agent-task-pane" type="button" role="tab" aria-controls="agent-task-pane" aria-selected="false">Prompt &amp; assignment</button></li>
+        </ul>
+        <div class="tab-content" id="agent-tab-content">
+        <div class="tab-pane active" id="agent-config-pane" role="tabpanel" aria-labelledby="agent-config-tab" tabindex="0"><div class="row g-3">
+          <div class="col-12"><label for="agent-mode" class="form-label">Run mode</label><select id="agent-mode" class="form-select"><option value="per_guest">Per guest — separate conversation for each selected VM/LXC</option><option value="collective">Across selected guests — one shared conversation</option></select><div class="form-text">The shared mode can compare findings and reuse them across all selected guests, including guests in different projects. Each tool call still targets one selected guest.</div></div>
           <div class="col-md-8"><label for="agent-url" class="form-label">LLM endpoint URL (OpenAI compatible)</label><input id="agent-url" type="url" inputmode="url" pattern="https?://.+" class="form-control" placeholder="http://localhost:8081/v1" required><div class="form-text">Enter an HTTP or HTTPS base URL. Requests are sent from the DeployForge server. Model must support Chat Completions function tools.</div></div>
           <div class="col-md-4"><label for="agent-api-key" class="form-label">API key</label><input id="agent-api-key" type="password" autocomplete="off" class="form-control"><div class="form-text">Remembered for this browser tab, including page reloads.</div></div>
           <div class="col-12"><div class="form-check"><input id="agent-ssl" type="checkbox" class="form-check-input" checked><label for="agent-ssl" class="form-check-label">Require SSL certificate verification</label></div></div>
           <div class="col-md-8"><label for="agent-model" class="form-label">Model</label><div class="input-group"><input id="agent-model" class="form-control" list="agent-models" placeholder="Fetch or enter a model ID" required><button type="button" id="agent-fetch" class="btn btn-outline-secondary">Fetch</button></div><datalist id="agent-models"></datalist></div>
           <div class="col-md-4"><label for="agent-context" class="form-label">Context window (tokens)</label><input id="agent-context" type="number" min="1" step="1" value="16384" class="form-control" aria-describedby="agent-context-limit" required><button id="agent-context-max" type="button" class="btn btn-sm btn-outline-secondary mt-2" disabled>Use provider max</button><div id="agent-context-limit" class="form-text"></div></div>
-          <div class="col-md-3"><label for="agent-turns" class="form-label">Max turns per guest</label><input id="agent-turns" type="number" min="1" max="100" value="20" class="form-control" required></div>
+          <div class="col-md-3"><label for="agent-turns" class="form-label">Max model turns</label><input id="agent-turns" type="number" min="1" max="100" value="20" class="form-control" required><div class="form-text">Per guest in separate mode; total in shared mode.</div></div>
           <div class="col-md-3"><label for="agent-tool-timeout" class="form-label">Command timeout (seconds)</label><input id="agent-tool-timeout" type="number" min="1" max="86400" value="60" class="form-control" required></div>
           <div class="col-md-3"><label for="agent-request-timeout" class="form-label">LLM timeout (seconds)</label><input id="agent-request-timeout" type="number" min="1" max="600" value="120" class="form-control" required></div>
           <div class="col-md-3"><label for="agent-tokens" class="form-label">Max response tokens</label><input id="agent-tokens" type="number" min="256" step="1" value="2048" class="form-control" aria-describedby="agent-token-limit" required><div id="agent-token-limit" class="form-text"></div></div>
           <div class="col-md-3"><label for="agent-temperature" class="form-label">Temperature (optional)</label><input id="agent-temperature" type="number" min="0" max="2" step="0.1" placeholder="Endpoint default" class="form-control"></div>
+        </div></div>
+        <div class="tab-pane" id="agent-task-pane" role="tabpanel" aria-labelledby="agent-task-tab" tabindex="0"><div class="row g-3">
           <div class="col-12"><label for="agent-prompt" class="form-label">Prompt</label><textarea id="agent-prompt" rows="4" class="form-control" required placeholder="Grade this assignment. Verify x.py, y.py and z.md are in /home/student/assignment. Run the required tests. If files are missing, search likely directories quickly, report their actual locations, and return a rubric with scores and evidence. Do not modify submissions."></textarea></div>
           <div class="col-12"><label for="agent-assignment-file" class="form-label">Assignment document (.md)</label><input id="agent-assignment-file" type="file" accept=".md,.markdown,text/markdown,text/plain" class="form-control"><label for="agent-assignment" class="form-label mt-2">Assignment Markdown (upload above or paste here)</label><textarea id="agent-assignment" rows="6" class="form-control"></textarea></div>
           <div class="col-12"><label for="agent-uploads" class="form-label">Files the agent may push (optional)</label><input id="agent-uploads" type="file" multiple class="form-control"><div class="form-text">For example, test scripts or reference data. 25 MiB total; unique filenames. The agent can also push generated text files.</div></div>
+        </div></div>
         </div>
-        <div class="form-text mt-3">One independent run per selected guest. Results include criteria, scores, evidence and feedback. Cancellation takes effect between operations; a running command or request may finish first. One extra model turn is reserved for the final rubric when the turn limit is reached.</div>
+        <div class="form-text mt-3">Per guest mode returns individual rubrics. Across selected guests returns an overall answer and an outcome for each guest. Cancellation takes effect between operations; a running command or request may finish first. One extra model turn is reserved for the final result when the turn limit is reached.</div>
       </form>
       <div id="agent-status" class="small mt-3" role="status" aria-live="polite"></div>
       <div id="agent-error" class="alert alert-danger mt-3 d-none" role="alert"></div>
@@ -56,7 +65,7 @@
   document.body.appendChild(root);
   const el = id => document.getElementById(`agent-${id}`);
   const settingsKey = 'deployforge.agent.config.v1';
-  const fields = ['url', 'model', 'ssl', 'context', 'turns', 'tool-timeout', 'request-timeout', 'tokens', 'temperature', 'prompt', 'assignment'];
+  const fields = ['mode', 'url', 'model', 'ssl', 'context', 'turns', 'tool-timeout', 'request-timeout', 'tokens', 'temperature', 'prompt', 'assignment'];
   const keyStorage = 'deployforge.agent.api-key.v1';
   const filesStorage = 'agent-form-files-v1';
   let groups = new Map(), job = null, busy = false;
@@ -116,16 +125,29 @@
   root.addEventListener('hide.bs.modal', () => {
     saveSettings(); saveFiles().catch(err => window.shell?.logWarn?.(err.message));
   });
-  function validEndpoint() {
+  function validEndpoint(report = true) {
     const input = el('url');
     input.setCustomValidity('');
     try {
       const url = new URL(input.value.trim());
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
     } catch { input.setCustomValidity('Enter an HTTP or HTTPS endpoint URL without credentials, query parameters or a fragment.'); }
-    return input.reportValidity();
+    return report ? input.reportValidity() : input.checkValidity();
   }
   el('url').addEventListener('input', () => el('url').setCustomValidity(''));
+  function showFieldTab(field) {
+    const pane = field.closest('.tab-pane');
+    const tab = pane && document.getElementById(pane.getAttribute('aria-labelledby'));
+    if (tab) bootstrap.Tab.getOrCreateInstance(tab).show();
+  }
+  function reportFormValidity() {
+    validEndpoint(false);
+    const invalid = Array.from(el('form').elements).find(field => field.willValidate && !field.checkValidity());
+    if (!invalid) return true;
+    showFieldTab(invalid);
+    requestAnimationFrame(() => { invalid.focus(); invalid.reportValidity(); });
+    return false;
+  }
   function config() {
     const cfg = { url: el('url').value.trim(), model: el('model').value.trim(), api_key: el('api-key').value,
       ssl_verify: el('ssl').checked, context_window: Number(el('context').value), max_turns: Number(el('turns').value),
@@ -173,24 +195,36 @@
   });
   el('form').addEventListener('submit', async event => {
     event.preventDefault();
-    if (busy || !groups.size || !validEndpoint() || !el('form').reportValidity()) return;
+    if (busy || !groups.size || !reportFormValidity()) return;
     error();
     const attachments = Array.from(el('uploads').files || []);
-    if (attachments.reduce((size, file) => size + file.size, 0) > 25 * 1024 * 1024) { error('Attachments exceed the 25 MiB limit.'); return; }
-    if (new Set(attachments.map(file => file.name)).size !== attachments.length) { error('Attachment filenames must be unique.'); return; }
+    if (attachments.reduce((size, file) => size + file.size, 0) > 25 * 1024 * 1024) { showFieldTab(el('uploads')); error('Attachments exceed the 25 MiB limit.'); return; }
+    if (new Set(attachments.map(file => file.name)).size !== attachments.length) { showFieldTab(el('uploads')); error('Attachment filenames must be unique.'); return; }
     const llm = config(), prompt = el('prompt').value, assignment = el('assignment').value;
     busy = true; el('run').disabled = true;
     el('status').textContent = 'Preparing agent run…'; saveSettings();
     try {
       await saveFiles();
       const steps = [], files = attachments.map((file, index) => [`agent-upload-${index}`, file]);
+      const selectedGroups = [];
       for (const [pid, targets] of groups) {
         const auth = await guestTransferAuthPayload(pid, targets);
-        const body = { ...auth, targets, llm, prompt, assignment };
-        const step = { method: 'POST', url: `/api/projects/${encodeURIComponent(pid)}/instances/actions/agent` };
+        selectedGroups.push({ projectId: pid, ...auth, targets });
+      }
+      if (el('mode').value === 'collective') {
+        const body = { groups: selectedGroups, llm, prompt, assignment };
+        const step = { method: 'POST', url: '/api/plugins/agent/collective' };
         if (files.length) { step.form = [['payload', JSON.stringify(body)]]; step.files = files.map(([key]) => ['files', key]); }
         else step.body = body;
         steps.push(step);
+      } else {
+        for (const group of selectedGroups) {
+          const { projectId, ...body } = group;
+          const step = { method: 'POST', url: `/api/projects/${encodeURIComponent(projectId)}/instances/actions/agent` };
+          if (files.length) { step.form = [['payload', JSON.stringify({ ...body, llm, prompt, assignment })]]; step.files = files.map(([key]) => ['files', key]); }
+          else step.body = { ...body, llm, prompt, assignment };
+          steps.push(step);
+        }
       }
       job = await ServerQueue.submit('Run agent', steps, { projectId: groups.keys().next().value }, files);
       el('live').textContent = 'Live transcript';

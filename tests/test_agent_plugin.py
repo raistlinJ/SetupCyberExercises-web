@@ -108,6 +108,7 @@ def test_disabled_plugin_has_no_routes(monkeypatch, tmp_path):
     client = app.test_client()
     assert client.get("/api/plugins").get_json() == {"plugins": []}
     assert client.post("/api/plugins/agent/models", json={}).status_code == 404
+    assert client.post("/api/plugins/agent/collective", json={}).status_code == 404
     assert client.post("/api/projects/p/instances/actions/agent", json={}).status_code == 404
 
 
@@ -208,6 +209,126 @@ def test_vm_and_lxc_have_independent_conversations(harness, monkeypatch):
     assert execute.call_args_list[0].args[4]["type"] == "qemu"
     assert execute.call_args_list[1].args[4]["type"] == "lxc"
     assert not result["agent_failed"]  # A failing submission is a completed grade.
+
+
+def test_collective_conversation_spans_projects_and_targets_only_selected_guests(harness, monkeypatch):
+    client, body, entries, _ = harness
+    projects = {
+        "p": (SimpleNamespace(id="p", proxmox_api_token="token-p", credentials=[]), entries[0]),
+        "other": (SimpleNamespace(id="other", proxmox_api_token="token-other", credentials=[]), entries[1]),
+    }
+
+    def context(pid, payload, **kwargs):
+        project, entry = projects[pid]
+        assert payload["targets"] == [{"index": entry["index"], "name": entry["name"]}]
+        return project, MagicMock(), "https://proxmox", "remote-password", [entry], [], []
+
+    monkeypatch.setattr(api, "_guest_transfer_context", context)
+    execute = MagicMock(side_effect=[
+        {"exitcode": 0, "stdout": "version A", "stderr": ""},
+        {"exitcode": 0, "stdout": "version B", "stderr": ""},
+    ])
+    monkeypatch.setattr(api, "_execute_instance_command", execute)
+    calls = fake_llm(
+        monkeypatch,
+        completion("run_command", {"guest_id": "g1", "command": "cat /etc/version"}),
+        completion("run_command", {"guest_id": "g2", "command": "cat /etc/version"}),
+        completion("submit_result", {"summary": "Versions differ across projects", "guests": [
+            {"guest_id": "g1", "status": "completed", "summary": "Version A"},
+            {"guest_id": "g2", "status": "completed", "summary": "Version B"},
+        ]}),
+    )
+    response = client.post("/api/plugins/agent/collective", json={
+        "llm": body["llm"], "prompt": "Compare versions", "assignment": "",
+        "groups": [
+            {"projectId": "p", "password": "remote-password", "targets": [{"index": 1, "name": "student-one", "vmid": 999}]},
+            {"projectId": "other", "password": "remote-password", "targets": [{"index": 2, "name": "student-two"}]},
+        ],
+    })
+    assert response.status_code == 200
+    result = response.get_json()
+    assert result["summary"] == "Versions differ across projects"
+    assert [report["summary"] for report in result["reports"]] == ["Version A", "Version B"]
+    assert [call.args[0].id for call in execute.call_args_list] == ["p", "other"]
+    assert len(calls[0]["messages"]) == 2
+    assert "version A" in json.dumps(calls[2]["messages"])
+    assert "version B" in json.dumps(calls[2]["messages"])
+    assert all("remote-password" not in json.dumps(call) for call in calls)
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(result["outputs_zip"]["base64"]))) as archive:
+        assert "shared_transcript.json" in archive.namelist()
+        assert "summary.md" in archive.namelist()
+        assert any(name.startswith("project-2-other/g2-") and name.endswith("/report.json") for name in archive.namelist())
+
+
+def test_collective_rejects_unselected_guest_tool_target(harness, monkeypatch):
+    client, body, _, _ = harness
+    execute = MagicMock()
+    monkeypatch.setattr(api, "_execute_instance_command", execute)
+    calls = fake_llm(
+        monkeypatch,
+        completion("run_command", {"guest_id": "g999", "command": "hostname"}),
+        completion("submit_result", {"summary": "Could not inspect", "guests": [
+            {"guest_id": "g1", "status": "incomplete", "summary": "Not inspected"},
+        ]}),
+    )
+    response = client.post("/api/plugins/agent/collective", json={
+        "llm": body["llm"], "prompt": "Inspect hostname", "assignment": "",
+        "groups": [{"projectId": "p", "password": "remote-password", "targets": body["targets"]}],
+    })
+    assert response.status_code == 200
+    assert response.get_json()["reports"][0]["status"] == "incomplete"
+    assert calls[1]["messages"][-1]["content"] == '{"error": "Guest is not in the selected set"}'
+    execute.assert_not_called()
+
+
+def test_collective_queue_tracks_guests_across_projects(app, monkeypatch):
+    from app.action_queue import ActionQueue
+
+    monkeypatch.setattr(ActionQueue, "start", lambda self: None)
+    with app.test_request_context("/api/queue", method="POST"):
+        queue = ActionQueue(app)
+        row = queue.submit("local", {"token": "shared-test", "label": "Run agent", "projectId": "p", "steps": [{
+            "method": "POST", "url": "/api/plugins/agent/collective", "body": {"groups": [
+                {"projectId": "p", "targets": [{"index": 1, "name": "one", "type": "qemu"}]},
+                {"projectId": "other", "targets": [{"index": 2, "name": "two", "type": "lxc"}]},
+            ]},
+        }]}, [])
+    state = json.loads(row["agent_state"])
+    assert state["enabled"] is True
+    assert [(target["projectId"], target["name"]) for target in state["targets"]] == [
+        ("p", "one"), ("other", "two")
+    ]
+
+
+def test_collective_queue_retains_overall_and_guest_results(harness, monkeypatch):
+    from app.action_queue import ActionQueue, retained_agent_results
+
+    client, body, _, proxmox = harness
+    proxmox.agent_exec.return_value = {"exitcode": 0, "stdout": "node1", "stderr": ""}
+    fake_llm(
+        monkeypatch,
+        completion("run_command", {"guest_id": "g1", "command": "hostname"}),
+        completion("submit_result", {"summary": "One host inspected", "guests": [
+            {"guest_id": "g1", "status": "completed", "summary": "Hostname is node1"},
+        ]}),
+    )
+    monkeypatch.setattr(ActionQueue, "start", lambda self: None)
+    queue = ActionQueue(client.application)
+    with client.application.test_request_context("/api/queue", method="POST"):
+        row = queue.submit("local", {"token": "collective-retain", "label": "Run agent", "projectId": "p", "steps": [{
+            "method": "POST", "url": "/api/plugins/agent/collective", "body": {
+                "llm": body["llm"], "prompt": "Check hostname", "assignment": "",
+                "groups": [{"projectId": "p", "password": "remote-password", "targets": body["targets"]}],
+            },
+        }]}, [])
+    queue.execute(row)
+    with queue.connect() as db:
+        completed = db.execute("SELECT * FROM actions WHERE id=?", (row["id"],)).fetchone()
+    assert completed["status"] == "completed"
+    retained = retained_agent_results(completed)
+    assert retained["summary"] == "One host inspected"
+    assert retained["reports"][0]["summary"] == "Hostname is node1"
+    assert len(retained["archives"]) == 1
 
 
 def test_push_uses_only_supplied_attachment_and_selected_target(harness, monkeypatch):

@@ -44,6 +44,30 @@ Base path: `/api`. The table below keeps the long-form reference out of the READ
 | Manage CTFd settings | `POST /api/projects/{pid}/ctfd/settings`, `/ctfd/settings/update` |
 | Manage credential-linked users | `/ctfd/users_create`, `/ctfd/users_delete`, `/ctfd/users_check` |
 
+## Optional Agent Plugin
+
+Set `AGENT_PLUGIN_ENABLE=1` to register these routes. The VM Manager submits them
+through the server action queue.
+
+| Purpose | Method & Path |
+| --- | --- |
+| Discover models and limits | `POST /api/plugins/agent/models` |
+| Separate conversation for each selected guest | `POST /api/projects/{pid}/instances/actions/agent` |
+| One conversation across selected guests and projects | `POST /api/plugins/agent/collective` |
+
+Both run routes accept `llm`, `prompt`, and optional `assignment`. The per-guest
+route accepts `targets` and the project's Proxmox connection fields. The shared
+route accepts `groups: [{ projectId, targets, ...connectionFields }]`. Each target
+is identified by its instance `index` and `name`; the server resolves its VMID
+and node from inventory before allowing tools to run. Multipart requests put the
+JSON body in `payload` and attachments in repeated `files` fields.
+
+The agent already has `run_command`, `push_file`, and `pull_files` tools in both
+modes. A prompt can ask it to pull absolute guest file or folder paths without an
+additional option. Pull returns bounded text previews to the model; complete
+files are retained in the result ZIP, available from the owner's completed queue
+item. Existing guest transfer policy and connection requirements still apply.
+
 ## Credentials Payload Shape
 
 ```json
