@@ -3805,6 +3805,7 @@ function resetWizard() {
     
     document.getElementById('wiz-feat-vm').checked = true;
     document.getElementById('wiz-feat-ctfd').checked = false;
+    document.getElementById('wiz-feat-ctfrpg').checked = false;
     document.getElementById('wiz-proxmox-url').value = '';
     document.getElementById('wiz-proxmox-user').value = '';
     document.getElementById('wiz-proxmox-pass').value = '';
@@ -3816,8 +3817,13 @@ function resetWizard() {
     window._wizNetGraphTemplateIds = [];
     document.getElementById('wiz-proxmox-verify').checked = true;
     document.getElementById('wiz-ctfd-url').value = '';
-    document.getElementById('wiz-ctfd-token').value = '';
+    document.getElementById('wiz-ctfd-username').value = '';
+    document.getElementById('wiz-ctfd-password').value = '';
     document.getElementById('wiz-ctfd-verify').checked = true;
+    document.getElementById('wiz-ctfrpg-url').value = '';
+    document.getElementById('wiz-ctfrpg-username').value = '';
+    document.getElementById('wiz-ctfrpg-password').value = '';
+    document.getElementById('wiz-ctfrpg-verify').checked = true;
     
     document.getElementById('wiz-act-vm-create').checked = true;
     document.getElementById('wiz-act-vm-users').checked = true;
@@ -3827,6 +3833,7 @@ function resetWizard() {
     document.getElementById('wiz-act-vm-snapshot').checked = true;
     document.getElementById('wiz-act-vm-start').checked = false;
     document.getElementById('wiz-act-ctfd-users').checked = true;
+    document.getElementById('wiz-act-ctfrpg-users').checked = true;
     window.wizToggleVmActions && window.wizToggleVmActions();
   } catch {}
   wizardGotoStep(0);
@@ -3861,22 +3868,25 @@ window.wizardGotoStep = function(step) {
   if (step > totalWizardSteps) step = totalWizardSteps;
   
   const vmChecked = document.getElementById('wiz-feat-vm')?.checked;
-  const ctfdChecked = document.getElementById('wiz-feat-ctfd')?.checked;
+  const ctfdChecked = document.documentElement?.dataset?.ctfdPlugin === 'on' && document.getElementById('wiz-feat-ctfd')?.checked;
+  const ctfrpgChecked = document.documentElement?.dataset?.ctfrpgPlugin === 'on' && document.getElementById('wiz-feat-ctfrpg')?.checked;
 
   try {
     if (step === 2) {
-      if (!vmChecked && !ctfdChecked) {
+      if (!vmChecked && !ctfdChecked && !ctfrpgChecked) {
         submitProjectCreation('wizard');
         return;
       }
       document.getElementById('wiz-creds-vm')?.classList.toggle('d-none', !vmChecked);
       document.getElementById('wiz-creds-ctfd')?.classList.toggle('d-none', !ctfdChecked);
+      document.getElementById('wiz-creds-ctfrpg')?.classList.toggle('d-none', !ctfrpgChecked);
     }
     if (step === 3 && !vmChecked) step = 5;
     if (step === 4 && !vmChecked) step = 5;
     if (step === 5) {
       document.getElementById('wiz-act-vm')?.classList.toggle('d-none', !vmChecked);
       document.getElementById('wiz-act-ctfd')?.classList.toggle('d-none', !ctfdChecked);
+      document.getElementById('wiz-act-ctfrpg')?.classList.toggle('d-none', !ctfrpgChecked);
     }
   } catch {}
 
@@ -3987,13 +3997,14 @@ window.wizardNext = async function() {
     const pwd = document.getElementById('wiz-proxmox-pass')?.value;
     const verifySSL = document.getElementById('wiz-proxmox-verify')?.checked;
     
-    const ctfdChecked = document.getElementById('wiz-feat-ctfd')?.checked;
+    const ctfdChecked = document.documentElement?.dataset?.ctfdPlugin === 'on' && document.getElementById('wiz-feat-ctfd')?.checked;
     let ctfdCreds = undefined;
     if (ctfdChecked) {
       const ctfdUrl = document.getElementById('wiz-ctfd-url')?.value?.trim();
-      const ctfdToken = document.getElementById('wiz-ctfd-token')?.value?.trim();
+      const ctfdUser = document.getElementById('wiz-ctfd-username')?.value?.trim();
+      const ctfdPass = document.getElementById('wiz-ctfd-password')?.value;
       const ctfdVerify = document.getElementById('wiz-ctfd-verify')?.checked;
-      ctfdCreds = { url: ctfdUrl, token: ctfdToken, verify_ssl: ctfdVerify };
+      ctfdCreds = { url: ctfdUrl, username: ctfdUser, password: ctfdPass, verify_ssl: ctfdVerify };
     }
     
     if (!url || !user || !pwd) {
@@ -4538,6 +4549,7 @@ function wizardBuildRunItems(options) {
   if (opts.createVms && createOptions.applyScenario) items.push({ key: 'vm-scenario', label: 'Apply scenario', status: 'pending', detail: 'Scenario metadata will be applied to the cloned VMs.' });
   if (opts.createVms && createOptions.startVm) items.push({ key: 'vm-start', label: 'Start VMs', status: 'pending', detail: 'Created instances will be powered on.' });
   if (opts.createCtfdUsers) items.push({ key: 'ctfd-users', label: 'Create CTFd users', status: 'pending', detail: 'CTFd users will be created or updated from the credential list.' });
+  if (opts.createCtfrpgUsers) items.push({ key: 'ctfrpg-users', label: 'Create CTF-RPG users', status: 'pending', detail: 'CTF-RPG users will be created or updated from the credential list.' });
   return items;
 }
 
@@ -4610,14 +4622,14 @@ function wizardSummarizeActionResult(action, result) {
     if (errors) bits.push(`${errors} issue${errors === 1 ? '' : 's'}`);
     return bits.join(', ');
   }
-  if (action === 'ctfd_users_create') {
+  if (action === 'ctfd_users_create' || action === 'ctfrpg_users_create') {
     const created = wizardCountEntries(res.created);
     const updated = wizardCountEntries(res.updated);
-    const skipped = wizardCountEntries(res.skipped);
+    const skipped = wizardCountEntries(action === 'ctfrpg_users_create' ? res.unchanged : res.skipped);
     const results = Array.isArray(res.results) ? res.results : [];
     const resultErrors = results.filter(item => item && item.error).length;
     const bits = [`Created ${created}, updated ${updated}`];
-    if (skipped) bits.push(`${skipped} skipped`);
+    if (skipped) bits.push(`${skipped} ${action === 'ctfrpg_users_create' ? 'unchanged' : 'skipped'}`);
     if (resultErrors) bits.push(`${resultErrors} issue${resultErrors === 1 ? '' : 's'}`);
     return bits.join(', ');
   }
@@ -4676,7 +4688,7 @@ function wizardCollectActionIssues(action, result) {
     });
     return issues;
   }
-  if (action === 'ctfd_users_create') {
+  if (action === 'ctfd_users_create' || action === 'ctfrpg_users_create') {
     if (res.error) issues.push(String(res.error));
     (Array.isArray(res.results) ? res.results : []).forEach(entry => {
       if (!entry || !entry.error) return;
@@ -4718,7 +4730,7 @@ function wizardActionHasErrors(action, result) {
   if (action === 'start' || action === 'users_access_sync' || action === 'apply_scenario' || action === 'users_create' || action === 'user_accessibility') {
     return wizardCountEntries(res.errors) > 0;
   }
-  if (action === 'ctfd_users_create') {
+  if (action === 'ctfd_users_create' || action === 'ctfrpg_users_create') {
     const resultErrors = (Array.isArray(res.results) ? res.results : []).filter(item => item && item.error).length;
     return !!res.error || resultErrors > 0;
   }
@@ -4864,7 +4876,7 @@ window.submitProjectCreation = async function(mode) {
   const name = (input && input.value ? input.value.trim() : '');
   if (!name) { try { showToast('Project name is missing.', 'warning'); } catch { } return; }
 
-  let vmUrl = '', vmUser = '', vmPass = '', ctfdToken = '';
+  let vmUrl = '', vmUser = '', vmPass = '', ctfdUser = '', ctfdPass = '', ctfrpgUser = '', ctfrpgPass = '';
   let payload = { name };
   let wizardRunOptions = null;
 
@@ -4917,12 +4929,31 @@ window.submitProjectCreation = async function(mode) {
       payload.proxmox_verify_ssl = vmVerify === true;
     }
     
-    if (document.getElementById('wiz-feat-ctfd')?.checked) {
+    const hasCtfdFeature = document.documentElement?.dataset?.ctfdPlugin === 'on' && !!document.getElementById('wiz-feat-ctfd')?.checked;
+    const hasCtfrpgFeature = document.documentElement?.dataset?.ctfrpgPlugin === 'on' && !!document.getElementById('wiz-feat-ctfrpg')?.checked;
+    if (hasCtfdFeature) {
       const ctfdUrl = document.getElementById('wiz-ctfd-url')?.value || '';
       if (ctfdUrl) payload.challenge_url = ctfdUrl;
-      ctfdToken = document.getElementById('wiz-ctfd-token')?.value || '';
+      ctfdUser = document.getElementById('wiz-ctfd-username')?.value?.trim() || '';
+      ctfdPass = document.getElementById('wiz-ctfd-password')?.value || '';
+      if (!/^https?:\/\//i.test(ctfdUrl) || !ctfdUser || !ctfdPass) {
+        showToast('CTFd URL, admin username, and password are required.', 'warning');
+        wizardGotoStep(2);
+        return;
+      }
       const ctfdVerify = document.getElementById('wiz-ctfd-verify')?.checked;
       payload.challenge_verify_ssl = ctfdVerify === true;
+    }
+    if (hasCtfrpgFeature) {
+      payload.ctfrpg_url = document.getElementById('wiz-ctfrpg-url')?.value?.trim() || '';
+      ctfrpgUser = document.getElementById('wiz-ctfrpg-username')?.value?.trim() || '';
+      ctfrpgPass = document.getElementById('wiz-ctfrpg-password')?.value || '';
+      payload.ctfrpg_verify_ssl = document.getElementById('wiz-ctfrpg-verify')?.checked === true;
+      if (!/^https?:\/\//i.test(payload.ctfrpg_url) || !ctfrpgUser || !ctfrpgPass) {
+        showToast('CTF-RPG URL, admin username, and password are required.', 'warning');
+        wizardGotoStep(2);
+        return;
+      }
     }
 
     if (document.getElementById('wiz-feat-vm')?.checked && wizSelectedTemplates && wizSelectedTemplates.length > 0) {
@@ -4938,7 +4969,6 @@ window.submitProjectCreation = async function(mode) {
     }
     
     const hasVmFeature = !!document.getElementById('wiz-feat-vm')?.checked;
-    const hasCtfdFeature = !!document.getElementById('wiz-feat-ctfd')?.checked;
     const isCreate = hasVmFeature && !!document.getElementById('wiz-act-vm-create')?.checked;
     const createOptions = wizardNormalizeVmCreateOptions({
       createUsersAndPerms: !!document.getElementById('wiz-act-vm-users')?.checked,
@@ -4949,11 +4979,13 @@ window.submitProjectCreation = async function(mode) {
       startVm: !!document.getElementById('wiz-act-vm-start')?.checked,
     });
     const isUsersCtfd = hasCtfdFeature && !!document.getElementById('wiz-act-ctfd-users')?.checked;
+    const isUsersCtfrpg = hasCtfrpgFeature && !!document.getElementById('wiz-act-ctfrpg-users')?.checked;
     wizardRunOptions = {
       createVms: isCreate,
       createOptions,
       createCtfdUsers: isUsersCtfd,
-      hasSecrets: !!(vmUser || vmPass || ctfdToken)
+      createCtfrpgUsers: isUsersCtfrpg,
+      hasSecrets: !!(vmUser || vmPass || ctfdUser || ctfdPass || ctfrpgUser || ctfrpgPass)
     };
     wizardStartQueue(
       wizardBuildRunItems(wizardRunOptions),
@@ -4962,11 +4994,11 @@ window.submitProjectCreation = async function(mode) {
     );
 
     // Live validation
-    if (vmUrl || vmUser || ctfdToken || payload.challenge_url) {
+    if (vmUrl || vmUser || ctfdUser || payload.challenge_url) {
       wizardSetRunState('Validating credentials...', 'Checking the manager connections before scenario creation starts.');
       const testPayload = {
          proxmox: (vmUrl || vmUser) ? { url: vmUrl, username: vmUser, password: vmPass } : null,
-         ctfd: (payload.challenge_url || ctfdToken) ? { url: payload.challenge_url, token: ctfdToken } : null
+         ctfd: (payload.challenge_url || ctfdUser) ? { url: payload.challenge_url, username: ctfdUser, password: ctfdPass, verify_ssl: payload.challenge_verify_ssl !== false } : null
       };
       try {
         const testRes = await http('POST', '/api/test/credentials', testPayload);
@@ -4986,7 +5018,7 @@ window.submitProjectCreation = async function(mode) {
   try {
     if (mode === 'wizard') {
       if (window.ServerQueue) {
-        await submitServerWizard(payload, wizardRunOptions, { vmUser, vmPass, vmUrl, ctfdToken });
+        await submitServerWizard(payload, wizardRunOptions, { vmUser, vmPass, vmUrl, ctfdUser, ctfdPass, ctfrpgUser, ctfrpgPass });
         return;
       }
       wizardUpdateRunItem('project-create', { status: 'running', progress: 15, detail: 'Sending create request...' });
@@ -5026,10 +5058,11 @@ window.submitProjectCreation = async function(mode) {
     try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
     
     // If wizard mode and we collected credentials, send the secrets
-    if (mode === 'wizard' && pid && (vmUser || vmPass || ctfdToken)) {
+    if (mode === 'wizard' && pid && (vmUser || vmPass || ctfdUser || ctfdPass || ctfrpgUser || ctfrpgPass)) {
       const secretsPayload = {
         proxmox: (vmUser || vmPass) ? { username: vmUser, password: vmPass } : undefined,
-        ctfd: ctfdToken ? { token: ctfdToken } : undefined
+        ctfd: (ctfdUser || ctfdPass) ? { username: ctfdUser, password: ctfdPass } : undefined,
+        ctfrpg: (ctfrpgUser || ctfrpgPass) ? { username: ctfrpgUser, password: ctfrpgPass } : undefined
       };
       try {
         wizardUpdateRunItem('save-secrets', { status: 'running', progress: 15, detail: 'Saving credentials for manager pages...' });
@@ -5108,8 +5141,18 @@ window.submitProjectCreation = async function(mode) {
           wizardSetRunState('Running selected operations...', 'Creating CTFd users from the scenario credentials.');
           await wizardRunTrackedAction(pid, 'ctfd-users', 'ctfd_users_create', () => http('POST', `/api/projects/${encodeURIComponent(pid)}/ctfd/users_create`, {
             baseUrl: payload.challenge_url || undefined,
-            token: ctfdToken || undefined,
+            username: ctfdUser || undefined,
+            password: ctfdPass || undefined,
             verifySSL: payload.challenge_verify_ssl !== false,
+          }));
+        }
+        if (wizardRunOptions?.createCtfrpgUsers) {
+          wizardSetRunState('Running selected operations...', 'Creating CTF-RPG users from the scenario credentials.');
+          await wizardRunTrackedAction(pid, 'ctfrpg-users', 'ctfrpg_users_create', () => http('POST', `/api/projects/${encodeURIComponent(pid)}/ctfrpg/users_create`, {
+            baseUrl: payload.ctfrpg_url,
+            username: ctfrpgUser,
+            password: ctfrpgPass,
+            verifySSL: payload.ctfrpg_verify_ssl !== false,
           }));
         }
       } finally {
@@ -5310,8 +5353,10 @@ async function autoSaveProjectField(pid) {
   const agentLimit = document.getElementById(`cfg-${pid}-agent_max_parallel_agents`);
   if (configAgentPluginEnabled && agentLimit && !agentLimit.disabled) payload.agent_max_parallel_agents = Number(agentLimit.value);
   // Optional future fields (skip if disabled)
-  const optIds = ['keycloak_url', 'keycloak_port', 'keycloak_nodename', 'challenge_url', 'challenge_port'];
+  const optIds = ['keycloak_url', 'keycloak_port', 'keycloak_nodename', 'challenge_url', 'challenge_port', 'ctfrpg_url'];
   optIds.forEach(id => {
+    if (id.startsWith('challenge_') && document.documentElement.dataset.ctfdPlugin === 'off') return;
+    if (id.startsWith('ctfrpg_') && document.documentElement.dataset.ctfrpgPlugin === 'off') return;
     const el = document.getElementById(`cfg-${pid}-` + id);
     if (el && !el.disabled) {
       let v = el.value;
@@ -5319,6 +5364,8 @@ async function autoSaveProjectField(pid) {
       payload[id] = v;
     }
   });
+  const ctfrpgVerify = document.getElementById(`cfg-${pid}-ctfrpg_verify_ssl`);
+  if (ctfrpgVerify && !ctfrpgVerify.disabled && document.documentElement.dataset.ctfrpgPlugin !== 'off') payload.ctfrpg_verify_ssl = ctfrpgVerify.checked;
   try {
     await http('PATCH', `/api/projects/${pid}`, payload);
     try {
@@ -6705,15 +6752,27 @@ function renderProjectCard(p) {
               <label class="form-label" title="Proxmox node name (leave empty to auto-detect from URL)">Node Name</label>
               <input id="cfg-${p.id}-proxmox_node" class="form-control form-control-sm" value="${p.proxmox_node || ''}" placeholder="(auto)" title="Explicit Proxmox node name for export validation" oninput="debounceProjectSave('${p.id}','proxmox_node')" />
             </div>
-            <div class="col-12"><hr class="my-3"/></div>
-            <div class="col-md-9">
+            <div class="col-12" data-plugin="ctfd"><hr class="my-3"/></div>
+            <div class="col-md-9" data-plugin="ctfd">
               <label class="form-label" title="Base URL to the CTFd platform">CTFd URL</label>
               <input id="cfg-${p.id}-challenge_url" class="form-control form-control-sm" value="${p.challenge_url || ''}" placeholder="https://ctfd.example.com" title="CTFd platform URL" oninput="debounceProjectSave('${p.id}','challenge_url')" />
             </div>
-            <div class="col-md-3">
+            <div class="col-md-3" data-plugin="ctfd">
               <label class="form-label" title="CTFd platform port">CTFd Port</label>
               <input id="cfg-${p.id}-challenge_port" type="number" class="form-control form-control-sm" value="${p.challenge_port ?? 443}" placeholder="443" title="CTFd port" oninput="debounceProjectSave('${p.id}','challenge_port')" />
             </div>
+            <div class="col-12" data-plugin="ctfrpg"><hr class="my-3"/></div>
+            <div class="col-md-9" data-plugin="ctfrpg">
+              <label class="form-label" for="cfg-${p.id}-ctfrpg_url" title="Base URL to the CTF-RPG game">CTF-RPG URL</label>
+              <input id="cfg-${p.id}-ctfrpg_url" type="url" class="form-control form-control-sm" value="${escHtml(p.ctfrpg_url || '')}" placeholder="https://game.example.com:8443" title="CTF-RPG game URL; include the port when it is not the default" oninput="debounceProjectSave('${p.id}','ctfrpg_url')" />
+            </div>
+            <div class="col-md-3 d-flex align-items-end" data-plugin="ctfrpg">
+              <div class="form-check mb-2">
+                <input id="cfg-${p.id}-ctfrpg_verify_ssl" class="form-check-input" type="checkbox" ${p.ctfrpg_verify_ssl !== false ? 'checked' : ''} onchange="debounceProjectSave('${p.id}','ctfrpg_verify_ssl', 50)" />
+                <label class="form-check-label small" for="cfg-${p.id}-ctfrpg_verify_ssl">Verify TLS certificate</label>
+              </div>
+            </div>
+            <div class="col-12 small text-muted" data-plugin="ctfrpg">Include a custom port in the URL. Set the admin username and password in <a href="/static/ctfrpg_manager.html?id=${encodeURIComponent(p.id)}">CTF-RPG Manager → Connection</a>.</div>
             <div class="col-12"><hr class="my-3"/></div>
             <div class="col-md-6">
               <label class="form-label" title="Number of student/participant instances">Number of VM Clones to Create</label>

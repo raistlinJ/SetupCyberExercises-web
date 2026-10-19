@@ -31,7 +31,7 @@ Base path: `/api`. The table below keeps the long-form reference out of the READ
 ## Connectors
 
 - Proxmox nodes lookup: `POST /api/proxmox/nodes` with `{ baseUrl, token, verifySSL }`.
-- CTFd challenges (simple listing): `POST /api/ctfd/challenges` with `{ baseUrl, token }`.
+- CTFd challenges (simple listing): `POST /api/ctfd/challenges` with `{ baseUrl, username, password }`.
 
 ## CTFd Project-Scoped Endpoints
 
@@ -43,6 +43,25 @@ Base path: `/api`. The table below keeps the long-form reference out of the READ
 | Upload exported archive | `POST /api/projects/{pid}/ctfd/upload` |
 | Manage CTFd settings | `POST /api/projects/{pid}/ctfd/settings`, `/ctfd/settings/update` |
 | Manage credential-linked users | `/ctfd/users_create`, `/ctfd/users_delete`, `/ctfd/users_check` |
+
+CTFd user actions use the same `only: ["username"]` selection rule as CTF-RPG: omit it to process all project credentials, or pass an empty list to process none. The manager asks for confirmation before acting on every configured account or deleting selected accounts.
+
+## CTF-RPG Project-Scoped Endpoints
+
+The [CTF-RPG Manager](/static/ctfrpg_manager.html) uses project credentials to manage accounts. Set the game URL (including any custom port) and TLS verification in the Configuration tab, or set `ctfrpg_url` and `ctfrpg_verify_ssl` on the project API. Store admin login credentials with `PATCH /api/projects/{pid}/secrets` using `{ "ctfrpg": { "username": "admin", "password": "..." } }`, or use the manager's Connection dialog. The credentials are encrypted per DeployForge user and project.
+Existing CTF-RPG integration tokens are no longer used. Enter an administrator username and password for each project before using the manager.
+
+| Action | Endpoint |
+| --- | --- |
+| Verify admin credentials and list characters | `POST /api/projects/{pid}/ctfrpg/login` |
+| Check project users and read scores/teams | `POST /api/projects/{pid}/ctfrpg/users_check` |
+| Create or update project users | `POST /api/projects/{pid}/ctfrpg/users_create` |
+| Delete project users | `POST /api/projects/{pid}/ctfrpg/users_delete` |
+
+The action requests accept optional `only: ["username"]` to select project credentials. Without `only`, they process all project credentials; an empty list processes none. Create also accepts an optional `hero` character ID. Per-user failures are returned in `results`. The connection routes accept `baseUrl`, `username`, `password`, and `verifySSL` in the request body for testing a connection before saving it; otherwise they use the saved project settings and credentials. A different `baseUrl` requires explicit credentials. All routes require DeployForge authentication.
+
+The CTF-RPG Manager's Notifications tab configures SCE-web browser audio alerts for score and leaderboard changes. The first successful refresh establishes a silent baseline. Enabled alerts play one at a time, with each clip finishing before speech starts. **Stop audio** cancels active and queued alerts; Preview also toggles to Stop during playback. Settings use the existing project audio API, and playback is disabled in remote mode.
+Its management table places each credential's team rank and points beside that user's rank and points. User and Team columns can sort by name or rank, with unavailable values last.
 
 ## Optional Agent Plugin
 

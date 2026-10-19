@@ -3,10 +3,11 @@ function buildServerWizardSteps(payload, runOptions, auth) {
   const add = (key, method, path, body) => steps.push({
     method, url: `/api/projects/$project/${path}`, body, projectFromStep: 0, wizardKey: key,
   });
-  if (auth.vmUser || auth.vmPass || auth.ctfdToken) {
+  if (auth.vmUser || auth.vmPass || auth.ctfdUser || auth.ctfdPass || auth.ctfrpgUser || auth.ctfrpgPass) {
     add('save-secrets', 'PUT', 'secrets', {
       proxmox: (auth.vmUser || auth.vmPass) ? { username: auth.vmUser, password: auth.vmPass } : undefined,
-      ctfd: auth.ctfdToken ? { token: auth.ctfdToken } : undefined,
+      ctfd: (auth.ctfdUser || auth.ctfdPass) ? { username: auth.ctfdUser, password: auth.ctfdPass } : undefined,
+      ctfrpg: (auth.ctfrpgUser || auth.ctfrpgPass) ? { username: auth.ctfrpgUser, password: auth.ctfrpgPass } : undefined,
     });
   }
   if (runOptions.createVms) {
@@ -37,7 +38,13 @@ function buildServerWizardSteps(payload, runOptions, auth) {
   }
   if (runOptions.createCtfdUsers) {
     add('ctfd-users', 'POST', 'ctfd/users_create', { baseUrl: payload.challenge_url || undefined,
-      token: auth.ctfdToken || undefined, verifySSL: payload.challenge_verify_ssl !== false });
+      username: auth.ctfdUser || undefined, password: auth.ctfdPass || undefined,
+      verifySSL: payload.challenge_verify_ssl !== false });
+  }
+  if (runOptions.createCtfrpgUsers) {
+    add('ctfrpg-users', 'POST', 'ctfrpg/users_create', { baseUrl: payload.ctfrpg_url || undefined,
+      username: auth.ctfrpgUser || undefined, password: auth.ctfrpgPass || undefined,
+      verifySSL: payload.ctfrpg_verify_ssl !== false });
   }
   return steps;
 }
@@ -73,6 +80,7 @@ async function submitServerCtfdBulk(kind, pids) {
   if (!['users_create', 'users_delete'].includes(kind)) throw new Error('Unsupported bulk action');
   const projects = [];
   const steps = [];
+  const hasUserSelection = !!CTFD_SELECTED_KEYS?.size;
   for (const pid of pids) {
     const project = CTFD_ALL_PROJECTS.find(item => String(item.id) === String(pid));
     if (!project) throw new Error(`Project ${pid} is unavailable`);
@@ -82,7 +90,7 @@ async function submitServerCtfdBulk(kind, pids) {
     const indices = Array.from(CTFD_SELECTED_KEYS || []).map(key => String(key).split(':'))
       .filter(([id]) => id === String(pid)).map(([, index]) => Number(index));
     const names = indices.map(index => project.credentials?.[index - 1]?.username).filter(Boolean);
-    if (names.length) body.only = names;
+    if (hasUserSelection) body.only = names;
     steps.push({ method: 'POST', url: `/api/projects/${encodeURIComponent(pid)}/ctfd/${kind}`, body });
     projects.push(project);
   }

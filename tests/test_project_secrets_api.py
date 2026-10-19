@@ -158,7 +158,7 @@ class ProjectSecretsApiTests(unittest.TestCase):
 
             resp = self.client.patch(
                 f'/api/projects/{self.project.id}/secrets',
-                json={'ctfd': {'token': 'ctfdtoken-user'}},
+                json={'ctfd': {'username': 'ctfd-admin', 'password': 'ctfd-secret'}},
             )
             self.assertEqual(resp.status_code, 200)
             body = resp.get_json() or {}
@@ -168,14 +168,16 @@ class ProjectSecretsApiTests(unittest.TestCase):
             resp2 = self.client.get(f'/api/projects/{self.project.id}/secrets')
             self.assertEqual(resp2.status_code, 200)
             got = resp2.get_json() or {}
-            self.assertEqual(got.get('ctfd', {}).get('token'), 'ctfdtoken-user')
+            self.assertEqual(got.get('ctfd', {}).get('username'), 'ctfd-admin')
+            self.assertEqual(got.get('ctfd', {}).get('password'), 'ctfd-secret')
 
             # Another non-admin user should not see carol's secret
             self.app.current_user = lambda: {'username': 'dave', 'roles': ['user']}
             resp3 = self.client.get(f'/api/projects/{self.project.id}/secrets')
             self.assertEqual(resp3.status_code, 200)
             got2 = resp3.get_json() or {}
-            self.assertEqual(got2.get('ctfd', {}).get('token'), '')
+            self.assertEqual(got2.get('ctfd', {}).get('username'), '')
+            self.assertEqual(got2.get('ctfd', {}).get('password'), '')
 
     def test_anonymous_mode_can_read_existing_project_secret_owner(self):
         with ExitStack() as stack:
@@ -184,7 +186,7 @@ class ProjectSecretsApiTests(unittest.TestCase):
 
             save_resp = self.client.patch(
                 f'/api/projects/{self.project.id}/secrets',
-                json={'ctfd': {'token': 'ctfdtoken-owner'}},
+                json={'ctfd': {'username': 'ctfd-owner', 'password': 'ctfd-secret'}},
             )
             self.assertEqual(save_resp.status_code, 200)
 
@@ -195,7 +197,8 @@ class ProjectSecretsApiTests(unittest.TestCase):
             resp = self.client.get(f'/api/projects/{self.project.id}/secrets')
             self.assertEqual(resp.status_code, 200)
             body = resp.get_json() or {}
-            self.assertEqual(body.get('ctfd', {}).get('token'), 'ctfdtoken-owner')
+            self.assertEqual(body.get('ctfd', {}).get('username'), 'ctfd-owner')
+            self.assertEqual(body.get('ctfd', {}).get('password'), 'ctfd-secret')
             self.assertTrue(body.get('ctfd', {}).get('saved'))
 
 

@@ -41,9 +41,9 @@
       const serverHasAny = !!(body?.proxmox?.saved || body?.ctfd?.saved);
       if (!serverHasAny) {
         const legacy = readLegacyLocalStorageCreds(key);
-        const hasLegacy = !!(legacy?.proxmox?.username || legacy?.proxmox?.password || legacy?.ctfd?.token);
+        const hasLegacy = !!(legacy?.proxmox?.username || legacy?.proxmox?.password);
         if (hasLegacy) {
-          await patchProjectSecrets(key, legacy);
+          await patchProjectSecrets(key, { proxmox: legacy.proxmox });
           clearLegacyLocalStorageCreds(key);
           body = await _fetchJson(`/api/projects/${encodeURIComponent(key)}/secrets`, { method: 'GET' });
         }
@@ -83,7 +83,7 @@
   function proxKey(pid){ return `toolhub.prox.persist.${pid}`; }
 
   function readLegacyLocalStorageCreds(pid){
-    const out = { proxmox: { username: '', password: '' }, ctfd: { token: '' } };
+    const out = { proxmox: { username: '', password: '' } };
     // Proxmox legacy (xor-encoded u_enc/p_enc)
     try {
       const raw = localStorage.getItem(proxKey(pid));
@@ -99,18 +99,8 @@
         }
       }
     } catch {}
-    // CTFd legacy (xor-encoded token_enc or plaintext token)
-    try {
-      const raw = localStorage.getItem(ctfdKey(pid));
-      if (raw) {
-        const obj = JSON.parse(raw);
-        if (obj && obj.token_enc) out.ctfd.token = xorDecode(obj.token_enc);
-        else if (obj && obj.token) out.ctfd.token = String(obj.token || '');
-      }
-    } catch {}
     // Trim
     try { out.proxmox.username = String(out.proxmox.username || '').trim(); } catch {}
-    try { out.ctfd.token = String(out.ctfd.token || '').trim(); } catch {}
     return out;
   }
 
@@ -124,7 +114,7 @@
     try {
       if (persist) {
         await patchProjectSecrets(pid, { ctfd: {
-          token: value.token || '',
+          token: '',
           username: value.username || '',
           password: value.password || '',
         } });
@@ -133,23 +123,16 @@
       }
     } catch {}
   }
-  async function setPersistCtfdToken(pid, token, persist){
-    return setPersistCtfdCreds(pid, { token: token || '', username: '', password: '' }, persist);
-  }
   function readPersistCtfdCreds(pid){
     try {
       const cached = _secretsCache.get(String(pid||''));
       const value = cached?.ctfd || {};
       return {
-        token: typeof value.token === 'string' ? value.token : '',
         username: typeof value.username === 'string' ? value.username : '',
         password: typeof value.password === 'string' ? value.password : '',
       };
     } catch {}
     return {};
-  }
-  function readPersistCtfdToken(pid){
-    return String(readPersistCtfdCreds(pid).token || '');
   }
   async function setPersistProxCreds(pid, username, password, persist){
     // Persist to the server (per-user, per-project, encrypted at rest).
@@ -189,7 +172,7 @@
     } catch {}
     return removed;
   }
-  window.CREDS = { setPersistCtfdCreds, readPersistCtfdCreds, setPersistCtfdToken, readPersistCtfdToken, setPersistProxCreds, readPersistProxCreds, clearAllPersistedCreds };
+  window.CREDS = { setPersistCtfdCreds, readPersistCtfdCreds, setPersistProxCreds, readPersistProxCreds, clearAllPersistedCreds };
   window.CREDS.fetchProjectSecrets = fetchProjectSecrets;
   window.CREDS.patchProjectSecrets = patchProjectSecrets;
 

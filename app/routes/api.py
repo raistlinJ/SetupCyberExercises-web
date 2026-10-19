@@ -31,8 +31,10 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, fields
 import time
 from ..guest_push_batch import GuestPushBatch
+from ..qemu_guest_stream import build_host_script
 from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
+from ..connectors.ctfrpg import CTFRPGClient, CTFRPGError
 from ..storage.projects import (
     ProjectStore,
     Project,
@@ -73,18 +75,16 @@ def api_test_credentials():
             
     if ctf_creds:
         url = (ctf_creds.get("url") or "").strip()
-        token = (ctf_creds.get("token") or "").strip()
         username = (ctf_creds.get("username") or "").strip()
         password = ctf_creds.get("password") or ""
         verify_ssl = bool(ctf_creds.get("verify_ssl", False))
-        if not url or not (token or (username and password)):
-            return jsonify({"ok": False, "error": "CTFd URL and either an Admin Access Token or username/password are required."})
+        if not url or not username or not password:
+            return jsonify({"ok": False, "error": "CTFd URL, admin username, and password are required."})
         try:
-            client = CTFdClient(url, token, verify_ssl=verify_ssl)
-            if not token:
-                ok, message = client.login_with_credentials(username, password)
-                if not ok:
-                    return jsonify({"ok": False, "error": f"CTFd login failed: {message}"})
+            client = CTFdClient(url, token='', verify_ssl=verify_ssl)
+            ok, message = client.login_with_credentials(username, password)
+            if not ok:
+                return jsonify({"ok": False, "error": f"CTFd login failed: {message}"})
             u = client.get_current_user()
             if not u:
                 return jsonify({"ok": False, "error": "CTFd connection failed or credentials are invalid."})
@@ -9201,57 +9201,31 @@ def _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
     cancel_path = f"/tmp/deployforge-cancel-{uuid.uuid4().hex}"
     extract = (f"{_lxc_prepare_directory_command(destination, owner)} && "
                f"tar --overwrite -xpf {shlex.quote(guest_archive)} -C {shlex.quote(destination)}")
-    # qm limits stdin to 1 MiB. Each bounded chunk travels locally from the
-    # staged host file through the guest agent, never back through this app.
-    script = f'''import json, subprocess, shlex, os
-vmid = {int(entry['vmid'])!r}
-archive = {remote_archive!r}
-guest_archive = {guest_archive!r}
-cancel_path = {cancel_path!r}
-def run(command, data=None, timeout=120):
-    args = ['qm', 'guest', 'exec', str(vmid), '--synchronous', '1', '--timeout', str(timeout)]
-    if data is not None:
-        args += ['--pass-stdin', '1']
-    result = subprocess.run(args + ['--', '/bin/sh', '-c', command], input=data,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 30)
-    if result.returncode:
-        raise RuntimeError(result.stderr.decode(errors='replace') or 'qm guest exec failed')
-    state = json.loads(result.stdout)
-    if not state.get('exited') or state.get('exitcode') != 0:
-        raise RuntimeError(state.get('err-data') or state.get('out-data') or 'Guest command failed or timed out')
-try:
-    run('rm -f -- ' + shlex.quote(guest_archive))
-    with open(archive, 'rb') as stream:
-        while True:
-            if os.path.exists(cancel_path):
-                raise RuntimeError('Transfer cancelled')
-            chunk = stream.read(512 * 1024)
-            if not chunk:
-                break
-            run('cat >> ' + shlex.quote(guest_archive), chunk)
-            print('TRANSFER_BYTES=' + str(stream.tell()), flush=True)
-    print('TRANSFER_EXTRACTING', flush=True)
-    if os.path.exists(cancel_path):
-        raise RuntimeError('Transfer cancelled')
-    run({extract!r}, timeout={max(600, int(archive_size / (256 * 1024)) + 120)})
-finally:
-    try:
-        run('rm -f -- ' + shlex.quote(guest_archive))
-    except Exception:
-        pass
-    if os.path.exists(cancel_path):
-        os.unlink(cancel_path)
-'''
+    # One host-side process holds the agent socket and guest file open.
+    # The bounded qm stdin path remains a protocol-unavailable fallback.
+    transfer_timeout = max(600, int(archive_size / (256 * 1024)) + 120)
+    script = build_host_script({
+        'vmid': int(entry['vmid']), 'archive': remote_archive,
+        'archive_size': archive_size, 'guest_archive': guest_archive,
+        'cancel_path': cancel_path, 'extract': extract, 'timeout': transfer_timeout,
+        'agent_socket': f"/var/run/qemu-server/{int(entry['vmid'])}.qga",
+        'lock_path': f"/run/lock/deployforge-qga-{int(entry['vmid'])}.lock",
+    })
     cancelled = False
+    compatible_mode = False
     def report_line(line):
-        nonlocal cancelled
+        nonlocal cancelled, compatible_mode
         if cancelled:
             return
         try:
             if line.startswith(b'TRANSFER_BYTES='):
-                _transfer_bytes('Copying to guest', int(line.split(b'=', 1)[1]), archive_size)
+                direction = 'Copying to guest (compatible mode)' if compatible_mode else 'Copying to guest'
+                _transfer_bytes(direction, int(line.split(b'=', 1)[1]), archive_size)
             elif line.strip() == b'TRANSFER_EXTRACTING':
                 _transfer_bytes('Extracting in guest', 0)
+            elif line.strip() == b'TRANSFER_FALLBACK':
+                compatible_mode = True
+                _transfer_bytes('Copying to guest (compatible mode)', 0, archive_size)
         except _GuestTransferCancelled:
             # Ask the host loop to stop, then drain its output so its finally
             # block removes the guest archive before releasing the batch.
@@ -9265,7 +9239,7 @@ finally:
     _transfer_bytes('Copying to guest', 0, archive_size)
     code, _, error = _ssh_exec_result(
         ssh_client, f'python3 -c {shlex.quote(script)}',
-        timeout=max(600, int(archive_size / (512 * 1024) + 1) * 150 + 720),
+        timeout=transfer_timeout + 180,
         sudo=use_sudo, sudo_password=password, on_stdout_line=report_line,
     )
     if cancelled:
@@ -12066,12 +12040,25 @@ def runtime_set():
 
 def _ctfd_client_from_req(proj: Project) -> CTFdClient:
     body = request.get_json(silent=True) or {}
-    base_url = (body.get('baseUrl') or getattr(proj, 'challenge_url', '') or '').strip()
+    stored_url = str(getattr(proj, 'challenge_url', '') or '').strip()
+    base_url = str(body.get('baseUrl') or stored_url).strip()
     port = body.get('port') if ('port' in body) else getattr(proj, 'challenge_port', 443)
-    token = str(body.get('token') or '').strip()
-    username = str(body.get('username') or '').strip()
-    password = str(body.get('password') or '')
-    verify = bool(body.get('verifySSL', True))
+    explicit_credentials = 'username' in body or 'password' in body
+    if explicit_credentials:
+        username = str(body.get('username') or '').strip()
+        password = str(body.get('password') or '')
+    else:
+        if base_url.rstrip('/') != stored_url.rstrip('/'):
+            raise ValueError('Provide CTFd credentials when testing a different URL')
+        if int(port or 443) != int(getattr(proj, 'challenge_port', 443) or 443):
+            raise ValueError('Provide CTFd credentials when testing a different port')
+        ss = _user_secrets_store()
+        secrets_username = _effective_secrets_username(ss, _acting_username(), proj.id)
+        enc = ss.get_enc(secrets_username, proj.id) or {}
+        sk = current_app.config.get('SECRET_KEY')
+        username = _dec_secret(sk, enc.get('ctfd_username_enc') or '')
+        password = _dec_secret(sk, enc.get('ctfd_password_enc') or '')
+    verify = bool(body.get('verifySSL', getattr(proj, 'challenge_verify_ssl', True)))
     # Normalize base_url and apply port if provided
     try:
         if base_url and not (base_url.startswith('http://') or base_url.startswith('https://')):
@@ -12091,15 +12078,169 @@ def _ctfd_client_from_req(proj: Project) -> CTFdClient:
         base_url = urlunparse((scheme, netloc, '', '', '', ''))
     except Exception:
         pass
-    client = CTFdClient(base_url=base_url, token=token, verify_ssl=verify)
-    # If token not provided but username/password provided, attempt session login (cookie-based)
-    if not token and not (username and password):
-        raise RuntimeError('CTFd token or username/password are required')
-    if (not token) and username and password:
-        ok, msg = client.login_with_credentials(username, password)
-        if not ok:
-            raise RuntimeError(f'CTFd login failed: {msg}')
+    if not username or not password:
+        raise ValueError('CTFd admin username and password are required')
+    client = CTFdClient(base_url=base_url, token='', verify_ssl=verify)
+    ok, msg = client.login_with_credentials(username, password)
+    if not ok:
+        raise RuntimeError(f'CTFd login failed: {msg}')
     return client
+
+
+def _ctfrpg_client_from_req(proj: Project, pid: str) -> CTFRPGClient:
+    body = request.get_json(silent=True) or {}
+    stored_url = str(getattr(proj, 'ctfrpg_url', '') or '').strip()
+    base_url = str(body.get('baseUrl') or stored_url).strip()
+    explicit_credentials = 'username' in body or 'password' in body
+    if explicit_credentials:
+        username = str(body.get('username') or '').strip()
+        password = str(body.get('password') or '')
+    else:
+        if base_url.rstrip('/') != stored_url.rstrip('/'):
+            raise ValueError('Provide CTF-RPG credentials when testing a different URL')
+        ss = _user_secrets_store()
+        secrets_username = _effective_secrets_username(ss, _acting_username(), pid)
+        enc = ss.get_enc(secrets_username, pid) or {}
+        sk = current_app.config.get('SECRET_KEY')
+        username = _dec_secret(sk, enc.get('ctfrpg_username_enc') or '')
+        password = _dec_secret(sk, enc.get('ctfrpg_password_enc') or '')
+    verify = body.get('verifySSL', getattr(proj, 'ctfrpg_verify_ssl', True))
+    if not isinstance(verify, bool):
+        raise ValueError('verifySSL must be true or false')
+    return CTFRPGClient(base_url, username, password, verify_ssl=verify)
+
+
+def _ctfrpg_failure(exc):
+    if isinstance(exc, CTFRPGError):
+        status = exc.status_code if exc.status_code in (400, 401, 403, 404, 409) else 502
+    else:
+        status = 400
+    return jsonify({'ok': False, 'error': str(exc)}), status
+
+
+def _ctf_project_credential_targets(proj, body):
+    creds = [c for c in (proj.credentials or []) if isinstance(c, dict) and c.get('username')]
+    if 'only' not in body:
+        return creds
+    only = body['only']
+    if not isinstance(only, list) or any(not isinstance(u, str) for u in only):
+        raise ValueError('only must be a list of usernames')
+    wanted = {u.casefold() for u in only}
+    return [c for c in creds if str(c['username']).casefold() in wanted]
+
+
+@api_bp.post('/projects/<pid>/ctfrpg/login')
+@_secure_route()
+def ctfrpg_login(pid: str):
+    proj = _store().get(pid)
+    if not proj:
+        return jsonify({'error': 'Project not found'}), 404
+    try:
+        return jsonify({'ok': True, **_ctfrpg_client_from_req(proj, pid).me()})
+    except (CTFRPGError, ValueError) as exc:
+        return _ctfrpg_failure(exc)
+
+
+@api_bp.post('/projects/<pid>/ctfrpg/users_check')
+@_secure_route()
+def ctfrpg_users_check(pid: str):
+    proj = _store().get(pid)
+    if not proj:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        targets = _ctf_project_credential_targets(proj, body)
+        if not targets:
+            return jsonify({'ok': True, 'users': [], 'teams': [], 'remoteUsers': []})
+        client = _ctfrpg_client_from_req(proj, pid)
+        remote_users = client.users().get('users') or []
+        scoreboard = client.scoreboard()
+        score_users = {str(u.get('username', '')).casefold(): u for u in scoreboard.get('users', []) if isinstance(u, dict)}
+        by_name = {str(u.get('username', '')).casefold(): u for u in remote_users if isinstance(u, dict)}
+        users = []
+        for cred in targets:
+            name = str(cred['username'])
+            account = by_name.get(name.casefold())
+            score = score_users.get(name.casefold()) or {}
+            users.append({
+                'username': name, 'exists': bool(account),
+                'role': account.get('role') if account else None,
+                'hero': account.get('hero') if account else None,
+                'team': account.get('team') if account else None,
+                'score': account.get('score', score.get('score', 0)) if account else 0,
+                'completed': account.get('completed', 0) if account else 0,
+                'rank': score.get('rank'),
+            })
+        return jsonify({'ok': True, 'users': users, 'teams': scoreboard.get('teams') or [], 'remoteUsers': remote_users})
+    except (CTFRPGError, ValueError) as exc:
+        return _ctfrpg_failure(exc)
+
+
+@api_bp.post('/projects/<pid>/ctfrpg/users_create')
+@_secure_route()
+def ctfrpg_users_create(pid: str):
+    proj = _store().get(pid)
+    if not proj:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        targets = _ctf_project_credential_targets(proj, body)
+        if not targets:
+            return jsonify({'ok': True, 'created': 0, 'updated': 0, 'unchanged': 0, 'results': []})
+        client = _ctfrpg_client_from_req(proj, pid)
+        hero = body.get('hero') or None
+        if hero is not None and not isinstance(hero, str):
+            raise ValueError('hero must be a character ID')
+        me = client.me()
+        if hero and hero not in {c.get('id') for c in me.get('characters', [])}:
+            raise ValueError('Choose a valid CTF-RPG character')
+        results = []
+        counts = {'created': 0, 'updated': 0, 'unchanged': 0}
+        for cred in targets:
+            name = str(cred['username'])
+            try:
+                result = client.put_user(name, str(cred.get('password') or ''), hero)
+                action = result.get('action') or 'updated'
+                if action in counts:
+                    counts[action] += 1
+                results.append({'username': name, 'action': action})
+            except (CTFRPGError, ValueError) as exc:
+                results.append({'username': name, 'error': str(exc)})
+        return jsonify({'ok': True, **counts, 'results': results})
+    except (CTFRPGError, ValueError) as exc:
+        return _ctfrpg_failure(exc)
+
+
+@api_bp.post('/projects/<pid>/ctfrpg/users_delete')
+@_secure_route()
+def ctfrpg_users_delete(pid: str):
+    proj = _store().get(pid)
+    if not proj:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        targets = _ctf_project_credential_targets(proj, body)
+        if not targets:
+            return jsonify({'ok': True, 'deleted': 0, 'results': []})
+        client = _ctfrpg_client_from_req(proj, pid)
+        client.me()
+        results = []
+        deleted = 0
+        for cred in targets:
+            name = str(cred['username'])
+            try:
+                client.delete_user(name)
+                results.append({'username': name, 'action': 'deleted'})
+                deleted += 1
+            except CTFRPGError as exc:
+                if exc.status_code == 404:
+                    results.append({'username': name, 'action': 'missing'})
+                else:
+                    results.append({'username': name, 'error': str(exc)})
+        return jsonify({'ok': True, 'deleted': deleted, 'results': results})
+    except (CTFRPGError, ValueError) as exc:
+        return _ctfrpg_failure(exc)
+
 
 @api_bp.post('/projects/<pid>/ctfd/settings')
 @_secure_route()
@@ -12252,41 +12393,17 @@ def ctfd_login(pid: str):
     body = request.get_json(silent=True) or {}
     try:
         client = _ctfd_client_from_req(proj)
-        # If token was provided, validate it via /api/v1/users/me; for session login, presence of session implies success
+        ok_flag = bool(client.session is not None)
         me_json = None
-        ok_flag = False
         role = None
-        if client.token:
-            try:
-                me = client.get_current_user() or {}
-                me_json = me
-                try:
-                    role = client.get_role()
-                except Exception:
-                    role = None
-                # Consider token valid only if /me returns a usable user shape
-                uid = None
-                try:
-                    cand = me.get('id') if isinstance(me, dict) else None
-                    if cand is not None:
-                        uid = int(cand)
-                except Exception:
-                    uid = None
-                ok_flag = bool(uid is not None or (isinstance(me, dict) and (me.get('name') or me.get('email'))))
-            except Exception as e:
-                me_json = { 'error': str(e) }
-                ok_flag = False
-        else:
-            # Session flow: if we got here without exception, login_with_credentials worked
-            ok_flag = bool(client.session is not None)
-            try:
-                me_json = client.get_current_user() or {}
-                role = client.get_role()
-            except Exception:
-                role = None
+        try:
+            me_json = client.get_current_user() or {}
+            role = client.get_role()
+        except Exception:
+            role = None
         res = {
             'ok': ok_flag,
-            'using_token': bool(client.token),
+            'using_token': False,
             'session': bool(client.session is not None),
             'me': me_json,
             'role': role,
@@ -12302,9 +12419,11 @@ def ctfd_users_create(pid: str):
     store = _store(); proj = store.get(pid)
     if not proj: return jsonify({"error":"Project not found"}), 404
     body = request.get_json(silent=True) or {}
-    only = body.get('only')  # optional subset of usernames
-    creds = [c for c in (proj.credentials or []) if (not only or c.get('username') in only)]
-    if not creds: return jsonify({"created":0, "updated":0, "skipped":0})
+    try:
+        creds = _ctf_project_credential_targets(proj, body)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if not creds: return jsonify({"created":0, "updated":0, "skipped":0, "results":[]})
     _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
     client = _ctfd_client_from_req(proj)
 
@@ -12350,8 +12469,11 @@ def ctfd_users_delete(pid: str):
     store = _store(); proj = store.get(pid)
     if not proj: return jsonify({"error":"Project not found"}), 404
     body = request.get_json(silent=True) or {}
-    only = body.get('only')  # optional subset
-    creds = [c for c in (proj.credentials or []) if (not only or c.get('username') in only)]
+    try:
+        creds = _ctf_project_credential_targets(proj, body)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if not creds: return jsonify({'deleted': 0, 'results': []})
     _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
     client = _ctfd_client_from_req(proj)
     # Preflight: ensure permission to delete users
@@ -12387,27 +12509,19 @@ def ctfd_users_delete(pid: str):
 @_secure_route()
 def ctfd_users_check(pid: str):
     """Return existence of project credential usernames on the CTFd server.
-    Request JSON: { baseUrl, port, token?, username?, password?, verifySSL?, only?: [usernames] }
+    Request JSON: { baseUrl, port, username?, password?, verifySSL?, only?: [usernames] }
     Response JSON: { users: [{ username, exists }] }
     """
     store = _store(); proj = store.get(pid)
     if not proj:
         return jsonify({"error": "Project not found"}), 404
     body = request.get_json(silent=True) or {}
-    only = body.get('only')
-    # Determine which usernames to check
-    creds = list(getattr(proj, 'credentials', []) or [])
-    targets = []
-    for c in creds:
-        try:
-            u = (c.get('username') or '').strip()
-            if not u:
-                continue
-            if only and u not in only:
-                continue
-            targets.append(u)
-        except Exception:
-            continue
+    try:
+        targets = [str(c['username']).strip() for c in _ctf_project_credential_targets(proj, body)]
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if not targets:
+        return jsonify({'users': []})
     # Build client (supports token or session login)
     _queue_progress_reporter()({'phase': 'ctfd_connect', 'progress': None, 'message': 'Connecting to CTFd and checking access…'})
     client = _ctfd_client_from_req(proj)
@@ -13042,7 +13156,7 @@ def ctfd_users_check(pid: str):
             'team_last_solve_challenge': team_last_solve_challenge,
         })
     category_payload = None
-    if not only:
+    if 'only' not in body:
         cache_key = _make_ctfd_category_firsts_cache_key(pid, client, body)
         category_payload = _get_cached_ctfd_category_firsts(cache_key)
         if category_payload is None:
@@ -13391,6 +13505,8 @@ def _validate_project_fields(data: dict) -> list:
     for k in ["proxmox_url", "guacamole_url", "keycloak_url", "challenge_url"]:
         if k in data and not _is_valid_url(data[k]):
             errors.append(f"{k} must start with http:// or https://")
+    if "ctfrpg_url" in data and data["ctfrpg_url"] and not _is_valid_url(data["ctfrpg_url"]):
+        errors.append("ctfrpg_url must start with http:// or https://")
 
     for k in [
         "proxmox_api_port", "proxmox_ssh_port",
@@ -13515,6 +13631,8 @@ def get_project_secrets(pid: str):
     ctfd_token = _dec_secret(sk, enc.get('ctfd_token_enc') or '')
     ctfd_username = _dec_secret(sk, enc.get('ctfd_username_enc') or '')
     ctfd_password = _dec_secret(sk, enc.get('ctfd_password_enc') or '')
+    ctfrpg_username = _dec_secret(sk, enc.get('ctfrpg_username_enc') or '')
+    ctfrpg_password = _dec_secret(sk, enc.get('ctfrpg_password_enc') or '')
     return jsonify({
         "projectId": pid,
         "proxmox": {
@@ -13526,8 +13644,9 @@ def get_project_secrets(pid: str):
             "token": ctfd_token,
             "username": ctfd_username,
             "password": ctfd_password,
-            "saved": bool(ctfd_token or ctfd_username or ctfd_password),
-        }
+            "saved": bool(ctfd_username and ctfd_password),
+        },
+        "ctfrpg": {"username": ctfrpg_username, "password": ctfrpg_password, "saved": bool(ctfrpg_username and ctfrpg_password)},
     })
 
 
@@ -13537,9 +13656,10 @@ def update_project_secrets(pid: str):
     """Set/clear project-scoped credentials.
 
     Accepts either nested objects:
-      { proxmox: { username, password }, ctfd: { token, username, password } }
+      { proxmox: { username, password }, ctfd: { token, username, password }, ctfrpg: { username, password } }
     or flat keys:
-      { proxmox_username, proxmox_password, ctfd_token, ctfd_username, ctfd_password }
+      { proxmox_username, proxmox_password, ctfd_token, ctfd_username, ctfd_password,
+        ctfrpg_username, ctfrpg_password }
 
     Any provided secret field set to an empty string clears that secret.
     """
@@ -13556,6 +13676,7 @@ def update_project_secrets(pid: str):
 
     prox = data.get('proxmox') if isinstance(data.get('proxmox'), dict) else {}
     ctfd = data.get('ctfd') if isinstance(data.get('ctfd'), dict) else {}
+    ctfrpg = data.get('ctfrpg') if isinstance(data.get('ctfrpg'), dict) else {}
 
     # Prefer nested, fall back to flat.
     prox_user_in = prox.get('username') if 'username' in prox else data.get('proxmox_username')
@@ -13563,6 +13684,8 @@ def update_project_secrets(pid: str):
     ctfd_token_in = ctfd.get('token') if 'token' in ctfd else data.get('ctfd_token')
     ctfd_user_in = ctfd.get('username') if 'username' in ctfd else data.get('ctfd_username')
     ctfd_pass_in = ctfd.get('password') if 'password' in ctfd else data.get('ctfd_password')
+    ctfrpg_user_in = ctfrpg.get('username') if 'username' in ctfrpg else data.get('ctfrpg_username')
+    ctfrpg_pass_in = ctfrpg.get('password') if 'password' in ctfrpg else data.get('ctfrpg_password')
 
     sk = current_app.config.get('SECRET_KEY')
     ss = _user_secrets_store()
@@ -13591,6 +13714,19 @@ def update_project_secrets(pid: str):
         ss.upsert_enc(secrets_username, pid, ctfd_token_enc=_enc_secret(sk, token) if token else '')
         changed = True
 
+    if ctfrpg_user_in is not None or ctfrpg_pass_in is not None:
+        cur_user = _dec_secret(sk, existing.get('ctfrpg_username_enc') or '')
+        cur_pass = _dec_secret(sk, existing.get('ctfrpg_password_enc') or '')
+        new_user = cur_user if ctfrpg_user_in is None else str(ctfrpg_user_in or '').strip()
+        new_pass = cur_pass if ctfrpg_pass_in is None else str(ctfrpg_pass_in or '')
+        ss.upsert_enc(
+            secrets_username, pid,
+            ctfrpg_username_enc=_enc_secret(sk, new_user) if new_user else '',
+            ctfrpg_password_enc=_enc_secret(sk, new_pass) if new_pass else '',
+            ctfrpg_token_enc='',
+        )
+        changed = True
+
     if ctfd_user_in is not None or ctfd_pass_in is not None:
         cur_user = _dec_secret(sk, existing.get('ctfd_username_enc') or '')
         cur_pass = _dec_secret(sk, existing.get('ctfd_password_enc') or '')
@@ -13601,6 +13737,7 @@ def update_project_secrets(pid: str):
             pid,
             ctfd_username_enc=_enc_secret(sk, new_user) if new_user else '',
             ctfd_password_enc=_enc_secret(sk, new_pass) if new_pass else '',
+            ctfd_token_enc='',
         )
         changed = True
 
@@ -13620,11 +13757,14 @@ def update_project_secrets(pid: str):
     ctfd_token = _dec_secret(sk, enc.get('ctfd_token_enc') or '')
     ctfd_username = _dec_secret(sk, enc.get('ctfd_username_enc') or '')
     ctfd_password = _dec_secret(sk, enc.get('ctfd_password_enc') or '')
+    ctfrpg_username = _dec_secret(sk, enc.get('ctfrpg_username_enc') or '')
+    ctfrpg_password = _dec_secret(sk, enc.get('ctfrpg_password_enc') or '')
     return jsonify({
         "ok": True,
         "projectId": pid,
         "proxmox_saved": bool(prox_user or prox_pass),
-        "ctfd_saved": bool(ctfd_token or ctfd_username or ctfd_password),
+        "ctfd_saved": bool(ctfd_username and ctfd_password),
+        "ctfrpg_saved": bool(ctfrpg_username and ctfrpg_password),
     })
 
 @api_bp.route("/projects", methods=["POST"])
@@ -13641,7 +13781,7 @@ def create_project():
     "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
         "guacamole_url", "guacamole_port",
         "keycloak_url", "keycloak_port", "keycloak_nodename",
-        "challenge_url", "challenge_port", "challenge_verify_ssl",
+        "challenge_url", "challenge_port", "challenge_verify_ssl", "ctfrpg_url", "ctfrpg_verify_ssl",
         "instances", "tag", "vnc_start_port", "credentials",
         # Advanced Proxmox
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
@@ -13697,7 +13837,7 @@ def update_project(pid: str):
     "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
         "guacamole_url", "guacamole_port",
         "keycloak_url", "keycloak_port", "keycloak_nodename",
-        "challenge_url", "challenge_port", "challenge_verify_ssl",
+        "challenge_url", "challenge_port", "challenge_verify_ssl", "ctfrpg_url", "ctfrpg_verify_ssl",
         "instances", "tag", "vnc_start_port", "credentials", "vms",
         # Advanced Proxmox
         "proxmox_vm_config_path", "proxmox_qm_path", "proxmox_pvesh_path",
@@ -16818,18 +16958,16 @@ def proxmox_node_network(node: str):
 def ctfd_challenges():
     data = request.get_json(force=True) or {}
     base_url = data.get("baseUrl")
-    token = str(data.get("token") or '').strip()
     username = str(data.get("username") or '').strip()
     password = str(data.get("password") or '')
-    if not base_url or not (token or (username and password)):
-        return jsonify({"error": "Missing baseUrl or credentials"}), 400
+    if not base_url or not username or not password:
+        return jsonify({"error": "CTFd URL, admin username, and password are required"}), 400
 
-    client = CTFdClient(base_url=base_url, token=token, verify_ssl=bool(data.get('verifySSL', True)))
+    client = CTFdClient(base_url=base_url, token='', verify_ssl=bool(data.get('verifySSL', True)))
     try:
-        if not token:
-            ok, message = client.login_with_credentials(username, password)
-            if not ok:
-                return jsonify({"error": f"CTFd login failed: {message}"}), 401
+        ok, message = client.login_with_credentials(username, password)
+        if not ok:
+            return jsonify({"error": f"CTFd login failed: {message}"}), 401
         challenges = client.list_challenges()
         return jsonify({"challenges": challenges})
     except Exception as e:
@@ -16839,7 +16977,7 @@ def ctfd_challenges():
 @_secure_route()
 def ctfd_stats_challenges(pid: str):
     """Return challenge stats with teams and users who solved each challenge.
-    Request JSON: { baseUrl, port?, token?, username?, password?, verifySSL?, detail?: bool }
+    Request JSON: { baseUrl, port?, username?, password?, verifySSL?, detail?: bool }
     Response JSON: { items: [ { id, name, category, value(points), solves, visible, teams?, users?, teams_count?, users_count? } ], logs }
     Note: When detail is false, only counts are returned (teams_count/users_count) and teams/users arrays are omitted for speed.
     """
@@ -16857,7 +16995,7 @@ def ctfd_stats_challenges(pid: str):
         if role not in ('admin', 'teacher'):
             return jsonify({
                 'error': 'forbidden',
-                'message': 'CTFd challenges stats requires an Admin or Teacher API token',
+                'message': 'CTFd challenges stats requires an Admin or Teacher account',
                 'role': role or '',
                 'using_token': bool(getattr(client, 'token', '')),
                 'logs': getattr(client, 'logs', []),
@@ -17307,7 +17445,7 @@ def ctfd_stats_challenges(pid: str):
 @_secure_route()
 def ctfd_challenges_list(pid: str):
     """Return all challenges including hidden for progress accounting.
-    Body: { baseUrl, port?, token?, username?, password?, verifySSL? }
+    Body: { baseUrl, port?, username?, password?, verifySSL? }
     Returns: { challenges: [ { id, name, category, value, state, hidden } ], using_token, logs }
     """
     s = _store(); proj = s.get(pid)
@@ -17323,7 +17461,7 @@ def ctfd_challenges_list(pid: str):
         if role not in ('admin', 'teacher'):
             return jsonify({
                 'error': 'forbidden',
-                'message': 'Admin/Teacher API token required to list all challenges',
+                'message': 'Admin/Teacher account required to list all challenges',
                 'role': role or '',
                 'using_token': bool(getattr(client, 'token', '')),
                 'logs': getattr(client, 'logs', []),
@@ -17357,7 +17495,7 @@ def ctfd_challenges_list(pid: str):
 @_secure_route()
 def ctfd_stats_challenge_one(pid: str, cid: int):
     """Return stats for a single challenge id. Mirrors the per-item logic of the bulk endpoint.
-    Body: { baseUrl, port?, token?, username?, password?, verifySSL? }
+    Body: { baseUrl, port?, username?, password?, verifySSL? }
     Returns: { item: { ... }, using_token, logs }
     """
     s = _store(); proj = s.get(pid)
@@ -17373,7 +17511,7 @@ def ctfd_stats_challenge_one(pid: str, cid: int):
         if role not in ('admin', 'teacher'):
             return jsonify({
                 'error': 'forbidden',
-                'message': 'CTFd challenge stats requires an Admin or Teacher API token',
+                'message': 'CTFd challenge stats requires an Admin or Teacher account',
                 'role': role or '',
                 'using_token': bool(getattr(client, 'token', '')),
                 'logs': getattr(client, 'logs', []),
@@ -17632,7 +17770,7 @@ def ctfd_stats_challenge_one(pid: str, cid: int):
 @_secure_route()
 def ctfd_challenges_visibility(pid: str):
     """Bulk update visibility for a list of CTFd challenges.
-    Body: { baseUrl, port?, token?, username?, password?, verifySSL?, ids: [int], visible: bool }
+    Body: { baseUrl, port?, username?, password?, verifySSL?, ids: [int], visible: bool }
     Returns: { ok, updated: [ { id, state } ], errors: [ { id, error } ], using_token, logs }
     """
     s = _store(); proj = s.get(pid)

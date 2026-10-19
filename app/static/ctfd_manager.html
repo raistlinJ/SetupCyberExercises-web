@@ -6,7 +6,7 @@
   <title>DeployForge — CTFd Manager</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-  <link href="/static/css/shell.css?v=20261009-agent-results" rel="stylesheet">
+  <link href="/static/css/shell.css?v=20261013-integrations" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
 </head>
 <body class="shell-body">
@@ -59,7 +59,8 @@
         <ul class="nav nav-pills flex-nowrap">
           <li class="nav-item"><a class="nav-link" data-shell-link href="/">Configuration</a></li>
           <li class="nav-item"><a class="nav-link" data-shell-link href="/static/vm_manager.html">VM Manager</a></li>
-          <li class="nav-item"><a class="nav-link active" aria-current="page" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a></li>
+          <li class="nav-item" data-plugin="ctfd"><a class="nav-link active" aria-current="page" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a></li>
+          <li class="nav-item" data-plugin="ctfrpg"><a class="nav-link" data-shell-link href="/static/ctfrpg_manager.html">CTF-RPG Manager</a></li>
           <li class="nav-item"><a class="nav-link" data-shell-link href="/static/exports.html">Exports</a></li>
           <li class="nav-item">
             <a class="nav-link ctfd-server-link d-none disabled fw-semibold border border-secondary rounded-pill px-2 py-1 text-nowrap" id="nav-ctfd-link" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true" tabindex="-1" title="Open this project's CTFd UI">Server: —</a>
@@ -89,13 +90,13 @@
             </div>
             <span id="ctfd-filter-error" class="text-danger small d-none">Invalid regular expression</span>
             <div class="d-flex align-items-center gap-2">
-              <button id="btn-ctfd-login" class="btn btn-sm btn-outline-primary" title="Update CTFd URL/port and token">Re-authenticate to CTFd</button>
+              <button id="btn-ctfd-login" class="btn btn-sm btn-outline-primary" title="Update CTFd URL, port, and credentials">Re-authenticate to CTFd</button>
               <span id="ctfd-refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="left" title="Please authenticate to CTFd first.">
                 <button id="btn-ctfd-refresh" class="btn btn-sm btn-outline-secondary" onclick="ctfdRefresh()" disabled>Refresh States</button>
               </span>
               <div class="input-group input-group-sm" style="width: 200px;">
                 <span class="input-group-text">Auto</span>
-                <select id="ctfd-auto-interval" class="form-select" title="Automatically refresh at an interval (requires a valid token)">
+                <select id="ctfd-auto-interval" class="form-select" title="Automatically refresh at an interval (requires a valid login)">
                   <option value="0">Off</option>
                   <option value="15">15s</option>
                   <option value="30">30s</option>
@@ -145,7 +146,7 @@
             <div class="btn-group btn-group-sm" id="ctfd-users-group" data-bs-toggle="tooltip" data-bs-placement="top" title="Create or delete CTFd users for project credentials.">
               <button id="act-ctf-users" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled>Users</button>
               <ul class="dropdown-menu">
-                <li><button class="dropdown-item" type="button" onclick="ctfdAction('users_create')">Create</button></li>
+                <li><button class="dropdown-item" type="button" onclick="ctfdAction('users_create')">Create / update</button></li>
                 <li><button class="dropdown-item" type="button" onclick="ctfdAction('users_delete')">Delete</button></li>
               </ul>
             </div>
@@ -155,7 +156,7 @@
                 <li><a class="dropdown-item" href="#" id="open-challenges-popup">Challenges</a></li>
               </ul>
             </div>
-            <div class="d-flex align-items-center gap-5 flex-wrap ms-auto" id="ctfd-settings-toggles" title="Requires CTFd admin/teacher token">
+            <div class="d-flex align-items-center gap-5 flex-wrap ms-auto" id="ctfd-settings-toggles" title="Requires a CTFd admin or teacher account">
               <div class="form-check form-switch m-0 p-0 d-flex align-items-center" data-bs-toggle="tooltip" data-bs-placement="top" title="Applies settings on the CTFd server">
                 <input class="form-check-input me-2" type="checkbox" id="ctfd-toggle-chals" disabled>
                 <label class="form-check-label small text-muted text-nowrap" for="ctfd-toggle-chals">Challenges Visible</label>
@@ -172,7 +173,7 @@
             </div>
           </div>
           <div id="ctfd-config-only-alert" class="alert alert-info py-2 px-3 small mb-3" role="alert">
-            Showing project configuration only. CTFd values (rank, points, last solves, teams) will appear as <code>n/a</code> until you set a valid API token and press <em>Refresh States</em>.
+            Showing project configuration only. CTFd values (rank, points, last solves, teams) will appear as <code>n/a</code> until you sign in and press <em>Refresh States</em>.
           </div>
 
           <ul class="nav nav-tabs" id="ctfd-main-tabs" role="tablist">
@@ -197,7 +198,7 @@
                       <span>Notification audio</span>
                       <button id="ctfd-notify-template-vars" type="button" class="btn btn-outline-secondary btn-sm py-0 px-2" data-bs-toggle="tooltip" data-bs-placement="top" title="TTS hints" aria-label="TTS hints">?</button>
                     </div>
-                    <div class="small text-muted">Select from uploaded audio files (Settings → Media Manager).</div>
+                    <div class="small text-muted">Browser alerts for changes detected during refresh. Select audio files from Settings → Media Manager and use Preview to check playback.</div>
                   </div>
                   <div class="btn-group btn-group-sm" role="group" aria-label="Notification audio actions">
                     <button id="ctfd-notify-reload" type="button" class="btn btn-outline-secondary">Reload</button>
@@ -423,26 +424,7 @@
             <input id="ctfd-port" type="number" class="form-control" placeholder="443" title="CTFd port" />
           </div>
         </div>
-        <fieldset class="mb-3">
-          <legend class="form-label mb-2">Authentication</legend>
-          <div class="form-check form-check-inline">
-            <input class="form-check-input" type="radio" name="ctfd-auth-mode" id="ctfd-auth-token" value="token" checked onchange="updateCtfdAuthMode()">
-            <label class="form-check-label" for="ctfd-auth-token">API token</label>
-          </div>
-          <div class="form-check form-check-inline">
-            <input class="form-check-input" type="radio" name="ctfd-auth-mode" id="ctfd-auth-password" value="password" onchange="updateCtfdAuthMode()">
-            <label class="form-check-label" for="ctfd-auth-password">Username &amp; password</label>
-          </div>
-        </fieldset>
-        <div class="mb-3" id="ctfd-token-fields">
-          <label class="form-label" title="CTFd API Token (recommended)">API Token</label>
-          <div class="input-group">
-            <input id="ctfd-token" type="password" class="form-control" placeholder="ctfd_..." />
-            <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" data-target="ctfd-token" title="Show">&#x1F576;&#xFE0E;</button>
-          </div>
-          <div class="form-text">Use an admin API token for user creation and deletion.</div>
-        </div>
-        <div class="row g-2 mb-3 d-none" id="ctfd-password-fields">
+        <div class="row g-2 mb-3" id="ctfd-password-fields">
           <div class="col-md-6">
             <label class="form-label" for="ctfd-username">Username</label>
             <input id="ctfd-username" autocomplete="username" class="form-control" placeholder="admin" />

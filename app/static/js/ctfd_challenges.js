@@ -206,13 +206,7 @@
   function readCtfdCreds(pid){
     try {
       const key = `toolhub.session.ctfd.${pid}`;
-      // Prefer same-origin cookie so auth stays in sync with the manager page and other popups.
-      let fromCookie = null;
-      try {
-        const m = document.cookie.match(new RegExp('(?:^|; )'+key.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'=([^;]*)'));
-        if (m) fromCookie = JSON.parse(decodeURIComponent(m[1]||''));
-      } catch { fromCookie = null; }
-      // Next, local sessionStorage
+      // Read this tab's session, then the manager tab when opened as a popup.
       let obj = {};
       try { obj = JSON.parse(sessionStorage.getItem(key)||'{}'); } catch { obj = {}; }
       // Fallback to opener's sessionStorage when opened as popup
@@ -224,12 +218,11 @@
         } catch { fromOpener = null; }
       }
       const merged = {
-        username: String(obj?.username || fromCookie?.username || fromOpener?.username || '').trim(),
-        password: String(obj?.password || fromCookie?.password || fromOpener?.password || ''),
-        token: String(fromCookie?.token || obj?.token || fromOpener?.token || '').trim(),
-        validated: !!((fromCookie && fromCookie.validated !== undefined) ? fromCookie.validated : (obj?.validated !== undefined ? obj.validated : fromOpener?.validated)),
+        username: String(obj?.username || fromOpener?.username || '').trim(),
+        password: String(obj?.password || fromOpener?.password || ''),
+        validated: !!(obj?.validated !== undefined ? obj.validated : fromOpener?.validated),
       };
-      if (merged.token || merged.username || merged.password) {
+      if (merged.username && merged.password) {
         try { sessionStorage.setItem(key, JSON.stringify(merged)); } catch {}
       }
       return merged;
@@ -242,14 +235,9 @@
       const payload = {
         username: String(obj?.username || '').trim(),
         password: String(obj?.password || ''),
-        token: String(obj?.token || '').trim(),
         validated: !!obj?.validated,
       };
       try { sessionStorage.setItem(key, JSON.stringify(payload)); } catch {}
-      try {
-        const secure = (location.protocol === 'https:') ? '; Secure' : '';
-        document.cookie = `${key}=${encodeURIComponent(JSON.stringify({ token: payload.token, validated: payload.validated }))}; Path=/; SameSite=Lax${secure}`;
-      } catch {}
       try {
         if (window.opener && window.opener.sessionStorage) {
           window.opener.sessionStorage.setItem(key, JSON.stringify(payload));
@@ -263,23 +251,18 @@
       if (window.CREDS?.readPersistCtfdCreds) {
         const value = window.CREDS.readPersistCtfdCreds(String(pid || '')) || {};
         return {
-          token: String(value.token || '').trim(),
           username: String(value.username || '').trim(),
           password: String(value.password || ''),
         };
       }
-      return { token: String(window.CREDS?.readPersistCtfdToken?.(String(pid || '')) || '').trim(), username: '', password: '' };
+      return { username: '', password: '' };
     } catch {
       return {};
     }
   }
-  function readPersistedCtfdToken(pid){ return String(readPersistedCtfdCreds(pid).token || ''); }
   function ctfdAuthPayload(creds){
     const value = creds || {};
-    const token = String(value.token || '').trim();
-    return token
-      ? { token, username: '', password: '' }
-      : { token: '', username: String(value.username || '').trim(), password: String(value.password || '') };
+    return { username: String(value.username || '').trim(), password: String(value.password || '') };
   }
 
   async function hydrateCtfdCredsFromPersisted(pid, options){
@@ -287,12 +270,12 @@
     const projectId = String(pid || '').trim();
     if (!projectId) return readCtfdCreds(projectId);
     let sess = readCtfdCreds(projectId) || {};
-    if (sess?.token || (sess?.username && sess?.password)) return sess;
+    if (sess?.username && sess?.password) return sess;
     try {
       if (!opts.skipFetch) await window.CREDS?.fetchProjectSecrets?.(projectId);
     } catch {}
     const persisted = readPersistedCtfdCreds(projectId);
-    if (!(persisted.token || (persisted.username && persisted.password))) return sess;
+    if (!(persisted.username && persisted.password)) return sess;
     sess = { ...sess, ...persisted, validated: true };
     writeCtfdCreds(projectId, sess);
     return sess;
@@ -414,11 +397,9 @@
         const current = readCtfdCreds(String(m.pid)) || {};
         const persisted = readPersistedCtfdCreds(String(m.pid));
         const auth = {
-          token: current.token || persisted.token || '',
           username: current.username || persisted.username || '',
           password: current.password || persisted.password || '',
         };
-        const passwordMode = !auth.token && !!(auth.username || auth.password);
         return `
         <div class="card">
           <div class="card-body">
@@ -441,20 +422,6 @@
                 <div class="form-check mb-2">
                   <input class="form-check-input" type="checkbox" data-pid="${m.pid}" data-field="verify" ${ctfdProjectVerifySSL(byId[String(m.pid)]) ? 'checked' : ''}>
                   <label class="form-check-label">Verify SSL</label>
-                </div>
-              </div>
-              <div class="col-md-4">
-                <label class="form-label">Authentication</label>
-                <select class="form-select" data-pid="${m.pid}" data-field="auth">
-                  <option value="token"${passwordMode ? '' : ' selected'}>API token</option>
-                  <option value="password"${passwordMode ? ' selected' : ''}>Username &amp; password</option>
-                </select>
-              </div>
-              <div class="col-md-8">
-                <label class="form-label">API Token</label>
-                <div class="input-group">
-                  <input type="password" class="form-control ctfd-token-input" data-pid="${m.pid}" data-field="token" placeholder="ctfd_..." value="${escapeHtml(auth.token)}">
-                  <button class="btn btn-outline-secondary" type="button" data-act="toggle-visible" title="Show">&#x1F576;&#xFE0E;</button>
                 </div>
               </div>
               <div class="col-md-6">
@@ -481,7 +448,7 @@
               CREDS.fetchProjectSecrets(String(pid)).then(()=>{
                 try {
                   const saved = readPersistedCtfdCreds(String(pid));
-                  ['token', 'username', 'password'].forEach(field => {
+                  ['username', 'password'].forEach(field => {
                     const inp = document.querySelector(`#ctfdLoginList [data-pid="${CSS.escape(String(pid))}"][data-field="${field}"]`);
                     if (inp && !inp.value && saved[field]) inp.value = saved[field];
                   });
@@ -801,7 +768,7 @@
           invalid.push(name);
           needsSetup.set(String(pid), { pid: String(pid), name });
         }
-        if (!(creds.token || (creds.username && creds.password))) {
+        if (!(creds.username && creds.password)) {
           missing.push({ pid: String(pid), name });
           needsSetup.set(String(pid), { pid: String(pid), name });
         }
@@ -1124,7 +1091,7 @@
             const pid = String(inp.getAttribute('data-pid') || '');
             const field = String(inp.getAttribute('data-field') || '');
             if (!pid || !field) return;
-            if (!entries.has(pid)) entries.set(pid, { url: '', port: 443, auth: 'token', token: '', username: '', password: '', verify: true });
+            if (!entries.has(pid)) entries.set(pid, { url: '', port: 443, username: '', password: '', verify: true });
             const obj = entries.get(pid);
             if (field === 'verify') obj.verify = !!inp.checked;
             else if (field === 'port') obj.port = Number(inp.value || 443);
@@ -1137,12 +1104,10 @@
           for (const [pid, entry] of entries.entries()) {
             const normUrl = normalizeUrl(entry.url || '');
             const port = Number(entry.port || 443) || 443;
-            const auth = entry.auth === 'password'
-              ? { token: '', username: String(entry.username || '').trim(), password: String(entry.password || '') }
-              : { token: String(entry.token || '').trim(), username: '', password: '' };
+            const auth = { username: String(entry.username || '').trim(), password: String(entry.password || '') };
             const verify = !!entry.verify;
             const proj = (PROJECTS || []).find(p => String(p?.id) === String(pid)) || await loadProject(pid);
-            if (!normUrl || !(auth.token || (auth.username && auth.password))) { failCount += 1; continue; }
+            if (!normUrl || !(auth.username && auth.password)) { failCount += 1; continue; }
             const patch = {};
             if (proj) {
               if (normUrl !== String(proj.challenge_url || '').trim()) patch.challenge_url = normUrl;
@@ -1174,8 +1139,6 @@
               try {
                 if (window.CREDS && typeof CREDS.setPersistCtfdCreds === 'function') {
                   await CREDS.setPersistCtfdCreds(String(pid), auth, persist);
-                } else if (window.CREDS && typeof CREDS.setPersistCtfdToken === 'function') {
-                  await CREDS.setPersistCtfdToken(String(pid), auth.token, persist);
                 }
               } catch {}
               okCount += 1;

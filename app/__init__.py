@@ -1,7 +1,7 @@
 import os
 import tempfile
 from dotenv import load_dotenv
-from flask import Flask, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
 _DOTENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
 
@@ -599,7 +599,35 @@ def create_app():
     # Register blueprints
     from .routes.api import api_bp
     app.register_blueprint(api_bp, url_prefix="/api")
-    # Optional plugins are imported and registered only when enabled at startup.
+    # Built-in integrations stay enabled for existing installations unless disabled.
+    def plugin_enabled(name, default):
+        return os.environ.get(name, default).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    ctfd_enabled = plugin_enabled('CTFD_PLUGIN_ENABLE', '1')
+    ctfrpg_enabled = plugin_enabled('CTFRPG_PLUGIN_ENABLE', '1')
+    app.config['CTFD_PLUGIN_ENABLE'] = ctfd_enabled
+    app.config['CTFRPG_PLUGIN_ENABLE'] = ctfrpg_enabled
+
+    @app.before_request
+    def block_disabled_integrations():
+        path = request.path
+        if not ctfd_enabled and (
+            path.startswith('/api/ctfd/')
+            or (path.startswith('/api/projects/') and '/ctfd/' in path)
+            or path in ('/static/ctfd_manager.html', '/static/ctfd_challenges.html')
+        ):
+            return jsonify({'error': 'CTFd plugin is disabled'}), 404
+        if not ctfrpg_enabled and (
+            (path.startswith('/api/projects/') and '/ctfrpg/' in path)
+            or path == '/static/ctfrpg_manager.html'
+        ):
+            return jsonify({'error': 'CTF-RPG plugin is disabled'}), 404
+        if not ctfd_enabled and path == '/api/test/credentials' and request.is_json:
+            body = request.get_json(silent=True) or {}
+            if isinstance(body, dict) and body.get('ctfd'):
+                return jsonify({'error': 'CTFd plugin is disabled'}), 404
+
+    # Optional agent plugin is imported and registered only when enabled at startup.
     agent_enabled = os.environ.get('AGENT_PLUGIN_ENABLE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
     app.config['AGENT_PLUGIN_ENABLE'] = agent_enabled
     app.config['ORCHESTRATION_PERMISSIONS_ENABLE'] = os.environ.get(
@@ -611,7 +639,14 @@ def create_app():
 
     @app.get('/api/plugins')
     def plugins():
-        return {'plugins': [{'name': 'agent', 'script': '/static/js/agent_plugin.js?v=20261015-agent-tabs'}] if agent_enabled else []}
+        enabled = []
+        if agent_enabled:
+            enabled.append({'name': 'agent', 'script': '/static/js/agent_plugin.js?v=20261015-agent-tabs'})
+        if ctfd_enabled:
+            enabled.append({'name': 'ctfd'})
+        if ctfrpg_enabled:
+            enabled.append({'name': 'ctfrpg'})
+        return {'plugins': enabled}
 
     @app.get('/api/features')
     def features():

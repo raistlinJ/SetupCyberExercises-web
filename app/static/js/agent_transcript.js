@@ -84,11 +84,37 @@
       element.classList.toggle('d-none', !!guestSelect.value && element.dataset.transcriptGuest !== guestSelect.value);
     });
   }
-  const labels = { system_prompt: 'System prompt', prompt: 'Prompt', assignment: 'Assignment', turn_start: 'Model request', reasoning: 'Reasoning returned by endpoint', response: 'Model response', tool_name: 'Tool requested', tool_arguments: 'Tool arguments (streaming)', tool_start: 'Tool call', tool_result: 'Tool result', rubric: 'Rubric', error: 'Error', status: 'Status', usage: 'Usage', guest_complete: 'Guest finished' };
+  const labels = { system_prompt: 'System prompt', prompt: 'Prompt', assignment: 'Assignment', turn_start: 'Model request', reasoning: 'Reasoning returned by endpoint', response: 'Model response', tool_start: 'Tool call', tool_result: 'Tool result', rubric: 'Rubric', error: 'Error', status: 'Status', usage: 'Usage', guest_complete: 'Guest finished' };
+  const label = key => key.replaceAll('_', ' ').replace(/^./, first => first.toUpperCase());
+  function formatData(value, depth = 0) {
+    if (value === null || value === undefined) return '';
+    if (Array.isArray(value)) return value.map((item, index) => `${'  '.repeat(depth)}${index + 1}. ${formatData(item, depth + 1).trimStart()}`).join('\n');
+    if (typeof value === 'object') return Object.entries(value).map(([key, item]) => {
+      const prefix = `${'  '.repeat(depth)}${label(key)}:`;
+      if (item && typeof item === 'object') return `${prefix}\n${formatData(item, depth + 1)}`;
+      return `${prefix} ${String(item ?? '')}`;
+    }).join('\n');
+    return String(value);
+  }
+  function eventText(event) {
+    if (event.kind === 'turn_start') return event.text || '';
+    if (event.kind === 'rubric' && event.data?.criteria) {
+      const criteria = event.data.criteria.map(criterion =>
+        `${criterion.criterion} — ${criterion.status} — ${criterion.score}/${criterion.max_score}\nEvidence: ${criterion.evidence}\nFeedback: ${criterion.feedback}`);
+      return [event.data.summary || event.text, ...criteria].filter(Boolean).join('\n\n');
+    }
+    if (event.kind === 'usage' && typeof event.text === 'string') {
+      try { return formatData(JSON.parse(event.text)); } catch { /* Some endpoints already send text. */ }
+    }
+    return [event.text || '', formatData(event.data)].filter(Boolean).join('\n');
+  }
   function append(event) {
     if (seen.has(event.id)) return;
     seen.add(event.id); events.push(event); addGuest(event);
-    const streaming = ['reasoning', 'response', 'tool_name', 'tool_arguments'].includes(event.kind);
+    // Tool arguments arrive as JSON fragments; the parsed tool_start event below
+    // shows the same information as readable text when the call is complete.
+    if (['tool_name', 'tool_arguments'].includes(event.kind)) return;
+    const streaming = ['reasoning', 'response'].includes(event.kind);
     const key = JSON.stringify([guestKey(event), event.turn, event.kind, event.toolCallIndex]);
     let block = streaming ? blocks.get(key) : null;
     if (!block) {
@@ -103,7 +129,7 @@
       const pre = document.createElement('pre'); contentHost.appendChild(pre); body.appendChild(section);
       block = { section, pre }; if (streaming) blocks.set(key, block);
     }
-    block.pre.appendChild(document.createTextNode((event.text || '') + (event.data !== null && event.data !== undefined ? '\n' + JSON.stringify(event.data, null, 2) : '') + (event.truncated ? '\n[Preview truncated; full output is retained in the report ZIP.]' : '')));
+    block.pre.appendChild(document.createTextNode(eventText(event) + (event.truncated ? '\n[Preview truncated; full output is retained in the report ZIP.]' : '')));
     applyFilter();
   }
   async function observe(runVersion) {

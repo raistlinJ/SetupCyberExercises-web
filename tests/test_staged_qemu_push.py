@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from app.routes.api import _push_staged_tar_to_qemu
+from app.qemu_guest_stream import build_host_script
 
 
 @pytest.mark.parametrize('failure', [None, 'exit', 'timeout', 'host'])
@@ -36,7 +37,12 @@ def test_host_script_streams_binary_chunks_and_checks_guest_results(tmp_path, fa
             exec(compile(args[2], '<host script>', 'exec'), {})
         return 0, '', ''
 
-    with patch('app.routes.api._ssh_exec_result', side_effect=ssh):
+    def script(config):
+        return build_host_script({**config, 'agent_socket': str(tmp_path / 'missing.qga'),
+                                  'lock_path': str(tmp_path / 'guest.lock')})
+
+    with patch('app.routes.api._ssh_exec_result', side_effect=ssh), \
+            patch('app.routes.api.build_host_script', side_effect=script):
         if failure:
             with pytest.raises(RuntimeError):
                 _push_staged_tar_to_qemu(None, {'vmid': 101}, str(archive), len(content), '/models', True, 'secret')

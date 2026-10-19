@@ -75,6 +75,7 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
             const elements = new Map();
             const document = {{
               body: makeElement('body'),
+              documentElement: {{ dataset: {{ ctfdPlugin: 'on', ctfrpgPlugin: 'on' }} }},
               addEventListener() {{}},
               removeEventListener() {{}},
               dispatchEvent() {{ return true; }},
@@ -179,6 +180,55 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
                 f'STDOUT:\n{result.stdout}\n'
                 f'STDERR:\n{result.stderr}'
             )
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
+    def test_wizard_ctfrpg_selection_respects_enabled_plugin(self):
+        harness = textwrap.dedent(
+            """
+            (async () => {
+              const input = document.getElementById('proj-name');
+              const calls = [];
+              input.value = 'RPG Lab';
+              document.getElementById('wiz-users').value = '1';
+              document.getElementById('wiz-feat-vm').checked = false;
+              document.getElementById('wiz-feat-ctfd').checked = true;
+              document.getElementById('wiz-feat-ctfrpg').checked = true;
+              document.getElementById('wiz-act-ctfrpg-users').checked = true;
+              document.getElementById('wiz-ctfrpg-url').value = 'https://rpg.local';
+              document.getElementById('wiz-ctfrpg-username').value = 'rpg-admin';
+              document.getElementById('wiz-ctfrpg-password').value = 'rpg-password';
+              document.getElementById('wiz-ctfrpg-verify').checked = false;
+              document.documentElement.dataset.ctfdPlugin = 'off';
+              document.documentElement.dataset.ctfrpgPlugin = 'on';
+              currentWizardStep = 5;
+              loadProjects = async () => {};
+              startWizardJobStatusPolling = () => () => {};
+              showToast = () => {};
+              http = async (method, url, body) => {
+                calls.push({ method, url, body });
+                if (url === '/api/projects') return { id: 'rpg-lab', name: 'RPG Lab' };
+                if (url === '/api/projects/rpg-lab/secrets') return { ok: true };
+                if (url === '/api/projects/rpg-lab/ctfrpg/users_create') return { ok: true, created: 1, results: [] };
+                throw new Error(`Unexpected request: ${method} ${url}`);
+              };
+              await window.submitProjectCreation('wizard');
+              const project = calls.find(call => call.url === '/api/projects');
+              if (project.body.ctfrpg_url !== 'https://rpg.local' || project.body.challenge_url) throw new Error('Only enabled integration settings should be saved');
+              const secrets = calls.find(call => call.url.endsWith('/secrets'));
+              if (secrets.body.ctfrpg.username !== 'rpg-admin' || secrets.body.ctfrpg.password !== 'rpg-password' || secrets.body.ctfd) throw new Error('Only enabled integration credentials should be saved');
+              const create = calls.find(call => call.url.endsWith('/ctfrpg/users_create'));
+              if (!create || create.body.verifySSL !== false) throw new Error('Selected CTF-RPG users should be created');
+
+              calls.length = 0;
+              input.value = 'Disabled RPG Lab';
+              document.documentElement.dataset.ctfrpgPlugin = 'off';
+              await window.submitProjectCreation('wizard');
+              if (calls.length !== 1 || calls[0].url !== '/api/projects') throw new Error('Disabled plugin should not run integration actions');
+              if (calls[0].body.ctfrpg_url) throw new Error('Disabled plugin should not save integration settings');
+            })();
+            """
+        )
+        self._run_node_regression(harness)
 
     @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
     def test_wizard_create_runs_vm_manager_style_followups(self):

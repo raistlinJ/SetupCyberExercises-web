@@ -64,7 +64,41 @@ class CtfdCredentialsApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn('token or username/password', (response.get_json() or {}).get('error', ''))
+        self.assertIn('username and password', (response.get_json() or {}).get('error', ''))
+
+    def test_project_login_rejects_token_only_credentials(self):
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+             patch('app.routes.api.CTFdClient') as client_cls:
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/ctfd/login',
+                json={'token': 'legacy-token'},
+            )
+        self.assertEqual(response.status_code, 400)
+        client_cls.assert_not_called()
+
+    def test_project_login_uses_saved_username_and_password(self):
+        client = Mock()
+        client.session = object()
+        client.logs = []
+        client.login_with_credentials.return_value = (True, 'ok')
+        client.get_current_user.return_value = {'name': 'admin'}
+        client.get_role.return_value = 'admin'
+        secrets = Mock()
+        secrets.get_enc.return_value = {
+            'ctfd_username_enc': 'admin', 'ctfd_password_enc': 'secret',
+            'ctfd_token_enc': 'legacy-token',
+        }
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+             patch('app.routes.api._user_secrets_store', return_value=secrets), \
+             patch('app.routes.api._effective_secrets_username', return_value='admin'), \
+             patch('app.routes.api._dec_secret', side_effect=lambda _key, value: value), \
+             patch('app.routes.api.CTFdClient', return_value=client) as client_cls:
+            response = self.client.post(f'/api/projects/{self.project.id}/ctfd/login', json={})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        client_cls.assert_called_once_with(
+            base_url='https://ctfd.example.test', token='', verify_ssl=True
+        )
+        client.login_with_credentials.assert_called_once_with('admin', 'secret')
 
     def test_create_users_reports_that_stock_ctfd_requires_admin(self):
         self.project.credentials = [{'username': 'student', 'password': 'student-password'}]
@@ -84,6 +118,25 @@ class CtfdCredentialsApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn('admin account is required', (response.get_json() or {}).get('error', ''))
+
+    def test_empty_user_selection_does_not_contact_ctfd(self):
+        self.project.credentials = [{'username': 'student', 'password': 'student-password'}]
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+             patch('app.routes.api._ctfd_client_from_req') as factory:
+            created = self.client.post(f'/api/projects/{self.project.id}/ctfd/users_create', json={'only': []})
+            deleted = self.client.post(f'/api/projects/{self.project.id}/ctfd/users_delete', json={'only': []})
+            checked = self.client.post(f'/api/projects/{self.project.id}/ctfd/users_check', json={'only': []})
+        self.assertEqual(created.get_json()['results'], [])
+        self.assertEqual(deleted.get_json()['results'], [])
+        self.assertEqual(checked.get_json()['users'], [])
+        factory.assert_not_called()
+
+    def test_invalid_user_selection_is_rejected(self):
+        self.project.credentials = [{'username': 'student', 'password': 'student-password'}]
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)):
+            for action in ('users_create', 'users_delete', 'users_check'):
+                response = self.client.post(f'/api/projects/{self.project.id}/ctfd/{action}', json={'only': 'student'})
+                self.assertEqual(response.status_code, 400)
 
 
 if __name__ == '__main__':

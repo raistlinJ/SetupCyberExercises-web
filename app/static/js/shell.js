@@ -522,6 +522,21 @@ function ensureSidebarToggleControl() {
 function getCurrentProjectId() {
   try { return localStorage.getItem(CURRENT_PROJECT_KEY) || ''; } catch { return ''; }
 }
+
+async function loadIntegrationPlugins() {
+  try {
+    const response = await fetch('/api/plugins', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('Could not load plugins');
+    const data = await response.json();
+    const names = new Set((data.plugins || []).map(plugin => plugin.name));
+    document.documentElement.dataset.ctfdPlugin = names.has('ctfd') ? 'on' : 'off';
+    document.documentElement.dataset.ctfrpgPlugin = names.has('ctfrpg') ? 'on' : 'off';
+  } catch {
+    document.documentElement.dataset.ctfdPlugin = 'off';
+    document.documentElement.dataset.ctfrpgPlugin = 'off';
+  }
+  document.documentElement.dataset.pluginsReady = 'true';
+}
 function setCurrentProjectId(id) {
   const pid = String(id || '').trim();
   try {
@@ -601,6 +616,7 @@ async function renderSidebarProjects(activeTab) {
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
 
 async function initShell(activeTab) {
+  await loadIntegrationPlugins();
   try { _installRemoteModeGuards(); } catch {}
   ensureSidebarToggleControl();
   applySidebarCollapseState(_sidebarCollapsed);

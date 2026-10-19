@@ -13,7 +13,7 @@ DeployForge focuses on fast project setup with an opinionated UI. The sections b
 ## CTFd Manager & Challenges Popup
 
 - Token-first integration with session (cookie) fallback, surfacing upstream errors with actionable hints.
-- Manager tab lets you update CTFd base URL/port and API token plus toggle global visibility (where the upstream supports it).
+- Manager tab lets you update the CTFd base URL, port, username, and password, plus toggle global visibility (where the upstream supports it).
 - Challenges popup (opened from the CTFd Manager) includes:
   - Column sorting with indicators and regex-capable filtering across every column (invalid regex strings auto-fallback to plain text).
   - Visibility badges, row selection with bulk Set Visible/Hidden, and per-row toggle buttons.

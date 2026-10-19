@@ -16,6 +16,8 @@ def env_file(monkeypatch, tmp_path):
     monkeypatch.setenv("USERS_FILE", str(tmp_path / "users.json"))
     monkeypatch.setenv("AUTH_ENABLE", "0")
     monkeypatch.delenv("AGENT_PLUGIN_ENABLE", raising=False)
+    monkeypatch.delenv("CTFD_PLUGIN_ENABLE", raising=False)
+    monkeypatch.delenv("CTFRPG_PLUGIN_ENABLE", raising=False)
     monkeypatch.delenv("ORCHESTRATION_PERMISSIONS_ENABLE", raising=False)
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.delenv("PORT", raising=False)
@@ -39,7 +41,7 @@ def test_shell_can_disable_plugin_enabled_in_dotenv(env_file, monkeypatch):
     app = application.create_app()
     assert app.config["AGENT_PLUGIN_ENABLE"] is False
     assert app.secret_key == "shell-secret"
-    assert app.test_client().get("/api/plugins").get_json() == {"plugins": []}
+    assert {entry["name"] for entry in app.test_client().get("/api/plugins").get_json()["plugins"]} == {"ctfd", "ctfrpg"}
 
 
 def test_dotenv_loads_before_configuration_from_other_working_directory(env_file, monkeypatch, tmp_path):
@@ -58,7 +60,7 @@ def test_missing_dotenv_keeps_plugin_disabled_by_default(env_file):
     assert not env_file.exists()
     app = application.create_app()
     assert app.config["AGENT_PLUGIN_ENABLE"] is False
-    assert app.test_client().get("/api/plugins").get_json() == {"plugins": []}
+    assert {entry["name"] for entry in app.test_client().get("/api/plugins").get_json()["plugins"]} == {"ctfd", "ctfrpg"}
 
 
 def test_default_dotenv_location_is_project_root():

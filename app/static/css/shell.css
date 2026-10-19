@@ -732,3 +732,9 @@ body.console-dock-open #agentModal .modal-dialog { height: calc(100% - var(--con
 .agent-running .bi-robot { color: #60a5fa !important; animation: agent-running-pulse 1.2s ease-in-out infinite; }
 @keyframes agent-running-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .agent-running .bi-robot { animation: none; } }
+html:not([data-plugins-ready]) [data-plugin="ctfd"],
+html:not([data-plugins-ready]) [data-plugin="ctfrpg"],
+html[data-ctfd-plugin="off"] [data-plugin="ctfd"],
+html[data-ctfrpg-plugin="off"] [data-plugin="ctfrpg"] {
+  display: none !important;
+}

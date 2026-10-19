@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeployForge — CTF-RPG Manager</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/css/shell.css?v=20261013-integrations" rel="stylesheet">
+  <link rel="icon" href="/static/favicon.ico">
+  <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</head>
+<body class="shell-body">
+<header class="app-banner">
+  <div class="container-fluid d-flex align-items-center justify-content-between py-2">
+    <div class="d-flex align-items-center gap-2">
+      <span aria-hidden="true" class="banner-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="3" stroke="white" stroke-width="1.5"/><circle cx="19" cy="5" r="3" stroke="white" stroke-width="1.5"/><circle cx="12" cy="19" r="3" stroke="white" stroke-width="1.5"/><line x1="7.5" y1="6.5" x2="16.5" y2="6.5" stroke="white" stroke-width="1.5"/><line x1="10.2" y1="9.2" x2="6.8" y2="16.2" stroke="white" stroke-width="1.5"/><line x1="13.8" y1="9.2" x2="17.2" y2="16.2" stroke="white" stroke-width="1.5"/></svg></span>
+      <span class="banner-title">DeployForge</span>
+    </div>
+    <div class="d-flex align-items-center gap-3" id="banner-user-region" style="min-width:260px;justify-content:flex-end;">
+      <div id="banner-user-label" class="small text-white-50">User: <span id="banner-username" class="text-white">…</span></div>
+      <div class="dropdown"><button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown">Menu</button><ul class="dropdown-menu dropdown-menu-end"><li><a class="dropdown-item" href="/" data-act="open-settings">Settings</a></li><li><a class="dropdown-item" href="/static/admin_users.html">Users</a></li><li><hr class="dropdown-divider"></li><li><button class="dropdown-item text-danger" id="banner-logout" type="button">Logout</button></li></ul></div>
+    </div>
+  </div>
+  <div class="banner-overlay" aria-hidden="true"></div>
+</header>
+<div class="container-fluid shell-container"><div class="row g-0">
+  <aside class="col-12 col-md-3 col-lg-2 shell-sidebar bg-light d-flex flex-column">
+    <div class="p-2 border-bottom d-flex gap-2"><input id="proj-name" class="form-control form-control-sm" placeholder="New project name" title="Project name"><button id="create-project" class="btn btn-sm btn-primary" type="button">Add</button></div>
+    <div id="sidebar-projects" class="flex-grow-1"></div>
+  </aside>
+  <main class="col-12 col-md-9 col-lg-10 shell-content p-3">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <ul class="nav nav-pills flex-nowrap">
+        <li class="nav-item"><a class="nav-link" data-shell-link href="/">Configuration</a></li>
+        <li class="nav-item"><a class="nav-link" data-shell-link href="/static/vm_manager.html">VM Manager</a></li>
+        <li class="nav-item" data-plugin="ctfd"><a class="nav-link" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a></li>
+        <li class="nav-item" data-plugin="ctfrpg"><a class="nav-link active" aria-current="page" data-shell-link href="/static/ctfrpg_manager.html">CTF-RPG Manager</a></li>
+        <li class="nav-item"><a class="nav-link" data-shell-link href="/static/exports.html">Exports</a></li>
+        <li class="nav-item"><a id="game-link" class="nav-link d-none fw-semibold border border-secondary rounded-pill px-2 py-1 text-nowrap" target="_blank" rel="noopener noreferrer" title="Open this project's CTF-RPG UI">Server: —</a></li>
+      </ul>
+      <div class="d-flex align-items-center gap-2"><div class="btn-group btn-group-sm" role="group" aria-label="Projects selection"><button id="choose-projects" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#projects-modal" type="button" title="Choose one or more projects">Projects <span id="projects-count" class="badge bg-secondary ms-1">0</span></button></div></div>
+    </div>
+    <div class="card"><div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+        <div class="input-group input-group-sm" style="max-width:460px">
+          <span class="input-group-text">Filter</span>
+          <input id="filter" type="text" class="form-control" placeholder="Text or RegExp (when enabled)" title="Filter rows by text; enable Regex for advanced matching">
+          <span class="input-group-text"><input id="filter-regex" class="form-check-input mt-0" type="checkbox" title="Treat filter as JavaScript RegExp (case-insensitive)" aria-label="Regex"><span class="ms-1">Regex</span></span>
+          <button id="clear-filter" class="btn btn-outline-secondary" type="button" title="Clear filter">Clear</button>
+        </div>
+        <span id="filter-error" class="text-danger small d-none">Invalid regular expression</span>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <button id="connection-button" class="btn btn-sm btn-outline-primary" type="button" title="Update CTF-RPG URL and credentials">Re-authenticate to CTF-RPG</button>
+          <button id="refresh-button" class="btn btn-sm btn-outline-secondary" type="button">Refresh States</button>
+          <div class="input-group input-group-sm" style="width:200px"><label class="input-group-text" for="auto-interval">Auto</label><select id="auto-interval" class="form-select" title="Automatically refresh at an interval"><option value="0" selected>Off</option><option value="15">15s</option><option value="30">30s</option><option value="60">60s</option><option value="300">5m</option></select></div>
+          <span id="auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
+          <div class="btn-group btn-group-sm ms-2"><button id="columns-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">Columns</button><ul id="columns-menu" class="dropdown-menu p-2 small" style="min-width:190px"><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="project">Project</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="user" checked>User</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="team" checked>Team</label></li><li><hr class="dropdown-divider"></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="user_points" checked>User Points</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="team_points" checked>Team Points</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="character" checked>Character</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="completed" checked>Completed</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="state" checked>State</label></li></ul></div>
+          <button id="export-button" class="btn btn-sm btn-outline-secondary ms-2" type="button" title="Download table data as CSV">Download Data</button>
+        </div>
+      </div>
+      <div class="d-flex flex-wrap gap-2 mb-3 align-items-center" id="ctfrpg-actions-bar">
+        <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">Users</button><ul class="dropdown-menu"><li><button id="create-users" class="dropdown-item" type="button">Create / update</button></li><li><button id="delete-users" class="dropdown-item text-danger" type="button">Delete</button></li></ul></div>
+        <button id="select-visible" class="btn btn-sm btn-outline-secondary" type="button">Select visible</button>
+        <button id="clear-selection" class="btn btn-sm btn-outline-secondary" type="button">Clear selection</button>
+        <span id="selected-count" class="small text-muted">0 selected</span>
+        <div class="d-flex align-items-center gap-2 flex-wrap ms-auto"><label class="small text-muted text-nowrap" for="hero">Character for new users</label><select id="hero" class="form-select form-select-sm" style="width:170px"><option value="">Game default</option></select></div>
+      </div>
+      <ul class="nav nav-tabs" role="tablist">
+        <li class="nav-item" role="presentation"><button class="nav-link active" id="users-tab" data-bs-toggle="tab" data-bs-target="#users-pane" type="button" role="tab" aria-controls="users-pane" aria-selected="true">CTF-RPG Management</button></li>
+        <li class="nav-item" role="presentation"><button class="nav-link" id="notifications-tab" data-bs-toggle="tab" data-bs-target="#notifications-pane" type="button" role="tab" aria-controls="notifications-pane" aria-selected="false">Notifications</button></li>
+      </ul>
+      <div class="tab-content pt-3">
+        <div class="tab-pane fade show active" id="users-pane" role="tabpanel" aria-labelledby="users-tab" tabindex="0">
+          <div id="status" class="small mb-3 text-muted" role="status" aria-live="polite">Select a project to get started.</div>
+          <div id="project-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status" aria-live="polite" aria-label="Selected users per project"></div>
+      <div class="table-responsive data-scrollbox"><table class="table table-sm table-hover align-middle"><thead><tr>
+        <th scope="col" data-col="project"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="project">Project<span class="sort-icon"></span></button></th>
+        <th scope="col" data-col="user"><input id="select-all" class="form-check-input me-2" type="checkbox" aria-label="Select visible users"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="user">User<span class="sort-icon"></span></button><button class="btn btn-sm btn-link p-0 ms-2 sort-mode" type="button" data-mode="user" title="Toggle User sort between name and rank" aria-label="Toggle User sort between name and rank">⇅</button></th>
+        <th scope="col" data-col="team"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="team">Team<span class="sort-icon"></span></button><button class="btn btn-sm btn-link p-0 ms-2 sort-mode" type="button" data-mode="team" title="Toggle Team sort between name and rank" aria-label="Toggle Team sort between name and rank">⇅</button></th>
+        <th scope="col" data-col="user_points"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="user_points">User Points<span class="sort-icon"></span></button></th>
+        <th scope="col" data-col="team_points"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="team_points">Team Points<span class="sort-icon"></span></button></th>
+        <th scope="col" data-col="character"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="character">Character<span class="sort-icon"></span></button></th>
+        <th scope="col" data-col="completed"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="completed">Completed<span class="sort-icon"></span></button></th>
+        <th scope="col" data-col="state"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="state">State<span class="sort-icon"></span></button></th>
+      </tr></thead><tbody id="users-body"><tr><td colspan="8" class="text-muted">No project selected.</td></tr></tbody></table></div>
+        </div>
+    <div class="tab-pane fade" id="notifications-pane" role="tabpanel" aria-labelledby="notifications-tab">
+      <div class="border rounded p-3 mb-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+          <div><div class="fw-semibold">Notification audio</div><div class="small text-muted">Browser alerts for changes seen during refresh. Select from uploaded audio files (Settings → Media Manager).</div></div>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Notification audio actions"><button id="notify-stop" class="btn btn-outline-secondary" type="button">Stop audio</button><button id="notify-reload" class="btn btn-outline-secondary" type="button">Reload</button><button id="notify-save" class="btn btn-outline-primary" type="button">Save</button></div>
+        </div>
+        <div id="notify-status" class="small text-muted mt-2" role="status" aria-live="polite">Select a project to configure notification audio.</div>
+        <div class="table-responsive mt-2"><table class="table table-sm align-middle mb-0"><thead><tr><th style="width:110px">Enabled</th><th>Event</th><th>Audio</th></tr></thead><tbody id="notify-rows"><tr><td colspan="3" class="small text-muted">Select a project to configure notification audio.</td></tr></tbody></table></div>
+        <div class="small text-muted mt-2">Speech templates can use <code>{{project}}</code>, <code>{{user}}</code>, <code>{{team}}</code>, <code>{{score}}</code>, <code>{{points}}</code>, and <code>{{completed}}</code>. Audio plays in this browser while the manager is open; use Preview once to allow browser playback. Stop audio cancels active and queued alerts.</div>
+      </div>
+    </div>
+    </div>
+    </div></div>
+  </main>
+</div></div>
+<div class="modal fade" id="projects-modal" tabindex="-1" aria-labelledby="projects-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h2 id="projects-title" class="modal-title h5">Projects to manage</h2><button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div class="small text-muted mb-2">Choose one or more projects. Each project needs its own CTF-RPG connection.</div><div id="projects-list"></div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Done</button></div></div></div></div>
+<div class="modal fade" id="connection-modal" tabindex="-1" aria-labelledby="connection-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h2 id="connection-title" class="modal-title h5">CTF-RPG connection</h2><button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div id="connection-project" class="small text-muted mb-3"></div><label for="game-url" class="form-label">Game URL</label><input id="game-url" class="form-control mb-3" type="url" placeholder="https://game.example.com"><label for="game-username" class="form-label">Admin username</label><input id="game-username" class="form-control mb-3" type="text" autocomplete="username"><label for="game-password" class="form-label">Admin password</label><input id="game-password" class="form-control mb-3" type="password" autocomplete="current-password"><div class="form-check"><input id="verify-ssl" class="form-check-input" type="checkbox" checked><label for="verify-ssl" class="form-check-label">Verify TLS certificate</label></div><div id="connection-status" class="small mt-3" role="status" aria-live="polite"></div></div><div class="modal-footer"><button id="test-connection" class="btn btn-outline-primary" type="button">Test connection</button><button id="save-connection" class="btn btn-primary" type="button">Save connection</button></div></div></div></div>
+<div class="modal fade" id="actionSummaryModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header"><h2 id="action-summary-title" class="modal-title h5">Action results</h2><button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div id="action-summary-body" class="modal-body"></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div></div></div></div>
+<div class="modal fade" id="actionProgressModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h2 id="action-progress-title" class="modal-title h5">Working…</h2><button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div id="action-progress-text" class="small mb-2" aria-live="polite"></div><div class="progress"><div id="action-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">Starting…</div></div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Hide</button></div></div></div></div>
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/shell.js?v=20261015-collective-mode"></script>
+<script src="/static/js/creds.js"></script>
+<script src="/static/js/ctfrpg_audio.js?v=20261019-notifications"></script>
+<script src="/static/js/ctfrpg_table.js?v=20261019-unified"></script>
+<script src="/static/js/ctfrpg_manager.js?v=20261019-unified"></script>
+</body>
+</html>

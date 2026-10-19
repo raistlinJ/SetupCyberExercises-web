@@ -178,7 +178,7 @@ test('wizard captures dynamically created project references and per-template ac
   const steps = sandbox.buildServerWizardSteps({ name: 'lab', instances: 1, vms: [{ name: 'public' }, { name: 'private' }] }, {
     createVms: true, createCtfdUsers: true,
     createOptions: { enableUserAccessibility: true, createUsersAndPerms: false, startVm: true },
-  }, { vmUser: 'u', vmPass: 'p', ctfdToken: 't' });
+  }, { vmUser: 'u', vmPass: 'p', ctfdUser: 'admin', ctfdPass: 'secret' });
   assert.equal(steps[0].url, '/api/projects');
   assert(steps.slice(1).every(step => step.projectFromStep === 0));
   const patches = steps.filter(step => step.method === 'PATCH');
@@ -189,6 +189,68 @@ test('wizard captures dynamically created project references and per-template ac
   assert.equal(syncs[0].body.enable, true);
   assert.equal(syncs[1].body.enable, false);
   assert.equal(steps.at(-1).url, '/api/projects/$project/ctfd/users_create');
+  assert.equal(steps.at(-1).body.username, 'admin');
+  assert.equal(steps.at(-1).body.password, 'secret');
+  assert.equal(steps.find(step => step.url.endsWith('/secrets')).body.ctfd.username, 'admin');
+});
+
+test('wizard queues CTF-RPG credentials and user creation only when selected', () => {
+  const sandbox = {};
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync('app/static/js/server_workflows.js', 'utf8'), sandbox);
+  const payload = { name: 'lab', ctfrpg_url: 'https://rpg.local', ctfrpg_verify_ssl: false };
+  const steps = sandbox.buildServerWizardSteps(payload, { createCtfrpgUsers: true }, { ctfrpgUser: 'admin', ctfrpgPass: 'secret' });
+  assert.equal(steps[1].url, '/api/projects/$project/secrets');
+  assert.equal(steps[1].body.ctfrpg.username, 'admin');
+  assert.equal(steps[1].body.ctfrpg.password, 'secret');
+  assert.equal(steps[2].url, '/api/projects/$project/ctfrpg/users_create');
+  assert.equal(steps[2].body.baseUrl, 'https://rpg.local');
+  assert.equal(steps[2].body.verifySSL, false);
+  assert.equal(sandbox.buildServerWizardSteps(payload, {}, {}).length, 1);
+});
+
+test('CTFd bulk deletion sends an empty only-list for projects without selected users', async () => {
+  let submitted;
+  const sandbox = {
+    CTFD_SELECTED_KEYS: new Set(['one:1']),
+    CTFD_ALL_PROJECTS: [
+      {id: 'one', name: 'One', credentials: [{username: 'alice'}]},
+      {id: 'two', name: 'Two', credentials: [{username: 'bob'}]},
+    ],
+    hydrateCtfdCredsFromPersisted: async () => ({}),
+    ctfdAuthPayload: () => ({}), ctfdProjectVerifySSL: () => true,
+    ServerQueue: {
+      submit: async (_, steps) => { submitted = steps; return {id: 1}; },
+      wait: async () => ({}),
+      nativeFetch: async () => ({json: async () => ({results: [{}, {}]})}),
+    },
+    escHtml: value => value, buildCtfdResultsSummary: () => '',
+    showActionSummary() {}, ctfdRefreshMulti: async () => {},
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync('app/static/js/server_workflows.js', 'utf8'), sandbox);
+  await sandbox.submitServerCtfdBulk('users_delete', ['one', 'two']);
+  assert.deepEqual(Array.from(submitted[0].body.only), ['alice']);
+  assert.deepEqual(Array.from(submitted[1].body.only), []);
+});
+
+test('wizard integration visibility follows discovered plugins', async () => {
+  const html = fs.readFileSync('app/static/index.html', 'utf8');
+  for (const name of ['ctfd', 'ctfrpg']) {
+    assert.match(html, new RegExp(`data-plugin="${name}"[^>]*>\\s*<input[^>]*id="wiz-feat-${name}"`));
+  }
+  const shell = fs.readFileSync('app/static/js/shell.js', 'utf8');
+  const source = shell.slice(shell.indexOf('async function loadIntegrationPlugins()'), shell.indexOf('function setCurrentProjectId(', shell.indexOf('async function loadIntegrationPlugins()')));
+  const document = { documentElement: { dataset: {} } };
+  const sandbox = { document, fetch: async () => ({ ok: true, json: async () => ({ plugins: [{ name: 'ctfrpg' }] }) }) };
+  vm.createContext(sandbox); vm.runInContext(source, sandbox);
+  await sandbox.loadIntegrationPlugins();
+  assert.equal(document.documentElement.dataset.ctfdPlugin, 'off');
+  assert.equal(document.documentElement.dataset.ctfrpgPlugin, 'on');
+  sandbox.fetch = async () => { throw new Error('offline'); };
+  await sandbox.loadIntegrationPlugins();
+  assert.equal(document.documentElement.dataset.ctfdPlugin, 'off');
+  assert.equal(document.documentElement.dataset.ctfrpgPlugin, 'off');
 });
 
 test('queue progress renders each job independently, escapes status, and handles unknown percentages', () => {

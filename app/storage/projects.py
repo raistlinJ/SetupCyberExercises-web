@@ -375,6 +375,8 @@ class Project:
     challenge_url: str = "https://challenges.localhost"
     challenge_port: int = 443
     challenge_verify_ssl: bool = True
+    ctfrpg_url: str = ""
+    ctfrpg_verify_ssl: bool = True
     instances: int = 10
     tag: str = "-set-"
     vnc_start_port: int = 6000

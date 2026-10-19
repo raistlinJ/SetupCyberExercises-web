@@ -106,7 +106,7 @@ def test_disabled_plugin_has_no_routes(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_PLUGIN_ENABLE", "0")
     app = create_app()
     client = app.test_client()
-    assert client.get("/api/plugins").get_json() == {"plugins": []}
+    assert "agent" not in {entry["name"] for entry in client.get("/api/plugins").get_json()["plugins"]}
     assert client.post("/api/plugins/agent/models", json={}).status_code == 404
     assert client.post("/api/plugins/agent/collective", json={}).status_code == 404
     assert client.post("/api/projects/p/instances/actions/agent", json={}).status_code == 404
@@ -179,6 +179,8 @@ def test_grade_selected_guest_and_keep_archive(harness, monkeypatch):
         assert secret not in result["markdown"]
     with zipfile.ZipFile(io.BytesIO(base64.b64decode(result["outputs_zip"]["base64"]))) as archive:
         assert "rubrics.md" in archive.namelist()
+        assert "reports.txt" in archive.namelist()
+        assert "Required file" in archive.read("reports.txt").decode()
         assert "results.html" in archive.namelist()
         page = archive.read("results.html").decode()
         assert "Checked x.py" in page
@@ -187,8 +189,12 @@ def test_grade_selected_guest_and_keep_archive(harness, monkeypatch):
         assert f"{prefix}/transcript.json" in archive.namelist()
         assert "remote-password" not in archive.read(f"{prefix}/transcript.json").decode()
         assert f"{prefix}/rubric.md" in archive.namelist()
+        assert f"{prefix}/report.txt" in archive.namelist()
+        assert "Evidence: test -f /home/student/x.py exited 0" in archive.read(f"{prefix}/report.txt").decode()
         assert f"{prefix}/report.json" in archive.namelist()
-        assert "STDOUT:" in archive.read(f"{prefix}/output.log").decode()
+        output_log = archive.read(f"{prefix}/output.log").decode()
+        assert "STDOUT:" in output_log
+        assert "Exitcode: 0" in output_log
 
 
 def test_vm_and_lxc_have_independent_conversations(harness, monkeypatch):

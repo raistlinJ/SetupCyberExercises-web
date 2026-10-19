@@ -56,6 +56,9 @@ class UserSecretsStore:
                 "proxmox_username_enc",
                 "proxmox_password_enc",
                 "ctfd_token_enc",
+                "ctfrpg_token_enc",
+                "ctfrpg_username_enc",
+                "ctfrpg_password_enc",
                 "ctfd_username_enc",
                 "ctfd_password_enc",
             ):
@@ -86,6 +89,9 @@ class UserSecretsStore:
                     "proxmox_username_enc",
                     "proxmox_password_enc",
                     "ctfd_token_enc",
+                    "ctfrpg_token_enc",
+                    "ctfrpg_username_enc",
+                    "ctfrpg_password_enc",
                     "ctfd_username_enc",
                     "ctfd_password_enc",
                 )):
@@ -102,6 +108,9 @@ class UserSecretsStore:
         proxmox_username_enc: Optional[str] = None,
         proxmox_password_enc: Optional[str] = None,
         ctfd_token_enc: Optional[str] = None,
+        ctfrpg_token_enc: Optional[str] = None,
+        ctfrpg_username_enc: Optional[str] = None,
+        ctfrpg_password_enc: Optional[str] = None,
         ctfd_username_enc: Optional[str] = None,
         ctfd_password_enc: Optional[str] = None,
     ) -> None:
@@ -131,6 +140,12 @@ class UserSecretsStore:
                 entry["proxmox_password_enc"] = str(proxmox_password_enc or "")
             if ctfd_token_enc is not None:
                 entry["ctfd_token_enc"] = str(ctfd_token_enc or "")
+            if ctfrpg_token_enc is not None:
+                entry["ctfrpg_token_enc"] = str(ctfrpg_token_enc or "")
+            if ctfrpg_username_enc is not None:
+                entry["ctfrpg_username_enc"] = str(ctfrpg_username_enc or "")
+            if ctfrpg_password_enc is not None:
+                entry["ctfrpg_password_enc"] = str(ctfrpg_password_enc or "")
             if ctfd_username_enc is not None:
                 entry["ctfd_username_enc"] = str(ctfd_username_enc or "")
             if ctfd_password_enc is not None:
@@ -141,6 +156,9 @@ class UserSecretsStore:
                 "proxmox_username_enc",
                 "proxmox_password_enc",
                 "ctfd_token_enc",
+                "ctfrpg_token_enc",
+                "ctfrpg_username_enc",
+                "ctfrpg_password_enc",
                 "ctfd_username_enc",
                 "ctfd_password_enc",
             )):

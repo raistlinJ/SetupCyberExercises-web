@@ -37,9 +37,17 @@ transferred size, separately from the batch count. Archive preparation and
 extraction show indeterminate progress. LXC downloads temporarily stage an
 archive in the guest so the download size is known, then remove it. Staged archives are removed when the batch finishes. QEMU host-side
 copies require `python3`, `qm`, a working guest agent, and root/sudo access on
-the Proxmox host. Without an SSH password, QEMU retains the separate per-guest
-API transfer. The host-side QEMU copy uses bounded stdin chunks below the
-[Proxmox CLI's 1 MiB limit](https://lists.proxmox.com/pipermail/pve-devel/2020-February/041977.html).
+the Proxmox host. With host SSH access, a QEMU copy holds one guest-agent socket
+connection and one guest file handle open for the whole archive. Bounded file-write
+frames carry the bytes without starting a guest shell or polling a command for each
+chunk. This works without guest networking, guest SSH, or additional guest packages.
+The socket is released before `qm` extracts the archive. Uploads to the same VM are
+serialized on the host; copies to different guests still obey Max Jobs. The temporary
+guest archive is cleaned up on success, with cleanup attempted on cancellation or failure. If the guest-agent
+file commands are unavailable during preflight, the Queue shows compatible mode
+and uses the former bounded-stdin transport. Failed or partial streaming writes are
+reported as errors, not retried through another transport. Without a Proxmox SSH
+password, QEMU retains the separate per-guest API transfer.
 
 ## Quick start (Docker)
 
@@ -138,7 +146,7 @@ Security Notes:
 ## Using the CTFd Manager & Challenges popup
 
 1) Open the app and select a project, then click the "CTFd" tab.
-2) Click "Authenticate to CTFd" and paste an Admin/Teacher API token; Save and let it validate.
+2) Click "Authenticate to CTFd" and enter an Admin/Teacher username and password; save and let it validate.
 3) From the CTFd dropdown, choose "Challenges" to open the popup.
 4) In the popup:
 - Use the text filter to search across name/category, solves, points, visibility, team/user names, and counts.
@@ -150,7 +158,9 @@ Security Notes:
 
 Notes:
 - Sort, filter text, and the Include Hidden / Regex / Detailed Solves toggles are remembered per project for this browser session.
-- If you lack permissions, the popup will show hints; ensure the token has sufficient role.
+- If you lack permissions, the popup will show hints; use an account with sufficient permissions.
+
+The manager's **Notifications** tab saves browser audio and speech settings per project. The first successful refresh establishes a silent baseline; later refreshes detect leaderboard changes, the first observed score, and category first solves. Enable auto refresh to monitor these changes continuously. Periodic announcements use their own timer and do not fetch new CTFd data. Notifications play one at a time; use a template's Preview button to check playback in your browser.
 
 ## Screenshots
 
@@ -226,6 +236,23 @@ Policies are stored as a separate JSON object in Proxmox VM Notes:
 Human notes, scenario metadata and credentials are preserved. Updates use the Proxmox configuration digest when available so concurrent edits are rejected instead of overwritten. Only authorized administrators should edit these policies or have Proxmox VM-note write access.
 
 `cit_vm_accessor` enforces the policy on the server: downloads check it before each chunk; SPICE uploads are inspected by the bridge and checked at transfer start and during transfer. Missing or unreadable policy denies transfers. Existing VMs without policy remain disabled until configured. Reconnect an already-open console after enabling a previously disabled upload policy. SPICE and QEMU guest agents are still required for their respective directions, and download users still need the Proxmox guest-agent file-read privilege. This does not grant new Proxmox privileges or govern clipboard text and external clients.
+
+## CTF platform plugins
+
+CTFd and CTF-RPG are built-in plugins. Both are enabled by default so existing
+projects continue to work. To disable either integration, put these settings in
+the project-root `.env` and restart DeployForge:
+
+```dotenv
+CTFD_PLUGIN_ENABLE=0
+CTFRPG_PLUGIN_ENABLE=1
+```
+
+Use `1` to enable and `0` to disable either plugin. Explicit environment
+variables override `.env`; Docker Compose passes both settings to the app.
+Disabling a plugin hides its manager, Configuration fields, and wizard controls,
+and its integration routes and manager pages return 404. Stored project settings
+and credentials are retained for re-enabling later.
 
 ## Optional agent plugin
 
