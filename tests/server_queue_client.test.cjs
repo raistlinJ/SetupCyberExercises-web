@@ -7,8 +7,9 @@ const plans = fs.readFileSync('app/static/js/server_vm_actions.js', 'utf8');
 
 function browser(fetch) {
   const window = { fetch, location: { href: 'http://localhost/vm-manager', origin: 'http://localhost' }, shell: { logError() {} } };
+  window.queueEvents = [];
   window.window = window;
-  const sandbox = { window, document: { dispatchEvent() {} }, CustomEvent: class {}, Headers, FormData, Blob, URL,
+  const sandbox = { window, document: { dispatchEvent(event) { window.queueEvents.push(event); } }, CustomEvent: class {}, Headers, FormData, Blob, URL,
     setTimeout: fn => setTimeout(fn, 0), setInterval() {}, console };
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
@@ -16,6 +17,132 @@ function browser(fetch) {
 }
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+const deferred = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+};
+const job = (id, status = 'queued', revision = 0) => ({ id, label: 'Repeated label', status, revision, createdAt: id * 1000 });
+
+test('polling individual jobs never changes FIFO order or queued timestamps', async () => {
+  let reads = 0;
+  const window = browser(async url => url === '/api/queue'
+    ? json({ items: [job(3), job(1), job(2)] })
+    : json({ ...job(1, ++reads === 1 ? 'queued' : 'completed', reads), createdAt: 999999 }));
+  await window.ServerQueue.refresh();
+  assert.deepEqual(Array.from(window.ServerQueue.state().items, item => item.id), [1, 2, 3]);
+  await window.ServerQueue.wait({ id: 1 }, state => {
+    assert.equal(state.createdAt, 1000);
+    if (state.status === 'queued') assert.deepEqual(Array.from(window.ServerQueue.state().items, item => item.id), [1, 2, 3]);
+  });
+  assert.deepEqual(Array.from(window.ServerQueue.state().items, item => item.id), [2, 3]);
+});
+
+test('a delayed list cannot revert completed jobs or their newer progress', async () => {
+  const delayed = deferred();
+  let lists = 0;
+  const window = browser(async url => {
+    if (url === '/api/queue') return ++lists === 1 ? json({ items: [job(1)] }) : delayed.promise;
+    return json({ ...job(1, 'completed', 3), progress: 100, startedAt: 2000, finishedAt: 3000 });
+  });
+  await window.ServerQueue.refresh();
+  const refresh = window.ServerQueue.refresh();
+  await window.ServerQueue.wait({ id: 1 });
+  delayed.resolve(json({ items: [{ ...job(1, 'running', 1), progress: 10 }] }));
+  await refresh;
+  const state = window.ServerQueue.state();
+  assert.equal(state.activeItems.length, 0);
+  assert.equal(state.completed[0].progress, 100);
+  assert.equal(state.completed[0].createdAt, 1000);
+  assert.equal(state.completed[0].finishedAt, 3000);
+});
+
+test('a list started before submission cannot erase newly accepted work', async () => {
+  const delayed = deferred();
+  const window = browser(async (url, options = {}) => options.method === 'POST'
+    ? json(job(7), 202) : delayed.promise);
+  const refresh = window.ServerQueue.refresh();
+  await window.ServerQueue.submit('work', [{ url: '/api/work', method: 'POST' }]);
+  delayed.resolve(json({ items: [] }));
+  await refresh;
+  assert.deepEqual(Array.from(window.ServerQueue.state().items, item => item.id), [7]);
+});
+
+test('a late submission acknowledgement cannot revert an already running job', async () => {
+  const accepted = deferred();
+  let lists = 0;
+  const window = browser(async (url, options = {}) => options.method === 'POST'
+    ? accepted.promise : json({ items: ++lists === 1 ? [] : [job(1, 'running', 2)] }));
+  await window.ServerQueue.refresh();
+  const submit = window.ServerQueue.submit('work', [{ url: '/api/work', method: 'POST' }]);
+  await window.ServerQueue.refresh();
+  accepted.resolve(json(job(1), 202));
+  await submit;
+  assert.equal(window.ServerQueue.state().current.status, 'running');
+  assert.equal(window.ServerQueue.state().items.length, 0);
+});
+
+test('cleared history stays hidden when an old status response arrives late', async () => {
+  const delayed = deferred();
+  let cleared = false;
+  const window = browser(async url => {
+    if (url === '/api/queue/completed') { cleared = true; return json({ ok: true }); }
+    if (url === '/api/queue') return json({ items: cleared ? [] : [job(1, 'completed', 2)] });
+    return delayed.promise;
+  });
+  await window.ServerQueue.refresh();
+  const wait = window.ServerQueue.wait({ id: 1 });
+  await window.ServerQueue.clearCompleted();
+  delayed.resolve(json(job(1, 'completed', 2)));
+  await wait;
+  assert.equal(window.ServerQueue.state().completed.length, 0);
+});
+
+test('unchanged polls do not redraw and completed order stays newest first', async () => {
+  let revision = 0;
+  const window = browser(async () => json({ items: [job(1, 'completed', revision++), job(3, 'completed', 1), job(2)] }));
+  await window.ServerQueue.refresh();
+  const events = window.queueEvents.length;
+  await window.ServerQueue.refresh();
+  await window.ServerQueue.refresh();
+  assert.equal(window.queueEvents.length, events);
+  assert.deepEqual(Array.from(window.ServerQueue.state().completed, item => item.id), [3, 1]);
+});
+
+test('malformed snapshots preserve visible work and refresh can recover', async () => {
+  let calls = 0;
+  const window = browser(async () => json(++calls === 2 ? {} : { items: [job(1)] }));
+  await window.ServerQueue.refresh();
+  await assert.rejects(window.ServerQueue.refresh(), /Invalid queue snapshot/);
+  assert.equal(window.ServerQueue.state().items.length, 1);
+  await window.ServerQueue.refresh();
+  assert.equal(window.ServerQueue.state().items.length, 1);
+});
+
+test('a later authoritative snapshot can restore an item absent from an earlier list', async () => {
+  let calls = 0;
+  const window = browser(async () => json({ items: ++calls === 2 ? [] : [job(1)] }));
+  await window.ServerQueue.refresh();
+  await window.ServerQueue.refresh();
+  assert.equal(window.ServerQueue.state().items.length, 0);
+  await window.ServerQueue.refresh();
+  assert.equal(window.ServerQueue.state().items.length, 1);
+});
+
+test('server revisions order observations even when request start order differs', async () => {
+  const delayed = deferred();
+  let calls = 0;
+  const window = browser(async url => {
+    if (url === '/api/queue') return ++calls === 1 ? json({ items: [job(1)] }) : delayed.promise;
+    return json(job(1, 'completed', 2));
+  });
+  await window.ServerQueue.refresh();
+  const refresh = window.ServerQueue.refresh();
+  await window.ServerQueue.wait({ id: 1 });
+  delayed.resolve(json({ items: [{ ...job(1, 'completed', 3), summary: 'newer server data' }] }));
+  await refresh;
+  assert.equal(window.ServerQueue.state().completed[0].summary, 'newer server data');
+});
 
 test('waiting work is submitted immediately and a new page observes the same jobs', async () => {
   const accepted = [];

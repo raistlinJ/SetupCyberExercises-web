@@ -5927,7 +5927,7 @@ def instances_apply_scenario(pid: str):
     delay = float(getattr(proj, 'proxmox_update_delay_seconds', 0.5))
     total_mapped = len(mapped)
     if total_mapped > 0:
-        _job_emit_batch_progress(pid, 'applying', 'Applying Scenario', 0, total_mapped, message=f'Applying scenario notes… 0/{total_mapped} complete')
+        _job_emit_batch_progress(pid, 'applying', 'Set Credentials Metadata', 0, total_mapped, message=f'Setting credentials metadata… 0/{total_mapped} complete')
     
     # Map configurations by name for easy lookup
     cfg_map = {}
@@ -5937,7 +5937,7 @@ def instances_apply_scenario(pid: str):
             cfg_map[name.lower()] = cfg
 
     def do_apply(m):
-        _job_current(pid, 'scenario', 'Applying scenario notes to', m)
+        _job_current(pid, 'scenario', 'Setting credentials metadata on', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
             
@@ -6020,7 +6020,7 @@ def instances_apply_scenario(pid: str):
             finally:
                 if total_mapped > 0:
                     done = len(applied) + len(errors)
-                    _job_emit_batch_progress(pid, 'applying', 'Applying Scenario', done, total_mapped, current=str(m.get('name') or ''), message=f'Applied scenario step for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
+                    _job_emit_batch_progress(pid, 'applying', 'Set Credentials Metadata', done, total_mapped, current=str(m.get('name') or ''), message=f'Set credentials metadata for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'applied': applied, 'skipped': skipped, 'errors': errors })
 
@@ -9196,7 +9196,7 @@ def _transfer_bytes(direction, loaded, total=None):
 
 def _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
                              destination, use_sudo, password, owner=''):
-    """Run the host-to-guest copy on Proxmox; only the script crosses SSH."""
+    """Run a staged helper on Proxmox through a short SSH command."""
     guest_archive = f"/tmp/deployforge-qemu-push-{uuid.uuid4().hex}.tar"
     cancel_path = f"/tmp/deployforge-cancel-{uuid.uuid4().hex}"
     extract = (f"{_lxc_prepare_directory_command(destination, owner)} && "
@@ -9237,11 +9237,29 @@ def _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
                 raise RuntimeError(error or 'Could not signal transfer cancellation')
             cancelled = True
     _transfer_bytes('Copying to guest', 0, archive_size)
-    code, _, error = _ssh_exec_result(
-        ssh_client, f'python3 -c {shlex.quote(script)}',
-        timeout=transfer_timeout + 180,
-        sudo=use_sudo, sudo_password=password, on_stdout_line=report_line,
-    )
+    # Keep the program out of the SSH exec request and sudo command line.
+    # An inline launch can lose its SSH session on this host while the same
+    # program launched from a staged file completes successfully.
+    helper_path = f'/tmp/deployforge-qemu-helper-{uuid.uuid4().hex}.py'
+    sftp = ssh_client.open_sftp()
+    try:
+        with sftp.open(helper_path, 'wx') as helper:
+            sftp.chmod(helper_path, 0o600)
+            helper.write(script.encode('utf-8'))
+        code, _, error = _ssh_exec_result(
+            ssh_client, f'python3 {shlex.quote(helper_path)}',
+            timeout=transfer_timeout + 180,
+            sudo=use_sudo, sudo_password=password, on_stdout_line=report_line,
+        )
+    finally:
+        try:
+            sftp.remove(helper_path)
+        except Exception:
+            pass  # The SSH connection may already have been lost.
+        try:
+            sftp.close()
+        except Exception:
+            pass
     if cancelled:
         # Also remove a signal delivered just after the host's finally block.
         _ssh_exec_result(
@@ -9249,6 +9267,9 @@ def _push_staged_tar_to_qemu(ssh_client, entry, remote_archive, archive_size,
             sudo=use_sudo, sudo_password=password,
         )
         raise _GuestTransferCancelled('Transfer cancelled')
+    if code == -1:
+        raise RuntimeError('SSH connection closed without a transfer exit status; '
+                           'guest transfer completion is unknown')
     if code != 0:
         raise RuntimeError(error or f'Host-to-QEMU transfer exited with {code}')
 

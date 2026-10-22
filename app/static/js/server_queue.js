@@ -1,25 +1,68 @@
 // The browser submits complete work, then observes it. The server owns scheduling.
 (function () {
   const nativeFetch = window.fetch.bind(window);
-  let records = [];
+  const records = new Map();
+  let observation = 0;
+  let lastPublished = '';
   let context = null;
   let refreshing = null;
   const terminal = item => ['completed', 'error', 'cancelled'].includes(item.status);
-  const emit = () => document.dispatchEvent(new CustomEvent('remote-queue-changed'));
+  const visible = () => [...records.values()].filter(entry => !entry.hidden)
+    .map(entry => entry.item).sort((a, b) => a.id - b.id);
+  const emit = () => {
+    // Identical polling responses should not rebuild the queue DOM.
+    const signature = JSON.stringify(visible().map(({ revision, ...item }) => item));
+    if (signature === lastPublished) return;
+    lastPublished = signature;
+    document.dispatchEvent(new CustomEvent('remote-queue-changed'));
+  };
+  const stamp = value => Number.isFinite(Number(value)) && Number(value) > 0;
+  const rank = item => terminal(item) ? 2 : item.status === 'running' ? 1 : 0;
+  function merge(item, sequence, listed = false) {
+    const id = Number(item.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return item;
+    const previous = records.get(id);
+    const versioned = Number.isInteger(item.revision) && Number.isInteger(previous?.item.revision);
+    if (previous && ((versioned && item.revision < previous.item.revision)
+        || ((!versioned || item.revision === previous.item.revision) && sequence < previous.sequence)
+        || rank(item) < rank(previous.item))) return previous.item;
+    const next = { ...previous?.item, ...item, id };
+    // Submission/start times describe one event, never the latest poll.
+    for (const field of ['createdAt', 'startedAt', 'finishedAt']) {
+      if (stamp(previous?.item[field])) next[field] = previous.item[field];
+    }
+    const hidden = !!item.dismissed || (!!previous?.hidden && !listed
+      && (!versioned || item.revision <= previous.item.revision));
+    records.set(id, { item: next, sequence: Math.max(sequence, previous?.sequence || 0), hidden });
+    return next;
+  }
   const token = () => window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   async function refresh() {
     if (refreshing) return refreshing;
+    const sequence = ++observation;
     refreshing = (async () => {
-      const response = await nativeFetch('/api/queue', { credentials: 'same-origin' });
+      const response = await nativeFetch('/api/queue', { credentials: 'same-origin', cache: 'no-store' });
       if (!response.ok) return;
-      records = ((await response.json()).items || []).filter(item => item.label);
+      const payload = await response.json();
+      if (!Array.isArray(payload.items)) throw new Error('Invalid queue snapshot');
+      const items = payload.items.filter(item => item.label);
+      const present = new Set(items.map(item => Number(item.id)));
+      items.forEach(item => merge(item, sequence, true));
+      // An older list must not erase work accepted or updated while it loaded.
+      for (const [id, entry] of records) {
+        if (!present.has(id) && entry.sequence <= sequence) {
+          entry.hidden = true;
+          entry.sequence = sequence;
+        }
+      }
       emit();
     })().finally(() => { refreshing = null; });
     return refreshing;
   }
 
   async function submit(label, steps, options = {}, files = []) {
+    const sequence = ++observation;
     const plan = { label, steps, projectId: String(options.projectId || ''), token: options.token || token() };
     let body;
     const headers = {};
@@ -70,7 +113,7 @@
       if (!response.ok) throw new Error(await response.text());
       job = await response.json();
     }
-    records = records.filter(item => item.id !== job.id).concat(job);
+    merge(job, sequence);
     emit();
     return job;
   }
@@ -79,14 +122,14 @@
     for (;;) {
       // Network failures affect observation only; never resubmit accepted work.
       try {
-        const response = await nativeFetch(`/api/queue/${job.id}`, { credentials: 'same-origin' });
+        const sequence = ++observation;
+        const response = await nativeFetch(`/api/queue/${job.id}`, { credentials: 'same-origin', cache: 'no-store' });
         if (response.status === 401 || response.status === 403 || response.status === 404) {
           throw Object.assign(new Error('Cannot access queued action'), { terminal: true });
         }
         if (response.ok) {
-          const state = await response.json();
+          const state = merge(await response.json(), sequence);
           try { onUpdate?.(state); } catch (error) { window.shell?.logError?.(error.message || error); }
-          records = records.filter(item => item.id !== state.id).concat(state);
           emit();
           if (terminal(state)) return state;
         }
@@ -165,10 +208,11 @@
   }
 
   const state = () => {
-    const activeItems = records.filter(item => item.status === 'running');
+    const ordered = visible();
+    const activeItems = ordered.filter(item => item.status === 'running');
     return { active: !!activeItems.length, current: activeItems[0] || null, activeItems,
-      items: records.filter(item => item.status === 'queued'),
-      completed: records.filter(terminal).sort((a, b) => b.id - a.id) };
+      items: ordered.filter(item => item.status === 'queued'),
+      completed: ordered.filter(terminal).reverse() };
   };
 
   window.ServerQueue = { submit, wait, result, run, state, refresh, requestStep, nativeFetch, fetch: queuedFetch,

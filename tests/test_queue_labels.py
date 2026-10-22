@@ -34,7 +34,8 @@ def test_settings_label_uses_only_the_accessibility_flag():
 def test_existing_history_is_formatted_without_payload_or_replaying_actions():
     row = dict(id=1, label='PATCH /api/projects/p/vms/agentic-VM', project='p',
                status='completed', created=1, started=2, finished=3, cancel=0,
-               error='', step=1, total_steps=1, progress_state='{}')
+               error='', step=1, total_steps=1, progress_state='{}',
+               revision=0, dismissed=0, token='old-job', result=None)
     assert public_record(row)['label'] == 'Save VM settings · agentic-VM'
     assert row['label'].startswith('PATCH ')
 

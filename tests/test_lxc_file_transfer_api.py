@@ -42,6 +42,22 @@ class _Sftp:
     def __init__(self):
         self.uploads = {}
         self.removed = []
+        self.helpers = {}
+        self.helper_programs = []
+
+    def open(self, path, mode):
+        assert path.endswith('.py') and mode == 'wx'
+        content = io.BytesIO()
+        original_close = content.close
+        def close():
+            self.helpers[path] = content.getvalue()
+            self.helper_programs.append(content.getvalue().decode('utf-8'))
+            original_close()
+        content.close = close
+        return content
+
+    def chmod(self, path, mode):
+        assert path.endswith('.py') and mode == 0o600
 
     def putfo(self, stream, remote_path, file_size=None, callback=None):
         self.uploads[remote_path] = stream.read()
@@ -49,6 +65,9 @@ class _Sftp:
             callback(len(self.uploads[remote_path]), file_size)
 
     def remove(self, remote_path):
+        if remote_path.endswith('.py'):
+            self.helpers.pop(remote_path, None)
+            return
         self.removed.append(remote_path)
 
     def close(self):
@@ -438,6 +457,10 @@ class LxcFileTransferApiTests(unittest.TestCase):
                 self.assertEqual(body['pushed'][0]['file_permissions'], permissions)
                 if guest_type == 'qemu':
                     commands = ssh.commands + [call.kwargs['command'][-1] for call in prox.agent_exec.call_args_list]
+                    # Extraction now lives in the staged helper, launched
+                    # before the later guest-agent metadata commands.
+                    self.assertEqual(len(ssh.sftp.helper_programs), 1)
+                    commands[0] = ssh.sftp.helper_programs[0]
                 else:
                     # Unwrap the sudo/pct shell argument for exact path checks.
                     commands = [shlex.split(command)[-1] for command in ssh.commands]

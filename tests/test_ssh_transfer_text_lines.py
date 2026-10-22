@@ -19,7 +19,7 @@ def test_staged_push_accepts_text_and_binary_progress_and_stops_at_eof(text_line
     with patch.object(api, '_ssh_run_cmd', return_value=(stdout, io.BytesIO())), \
             patch.object(api, '_transfer_bytes') as progress:
         api._push_staged_tar_to_qemu(
-            None, {'vmid': 101}, '/tmp/archive.tar', 512, '/home/agentic', False, '')
+            MagicMock(), {'vmid': 101}, '/tmp/archive.tar', 512, '/home/agentic', False, '')
     assert stdout.readline.call_count == 3
     progress.assert_any_call('Copying to guest', 512, 512)
     progress.assert_any_call('Extracting in guest', 0)

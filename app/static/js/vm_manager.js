@@ -75,6 +75,37 @@ function _vmBuildProxmoxHref(proj) {
   }
 }
 
+function vmGuestProxmoxHref(proj, detail) {
+  const type = String(detail?.type || '').toLowerCase();
+  const vmid = Number(detail?.vmid);
+  if (!['qemu', 'lxc'].includes(type) || !Number.isSafeInteger(vmid) || vmid <= 0) return '';
+  const base = _vmBuildProxmoxHref(proj);
+  if (!base) return '';
+  try {
+    const url = new URL(base);
+    if (!['http:', 'https:'].includes(url.protocol)) return '';
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    // Proxmox's resource tree identifies guests by type/VMID across nodes.
+    // StateProvider order: view, rid, ltab, nodetab, storagetab, sdntab,
+    // pooltab, kvmtab, lxctab, dctab. VM console='console' (8), LXC='consolejs'.
+    const state = ['0', `=${encodeURIComponent(`${type}/${vmid}`)}`, '4', '', '', '', '',
+      type === 'qemu' ? '8' : '', type === 'lxc' ? '=consolejs' : '', ''];
+    url.hash = `v1:${state.join(':')}`;
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+function vmGuestNameLink(row, proj) {
+  const label = escHtml(row.vmName || '');
+  const href = vmGuestProxmoxHref(proj, row.detail);
+  if (!href) return label;
+  return `<a href="${escHtml(href)}" target="_blank" rel="noopener noreferrer" title="Open ${String(row.detail.type).toLowerCase() === 'lxc' ? 'LXC container' : 'VM'} console in Proxmox">${label}</a>`;
+}
+
 function vmFormatResourceBytes(value) {
   const bytes = Number(value);
   if (!Number.isFinite(bytes) || bytes < 0) return '—';
@@ -1770,7 +1801,7 @@ function renderMergedVmTable(rows) {
       html += `<tr>` +
         `<td><input type=\"checkbox\" class=\"row-chk\" data-key=\"${escHtml(key)}\" ${checked} /></td>` +
         (VM_COLS.project ? `<td><span class=\"badge bg-light text-dark\">${escHtml(r.project)}</span></td>` : '') +
-        (VM_COLS.name ? `<td>${escHtml(r.vmName)}${credApplyIcon}</td>` : '') +
+        (VM_COLS.name ? `<td>${vmGuestNameLink(r, (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(r.pid)) || (canonicalPid(PROJ?.id) === canonicalPid(r.pid) ? PROJ : null))}${credApplyIcon}</td>` : '') +
         (VM_COLS.cred ? (first ? `<td class="font-monospace" rowspan="${rowspan}">` +
           `<div class="d-flex align-items-center">` +
           `<div class="flex-grow-1">${credText}</div>` +
@@ -2637,7 +2668,7 @@ function renderVmTable(proj) {
       }
       html += `<tr>` +
         `<td><input type="checkbox" class="row-chk" data-key="${escHtml(r.key)}" ${checked} /></td>` +
-        (VM_COLS.name ? `<td>${escHtml(r.vmName)}${credApplyIcon}</td>` : '') +
+        (VM_COLS.name ? `<td>${vmGuestNameLink(r, PROJ)}${credApplyIcon}</td>` : '') +
         (VM_COLS.cred ? (first ? `<td class=\"font-monospace\" rowspan=\"${rowspan}\">` +
           `<div class=\"d-flex align-items-center\">` +
           `<div class=\"flex-grow-1\">${credText}</div>` +
@@ -4516,12 +4547,12 @@ async function runVmCreateFollowUpActions({ proj, targets, baseBody, createOptio
         requestTargets,
         setProgress,
         progress: 92,
-        label: 'Scenario…',
-        detail: `Applying scenario notes${contextLabel ? ` in ${contextLabel}` : ''}…`,
+        label: 'Credentials Metadata…',
+        detail: `Setting credentials metadata${contextLabel ? ` in ${contextLabel}` : ''}…`,
       });
       mergedResp = mergeVmActionSummaryData(mergedResp, scenarioResp);
     } catch (err) {
-      addFollowUpError('Scenario follow-up', err);
+      addFollowUpError('Credentials metadata follow-up', err);
     }
   }
 
@@ -4756,6 +4787,7 @@ function deriveCredsRepairTargetsFromChecked(checked) {
 
 function friendlyActionName(action) {
   const map = {
+    apply_scenario: 'Set Credentials Metadata',
     suspend: 'Pause',
     hibernate: 'Suspend',
     unlock: 'Unlock',
@@ -6892,7 +6924,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
         run_startup_cmds: ['Running…', 'Running startup commands', 'Ran startup cmds'],
         run_stored_cmds: ['Running…', 'Running stored commands', 'Ran stored cmds'],
         validate: ['Validating…', 'Running validation checks', 'Validated'],
-        apply_scenario: ['Applying…', 'Applying scenario notes', 'Applied scenario notes']
+        apply_scenario: ['Setting…', 'Setting credentials metadata', 'Credentials metadata set']
       };
       const [shortStart, longStart, pastTense] = verbMap[action] || ['Working…', 'Working', 'Done'];
       let validateSkipped = [];
@@ -7633,7 +7665,7 @@ async function vmActionMultiExec(action, opts = {}) {
         continue;
       }
       if (action === 'apply_scenario') {
-        setAp(Math.max(20, pct), 'Working…', `Applying Scenario Name in ${projName}…`);
+        setAp(Math.max(20, pct), 'Working…', `Setting credentials metadata in ${projName}…`);
         const requestPromise = makeReq(`/instances/actions/apply_scenario`, { ...baseBody, targets });
         let stopStatusPoll = null;
         if (vmActionShouldPollStatus(action) && typeof startVmActionStatusPolling === 'function') {

@@ -1974,6 +1974,7 @@ const ConsoleDock = (() => {
   }
 
   function renderQueue(){
+    const scrollTop = body?.scrollTop || 0;
     const openResults = new Set(Array.from(body?.querySelectorAll('details[data-queue-result][open]') || [], el => el.dataset.queueResult));
     pendingAgentResults.forEach(id => openResults.add(id)); pendingAgentResults.clear();
     if (!body) return;
@@ -2156,6 +2157,7 @@ const ConsoleDock = (() => {
     }
     html += '</div>';
     body.innerHTML = html;
+    body.scrollTop = scrollTop;
     body.querySelectorAll('details[data-queue-result]').forEach(details => {
       details.addEventListener('toggle', () => loadAgentReports(details));
       if (details.open) loadAgentReports(details);

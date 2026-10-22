@@ -7,7 +7,7 @@ ACTION_LABELS = {
     'create': 'Create VMs', 'delete': 'Delete VMs', 'start': 'Start VMs',
     'hibernate': 'Suspend VMs', 'suspend': 'Pause VMs', 'unlock': 'Unlock VMs', 'poweroff': 'Power off VMs',
     'snapshot': 'Create snapshots', 'restore': 'Restore snapshots',
-    'apply_scenario': 'Apply scenario settings', 'fix_ageing': 'Fix bridge ageing',
+    'apply_scenario': 'Set Credentials Metadata', 'fix_ageing': 'Fix bridge ageing',
     'purge_leftovers': 'Clean up remaining resources',
     'nets_set': 'Assign network interfaces', 'nets_assign': 'Assign network interfaces',
     'nets_remove': 'Remove network interfaces', 'nets_clear': 'Remove network interfaces',

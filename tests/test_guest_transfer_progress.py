@@ -130,7 +130,7 @@ def test_staged_push_cancel_waits_for_remote_cleanup():
     try:
         with patch.object(api, '_ssh_exec_result', side_effect=ssh):
             with pytest.raises(api._GuestTransferCancelled):
-                api._push_staged_tar_to_qemu(None, {'vmid': 101}, '/tmp/staged.tar', 2048, '/files', False, '')
+                api._push_staged_tar_to_qemu(MagicMock(), {'vmid': 101}, '/tmp/staged.tar', 2048, '/files', False, '')
     finally:
         del api._TRANSFER_PROGRESS.cancelled
     assert events == ['signal', 'remote cleanup finished', 'remove signal']
@@ -145,6 +145,6 @@ def test_staged_push_keeps_compatible_mode_visible_for_byte_progress():
         return 0, b'', ''
 
     with patch.object(api, '_ssh_exec_result', side_effect=ssh), patch.object(api, '_transfer_bytes') as progress:
-        api._push_staged_tar_to_qemu(None, {'vmid': 101}, '/tmp/staged.tar', 1024, '/files', False, '')
+        api._push_staged_tar_to_qemu(MagicMock(), {'vmid': 101}, '/tmp/staged.tar', 1024, '/files', False, '')
     progress.assert_any_call('Copying to guest (compatible mode)', 512, 1024)
     progress.assert_any_call('Copying to guest (compatible mode)', 1024, 1024)

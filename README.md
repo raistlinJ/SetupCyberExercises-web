@@ -14,6 +14,26 @@ has been accepted, switching pages, refreshing, closing the tab, or signing out
 does not stop it. The Queue dock reconnects to your running, waiting, and recent
 completed actions on every manager page. Complete VM, guest-transfer, wizard,
 and CTFd bulk plans are submitted together, including their follow-up steps.
+The dock keeps waiting/running items in submission order and completed history
+newest first. Queued/start timestamps stay attached to their job; individual
+polls do not move rows. Persisted revisions reject stale responses, and cached
+responses are disabled. Unchanged polls do not redraw the dock; progress updates
+preserve its scroll position and expanded results. Refreshing the page only
+reconnects to existing work and does not resubmit it.
+
+Push, Pull, and Custom Command dialogs each have a **History — last 5 runs**
+selector. History is saved on the server for the signed-in user when a run starts,
+including failed attempts; cancelled waiting jobs are excluded. Repeating the same
+settings moves that entry to the top. Custom history restores the complete command
+and timeout, pull history restores the paths, and push history restores the
+destination, file/folder mode, owner, and permissions. Push recall retains matching
+selected files and can restore the last five file/folder selections from the same
+open page. After a page reload, or if that selection is unavailable, choose the
+local files again. A different history entry never silently keeps unrelated files.
+Recall never submits an action or changes the currently selected guests.
+Connection credentials, target lists, and uploaded file contents are not stored
+in recall history. Existing completed jobs are not backfilled, and clearing the
+Queue's completed list leaves recall history available.
 
 The queue stores job metadata in `DATA_DIR/action_queue.sqlite3` and streams
 queued uploads to `DATA_DIR/queue_uploads` without loading whole files into RAM.
@@ -37,7 +57,9 @@ transferred size, separately from the batch count. Archive preparation and
 extraction show indeterminate progress. LXC downloads temporarily stage an
 archive in the guest so the download size is known, then remove it. Staged archives are removed when the batch finishes. QEMU host-side
 copies require `python3`, `qm`, a working guest agent, and root/sudo access on
-the Proxmox host. With host SSH access, a QEMU copy holds one guest-agent socket
+the Proxmox host. The app stages a private temporary Python helper and launches
+it with a short SSH command, then removes the helper. It avoids passing the full
+program inline through SSH and sudo. With host SSH access, a QEMU copy holds one guest-agent socket
 connection and one guest file handle open for the whole archive. Bounded file-write
 frames carry the bytes without starting a guest shell or polling a command for each
 chunk. This works without guest networking, guest SSH, or additional guest packages.
@@ -48,6 +70,9 @@ file commands are unavailable during preflight, the Queue shows compatible mode
 and uses the former bounded-stdin transport. Failed or partial streaming writes are
 reported as errors, not retried through another transport. Without a Proxmox SSH
 password, QEMU retains the separate per-guest API transfer.
+Disconnected SSH clients are discarded from the batch pool so one lost connection
+does not immediately fail later guests. A missing SSH exit status leaves the
+affected transfer's completion unknown; it is not automatically replayed.
 
 ## Quick start (Docker)
 

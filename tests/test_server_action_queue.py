@@ -198,6 +198,35 @@ def wait_terminal(client, job_id):
     pytest.fail('Worker did not finish')
 
 
+def test_queue_revisions_and_event_times_survive_progress_cancel_and_dismiss(harness):
+    app, client, started, release, *_ = harness
+    job = enqueue(client, 'first').get_json()
+    assert started.wait(2)
+    url = f"/api/queue/{job['id']}"
+    response = client.get(url)
+    running = response.get_json()
+    assert response.headers['Cache-Control'] == 'no-store'
+    assert client.get('/api/queue').headers['Cache-Control'] == 'no-store'
+    queue = app.extensions['action_queue']
+    report = queue.progress_reporter(job['id'], 1)
+    report({'progress': 40, 'current': 'vm-1'})
+    progress = client.get(url).get_json()
+    assert progress['revision'] > running['revision'] >= job['revision']
+    report({'progress': 40, 'current': 'vm-1'})
+    assert client.get(url).get_json()['revision'] == progress['revision']
+    client.post(url + '/cancel')
+    cancelling = client.get(url).get_json()
+    assert cancelling['revision'] > progress['revision']
+    release.set()
+    finished = wait_terminal(client, job['id'])
+    client.delete('/api/queue/completed')
+    dismissed = client.get(url).get_json()
+    assert dismissed['dismissed'] is True
+    assert dismissed['revision'] > finished['revision']
+    assert all(item['createdAt'] == job['createdAt'] for item in [running, progress, cancelling, finished, dismissed])
+    assert all(item['startedAt'] == running['startedAt'] for item in [progress, cancelling, finished, dismissed])
+
+
 @pytest.mark.parametrize('error_field', ['errors', 'network_apply_errors'])
 def test_partial_create_runs_permissions_and_other_followups_but_preserves_errors(harness, error_field):
     app, client, started, release, finished, calls = harness
@@ -528,7 +557,7 @@ def test_progress_schema_migration_preserves_existing_work(tmp_path):
         queue = ActionQueue(app)
         with queue.connect() as db:
             row = dict(db.execute('SELECT * FROM actions WHERE id=1').fetchone())
-        assert row == {'id': 1, 'status': 'queued', 'payload': 'accepted payload', 'progress_state': '{}', 'agent_state': '{}'}
+        assert row == {'id': 1, 'status': 'queued', 'payload': 'accepted payload', 'progress_state': '{}', 'agent_state': '{}', 'revision': 0}
 
 
 def test_upload_storage_uses_bounded_reads_and_cleans_duplicates(harness, monkeypatch):

@@ -249,12 +249,6 @@
                       title="Create new VMs based on the configuration">Create</button></li>
                   <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('delete')"
                       title="Delete the selected VMs from Proxmox">Delete</button></li>
-                  <li>
-                    <hr class="dropdown-divider" />
-                  </li>
-                  <li><button class="dropdown-item"
-                      title="Notes for vm to overwrite this json with latest saved info from scenario page"
-                      type="button" onclick="vmAction('apply_scenario')">Apply Scenario Name to VMs</button></li>
                 </ul>
               </div>
               <!-- Power group -->
@@ -331,7 +325,7 @@
               </div>
               <!-- Users & Access group -->
               <div class="btn-group btn-group-sm" id="users-group" data-bs-toggle="tooltip" data-bs-placement="top"
-                title="Creates a Proxmox user and pool for the credential username, and adds selected VMs as pool members.">
+                title="Manage users, pools, credentials metadata, and VM access.">
                 <button id="act-users" type="button" class="btn btn-outline-secondary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled>Users &amp; Access</button>
                 <ul class="dropdown-menu">
@@ -349,6 +343,8 @@
                       Sync</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_creds_set')"
                       title="Set selected Proxmox users, pools, memberships, and VM access to match the current credential list">Set Credentials to Current List</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('apply_scenario')"
+                      title="Write the current project and credential metadata to the selected VM notes">Set Credentials Metadata</button></li>
                   <li>
                     <hr class="dropdown-divider" />
                   </li>
@@ -461,8 +457,8 @@
             </div>
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" role="switch" id="vm-create-opt-scenario" checked>
-              <label class="form-check-label" for="vm-create-opt-scenario">Apply scenario name to VMs</label>
-              <div class="form-text">Applies the current scenario metadata to the selected VM notes after cloning.</div>
+              <label class="form-check-label" for="vm-create-opt-scenario">Set Credentials Metadata</label>
+              <div class="form-text">Writes the current project and credential metadata to the selected VM notes after cloning.</div>
             </div>
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" role="switch" id="vm-create-opt-network" checked>
@@ -528,6 +524,11 @@
           </div>
           <div class="modal-body">
             <div id="lxc-push-summary" class="text-muted small mb-3"></div>
+            <div class="mb-3">
+              <label class="form-label" for="lxc-push-history">History — last 5 runs</label>
+              <select id="lxc-push-history" class="form-select" disabled><option>No recent runs</option></select>
+              <div id="lxc-push-history-help" class="form-text" aria-live="polite">Recall settings and files selected while this page remains open. After reloading, choose the files again.</div>
+            </div>
             <fieldset class="mb-3">
               <legend class="form-label mb-2">Content type</legend>
               <div class="form-check form-check-inline">
@@ -591,6 +592,10 @@
           </div>
           <div class="modal-body">
             <div id="lxc-pull-summary" class="text-muted small mb-3"></div>
+            <div class="mb-3">
+              <label class="form-label" for="lxc-pull-history">History — last 5 runs</label>
+              <select id="lxc-pull-history" class="form-select" disabled><option>No recent runs</option></select>
+            </div>
             <div class="mb-2">
               <label class="form-label" for="lxc-pull-paths">Guest paths</label>
               <textarea id="lxc-pull-paths" class="form-control font-monospace" rows="6"
@@ -707,15 +712,16 @@
   <!-- Settings modal injected via creds.js -->
   <script src="/static/js/creds.js?v=20251116b"></script>
   <script src="/static/js/auth.js?v=20251116b"></script>
-  <script src="/static/js/shell.js?v=20261015-collective-mode"></script>
-  <script src="/static/js/server_queue.js?v=20260907e"></script>
+  <script src="/static/js/shell.js?v=20261020-stable-queue"></script>
+  <script src="/static/js/server_queue.js?v=20261020-stable-queue"></script>
   <script src="/static/js/server_workflows.js?v=20260907a"></script>
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
   <script src="/static/js/app.js?v=20261009-agent-parallel"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/static/js/orchestration_access.js?v=20261009-flags"></script>
-  <script src="/static/js/vm_manager.js?v=20261009-agent-live"></script>
+  <script src="/static/js/vm_manager.js?v=20261020-guest-console"></script>
+  <script src="/static/js/action_history.js?v=20261021-retain-files"></script>
   <script src="/static/js/server_vm_actions.js?v=20261004a"></script>
   <script src="/static/js/plugin_loader.js?v=20261015-agent-tabs"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
@@ -885,6 +891,10 @@
       </div>
       <div class="modal-body">
         <p id="custom-command-summary" class="small text-muted"></p>
+        <div class="mb-3">
+          <label class="form-label" for="custom-command-history">History — last 5 runs</label>
+          <select id="custom-command-history" class="form-select" disabled><option>No recent runs</option></select>
+        </div>
         <label for="custom-command-input" class="form-label">Command</label>
         <textarea id="custom-command-input" class="form-control font-monospace" rows="5" spellcheck="false" placeholder="Enter a command or script"></textarea>
         <label for="custom-command-timeout" class="form-label mt-3">Timeout (seconds)</label>

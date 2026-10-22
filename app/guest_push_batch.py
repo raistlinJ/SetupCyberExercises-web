@@ -19,9 +19,14 @@ class GuestPushBatch:
 
     @contextmanager
     def command_client(self, state, connect):
-        with state['lock']:
-            available = state.setdefault('available', [state['ssh']])
-            client = available.pop() if available else None
+        client = None
+        while True:
+            with state['lock']:
+                available = state.setdefault('available', [state['ssh']])
+                client = available.pop() if available else None
+            if client is None or self._active(client):
+                break
+            client.close()
         if client is None:
             client = connect()
             with state['lock']:
@@ -29,8 +34,19 @@ class GuestPushBatch:
         try:
             yield client
         finally:
-            with state['lock']:
-                state['available'].append(client)
+            if self._active(client):
+                with state['lock']:
+                    state['available'].append(client)
+            else:
+                client.close()
+
+    @staticmethod
+    def _active(client):
+        get_transport = getattr(client, 'get_transport', None)
+        if get_transport is None:
+            return True
+        transport = get_transport()
+        return transport is not None and transport.is_active()
 
     def close(self):
         for state in self.hosts.values():

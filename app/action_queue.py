@@ -25,6 +25,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.datastructures import MultiDict, FileStorage
 from .queue_labels import queue_label, request_label
 from .guest_push_batch import GuestPushBatch
+from .action_history import KINDS as HISTORY_KINDS, history_settings, init_history, recent, remember
 
 
 class ActionQueue:
@@ -37,6 +38,7 @@ class ActionQueue:
         self.thread = None
         self.stopped = threading.Event()
         with self.connect() as db:
+            init_history(db)
             db.execute('''CREATE TABLE IF NOT EXISTS actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL,
                 token TEXT NOT NULL, label TEXT NOT NULL, project TEXT NOT NULL,
@@ -58,6 +60,15 @@ class ActionQueue:
                 db.execute("ALTER TABLE actions ADD COLUMN progress_state TEXT NOT NULL DEFAULT '{}'")
             if 'agent_state' not in columns:
                 db.execute("ALTER TABLE actions ADD COLUMN agent_state TEXT NOT NULL DEFAULT '{}'")
+            if 'revision' not in columns:
+                db.execute('ALTER TABLE actions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0')
+            # Version every persisted change, including progress/cancellation,
+            # so overlapping browser reads cannot roll a job backwards.
+            db.execute('''CREATE TRIGGER IF NOT EXISTS actions_revision
+                AFTER UPDATE ON actions WHEN NEW.revision = OLD.revision
+                BEGIN
+                    UPDATE actions SET revision = OLD.revision + 1 WHERE id = NEW.id;
+                END''')
             upload_columns = {row['name'] for row in db.execute('PRAGMA table_info(uploads)')}
             if 'path' not in upload_columns:
                 db.execute('ALTER TABLE uploads ADD COLUMN path TEXT')
@@ -380,6 +391,13 @@ class ActionQueue:
                 report({'phase': 'starting', 'progress': None, 'current': '',
                         'message': f'Step {index + 1}/{len(payload["steps"])} · {operation}…'})
                 attempted_steps.append(step)
+                recalled = history_settings(step)
+                if recalled:
+                    try:
+                        with self.connect() as db:
+                            remember(db, row['owner'], *recalled)
+                    except Exception:
+                        self.app.logger.warning('Could not save action history for job %s', job_id, exc_info=True)
                 code, headers, body = self.dispatch(step, payload, job_id, report, push_batch)
                 try:
                     result = json.loads(body)
@@ -607,6 +625,7 @@ def public_record(row):
         progress = round(100 * (row['step'] - 1 + step_progress / 100) / row['total_steps'], 1)
         progress = min(99, progress)
     return {'id': row['id'], 'label': queue_label(row['label']), 'projectId': row['project'],
+            'revision': row['revision'], 'dismissed': bool(row['dismissed']),
             'status': row['status'], 'summary': result_summary(row), 'createdAt': row['created'] * 1000,
             'logUrl': f"/api/queue/{row['id']}/log" if row['status'] in {'completed', 'error', 'cancelled'} else None,
             'liveTranscriptUrl': f"/api/queue/{row['id']}/transcript" if agent.get('enabled') else None,
@@ -634,6 +653,10 @@ def public_record(row):
 def init_action_queue(app):
     from .routes.api import _secure_route
     bp = Blueprint('action_queue', __name__)
+    @bp.after_request
+    def no_cached_queue_state(response):
+        response.headers['Cache-Control'] = 'no-store'
+        return response
     # Lazy initialization avoids opening worker threads before gunicorn forks.
     init_lock = threading.Lock()
 
@@ -650,6 +673,14 @@ def init_action_queue(app):
     def record(job_id):
         with queue().connect() as db:
             return db.execute('SELECT * FROM actions WHERE id=? AND owner=?', (job_id, owner())).fetchone()
+
+    @bp.get('/history/<kind>')
+    @_secure_route(api_key=False)
+    def history(kind):
+        if kind not in HISTORY_KINDS:
+            return jsonify(error='Unknown history type'), 404
+        with queue().connect() as db:
+            return jsonify(items=recent(db, owner(), kind))
 
     @bp.route('', methods=['POST'])
     @_secure_route()
