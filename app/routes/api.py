@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, fields
 import time
 from ..guest_push_batch import GuestPushBatch
+from ..command_templates import (render_command, command_context, VARIABLES,
+                                 CommandTemplateError)
 from ..qemu_guest_stream import build_host_script
 from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
 from ..connectors.ctfd import CTFdClient, CTFdError
@@ -46,11 +48,24 @@ from ..storage.projects import (
 from ..storage.runtime import RuntimeStore
 from ..storage.secrets import encrypt_str as _enc_secret, decrypt_str as _dec_secret
 from ..storage.user_secrets import UserSecretsStore
+from ..read_coalescing import coalesce_read, invalidate_reads_for_write
 
 from ..file_transfer import config_policy, write_policy, read_policy
 
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
+
+
+@api_bp.before_request
+def _separate_reads_before_write():
+    invalidate_reads_for_write()
+
+
+@api_bp.after_request
+def _separate_reads_after_write(response):
+    invalidate_reads_for_write()
+    return response
+
 
 @api_bp.route("/test/credentials", methods=["POST"])
 def api_test_credentials():
@@ -1308,6 +1323,90 @@ def _prefetch_pool_members_parallel(
     return results
 
 
+def _user_access_checker(client: ProxmoxClient):
+    """Read ACLs once and resolve access as displayed by VM refresh.
+
+    The checker returns None when ACLs cannot be read, allowing template defaults.
+    """
+    def _norm_acl_path(path: str) -> str:
+        p = str(path or '').strip()
+        if not p:
+            return ''
+        if not p.startswith('/'):
+            p = f"/{p}"
+        # Trim trailing slash except for root
+        if len(p) > 1:
+            p = p.rstrip('/')
+        return p
+
+    # Fetch ACLs once so we can report effective per-instance user access.
+    # Effective access can be inherited via propagate from ancestor paths (e.g., /vms).
+    acl_index = None
+    try:
+        entries = client.list_acls() or []
+        acl_index = {}
+        for e in entries:
+            try:
+                ugid = str(e.get('ugid') or '').strip().lower()
+                path = _norm_acl_path(e.get('path') or '')
+                roleid = str(e.get('roleid') or '').strip()
+                if not ugid or not path or not roleid:
+                    continue
+                propagate_raw = e.get('propagate')
+                propagate = bool(propagate_raw in (1, True, '1', 'true', 'True'))
+                acl_index.setdefault((ugid, path), []).append((roleid, propagate))
+            except Exception:
+                continue
+    except Exception:
+        acl_index = None
+
+    def _has_access_role_id(roleid: str) -> bool:
+        try:
+            return roleid in ('PVEUser', 'PVEVMUser')
+        except Exception:
+            return False
+
+    def _path_grants_access(ugid: str, path: str, require_propagate: bool) -> bool:
+        if acl_index is None:
+            return False
+        try:
+            key = (str(ugid or '').strip().lower(), _norm_acl_path(path))
+            entries = acl_index.get(key, [])
+            for roleid, propagate in entries:
+                if not _has_access_role_id(str(roleid)):
+                    continue
+                if require_propagate and not propagate:
+                    continue
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _effective_user_access(ugid: str, vmid: int, poolid: str | None) -> bool | None:
+        # If we couldn't fetch ACLs, leave as unknown (None).
+        if acl_index is None:
+            return None
+        try:
+            ug = str(ugid or '').strip().lower()
+            # Pool-level grant can also confer access.
+            if poolid:
+                if _path_grants_access(ug, f"/pool/{poolid}", require_propagate=False):
+                    return True
+            # Direct VM path
+            if _path_grants_access(ug, f"/vms/{int(vmid)}", require_propagate=False):
+                return True
+            # Inherited via propagate from /vms or /
+            if _path_grants_access(ug, "/vms", require_propagate=True):
+                return True
+            if _path_grants_access(ug, "/", require_propagate=True):
+                return True
+        except Exception:
+            return None
+        return False
+
+    return _effective_user_access
+
+
 def _has_user_access_role(roles_set: Any) -> bool:
     try:
         return ('PVEUser' in roles_set) or ('PVEVMUser' in roles_set)
@@ -1957,6 +2056,7 @@ def _summarize_proxmox_node_resources(nodes_value: Any, *, preferred_node: str =
 
 @api_bp.route("/projects/<pid>/proxmox/verify", methods=["POST"])
 @_secure_route()
+@coalesce_read
 def proxmox_verify(pid: str):
     """Verify connectivity to Proxmox API and SSH using provided credentials/ports.
     Request JSON: { baseUrl, apiPort, sshPort, verifySSL, username, password }
@@ -2058,6 +2158,7 @@ def proxmox_verify(pid: str):
     return jsonify(resp)
 @api_bp.route("/projects/<pid>/instances/refresh/vm", methods=["POST"])
 @_secure_route()
+@coalesce_read
 def instances_refresh_vm(pid: str):
     s = _store()
     proj = s.get(pid)
@@ -2385,81 +2486,7 @@ def instances_refresh_vm(pid: str):
         ),
     )
 
-    def _norm_acl_path(path: str) -> str:
-        p = str(path or '').strip()
-        if not p:
-            return ''
-        if not p.startswith('/'):
-            p = f"/{p}"
-        # Trim trailing slash except for root
-        if len(p) > 1:
-            p = p.rstrip('/')
-        return p
-
-    # Fetch ACLs once so we can report effective per-instance user access.
-    # Effective access can be inherited via propagate from ancestor paths (e.g., /vms).
-    acl_index = None
-    try:
-        entries = client.list_acls() or []
-        acl_index = {}
-        for e in entries:
-            try:
-                ugid = str(e.get('ugid') or '').strip().lower()
-                path = _norm_acl_path(e.get('path') or '')
-                roleid = str(e.get('roleid') or '').strip()
-                if not ugid or not path or not roleid:
-                    continue
-                propagate_raw = e.get('propagate')
-                propagate = bool(propagate_raw in (1, True, '1', 'true', 'True'))
-                acl_index.setdefault((ugid, path), []).append((roleid, propagate))
-            except Exception:
-                continue
-    except Exception:
-        acl_index = None
-
-    def _has_access_role_id(roleid: str) -> bool:
-        try:
-            return roleid in ('PVEUser', 'PVEVMUser')
-        except Exception:
-            return False
-
-    def _path_grants_access(ugid: str, path: str, require_propagate: bool) -> bool:
-        if acl_index is None:
-            return False
-        try:
-            key = (str(ugid or '').strip().lower(), _norm_acl_path(path))
-            entries = acl_index.get(key, [])
-            for roleid, propagate in entries:
-                if not _has_access_role_id(str(roleid)):
-                    continue
-                if require_propagate and not propagate:
-                    continue
-                return True
-        except Exception:
-            return False
-        return False
-
-    def _effective_user_access(ugid: str, vmid: int, poolid: str | None) -> bool | None:
-        # If we couldn't fetch ACLs, leave as unknown (None).
-        if acl_index is None:
-            return None
-        try:
-            ug = str(ugid or '').strip().lower()
-            # Pool-level grant can also confer access.
-            if poolid:
-                if _path_grants_access(ug, f"/pool/{poolid}", require_propagate=False):
-                    return True
-            # Direct VM path
-            if _path_grants_access(ug, f"/vms/{int(vmid)}", require_propagate=False):
-                return True
-            # Inherited via propagate from /vms or /
-            if _path_grants_access(ug, "/vms", require_propagate=True):
-                return True
-            if _path_grants_access(ug, "/", require_propagate=True):
-                return True
-        except Exception:
-            return None
-        return False
+    _effective_user_access = _user_access_checker(client)
 
     # Helper: extract network adaptor identifiers from VM config
     def _extract_nets(cfg: dict):
@@ -10097,6 +10124,49 @@ def instances_guest_delete_files(pid: str):
     })
 
 
+@api_bp.route("/projects/<pid>/commands/preview", methods=["POST"])
+@_secure_route()
+def preview_guest_commands(pid):
+    """Render only: no Proxmox connection and no guest command execution."""
+    project = _store().get(pid)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    body = request.get_json(force=True) or {}
+    commands = body.get('commands')
+    targets = body.get('targets')
+    if not isinstance(commands, list) or not 1 <= len(commands) <= 100:
+        return jsonify({"error": "Provide 1–100 commands"}), 400
+    entries = []
+    for command in commands:
+        entry = {'command': command} if isinstance(command, str) else command
+        if (not isinstance(entry, dict) or not isinstance(entry.get('command'), str)
+                or type(entry.get('render_template_variables', True)) is not bool):
+            return jsonify({"error": "Commands require text and a boolean render_template_variables option"}), 400
+        entries.append(entry)
+    if sum(len(entry['command']) for entry in entries) > 262144:
+        return jsonify({"error": "Commands must total at most 256 KiB"}), 400
+    if not isinstance(targets, list) or not 1 <= len(targets) <= 250:
+        return jsonify({"error": "Provide 1–250 preview targets"}), 400
+    previews = []
+    for target in targets:
+        normalized = _normalize_project_target(project, target)
+        if not normalized or not normalized['known_config']:
+            return jsonify({"error": "Unknown project guest"}), 400
+        # VMID is caller-supplied preview metadata, never an execution target.
+        vmid = target.get('vmid')
+        if vmid is not None and (type(vmid) is not int or vmid < 1):
+            return jsonify({"error": "Preview VMID must be a positive integer"}), 400
+        guest = {'index': normalized['index'], 'name': normalized['generated_name'], 'vmid': vmid}
+        try:
+            values = command_context(project, guest)
+            rendered = [render_command(entry['command'], project, guest,
+                                       enabled=entry.get('render_template_variables', True)) for entry in entries]
+            previews.append({**guest, 'variables': values, 'commands': rendered})
+        except CommandTemplateError as exc:
+            previews.append({**guest, 'error': str(exc)})
+    return jsonify({'previews': previews, 'variable_descriptions': VARIABLES})
+
+
 @api_bp.route("/projects/<pid>/instances/actions/run_startup_cmds", methods=["POST"])
 def instances_run_startup_cmds(pid: str):
     _start_job(pid, 'run_startup_cmds')
@@ -10196,13 +10266,16 @@ def instances_run_startup_cmds(pid: str):
                 command_text = ''
                 long_running = False
                 timeout_seconds = DEFAULT_CMD_TIMEOUT
+                render_variables = True
                 if hasattr(cmd_obj, 'command'):
                     command_text = getattr(cmd_obj, 'command', '')
                     enabled = getattr(cmd_obj, 'enabled', True)
+                    render_variables = getattr(cmd_obj, 'render_template_variables', True)
                     long_running = _coerce_bool_flag(getattr(cmd_obj, 'long_running', False), False)
                     timeout_seconds = _coerce_timeout(getattr(cmd_obj, 'timeout_seconds', DEFAULT_CMD_TIMEOUT))
                 elif isinstance(cmd_obj, dict):
                     command_text = cmd_obj.get('command') or cmd_obj.get('cmd') or ''
+                    render_variables = _coerce_bool_flag(cmd_obj.get('render_template_variables', True), True)
                     enabled = cmd_obj.get('enabled', True)
                     if enabled is None and cmd_obj.get('disabled') is not None:
                         enabled = not cmd_obj.get('disabled')
@@ -10233,6 +10306,7 @@ def instances_run_startup_cmds(pid: str):
                 commands_out.append({
                     'text': command_text,
                     'long_running': bool(long_running),
+                    'render_template_variables': render_variables,
                     'timeout_seconds': timeout_seconds,
                 })
             return commands_out
@@ -10346,7 +10420,9 @@ def instances_run_startup_cmds(pid: str):
             timeout_value = _coerce_timeout(timeout_override)
             long_running_flag = bool(command_entry.get('long_running')) if isinstance(command_entry, dict) else False
             try:
-                res = _execute_instance_command(proj, base_url, password, client, m, str(command_text), timeout_value)
+                command_text = render_command(str(command_text), proj, m,
+                                              enabled=command_entry.get('render_template_variables', True) if isinstance(command_entry, dict) else True)
+                res = _execute_instance_command(proj, base_url, password, client, m, command_text, timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
@@ -10615,6 +10691,9 @@ def instances_run_stored_cmds(pid: str):
         if body.get('validateOnly'):
             return jsonify({'error': 'Custom commands cannot be combined with validation'}), 400
         custom_command = custom_command.strip()
+        custom_render = body.get('renderTemplateVariables', True)
+        if type(custom_render) is not bool:
+            return jsonify({'error': 'renderTemplateVariables must be a boolean'}), 400
         custom_timeout = body.get('customCommandTimeoutSeconds', 60)
         if type(custom_timeout) is not int or not 1 <= custom_timeout <= 86400:
             return jsonify({'error': 'Custom command timeout must be a whole number between 1 and 86400 seconds'}), 400
@@ -11144,7 +11223,7 @@ def instances_run_stored_cmds(pid: str):
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
         steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
         if custom_command is not None:
-            steps = sanitize_start_command_steps([{'commands': [{'command': custom_command, 'timeout_seconds': custom_timeout}]}])
+            steps = sanitize_start_command_steps([{'commands': [{'command': custom_command, 'timeout_seconds': custom_timeout, 'render_template_variables': custom_render}]}])
         validation_commands = _extract_validation_commands(vcfg)
         template_key = _make_template_key(proj, vcfg, base, m.get('name'))
 
@@ -11155,13 +11234,16 @@ def instances_run_stored_cmds(pid: str):
                 command_text = ''
                 long_running = False
                 timeout_seconds = DEFAULT_CMD_TIMEOUT
+                render_variables = True
                 if hasattr(cmd_obj, 'command'):
                     command_text = getattr(cmd_obj, 'command', '')
                     enabled = getattr(cmd_obj, 'enabled', True)
+                    render_variables = getattr(cmd_obj, 'render_template_variables', True)
                     long_running = _coerce_bool_flag(getattr(cmd_obj, 'long_running', False), False)
                     timeout_seconds = _coerce_timeout(getattr(cmd_obj, 'timeout_seconds', DEFAULT_CMD_TIMEOUT))
                 elif isinstance(cmd_obj, dict):
                     command_text = cmd_obj.get('command') or cmd_obj.get('cmd') or ''
+                    render_variables = _coerce_bool_flag(cmd_obj.get('render_template_variables', True), True)
                     enabled = cmd_obj.get('enabled', True)
                     if enabled is None and cmd_obj.get('disabled') is not None:
                         enabled = not cmd_obj.get('disabled')
@@ -11198,6 +11280,7 @@ def instances_run_stored_cmds(pid: str):
                     'text': command_text,
                     'normalized': normalized_text,
                     'long_running': bool(long_running),
+                    'render_template_variables': render_variables,
                     'timeout_seconds': timeout_seconds,
                     'command_index': cmd_index,
                 })
@@ -11297,10 +11380,12 @@ def instances_run_stored_cmds(pid: str):
             timeout_value = _coerce_timeout(timeout_override)
             long_running_flag = bool(command_entry.get('long_running')) if isinstance(command_entry, dict) else False
             try:
+                command_text = render_command(str(command_text), proj, m,
+                                              enabled=command_entry.get('render_template_variables', True) if isinstance(command_entry, dict) else True)
                 with command_slots:
                     if _is_cancelled(pid):
                         raise RuntimeError('cancelled')
-                    res = _execute_instance_command(proj, base_url, password, client, m, str(command_text), timeout_value)
+                    res = _execute_instance_command(proj, base_url, password, client, m, command_text, timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
@@ -12152,6 +12237,7 @@ def _ctf_project_credential_targets(proj, body):
 
 @api_bp.post('/projects/<pid>/ctfrpg/login')
 @_secure_route()
+@coalesce_read
 def ctfrpg_login(pid: str):
     proj = _store().get(pid)
     if not proj:
@@ -12164,6 +12250,7 @@ def ctfrpg_login(pid: str):
 
 @api_bp.post('/projects/<pid>/ctfrpg/users_check')
 @_secure_route()
+@coalesce_read
 def ctfrpg_users_check(pid: str):
     proj = _store().get(pid)
     if not proj:
@@ -12265,9 +12352,9 @@ def ctfrpg_users_delete(pid: str):
 
 @api_bp.post('/projects/<pid>/ctfd/settings')
 @_secure_route()
+@coalesce_read
 def ctfd_settings_get(pid: str):
-    """Return current CTFd visibility and paused settings.
-    Response: { ok, settings: { challenges_visible, scoreboard_visible, ctfd_paused }, logs }
+    """Return CTFd visibility, paused, and solve-retraction settings.
     """
     s = _store(); proj = s.get(pid)
     if not proj:
@@ -12298,7 +12385,9 @@ def ctfd_settings_get(pid: str):
                 'challenges_visible': challenges_visible,
                 'scoreboard_visible': scoreboard_visible,
                 'ctfd_paused': ctfd_paused,
+                'users_can_clear_submissions': _lv(configs.get('allow_solve_retraction')) in ('true', '1'),
             },
+            'capabilities': {'solve_retraction': 'allow_solve_retraction' in configs},
             'configs': configs,
             'using_token': bool(client.token),
             'logs': getattr(client, 'logs', []),
@@ -12315,8 +12404,7 @@ def ctfd_settings_get(pid: str):
 @api_bp.post('/projects/<pid>/ctfd/settings/update')
 @_secure_route()
 def ctfd_settings_update(pid: str):
-    """Update CTFd visibility and paused settings.
-    Body may include any of: { challenges_visible: bool, scoreboard_visible: bool, ctfd_paused: bool }
+    """Update CTFd visibility, paused, and optional solve-retraction settings.
     """
     s = _store(); proj = s.get(pid)
     if not proj:
@@ -12328,6 +12416,14 @@ def ctfd_settings_update(pid: str):
         if role not in ('admin', 'teacher'):
             return jsonify({'ok': False, 'error': 'forbidden', 'message': f'Admin/Teacher role required (got {role})'}), 403
         body = request.get_json(silent=True) or {}
+        if 'users_can_clear_submissions' in body:
+            if role != 'admin':
+                return jsonify({'ok': False, 'error': 'A CTFd admin account is required to configure solve retraction.'}), 403
+            if not isinstance(body['users_can_clear_submissions'], bool):
+                return jsonify({'ok': False, 'error': 'users_can_clear_submissions must be a boolean.'}), 400
+            current_configs = client.list_configs()
+            if 'allow_solve_retraction' not in current_configs:
+                return jsonify({'ok': False, 'error': 'Update the custom CTFd server build to support the solve-retraction setting.'}), 409
         updates = {}
         attempts = []
         desired_chal = body.get('challenges_visible') if 'challenges_visible' in body else None
@@ -12343,6 +12439,8 @@ def ctfd_settings_update(pid: str):
             updates['score_visibility'] = val
         if 'ctfd_paused' in body:
             updates['paused'] = bool(body.get('ctfd_paused'))
+        if 'users_can_clear_submissions' in body:
+            updates['allow_solve_retraction'] = body['users_can_clear_submissions']
         # Apply initial updates
         result = client.set_configs(updates) if hasattr(client, 'set_configs') else {}
         attempts.append({ 'pass': 1, 'updates': dict(updates), 'server': result })
@@ -12383,6 +12481,12 @@ def ctfd_settings_update(pid: str):
             ctfd_paused = bool(paused) and str(paused).lower() not in ('false', '0', 'none', '')
         except Exception:
             ctfd_paused = False
+        users_can_clear_submissions = _lv(configs.get('allow_solve_retraction')) in ('true', '1')
+        if 'users_can_clear_submissions' in body and (
+            'allow_solve_retraction' not in configs
+            or users_can_clear_submissions != body['users_can_clear_submissions']
+        ):
+            return jsonify({'ok': False, 'error': 'CTFd did not apply the solve-retraction setting. Refresh settings and retry.'}), 502
         return jsonify({
             'ok': True,
             'applied': updates,
@@ -12391,7 +12495,9 @@ def ctfd_settings_update(pid: str):
                 'challenges_visible': challenges_visible,
                 'scoreboard_visible': scoreboard_visible,
                 'ctfd_paused': ctfd_paused,
+                'users_can_clear_submissions': users_can_clear_submissions,
             },
+            'capabilities': {'solve_retraction': 'allow_solve_retraction' in configs},
             'configs': configs,
             'using_token': bool(client.token),
             'logs': getattr(client, 'logs', []),
@@ -12407,6 +12513,7 @@ def ctfd_settings_update(pid: str):
 
 @api_bp.post('/projects/<pid>/ctfd/login')
 @_secure_route()
+@coalesce_read
 def ctfd_login(pid: str):
     s = _store(); proj = s.get(pid)
     if not proj:
@@ -12459,22 +12566,48 @@ def ctfd_users_create(pid: str):
             }), 403
     except Exception as e:
         return jsonify({"error": f"CTFd self-check failed: {e}", "ok": False}), 400
+    # Fetch the complete admin listing once. Per-username compatibility searches
+    # otherwise issue several requests (and full scans) for every missing user.
+    try:
+        existing_users = {}
+        for user in client.list_all_users(view_admin=True):
+            uid = user.get('id')
+            if uid is None:
+                raise ValueError('CTFd user listing returned a user without an ID')
+            for key in ('name', 'username', 'email'):
+                value = str(user.get(key) or '').strip().lower()
+                if value:
+                    existing_users.setdefault(value, uid)
+    except Exception as e:
+        return jsonify({
+            "ok": False, "error": f"CTFd user lookup failed: {e}",
+            "logs": getattr(client, 'logs', []),
+        }), 429 if isinstance(e, CTFdError) and e.status_code == 429 else 502
     created = 0; updated = 0; skipped = 0; results = []
+    rate_limit_error = None
     for c in _job_items(pid, creds, 'ctfd_users', 'Creating or updating CTFd user', report=_queue_progress_reporter(), summary=lambda: f'{sum(bool(r.get("error")) for r in results)} errors'):
         uname = c.get('username') or ''
         email = f"{uname}@example.com"
         pw = c.get('password') or ''
+        if rate_limit_error:
+            skipped += 1
+            results.append({"username": uname, "action": "skipped", "error": f"Skipped because {rate_limit_error}"})
+            continue
         try:
-            uid = client.find_user_id_by_name(uname)
+            uid = existing_users.get(uname.strip().lower())
             if uid:
                 # Update password to match project
                 client.update_user_password(uid, pw)
                 updated += 1; results.append({"username": uname, "id": uid, "action": "updated"})
             else:
                 u = client.create_user(uname, email, pw)
+                if u.get('id') is not None:
+                    existing_users[uname.strip().lower()] = u['id']
                 created += 1; results.append({"username": uname, "id": u.get('id'), "action": "created"})
         except Exception as e:
             results.append({"username": uname, "error": str(e)})
+            if isinstance(e, CTFdError) and e.status_code == 429:
+                rate_limit_error = str(e)
     return jsonify({
         "created": created,
         "updated": updated,
@@ -12528,6 +12661,7 @@ def ctfd_users_delete(pid: str):
 
 @api_bp.post('/projects/<pid>/ctfd/users_check')
 @_secure_route()
+@coalesce_read
 def ctfd_users_check(pid: str):
     """Return existence of project credential usernames on the CTFd server.
     Request JSON: { baseUrl, port, username?, password?, verifySSL?, only?: [usernames] }
@@ -12919,6 +13053,7 @@ def ctfd_users_check(pid: str):
         return team_solves_cache.get(tid_i) or []
 
     bulk_user_matches = {}
+    bulk_lookup_complete = False
     def _index_bulk_users(users):
         for user in users:
             if not isinstance(user, dict):
@@ -12933,7 +13068,10 @@ def ctfd_users_check(pid: str):
     if hasattr(client, 'list_all_users'):
         try:
             _index_bulk_users(client.list_all_users(view_admin=True) or [])
-        except Exception:
+            bulk_lookup_complete = True
+        except Exception as exc:
+            if isinstance(exc, CTFdError) and exc.status_code == 429:
+                return jsonify({'error': str(exc), 'logs': getattr(client, 'logs', [])}), 429
             try:
                 _index_bulk_users(client.list_all_users(view_admin=False) or [])
             except Exception:
@@ -12967,7 +13105,7 @@ def ctfd_users_check(pid: str):
                     uid = None
                 exists = bool(uid is not None or bulk_user.get('name') or bulk_user.get('username') or bulk_user.get('email'))
             bulk_exists = bool(exists)
-            if uid is None:
+            if uid is None and (bulk_exists or not bulk_lookup_complete):
                 uid = client.find_user_id_by_name(uname)
             exists = bool(uid is not None or bulk_exists)
             if uid:
@@ -16762,6 +16900,7 @@ def reveal_export_in_finder(pid: str, export_id: str):
 
 @api_bp.route("/proxmox/nodes", methods=["POST"])
 @_secure_route()
+@coalesce_read
 def proxmox_nodes():
     data = request.get_json(force=True) or {}
     base_url = data.get("baseUrl")
@@ -16804,6 +16943,7 @@ def proxmox_nodes():
 
 @api_bp.route("/proxmox/templates", methods=["POST"])
 @_secure_route()
+@coalesce_read
 def proxmox_templates():
     """List QEMU templates across all nodes.
     Body: { baseUrl, verifySSL, username, password, token }
@@ -16956,6 +17096,7 @@ def proxmox_templates():
 
 @api_bp.route("/proxmox/nodes/<node>/network", methods=["POST"])
 @_secure_route()
+@coalesce_read
 def proxmox_node_network(node: str):
     data = request.get_json(force=True) or {}
     base_url = data.get("baseUrl")
@@ -16976,6 +17117,7 @@ def proxmox_node_network(node: str):
 
 @api_bp.route("/ctfd/challenges", methods=["POST"])
 @_secure_route()
+@coalesce_read
 def ctfd_challenges():
     data = request.get_json(force=True) or {}
     base_url = data.get("baseUrl")
@@ -16996,6 +17138,7 @@ def ctfd_challenges():
 
 @api_bp.route('/projects/<pid>/ctfd/stats/challenges', methods=['POST'])
 @_secure_route()
+@coalesce_read
 def ctfd_stats_challenges(pid: str):
     """Return challenge stats with teams and users who solved each challenge.
     Request JSON: { baseUrl, port?, username?, password?, verifySSL?, detail?: bool }
@@ -17464,6 +17607,7 @@ def ctfd_stats_challenges(pid: str):
 
 @api_bp.post('/projects/<pid>/ctfd/challenges/list')
 @_secure_route()
+@coalesce_read
 def ctfd_challenges_list(pid: str):
     """Return all challenges including hidden for progress accounting.
     Body: { baseUrl, port?, username?, password?, verifySSL? }
@@ -17514,6 +17658,7 @@ def ctfd_challenges_list(pid: str):
 
 @api_bp.post('/projects/<pid>/ctfd/stats/challenges/<int:cid>')
 @_secure_route()
+@coalesce_read
 def ctfd_stats_challenge_one(pid: str, cid: int):
     """Return stats for a single challenge id. Mirrors the per-item logic of the bulk endpoint.
     Body: { baseUrl, port?, username?, password?, verifySSL? }
@@ -17891,6 +18036,7 @@ def instances_file_transfer(pid):
                            verify=body.get('verifySSL', proj.proxmox_verify_ssl is not False))
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     result = {'infos': [], 'skipped': skipped, 'errors': errors}
+    access_for = _user_access_checker(client) if requested else None
     for target in _job_items(pid, mapped, 'file_transfer', 'Updating VM transfer policy',
                              report=_queue_progress_reporter(),
                              summary=lambda: f"{len(result['infos'])} updated, {len(result['errors'])} errors"):
@@ -17904,10 +18050,21 @@ def instances_file_transfer(pid):
             if requested:
                 # Preserve the other direction from this VM's current policy, not template defaults.
                 policy = read_policy(config.get('description'))
-                if not vm.viewable_to_user and any(requested.values()):
+                # Match the VM list: live access overrides the template when known.
+                index = int(target['index'])
+                credentials = list(proj.credentials or [])
+                credential = credentials[index - 1] if 1 <= index <= len(credentials) else {}
+                user = str((credential or {}).get('username') or '').strip()
+                live_access = None
+                if user:
+                    userid = user if '@' in user else f'{user}@pve'
+                    poolid = re.sub(r'[^A-Za-z0-9_-]+', '', user.split('@', 1)[0])
+                    live_access = access_for(userid, int(target['vmid']), poolid)
+                accessible = vm.viewable_to_user if live_access is None else live_access
+                if not accessible and any(requested.values()):
                     raise ValueError('Enable User-Accessible first')
                 policy.update(requested)
-                if not vm.viewable_to_user:
+                if not accessible:
                     policy = {'file_upload': False, 'file_download': False}
             else:
                 policy = config_policy(vm)

@@ -18,6 +18,7 @@ import threading
 import time
 import zipfile
 from contextlib import contextmanager, ExitStack
+from collections import OrderedDict
 from urllib.parse import quote, unquote, urlsplit
 
 from flask import Blueprint, Response, g, jsonify, request, session, send_file
@@ -28,6 +29,12 @@ from .guest_push_batch import GuestPushBatch
 from .action_history import KINDS as HISTORY_KINDS, history_settings, init_history, recent, remember
 
 
+# Queue polling never needs stored request credentials or retained file bodies.
+_PUBLIC_COLUMNS = ', '.join(('id', 'label', 'project', 'status', 'created', 'started',
+                            'finished', 'error', 'cancel', 'dismissed', 'step', 'total_steps',
+                            'progress_state', 'agent_state', 'revision', 'token'))
+
+
 class ActionQueue:
     def __init__(self, app):
         self.app = app
@@ -35,6 +42,8 @@ class ActionQueue:
         self.upload_dir = os.path.join(app.config['DATA_DIR'], 'queue_uploads')
         os.makedirs(self.upload_dir, mode=0o700, exist_ok=True)
         self.lock = threading.Lock()
+        self._public_cache = OrderedDict()
+        self._public_cache_lock = threading.Lock()
         self.thread = None
         self.stopped = threading.Event()
         with self.connect() as db:
@@ -95,6 +104,33 @@ class ActionQueue:
         self.stopped.set()
         if self.thread:
             self.thread.join(timeout=5)
+
+    def public_snapshot(self, row):
+        """Parse retained results once per revision, never on every poll."""
+        key = (row['id'], row['revision'])
+        with self._public_cache_lock:
+            cached = self._public_cache.get(key)
+            if cached is not None:
+                self._public_cache.move_to_end(key)
+                return cached
+        record = dict(row)
+        if row['status'] in {'completed', 'error', 'cancelled'}:
+            # Owner access was checked by the lightweight query. Fetch the
+            # full current revision only when its summary is not already known.
+            with self.connect() as db:
+                current = db.execute('SELECT * FROM actions WHERE id=?', (row['id'],)).fetchone()
+            if current is not None:
+                record = dict(current)
+                key = (record['id'], record['revision'])
+        else:
+            record['result'] = None
+        snapshot = public_record(record)
+        with self._public_cache_lock:
+            self._public_cache[key] = snapshot
+            self._public_cache.move_to_end(key)
+            while len(self._public_cache) > 256:
+                self._public_cache.popitem(last=False)
+        return snapshot
 
     def submit(self, owner, plan, uploads):
         payload = json.dumps({'steps': plan['steps'], 'session': dict(session),
@@ -670,9 +706,10 @@ def init_action_queue(app):
         user = app.current_user() if app.config.get('AUTH_ENABLE') else None
         return str((user or {}).get('username', 'local')).lower()
 
-    def record(job_id):
+    def record(job_id, *, lightweight=False):
         with queue().connect() as db:
-            return db.execute('SELECT * FROM actions WHERE id=? AND owner=?', (job_id, owner())).fetchone()
+            columns = _PUBLIC_COLUMNS if lightweight else '*'
+            return db.execute(f'SELECT {columns} FROM actions WHERE id=? AND owner=?', (job_id, owner())).fetchone()
 
     @bp.get('/history/<kind>')
     @_secure_route(api_key=False)
@@ -720,14 +757,14 @@ def init_action_queue(app):
         q = queue()
         q.start()
         with q.connect() as db:
-            rows = db.execute("SELECT * FROM actions WHERE owner=? AND dismissed=0 AND (status IN ('queued', 'running') OR id IN (SELECT id FROM actions WHERE owner=? AND dismissed=0 ORDER BY id DESC LIMIT 50)) ORDER BY id", (owner(), owner())).fetchall()
-        return jsonify(items=[public_record(row) for row in rows])
+            rows = db.execute(f"SELECT {_PUBLIC_COLUMNS} FROM actions WHERE owner=? AND dismissed=0 AND (status IN ('queued', 'running') OR id IN (SELECT id FROM actions WHERE owner=? AND dismissed=0 ORDER BY id DESC LIMIT 50)) ORDER BY id", (owner(), owner())).fetchall()
+        return jsonify(items=[q.public_snapshot(row) for row in rows])
 
     @bp.route('/<int:job_id>', methods=['GET'])
     @_secure_route(api_key=False)
     def status(job_id):
-        row = record(job_id)
-        return (jsonify(public_record(row)), 200) if row else (jsonify(error='not found'), 404)
+        row = record(job_id, lightweight=True)
+        return (jsonify(queue().public_snapshot(row)), 200) if row else (jsonify(error='not found'), 404)
 
     @bp.route('/<int:job_id>/result', methods=['GET'])
     @_secure_route(api_key=False)

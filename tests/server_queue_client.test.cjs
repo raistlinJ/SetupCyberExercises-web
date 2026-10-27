@@ -5,12 +5,18 @@ const fs = require('node:fs');
 const source = fs.readFileSync('app/static/js/server_queue.js', 'utf8');
 const plans = fs.readFileSync('app/static/js/server_vm_actions.js', 'utf8');
 
-function browser(fetch) {
-  const window = { fetch, location: { href: 'http://localhost/vm-manager', origin: 'http://localhost' }, shell: { logError() {} } };
+function browser(fetch, extras = {}) {
+  const listeners = {};
+  const window = { fetch, location: { href: 'http://localhost/vm-manager', origin: 'http://localhost' }, shell: { logError() {} },
+    addEventListener(name, fn) { listeners[name] = fn; }, ...extras };
+  window.pageEvent = name => listeners[name]?.();
   window.queueEvents = [];
   window.window = window;
-  const sandbox = { window, document: { dispatchEvent(event) { window.queueEvents.push(event); } }, CustomEvent: class {}, Headers, FormData, Blob, URL,
-    setTimeout: fn => setTimeout(fn, 0), setInterval() {}, console };
+  const document = { hidden: false, dispatchEvent(event) { window.queueEvents.push(event); },
+    addEventListener(name, fn) { listeners[name] = fn; } };
+  window.queueDocument = document;
+  const sandbox = { window, document, CustomEvent: class {}, Headers, FormData, Blob, URL,
+    setTimeout: fn => setTimeout(fn, 0), setInterval(fn) { window.pollQueue = fn; }, console };
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
   return window;
@@ -36,6 +42,149 @@ test('polling individual jobs never changes FIFO order or queued timestamps', as
     if (state.status === 'queued') assert.deepEqual(Array.from(window.ServerQueue.state().items, item => item.id), [1, 2, 3]);
   });
   assert.deepEqual(Array.from(window.ServerQueue.state().items, item => item.id), [2, 3]);
+});
+
+test('CTFd, CTF-RPG and GET reads bypass running mutations even inside runQueued', async () => {
+  const calls = [];
+  const window = browser(async (url, options = {}) => {
+    calls.push([url, options]);
+    if (url === '/api/queue') {
+      assert.notEqual(options.method, 'POST');
+      return json({ items: [job(1, 'running')] });
+    }
+    return json({ ok: true });
+  });
+  for (const path of ['/api/projects', '/api/projects/p/secrets', '/api/ctfd/challenges',
+    '/api/projects/p/ctfd/users_check', '/api/projects/p/ctfd/settings',
+    '/api/projects/p/ctfd/login', '/api/projects/p/ctfd/challenges/list',
+    '/api/projects/p/ctfd/stats/challenges', '/api/projects/p/ctfd/stats/challenges/3',
+    '/api/projects/p/ctfrpg/login', '/api/projects/p/ctfrpg/users_check', '/api/projects/p/proxmox/verify']) {
+    const options = path.endsWith('projects') || path.endsWith('secrets') ? {} : { method: 'POST', body: '{}' };
+    await window.ServerQueue.run('Read', async () => {
+      const response = await window.fetch(path, options);
+      assert.deepEqual(await response.json(), { ok: true });
+    });
+  }
+  assert.equal(calls.filter(([url]) => url !== '/api/queue').length, 12);
+});
+
+test('overlapping identical reads share one request with independently consumable bodies', async () => {
+  const delayed = deferred();
+  let reads = 0;
+  const window = browser(async url => {
+    if (url === '/api/queue') return json({ items: [] });
+    reads++;
+    return delayed.promise;
+  });
+  const path = '/api/projects/p/ctfd/users_check';
+  const options = { method: 'POST', body: '{"username":"admin","password":"secret"}' };
+  const first = window.fetch(path, options);
+  const second = window.fetch(path, { ...options });
+  await Promise.resolve();
+  assert.equal(reads, 1);
+  delayed.resolve(json({ users: ['alice'] }));
+  const responses = await Promise.all([first, second]);
+  assert.deepEqual(await responses[0].json(), { users: ['alice'] });
+  assert.deepEqual(await responses[1].json(), { users: ['alice'] });
+  await window.fetch(path, options);
+  assert.equal(reads, 2, 'completed reads are never cached');
+});
+
+test('different credentials, bodies and caller-owned signals never share reads', async () => {
+  const delayed = deferred();
+  let reads = 0;
+  const window = browser(async url => url === '/api/queue' ? json({ items: [] }) : (reads++, delayed.promise));
+  const path = '/api/projects/p/ctfd/users_check';
+  const first = window.fetch(path, { method: 'POST', body: '{"username":"alice"}' });
+  const second = window.fetch(path, { method: 'POST', body: '{"username":"bob"}' });
+  const third = window.fetch(path, { method: 'POST', body: '{"username":"alice"}', headers: { 'X-API-Key': 'different' } });
+  const fourth = window.fetch(path, { method: 'POST', body: '{"username":"alice"}', signal: new AbortController().signal });
+  await Promise.resolve();
+  assert.equal(reads, 4);
+  delayed.resolve(json({ ok: true }));
+  await Promise.all([first, second, third, fourth]);
+});
+
+test('failed reads release their shared slot so a retry makes a fresh request', async () => {
+  let reads = 0;
+  const window = browser(async url => {
+    if (url === '/api/queue') return json({ items: [] });
+    if (++reads === 1) throw new Error('connection failed');
+    return json({ ok: true });
+  });
+  await assert.rejects(window.fetch('/api/projects'), /connection failed/);
+  assert.deepEqual(await (await window.fetch('/api/projects')).json(), { ok: true });
+  assert.equal(reads, 2);
+});
+
+test('a read after a completed mutation does not reuse an older in-flight read', async () => {
+  const delayed = deferred();
+  let reads = 0;
+  const window = browser(async (url, options = {}) => {
+    if (url === '/api/queue') return options.method === 'POST' ? json(job(1), 202) : json({ items: [] });
+    if (url === '/api/queue/1') return json(job(1, 'completed'));
+    if (url.endsWith('/result')) return json({ ok: true });
+    return ++reads === 1 ? delayed.promise : json({ version: 'new' });
+  });
+  const first = window.fetch('/api/projects');
+  await window.fetch('/api/projects/p/ctfd/users_create', { method: 'POST', body: '{}' });
+  assert.deepEqual(await (await window.fetch('/api/projects')).json(), { version: 'new' });
+  delayed.resolve(json({ version: 'old' }));
+  await first;
+  assert.equal(reads, 2);
+});
+
+test('page navigation aborts background reads while preserving accepted actions', async () => {
+  let signal;
+  let submissions = 0;
+  const window = browser(async (url, options = {}) => {
+    if (url === '/api/queue') {
+      if (options.method === 'POST') { submissions++; assert.equal(options.keepalive, true); return json(job(1), 202); }
+      return json({ items: [] });
+    }
+    signal = options.signal;
+    return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+  }, { AbortController });
+  const read = window.fetch('/api/projects');
+  await Promise.resolve();
+  await window.ServerQueue.submit('Create', [{ method: 'POST', url: '/api/projects/p/ctfd/users_create' }]);
+  window.pageEvent('pagehide');
+  await assert.rejects(read, { name: 'AbortError' });
+  assert.equal(signal.aborted, true);
+  assert.equal(submissions, 1);
+  await assert.rejects(window.fetch('/api/projects'), { name: 'AbortError' });
+});
+
+test('hidden pages stop snapshot polling and refresh immediately when visible again', async () => {
+  let polls = 0;
+  const window = browser(async () => { polls++; return json({ items: [] }); });
+  await window.ServerQueue.refresh();
+  assert.equal(polls, 1);
+  window.queueDocument.hidden = true;
+  window.pollQueue();
+  assert.equal(polls, 1);
+  window.queueDocument.hidden = false;
+  window.pageEvent('visibilitychange');
+  await window.ServerQueue.refresh();
+  assert.equal(polls, 2);
+  window.pageEvent('pagehide');
+  window.pollQueue();
+  assert.equal(polls, 2);
+});
+
+test('authentication changes never reuse a previous user’s in-flight read', async () => {
+  const delayed = deferred();
+  let reads = 0;
+  const window = browser(async url => {
+    if (url === '/api/queue') return json({ items: [] });
+    return ++reads === 1 ? delayed.promise : json({ user: 'bob' });
+  });
+  const old = window.fetch('/api/projects/p/secrets');
+  window.pageEvent('auth-changed');
+  assert.deepEqual(await (await window.fetch('/api/projects/p/secrets')).json(), { user: 'bob' });
+  delayed.resolve(json({ user: 'alice' }));
+  await old;
+  assert.equal(reads, 2);
 });
 
 test('a delayed list cannot revert completed jobs or their newer progress', async () => {
@@ -285,12 +434,13 @@ test('custom command plans carry the default or selected timeout to every projec
   }));
   for (const timeout of [undefined, 125, 12000]) {
     const steps = sandbox.buildServerVmSteps('run_stored_cmds', {
-      customCommand: 'hostname', customCommandTimeoutSeconds: timeout,
+      customCommand: 'hostname', customCommandTimeoutSeconds: timeout, renderTemplateVariables: false,
     }, projects);
     assert.equal(steps.length, 2);
     for (const step of steps) {
       assert.equal(step.body.customCommand, 'hostname');
       assert.equal(step.body.customCommandTimeoutSeconds, timeout ?? 60);
+      assert.equal(step.body.renderTemplateVariables, false);
     }
   }
 });
@@ -352,7 +502,7 @@ test('CTFd bulk deletion sends an empty only-list for projects without selected 
       nativeFetch: async () => ({json: async () => ({results: [{}, {}]})}),
     },
     escHtml: value => value, buildCtfdResultsSummary: () => '',
-    showActionSummary() {}, ctfdRefreshMulti: async () => {},
+    showActionSummary() {}, hideActionProgress() {}, ctfdRefreshMulti: async () => {},
   };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync('app/static/js/server_workflows.js', 'utf8'), sandbox);

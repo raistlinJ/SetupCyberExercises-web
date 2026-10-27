@@ -9,6 +9,8 @@ DeployForge is a Dockerized web UI for configuring CTF/scenario “Projects” a
 - Run Proxmox actions (create/refresh/restore, VM manager UI)
 - Manage CTFd settings and challenge visibility (with token-first auth)
 
+Startup, stored, and custom guest commands support [per-instance template variables](docs/command-variables.md), with an optional rendering switch, a command preview, and variable help.
+
 Queued actions run on the server in submission order. Once an upload or action
 has been accepted, switching pages, refreshing, closing the tab, or signing out
 does not stop it. The Queue dock reconnects to your running, waiting, and recent
@@ -20,6 +22,17 @@ polls do not move rows. Persisted revisions reject stale responses, and cached
 responses are disabled. Unchanged polls do not redraw the dock; progress updates
 preserve its scroll position and expanded results. Refreshing the page only
 reconnects to existing work and does not resubmit it.
+
+Navigation and background inventory, CTFd, and CTF-RPG reads run outside the
+action queue, so they can finish while a submitted action is running. Identical
+overlapping reads share work within a browser page and within each server
+process, scoped to the same session, credentials, and request. Results are not
+cached after a read finishes, and mutations separate reads so subsequent
+refreshes get fresh state. Leaving a page aborts its background reads without
+cancelling accepted actions. Hidden tabs pause queue snapshot polling.
+Queue polls load lightweight job state and reuse summaries by persisted revision;
+retained archives are loaded for a new completed revision or an explicit result
+request. Mutating actions continue to run in submission order across users.
 
 Push, Pull, and Custom Command dialogs each have a **History — last 5 runs**
 selector. History is saved on the server for the signed-in user when a run starts,
@@ -184,6 +197,15 @@ Security Notes:
 Notes:
 - Sort, filter text, and the Include Hidden / Regex / Detailed Solves toggles are remembered per project for this browser session.
 - If you lack permissions, the popup will show hints; use an account with sufficient permissions.
+
+The **Users Can Clear Submissions** switch in CTFd Manager controls the custom
+CTFd fork's `allow_solve_retraction` setting and requires a CTFd admin account.
+After deploying the updated fork, authenticate and refresh to enable the switch.
+The feature defaults to off. When enabled, participants can choose **Retract solve**
+on a solved challenge; in team mode, a teammate can retract the shared solve.
+This removes the correct submission and its points. Failed attempts, hint purchases,
+and awards remain. The Manager leaves the switch disabled if the connected CTFd
+build does not advertise the setting. It applies to the focused project/server.
 
 The manager's **Notifications** tab saves browser audio and speech settings per project. The first successful refresh establishes a silent baseline; later refreshes detect leaderboard changes, the first observed score, and category first solves. Enable auto refresh to monitor these changes continuously. Periodic announcements use their own timer and do not fetch new CTFd data. Notifications play one at a time; use a template's Preview button to check playback in your browser.
 

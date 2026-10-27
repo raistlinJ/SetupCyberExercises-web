@@ -96,6 +96,104 @@ class TransferPolicyTests(unittest.TestCase):
                 self.assertNotIn('file_transfer_capabilities', api._project_to_json(self.project))
             get.assert_not_called()
 
+    def test_instance_transfer_uses_live_access_instead_of_template_default(self):
+        self.project.vms[0].viewable_to_user = False
+        self.project.credentials = [{'username': 'alice'}, {'username': 'bob@pve'}]
+        targets = [
+            {'index': index, 'name': f'web-set-{index}', 'node': 'node', 'vmid': 100 + index, 'type': 'qemu'}
+            for index in (1, 2)
+        ]
+        upstream = Mock()
+        upstream.get_qemu_config.return_value = {
+            'digest': 'abc',
+            'description': 'Human notes\n{"AccessForge":{"file_upload":false,"file_download":true}}',
+        }
+        for direction in ('upload', 'download'):
+            for path, propagate in (('/vms/101', 0), ('/vms/', 1), ('/', 1), ('/pool/alice', 0)):
+                with self.subTest(direction=direction, path=path):
+                    upstream.reset_mock()
+                    upstream.list_acls.return_value = [
+                        {'ugid': 'alice@pve', 'path': path, 'roleid': 'PVEVMUser', 'propagate': propagate},
+                    ]
+                    with patch.object(api, 'ProxmoxClient', return_value=upstream), patch.object(api, '_resolve_targets_to_vm_info', return_value=(targets, [], [])):
+                        response = self.client.post('/api/projects/p/instances/actions/file_transfer', json={
+                            'targets': targets, 'file_' + direction: True,
+                        })
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual([info['name'] for info in response.json['infos']], ['web-set-1'])
+                    self.assertEqual([error['name'] for error in response.json['errors']], ['web-set-2'])
+                    upstream.list_acls.assert_called_once()
+                    upstream.set_qemu_options.assert_called_once()
+                    options = upstream.set_qemu_options.call_args.kwargs['options']
+                    self.assertEqual(read_policy(options['description']), {
+                        'file_upload': direction == 'upload', 'file_download': True,
+                    })
+                    self.assertIn('Human notes', options['description'])
+                    self.assertEqual(options['digest'], 'abc')
+                    self.assertFalse(self.project.vms[0].viewable_to_user)
+                    self.store.update_vm.assert_not_called()
+
+    def test_instance_disable_preserves_other_direction_when_live_access_enabled(self):
+        self.project.vms[0].viewable_to_user = False
+        self.project.credentials = [{'username': 'alice'}, {'username': 'bob@pve'}]
+        target = {'index': 2, 'name': 'web-set-2', 'node': 'node', 'vmid': 102, 'type': 'qemu'}
+        upstream = Mock()
+        upstream.list_acls.return_value = [
+            {'ugid': 'bob@pve', 'path': '/vms/102', 'roleid': 'PVEUser', 'propagate': 0},
+        ]
+        upstream.get_qemu_config.return_value = {
+            'description': '{"AccessForge":{"file_upload":true,"file_download":true}}',
+        }
+        for direction in ('upload', 'download'):
+            with self.subTest(direction=direction):
+                with patch.object(api, 'ProxmoxClient', return_value=upstream), patch.object(api, '_resolve_targets_to_vm_info', return_value=([target], [], [])):
+                    response = self.client.post('/api/projects/p/instances/actions/file_transfer', json={
+                        'targets': [target], 'file_' + direction: False,
+                    })
+                self.assertEqual(response.json['errors'], [])
+                written = upstream.set_qemu_options.call_args.kwargs['options']['description']
+                self.assertEqual(read_policy(written), {
+                    'file_upload': direction != 'upload', 'file_download': direction != 'download',
+                })
+
+    def test_instance_transfer_rejects_live_inaccessible_vm_even_if_template_enabled(self):
+        self.project.credentials = [{'username': 'alice'}]
+        target = {'index': 1, 'name': 'web-set-1', 'node': 'node', 'vmid': 101, 'type': 'qemu'}
+        upstream = Mock()
+        upstream.get_qemu_config.return_value = {'description': ''}
+        for direction in ('upload', 'download'):
+            for entry in (None,
+                          {'ugid': 'alice@pve', 'path': '/vms', 'roleid': 'PVEUser', 'propagate': 0},
+                          {'ugid': 'alice@pve', 'path': '/vms/101', 'roleid': 'AcostaRollback', 'propagate': 1},
+                          {'ugid': 'bob@pve', 'path': '/vms/101', 'roleid': 'PVEUser', 'propagate': 1}):
+                with self.subTest(direction=direction, entry=entry):
+                    upstream.list_acls.return_value = [entry] if entry else []
+                    with patch.object(api, 'ProxmoxClient', return_value=upstream), patch.object(api, '_resolve_targets_to_vm_info', return_value=([target], [], [])):
+                        response = self.client.post('/api/projects/p/instances/actions/file_transfer', json={
+                            'targets': [target], 'file_' + direction: True,
+                        })
+                    self.assertEqual(len(response.json['errors']), 1)
+                    self.assertIn('Enable User-Accessible first', response.json['errors'][0]['reason'])
+                    upstream.set_qemu_options.assert_not_called()
+
+    def test_unknown_live_access_falls_back_to_template_and_allows_disabling(self):
+        self.project.credentials = [{'username': 'alice'}]
+        target = {'index': 1, 'name': 'web-set-1', 'node': 'node', 'vmid': 101, 'type': 'qemu'}
+        upstream = Mock()
+        upstream.list_acls.side_effect = RuntimeError('ACL lookup unavailable')
+        upstream.get_qemu_config.return_value = {'description': ''}
+        for direction in ('upload', 'download'):
+            for accessible, enabled, allowed in ((True, True, True), (False, True, False), (False, False, True)):
+                with self.subTest(direction=direction, accessible=accessible, enabled=enabled):
+                    upstream.reset_mock()
+                    self.project.vms[0].viewable_to_user = accessible
+                    with patch.object(api, 'ProxmoxClient', return_value=upstream), patch.object(api, '_resolve_targets_to_vm_info', return_value=([target], [], [])):
+                        response = self.client.post('/api/projects/p/instances/actions/file_transfer', json={
+                            'targets': [target], 'file_' + direction: enabled,
+                        })
+                    self.assertEqual(len(response.json['errors']), 0 if allowed else 1)
+                    self.assertEqual(upstream.set_qemu_options.call_count, 1 if allowed else 0)
+
     def test_sync_applies_template_defaults_to_all_instances(self):
         targets = []
         upstream = Mock()

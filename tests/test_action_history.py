@@ -59,7 +59,7 @@ def test_history_records_execution_not_submission_or_cancelled_waiting_jobs(hist
     assert entries(client, 'custom') == []
     submit(client, 'run_stored_cmds', {'customCommand': 'hostname'})
     drain(app)
-    assert entries(client, 'custom')[0]['settings'] == {'command': 'hostname', 'timeoutSeconds': 60}
+    assert entries(client, 'custom')[0]['settings'] == {'command': 'hostname', 'timeoutSeconds': 60, 'renderTemplateVariables': True}
 
 
 @pytest.mark.parametrize('kind,action,body', [
@@ -126,3 +126,10 @@ def test_history_storage_failure_does_not_block_the_requested_action(history_app
     job = submit(client, 'run_stored_cmds', {'customCommand': 'hostname'})
     drain(app)
     assert client.get(f"/api/queue/{job['id']}").get_json()['status'] == 'completed'
+
+
+def test_custom_history_preserves_literal_mode(history_app):
+    app, client = history_app
+    submit(client, 'run_stored_cmds', {'customCommand': 'echo {{literal}}', 'renderTemplateVariables': False})
+    drain(app)
+    assert entries(client, 'custom')[0]['settings']['renderTemplateVariables'] is False

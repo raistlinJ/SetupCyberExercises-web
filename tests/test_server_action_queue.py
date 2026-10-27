@@ -5,12 +5,44 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 from flask import Flask, jsonify, request, session
 
 from app.action_queue import ActionQueue, init_action_queue, public_record
 from app.routes import api
+
+
+def test_queue_polls_reuse_summaries_without_reloading_large_results(harness, monkeypatch):
+    app, client, *_ = harness
+    job = enqueue(client, 'large-result').get_json()
+    wait_terminal(client, job['id'])
+    queue = app.extensions['action_queue']
+    retained = {'created': 7, 'outputs_zip': {'filename': 'guest_pull_large.zip', 'base64': 'x' * 2_000_000}}
+    with queue.connect() as db:
+        db.execute('UPDATE actions SET result=? WHERE id=?', (json.dumps(retained).encode(), job['id']))
+    statements = []
+    connect = queue.connect
+
+    @contextmanager
+    def traced_connect():
+        with connect() as db:
+            db.set_trace_callback(statements.append)
+            yield db
+
+    monkeypatch.setattr(queue, 'connect', traced_connect)
+    for _ in range(3):
+        item = client.get(f"/api/queue/{job['id']}").get_json()
+        assert 'Created: 7' in item['summary']
+        assert 'base64' not in json.dumps(item)
+        assert client.get('/api/queue').get_json()['items'][-1] == item
+    full_reads = [sql for sql in statements if sql.startswith('SELECT * FROM actions WHERE id=')]
+    assert len(full_reads) == 1, 'only a new terminal revision may load its retained result'
+    with queue.connect() as db:
+        db.execute('UPDATE actions SET result=? WHERE id=?', (b'{"created":8}', job['id']))
+    assert 'Created: 8' in client.get(f"/api/queue/{job['id']}").get_json()['summary']
+    assert client.get(f"/api/queue/{job['id']}/result").get_json() == {'created': 8}
 
 
 @pytest.mark.parametrize('status', ['completed', 'error'])
@@ -1000,7 +1032,8 @@ def test_queue_log_is_not_available_until_finished(harness):
 @pytest.mark.parametrize('direction', ['upload', 'download'])
 @pytest.mark.parametrize('enabled', [True, False])
 @pytest.mark.parametrize('write_fails', [True, False])
-def test_queued_vm_transfer_policy_updates_notes_reports_outcome_and_refreshes(harness, monkeypatch, direction, enabled, write_fails):
+@pytest.mark.parametrize('template_accessible', [True, False])
+def test_queued_vm_transfer_policy_updates_notes_reports_outcome_and_refreshes(harness, monkeypatch, direction, enabled, write_fails, template_accessible):
     from types import SimpleNamespace
     from unittest.mock import Mock
     from app.storage.projects import Project, VMConfig
@@ -1009,12 +1042,16 @@ def test_queued_vm_transfer_policy_updates_notes_reports_outcome_and_refreshes(h
     app, client, started, release, finished, calls = harness
     app.current_user = lambda: {'username': session['user'], 'roles': ['admin']} if session.get('user') else None
     project = Project(id='queue-test', name='Lab', proxmox_url='https://node.test',
-                      vms=[VMConfig(name='web', viewable_to_user=True)])
+                      credentials=[{'username': 'alice'}],
+                      vms=[VMConfig(name='web', viewable_to_user=template_accessible)])
     monkeypatch.setattr(api, '_store', lambda: SimpleNamespace(get=lambda pid: project))
     target = {'index': 1, 'name': 'web-set-1', 'node': 'node', 'vmid': 101, 'type': 'qemu'}
     monkeypatch.setattr(api, '_resolve_targets_to_vm_info', lambda *args: ([target], [], []))
     upstream = Mock()
     upstream.get_qemu_config.return_value = {'digest': 'abc', 'description': 'Human notes\n{"AccessForge":{"file_upload":true,"file_download":true}}'}
+    upstream.list_acls.return_value = [
+        {'ugid': 'alice@pve', 'path': '/vms/101', 'roleid': 'PVEVMUser', 'propagate': 1},
+    ]
 
     def write(**kwargs):
         started.set()

@@ -48,6 +48,11 @@
     if (kind === 'custom') {
       setValue('custom-command-input', settings.command);
       setValue('custom-command-timeout', settings.timeoutSeconds);
+      const render = document.getElementById('custom-render-template-variables');
+      if (render) {
+        render.checked = settings.renderTemplateVariables !== false;
+        render.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     } else if (kind === 'pull') {
       setValue('lxc-pull-paths', settings.paths);
     } else {

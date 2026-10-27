@@ -1,18 +1,28 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
 import re
+import time
 from urllib.parse import urlparse
 import requests
 
 
 class CTFdError(Exception):
     """Raised for non-2xx responses from CTFd, carrying status and body."""
-    def __init__(self, status_code: int, body: str = "", url: str = "", method: str = ""):
-        super().__init__(f"CTFd error {status_code}: {body}")
+    def __init__(self, status_code: int, body: str = "", url: str = "", method: str = "", retry_after: Optional[float] = None):
+        if status_code == 429:
+            wait = f" Wait at least {math.ceil(retry_after)} seconds before retrying." if retry_after is not None else " Wait before retrying."
+            message = "CTFd rate limit reached (HTTP 429). CTFd or its reverse proxy is receiving too many requests." + wait
+        else:
+            message = f"CTFd error {status_code}: {body}"
+        super().__init__(message)
         self.status_code = status_code
         self.body = body
         self.url = url
         self.method = method
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -294,16 +304,50 @@ class CTFdClient:
                 json=_redact(json) if json else None,
                 data=_redact(data) if data else None,
             )
-        resp = sess.request(method.upper(), url, headers=headers, params=params, json=json, data=data, timeout=30, verify=self.verify_ssl)
-        # Log response summary (truncate body)
-        try:
-            body_preview = (resp.text or "")[:300]
-        except Exception:
-            body_preview = ""
-        self._log("response", status=resp.status_code, url=url, body=body_preview)
+        # Retry only explicit rate-limit rejections, never ambiguous transport
+        # failures or other HTTP errors that could follow a successful write.
+        waited = 0.0
+        for attempt in range(4):
+            resp = sess.request(method.upper(), url, headers=headers, params=params, json=json, data=data, timeout=30, verify=self.verify_ssl)
+            try:
+                body_preview = (resp.text or "")[:300]
+            except Exception:
+                body_preview = ""
+            self._log("response", status=resp.status_code, url=url, body=body_preview)
+            if resp.status_code != 429:
+                break
+            retry_after = self._retry_after_seconds(resp)
+            delay = max(float(2 ** attempt), retry_after or 0.0)
+            # Bound worker occupancy, and never retry earlier than requested.
+            if attempt == 3 or waited + delay > 30:
+                raise CTFdError(429, resp.text, url=url, method=method.upper(), retry_after=retry_after)
+            self._log("rate_limit_retry", method=method.upper(), url=url, attempt=attempt + 1, delay=delay)
+            resp.close()
+            time.sleep(delay)
+            waited += delay
         if resp.status_code >= 400:
             raise CTFdError(resp.status_code, resp.text, url=url, method=method.upper())
         return resp
+
+    @staticmethod
+    def _retry_after_seconds(resp: requests.Response) -> Optional[float]:
+        """Accept both Retry-After forms: delay seconds and an HTTP date."""
+        value = (resp.headers.get('Retry-After') or '').strip()
+        if not value:
+            return None
+        if value.isascii() and value.isdigit():
+            try:
+                delay = float(value)
+                return delay if math.isfinite(delay) else None
+            except ValueError:
+                return None
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            return max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+        except (ValueError, TypeError, OverflowError):
+            return None
 
     def _safe_json(self, resp: requests.Response) -> Dict[str, Any]:
         """Parse JSON if present; return empty dict on empty/non-JSON bodies.
@@ -802,6 +846,9 @@ class CTFdClient:
         out: List[Dict[str, Any]] = []
         while page <= total_pages:
             payload = self.list_users(page=page, per_page=per_page, view_admin=view_admin)
+            if (not isinstance(payload, dict) or payload.get('success') is False
+                    or not any(isinstance(payload.get(key), list) for key in ('data', 'results'))):
+                raise ValueError('CTFd returned an invalid user listing')
             out.extend(self._list_payload_items(payload))
             next_total = self._list_payload_pages(payload, page)
             if next_total <= page:
@@ -848,6 +895,10 @@ class CTFdClient:
         for params in search_variants:
             try:
                 data = self.list_users(page=1, per_page=100, **params)
+            except CTFdError as exc:
+                if exc.status_code == 429:
+                    raise
+                continue
             except Exception:
                 continue
             matched = _match_user_id(data)
@@ -860,6 +911,13 @@ class CTFdClient:
         while page <= total_pages:
             try:
                 data = self.list_users(page=page, per_page=100, view_admin=True)
+            except CTFdError as exc:
+                if exc.status_code == 429:
+                    raise
+                if page == 1:
+                    data = self.list_users(page=page, per_page=100)
+                else:
+                    raise
             except Exception:
                 if page == 1:
                     data = self.list_users(page=page, per_page=100)

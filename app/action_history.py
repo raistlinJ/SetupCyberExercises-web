@@ -53,7 +53,11 @@ def history_settings(step):
         timeout = body.get('customCommandTimeoutSeconds', 60)
         if type(timeout) is not int or not 1 <= timeout <= 86400:
             return None
-        return 'custom', {'command': command.strip(), 'timeoutSeconds': timeout}
+        render = body.get('renderTemplateVariables', True)
+        if type(render) is not bool:
+            return None
+        return 'custom', {'command': command.strip(), 'timeoutSeconds': timeout,
+                          'renderTemplateVariables': render}
     return None
 
 

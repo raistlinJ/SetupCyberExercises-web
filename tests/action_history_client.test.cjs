@@ -18,7 +18,7 @@ function browser(fetch, options = {}) {
   const ids = ['lxcPushModal', 'lxcPullModal', 'customCommandModal', 'lxc-push-history', 'lxc-pull-history',
     'custom-command-history', 'lxc-push-type-file', 'lxc-push-type-folder', 'lxc-push-files', 'lxc-push-folder',
     'lxc-push-destination', 'lxc-push-owner', 'lxc-push-permissions', 'lxc-push-advanced', 'lxc-push-history-help', 'lxc-pull-paths',
-    'custom-command-input', 'custom-command-timeout'];
+    'custom-command-input', 'custom-command-timeout', 'custom-render-template-variables'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element()]));
   const callbacks = {};
   const window = { fetch: () => assert.fail('History must bypass queued fetch'), ServerQueue: { nativeFetch: fetch } };
@@ -43,7 +43,7 @@ test('custom history restores exact multiline commands and timeout without execu
   const command = "printf '<script>literal</script>'\necho done";
   const calls = [];
   const elements = browser(async (url, options) => {
-    calls.push([url, options]); return json([entry({ command, timeoutSeconds: 600 })]);
+    calls.push([url, options]); return json([entry({ command, timeoutSeconds: 600, renderTemplateVariables: false })]);
   });
   let edits = 0;
   elements['custom-command-input'].addEventListener('input', () => edits++);
@@ -55,6 +55,7 @@ test('custom history restores exact multiline commands and timeout without execu
   select.value = '1'; await select.fire('change');
   assert.equal(elements['custom-command-input'].value, command);
   assert.equal(elements['custom-command-timeout'].value, 600);
+  assert.equal(elements['custom-render-template-variables'].checked, false);
   assert.equal(edits, 2);
   assert.equal(select.value, '', 'same entry can be recalled again after editing');
   assert.equal(calls.length, 1);

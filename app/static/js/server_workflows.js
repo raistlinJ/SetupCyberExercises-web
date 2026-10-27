@@ -102,8 +102,15 @@ async function submitServerCtfdBulk(kind, pids) {
   const results = output.results || [output];
   const summary = results.map((result, index) => `<h6>${escHtml(projects[index]?.name || projects[index]?.id || '')}</h6>`
     + buildCtfdResultsSummary(kind === 'users_delete' ? 'delete' : 'create', result)).join('');
-  showActionSummary(title, summary + (state.errorMessage ? `<p class="text-danger">${escHtml(state.errorMessage)}</p>` : ''));
   CTFD_ALLOW_LOAD = true;
-  await ctfdRefreshMulti();
+  let refreshWarning = '';
+  try {
+    await ctfdRefreshMulti({ afterUserAction: true });
+  } catch (error) {
+    refreshWarning = `<p class="text-warning">Users processed, but the view could not be refreshed: ${escHtml(error.message || error)}</p>`;
+  } finally {
+    hideActionProgress();
+    showActionSummary(title, summary + (state.errorMessage ? `<p class="text-danger">${escHtml(state.errorMessage)}</p>` : '') + refreshWarning);
+  }
   return state;
 }

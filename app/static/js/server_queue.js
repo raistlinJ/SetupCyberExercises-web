@@ -6,6 +6,10 @@
   let lastPublished = '';
   let context = null;
   let refreshing = null;
+  const reads = new Map();
+  const readControllers = new Set();
+  let readGeneration = 0;
+  let pageActive = true;
   const terminal = item => ['completed', 'error', 'cancelled'].includes(item.status);
   const visible = () => [...records.values()].filter(entry => !entry.hidden)
     .map(entry => entry.item).sort((a, b) => a.id - b.id);
@@ -34,9 +38,43 @@
     const hidden = !!item.dismissed || (!!previous?.hidden && !listed
       && (!versioned || item.revision <= previous.item.revision));
     records.set(id, { item: next, sequence: Math.max(sequence, previous?.sequence || 0), hidden });
+    if (terminal(next) && (!previous || !terminal(previous.item))) ++readGeneration;
     return next;
   }
   const token = () => window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  function isRead(url, method) {
+    if (method === 'GET' || method === 'HEAD') return true;
+    // These endpoints use POST to carry credentials, but do not submit actions.
+    return method === 'POST' && (
+      /^\/api\/proxmox\/(?:nodes(?:\/[^/]+\/network)?|templates)$/.test(url.pathname)
+      || url.pathname === '/api/ctfd/challenges'
+      || /^\/api\/projects\/[^/]+\/(?:instances\/refresh\/vm|proxmox\/verify|ctfrpg\/(?:login|users_check)|ctfd\/(?:login|settings|users_check|challenges\/list|stats\/challenges(?:\/\d+)?))$/.test(url.pathname)
+    );
+  }
+
+  function readFetch(input, options = {}) {
+    if (!pageActive) return Promise.reject(Object.assign(new Error('Page navigation cancelled the read'), { name: 'AbortError' }));
+    // Caller-owned cancellation must never cancel another consumer's request.
+    if (options.signal || (options.body !== undefined && typeof options.body !== 'string')) {
+      return nativeFetch(input, options);
+    }
+    const headers = Array.from(new Headers(options.headers || {})).sort(([a], [b]) => a.localeCompare(b));
+    const key = JSON.stringify([readGeneration, new URL(input, window.location.href).href, { ...options, headers }]);
+    let pending = reads.get(key);
+    if (!pending) {
+      const controller = window.AbortController ? new window.AbortController() : null;
+      if (controller) readControllers.add(controller);
+      pending = Promise.resolve().then(() => nativeFetch(input, controller ? { ...options, signal: controller.signal } : options))
+        .finally(() => {
+          reads.delete(key);
+          if (controller) readControllers.delete(controller);
+        });
+      reads.set(key, pending);
+    }
+    // Each caller consumes its own body, including error responses.
+    return pending.then(response => response.clone());
+  }
 
   async function refresh() {
     if (refreshing) return refreshing;
@@ -62,6 +100,7 @@
   }
 
   async function submit(label, steps, options = {}, files = []) {
+    ++readGeneration;
     const sequence = ++observation;
     const plan = { label, steps, projectId: String(options.projectId || ''), token: options.token || token() };
     let body;
@@ -140,6 +179,8 @@
 
   async function result(job) {
     const state = await wait(job);
+    // A refresh after a mutation must not share a pre-mutation read.
+    ++readGeneration;
     const response = await nativeFetch(`/api/queue/${job.id}/result`, { credentials: 'same-origin' });
     if (state.status === 'cancelled') throw new Error('Action cancelled');
     // Preserve endpoint errors (and their HTTP status) for existing callers.
@@ -232,14 +273,11 @@
     if (typeof input !== 'string') return nativeFetch(input, options);
     const url = new URL(input, window.location.href);
     const method = String(options.method || 'GET').toUpperCase();
-    // These inventory reads use POST to carry connection credentials. They
-    // must remain available while actions are running, even inside runQueued.
-    const inventoryRead = method === 'POST' && (
-      /^\/api\/proxmox\/(?:nodes(?:\/[^/]+\/network)?|templates)$/.test(url.pathname)
-      || /^\/api\/projects\/[^/]+\/instances\/refresh\/vm$/.test(url.pathname)
-    );
-    const eligible = url.origin === window.location.origin && url.pathname.startsWith('/api/')
-      && !inventoryRead
+    const localApi = url.origin === window.location.origin && url.pathname.startsWith('/api/');
+    if (localApi && !url.pathname.startsWith('/api/queue') && isRead(url, method)) {
+      return readFetch(input, options);
+    }
+    const eligible = localApi
       && !url.pathname.startsWith('/api/queue')
       && !/\/(cancel|status|create-preflight)$/.test(url.pathname);
     if (eligible && (context || ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method))) {
@@ -247,6 +285,24 @@
     }
     return nativeFetch(input, options);
   };
+  window.addEventListener?.('pagehide', () => {
+    pageActive = false;
+    ++readGeneration;
+    for (const controller of readControllers) controller.abort();
+    reads.clear();
+  });
+  window.addEventListener?.('pageshow', () => { pageActive = true; });
+  document.addEventListener?.('auth-changed', () => {
+    ++readGeneration;
+    for (const controller of readControllers) controller.abort();
+    reads.clear();
+  });
   refresh().catch(() => {});
-  setInterval(() => refresh().catch(() => {}), 2000);
+  // Hidden tabs do not need a steady stream of queue snapshots.
+  setInterval(() => {
+    if (pageActive && !document.hidden) refresh().catch(() => {});
+  }, 2000);
+  document.addEventListener?.('visibilitychange', () => {
+    if (pageActive && !document.hidden) refresh().catch(() => {});
+  });
 })();

@@ -44,6 +44,7 @@ function buildServerVmSteps(action, options, projects) {
       if (options.customCommand) {
         extra.customCommand = options.customCommand;
         extra.customCommandTimeoutSeconds = options.customCommandTimeoutSeconds ?? 60;
+        extra.renderTemplateVariables = options.renderTemplateVariables !== false;
       }
       if (action === 'validate') extra.validateOnly = true;
       if (options.selectedCommands?.length) {

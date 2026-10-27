@@ -5541,6 +5541,22 @@ function openStoredCommandsManagerForContext(ctx) {
 
 let lastCustomCommand = '';
 let lastCustomCommandTimeoutSeconds = 60;
+let lastCustomRenderTemplateVariables = true;
+
+function customCommandPreviewGroups(options) {
+  const groups = options.targetsByPid
+    ? Object.entries(options.targetsByPid).map(([pid, targets]) => ({pid, targets}))
+    : [{pid: options.project?.id || PROJ?.id, targets: options.targets || []}];
+  return groups.filter(group => group.pid && group.targets.length).map(group => {
+    const project = options.project?.id === group.pid ? options.project : guestTransferProject(group.pid);
+    return {pid: group.pid, targets: group.targets.map(target => {
+      const entry = {index: Number(target.index), name: String(target.name)};
+      const vmid = Number(_findVmDetailForTarget(project, target)?.vmid);
+      if (Number.isInteger(vmid) && vmid > 0) entry.vmid = vmid;
+      return entry;
+    })};
+  });
+}
 
 function promptCustomCommand(options) {
   const modalEl = document.getElementById('customCommandModal');
@@ -5553,14 +5569,34 @@ function promptCustomCommand(options) {
     `Run this command on ${count} selected VM${count === 1 ? '' : 's'}.`;
   input.value = lastCustomCommand;
   timeoutInput.value = options.customCommandTimeoutSeconds ?? lastCustomCommandTimeoutSeconds;
+  let panel = document.getElementById('custom-template-controls');
+  if (!panel) {
+    panel = createCommandTemplatePanel('custom');
+    panel.classList.add('mt-3');
+    input.insertAdjacentElement('afterend', panel);
+  }
+  const renderInput = document.getElementById('custom-render-template-variables');
+  renderInput.checked = options.renderTemplateVariables ?? lastCustomRenderTemplateVariables;
+  const previewOutput = panel.querySelector('pre');
+  previewOutput.textContent = '';
+  invalidateCommandTemplatePreview('custom');
+  panel.querySelector('[data-role="template-preview"]').onclick = () => previewCommandTemplates(
+    previewOutput, customCommandPreviewGroups(options), input.value.trim() ? [{
+      command: input.value.trim(), render_template_variables: renderInput.checked,
+    }] : []);
   runBtn.disabled = !input.value.trim();
   const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
   return new Promise(resolve => {
     let command = null;
-    const update = () => { runBtn.disabled = !input.value.trim() || !timeoutInput.checkValidity(); };
+    const update = () => {
+      runBtn.disabled = !input.value.trim() || !timeoutInput.checkValidity();
+      invalidateCommandTemplatePreview('custom');
+    };
     const run = () => {
       if (!input.value.trim() || !timeoutInput.reportValidity()) return;
       options.customCommandTimeoutSeconds = Number(timeoutInput.value);
+      options.renderTemplateVariables = renderInput.checked;
+      lastCustomRenderTemplateVariables = renderInput.checked;
       command = input.value.trim();
       lastCustomCommand = command;
       lastCustomCommandTimeoutSeconds = options.customCommandTimeoutSeconds;
@@ -5568,11 +5604,14 @@ function promptCustomCommand(options) {
     };
     const focus = () => input.focus();
     input.addEventListener('input', update);
+    renderInput.addEventListener('change', update);
     timeoutInput.addEventListener('input', update);
     runBtn.addEventListener('click', run);
     modalEl.addEventListener('shown.bs.modal', focus, { once: true });
     modalEl.addEventListener('hidden.bs.modal', () => {
       input.removeEventListener('input', update);
+      renderInput.removeEventListener('change', update);
+      invalidateCommandTemplatePreview('custom');
       timeoutInput.removeEventListener('input', update);
       runBtn.removeEventListener('click', run);
       modalEl.removeEventListener('shown.bs.modal', focus);
@@ -6968,6 +7007,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
       if (opts.customCommand) {
         payload.customCommand = opts.customCommand;
         payload.customCommandTimeoutSeconds = opts.customCommandTimeoutSeconds ?? 60;
+        payload.renderTemplateVariables = opts.renderTemplateVariables !== false;
       }
       if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
         payload.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({
@@ -7486,6 +7526,7 @@ async function vmActionMultiExec(action, opts = {}) {
     if (opts.customCommand) {
       baseBody.customCommand = opts.customCommand;
       baseBody.customCommandTimeoutSeconds = opts.customCommandTimeoutSeconds ?? 60;
+        baseBody.renderTemplateVariables = opts.renderTemplateVariables !== false;
     }
     if (Array.isArray(opts.storedCommandOverrides) && opts.storedCommandOverrides.length) {
       baseBody.storedCommandOverrides = opts.storedCommandOverrides.map(entry => ({

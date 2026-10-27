@@ -19,6 +19,7 @@ class StartCommand:
     enabled: bool = True
     long_running: bool = False
     timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS
+    render_template_variables: bool = True
 
 
 @dataclass
@@ -91,6 +92,7 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
                     enabled=_coerce_enabled(entry.enabled),
                     long_running=_coerce_enabled(getattr(entry, 'long_running', False), False),
                     timeout_seconds=_coerce_timeout(getattr(entry, 'timeout_seconds', DEFAULT_COMMAND_TIMEOUT_SECONDS)),
+                    render_template_variables=_coerce_enabled(getattr(entry, 'render_template_variables', True)),
                 ))
             return normalized
         if isinstance(entry, dict):
@@ -132,6 +134,7 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
                 enabled=_coerce_enabled(enabled_hint),
                 long_running=_coerce_enabled(long_hint, False),
                 timeout_seconds=_coerce_timeout(timeout_hint),
+                render_template_variables=_coerce_enabled(entry.get('render_template_variables', entry.get('renderTemplateVariables', True))),
             ))
             return normalized
         if isinstance(entry, (list, tuple, set)):
@@ -164,6 +167,7 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
                     enabled=_coerce_enabled(cmd.enabled),
                     long_running=_coerce_enabled(getattr(cmd, 'long_running', False), False),
                     timeout_seconds=_coerce_timeout(getattr(cmd, 'timeout_seconds', DEFAULT_COMMAND_TIMEOUT_SECONDS)),
+                    render_template_variables=_coerce_enabled(getattr(cmd, 'render_template_variables', True)),
                 ))
                 continue
             if isinstance(cmd, dict):
@@ -190,6 +194,7 @@ def sanitize_start_command_steps(value: Any) -> List[StartCommandStep]:
                     enabled=_coerce_enabled(enabled_hint),
                     long_running=_coerce_enabled(long_hint, False),
                     timeout_seconds=_coerce_timeout(timeout_hint),
+                    render_template_variables=_coerce_enabled(cmd.get('render_template_variables', cmd.get('renderTemplateVariables', True))),
                 ))
                 continue
             text = _clean_start_command(cmd)
@@ -404,8 +409,10 @@ class Project:
 
 
 class ProjectStore:
+    _shared_write_lock = threading.RLock()
+
     def __init__(self, data_dir: str):
-        self._write_lock = threading.RLock()
+        self._write_lock = self._shared_write_lock
         self.data_dir = data_dir
         self.db_path = os.path.join(self.data_dir, "projects.json")
         os.makedirs(self.data_dir, exist_ok=True)

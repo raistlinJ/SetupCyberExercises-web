@@ -132,6 +132,77 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertEqual(len(command_list), 2)
             self.assertCountEqual([c.get('command') for c in command_list], ['echo start', 'hostname'])
 
+    def test_startup_and_stored_commands_render_resolved_instance_variables(self):
+        template = 'configure {{instance_index}} {{vmid}} {{vm_name}}'
+        for field, action in [('start_commands', 'run_startup_cmds'), ('stored_commands', 'run_stored_cmds')]:
+            with self.subTest(action=action), ExitStack() as stack:
+                setattr(self.project.vms[0], field, [StartCommandStep(commands=[StartCommand(command=template)])])
+                for ctx in self._common_patches():
+                    stack.enter_context(ctx)
+                guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+                guest.agent_exec.return_value = {'exitcode': 0, 'stdout': 'configured', 'stderr': ''}
+                response = self.client.post(
+                    f'/api/projects/{self.project.id}/instances/actions/{action}',
+                    json={'username': 'root@pam', 'password': 'secret', 'targets': [{'index': 1, 'name': self.target_name}]})
+                self.assertEqual(response.status_code, 200)
+                rendered = f'configure 1 101 {self.target_name}'
+                self.assertEqual(guest.agent_exec.call_args.kwargs['command'], rendered)
+                self.assertEqual(response.get_json()['ran'][0]['cmds'][0]['cmd'], rendered)
+                self.assertEqual(getattr(self.project.vms[0], field)[0].commands[0].command, template)
+
+    def test_saved_literal_mode_reaches_guest_unchanged(self):
+        text = 'echo {{unknown}} {{vmid}}'
+        for field, action in [('start_commands', 'run_startup_cmds'), ('stored_commands', 'run_stored_cmds')]:
+            with self.subTest(action=action), ExitStack() as stack:
+                setattr(self.project.vms[0], field, [StartCommandStep(commands=[
+                    StartCommand(command=text, render_template_variables=False)])])
+                for ctx in self._common_patches():
+                    stack.enter_context(ctx)
+                guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+                guest.agent_exec.return_value = {'exitcode': 0, 'stdout': '', 'stderr': ''}
+                response = self.client.post(
+                    f'/api/projects/{self.project.id}/instances/actions/{action}',
+                    json={'username': 'root@pam', 'password': 'secret', 'targets': [{'index': 1, 'name': self.target_name}]})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(guest.agent_exec.call_args.kwargs['command'], text)
+                self.assertEqual(response.get_json()['ran'][0]['cmds'][0]['cmd'], text)
+
+    def test_custom_command_render_toggle(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), ExitStack() as stack:
+                for ctx in self._common_patches():
+                    stack.enter_context(ctx)
+                guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+                guest.agent_exec.return_value = {'exitcode': 0, 'stdout': '', 'stderr': ''}
+                response = self.client.post(
+                    f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                    json={'username': 'root@pam', 'password': 'secret',
+                          'targets': [{'index': 1, 'name': self.target_name}],
+                          'customCommand': 'echo {{instance_index}}', 'renderTemplateVariables': enabled})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(guest.agent_exec.call_args.kwargs['command'],
+                                 'echo 1' if enabled else 'echo {{instance_index}}')
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={'customCommand': 'echo hello', 'renderTemplateVariables': 'false'})
+            self.assertEqual(response.status_code, 400)
+
+    def test_unknown_command_variable_never_reaches_guest(self):
+        self.project.vms[0].stored_commands = [StartCommandStep(commands=[StartCommand(command='echo {{wrong_name}}')])]
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={'username': 'root@pam', 'password': 'secret', 'targets': [{'index': 1, 'name': self.target_name}]})
+            self.assertEqual(response.status_code, 200)
+            guest.agent_exec.assert_not_called()
+            self.assertIn('Unknown command variable', str(response.get_json()['errors']))
+
     def test_custom_command_runs_without_saved_commands(self):
         self.project.vms[0].stored_commands = []
         command = 'echo custom\nprintf "done\\n"'

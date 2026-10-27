@@ -58,7 +58,7 @@ function normalizeCommandTimeout(rawValue, defaultValue = DEFAULT_COMMAND_TIMEOU
 }
 
 function createEmptyCommandEntry() {
-  return { command: '', enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS };
+  return { command: '', enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS, renderTemplateVariables: true };
 }
 
 function applyCommandLongRunningState(cmdElement, isLongRunning) {
@@ -142,7 +142,7 @@ function sanitizeStartCommandSteps(steps) {
     if (entry === undefined || entry === null) return null;
     if (typeof entry === 'string' || typeof entry === 'number') {
       const text = String(entry).trim();
-      return text ? { command: text, enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS } : null;
+      return text ? { command: text, enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS, renderTemplateVariables: true } : null;
     }
     if (typeof entry === 'object') {
       if (Array.isArray(entry)) {
@@ -180,10 +180,11 @@ function sanitizeStartCommandSteps(steps) {
         enabled: toBool(enabled, true),
         longRunning: toBool(longRunning, false),
         timeoutSeconds: normalizeCommandTimeout(timeoutHint, DEFAULT_COMMAND_TIMEOUT_SECONDS),
+        renderTemplateVariables: toBool(entry.renderTemplateVariables ?? entry.render_template_variables, true),
       };
     }
     const fallback = String(entry).trim();
-    return fallback ? { command: fallback, enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS } : null;
+    return fallback ? { command: fallback, enabled: true, longRunning: false, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS, renderTemplateVariables: true } : null;
   };
 
   const coerceDelay = (raw) => {
@@ -238,7 +239,7 @@ function sanitizeStartCommandSteps(steps) {
         const enabled = toBool(cmd?.enabled, true);
         const longRunning = toBool(cmd?.longRunning ?? cmd?.long_running, false);
         const timeoutSeconds = normalizeCommandTimeout(cmd?.timeoutSeconds ?? cmd?.timeout_seconds ?? cmd?.timeout);
-        return { command: text, enabled, longRunning, timeoutSeconds };
+        return { command: text, enabled, longRunning, timeoutSeconds, renderTemplateVariables: toBool(cmd?.renderTemplateVariables ?? cmd?.render_template_variables, true) };
       })
       .filter(Boolean);
     if (!cleanedCommands.length) continue;
@@ -286,6 +287,7 @@ function stepsToServerPayload(steps) {
       enabled: cmd.enabled !== false,
       long_running: cmd.longRunning === true,
       timeout_seconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+      render_template_variables: cmd.renderTemplateVariables !== false,
     }))
   }));
 }
@@ -430,8 +432,9 @@ function updateStoredCommandsCache(pid, vmName, steps, idxHint) {
 }
 
 // Basic HTTP helper (restored after refactor removed it inadvertently)
-async function http(method, url, body) {
+async function http(method, url, body, { signal } = {}) {
   const opts = { method, headers: {}, credentials: 'same-origin' };
+  if (signal) opts.signal = signal;
   if (body instanceof FormData) {
     opts.body = body;
   } else if (body !== undefined) {
@@ -459,7 +462,9 @@ async function http(method, url, body) {
         try { if (typeof window.showToast === 'function') window.showToast(warn, 'warning'); } catch { }
       }
     } catch { }
-    throw new Error(msg || `HTTP ${res.status}`);
+    const error = new Error(msg || `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
   }
   const ct = res.headers.get('content-type') || '';
   if (ct.includes('application/json')) return res.json();
@@ -5593,7 +5598,165 @@ async function autoSaveVm(pid, idx) {
   }
 }
 
+function createCommandTemplatePanel(prefix) {
+  const panel = document.createElement('details');
+  panel.id = `${prefix}-template-controls`;
+  panel.className = 'border rounded p-3 mb-3';
+  const variables = [
+    ['instance_index', 'Stable scenario instance number (starts at 1)'],
+    ['vmid', 'Resolved Proxmox guest ID'], ['vm_name', 'Generated guest name'],
+    ['project_id', 'Project ID'],
+  ];
+  panel.innerHTML = `<summary class="small fw-semibold">Advanced</summary>
+    <div class="mt-3">
+    <div class="d-flex align-items-center gap-2 mb-2">
+    <strong class="small">Template variables and command preview</strong>
+    <button type="button" class="btn btn-sm btn-outline-secondary rounded-circle px-2 py-0" data-role="template-help"
+      aria-label="Show available template variables" aria-expanded="false" aria-controls="${prefix}-template-help" title="Available template variables">?</button>
+    </div>
+    <div id="${prefix}-template-help" class="small mb-3" hidden>
+      <table class="table table-sm mb-2"><thead><tr><th>Variable</th><th>Value</th></tr></thead><tbody>
+      ${variables.map(([key, description]) => `<tr><td><code>{{${key}}}</code></td><td>${description}</td></tr>`).join('')}
+      </tbody></table>
+      <p class="mb-0">Turn off “Render template variables” to send {{...}} literally. This only controls SCE-web substitution.</p>
+    </div>
+    ${prefix === 'custom' ? `<div class="form-check form-switch mb-2">
+      <input type="checkbox" class="form-check-input" id="custom-render-template-variables" checked>
+      <label class="form-check-label small" for="custom-render-template-variables">Render template variables</label>
+      </div><p class="small text-muted">Preview uses the selected VMs and their instance values.</p>` : `<p class="small text-muted mb-2">Each command has a “Render template variables” switch. Preview shows enabled commands with their current settings, including unsaved edits.</p>
+      <div class="d-flex gap-2 flex-wrap mb-2">
+      <label class="small" for="${prefix}-preview-index">Instance index
+        <input id="${prefix}-preview-index" type="number" min="1" value="1" class="form-control form-control-sm"></label>
+      <label class="small" for="${prefix}-preview-vmid">Preview VMID (optional)
+        <input id="${prefix}-preview-vmid" type="number" min="1" class="form-control form-control-sm"></label></div>`}
+    <button type="button" data-role="template-preview" class="btn btn-sm btn-outline-primary">Preview commands</button>
+    <div data-role="template-preview-picker" class="mt-2" hidden>
+      <label class="form-label small mb-1" for="${prefix}-preview-selection">Preview result</label>
+      <select id="${prefix}-preview-selection" class="form-select form-select-sm" disabled></select>
+    </div>
+    <pre id="${prefix}-template-preview" class="small mt-2 mb-0" style="white-space: pre-wrap; overflow-wrap: anywhere;" aria-live="polite"></pre>
+    </div>`;
+  const helpButton = panel.querySelector('[data-role="template-help"]');
+  const help = panel.querySelector(`#${prefix}-template-help`);
+  helpButton.addEventListener('click', () => {
+    help.hidden = !help.hidden;
+    helpButton.setAttribute('aria-expanded', String(!help.hidden));
+  });
+  const output = panel.querySelector('pre');
+  const selector = panel.querySelector(`#${prefix}-preview-selection`);
+  output._previewSelector = selector;
+  output._previewPicker = panel.querySelector('[data-role="template-preview-picker"]');
+  selector.addEventListener('change', () => {
+    const choice = output._previewChoices?.[Number(selector.value)];
+    if (choice) output.textContent = choice.text;
+  });
+  panel.addEventListener('input', event => {
+    if (event.target !== selector) invalidateCommandTemplatePreview(prefix);
+  });
+  return panel;
+}
+
+function clearCommandTemplateChoices(output) {
+  output._previewAbort?.abort();
+  output._previewAbort = null;
+  output._previewChoices = [];
+  output._previewSelector.replaceChildren();
+  output._previewSelector.disabled = true;
+  output._previewPicker.hidden = true;
+}
+
+function invalidateCommandTemplatePreview(prefix) {
+  const output = document.getElementById(`${prefix}-template-preview`);
+  if (!output) return;
+  output._previewRequest = (output._previewRequest || 0) + 1;
+  clearCommandTemplateChoices(output);
+  if (output.textContent) output.textContent = 'Settings changed. Preview again to see the command that will be sent.';
+}
+
+async function previewCommandTemplates(output, groups, commands) {
+  const request = output._previewRequest = (output._previewRequest || 0) + 1;
+  clearCommandTemplateChoices(output);
+  if (!commands.length) { output.textContent = 'Enter an enabled command to preview.'; return; }
+  output.textContent = 'Rendering preview…';
+  try {
+    const previews = [];
+    // Literal commands and commands without placeholders need no server rendering.
+    const unchanged = commands.every(entry => entry.render_template_variables === false ||
+      !/\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}/.test(entry.command));
+    for (const group of groups) {
+      for (let start = 0; start < group.targets.length; start += 250) {
+        const targets = group.targets.slice(start, start + 250);
+        let result;
+        if (unchanged) {
+          result = {previews: targets.map(target => ({...target, commands: commands.map(entry => entry.command)}))};
+        } else {
+          const controller = new AbortController();
+          output._previewAbort = controller;
+          let timedOut = false;
+          const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 10000);
+          try {
+            result = await http('POST', `/api/projects/${encodeURIComponent(group.pid)}/commands/preview`,
+              { targets, commands }, {signal: controller.signal});
+          } catch (error) {
+            if (timedOut) throw new Error('Preview timed out after 10 seconds. Please try again.');
+            throw error;
+          } finally {
+            clearTimeout(timer);
+            if (output._previewAbort === controller) output._previewAbort = null;
+          }
+        }
+        if (request !== output._previewRequest) return;
+        for (const item of result.previews) {
+          const label = `${group.pid} / ${item.name} (instance ${item.index})`;
+          if (item.error) {
+            previews.push({ label: `${label} — Error`, text: item.error });
+          } else {
+            item.commands.forEach((command, i) => {
+              const mode = commands[i].render_template_variables === false ? 'Literal' : 'Rendered';
+              previews.push({ label: `${label} — Command ${i + 1} (${mode})`, text: `[${mode}]\n${command}` });
+            });
+          }
+        }
+      }
+    }
+    if (request !== output._previewRequest) return;
+    if (!previews.length) { output.textContent = 'Select at least one VM to preview.'; return; }
+    output._previewChoices = previews;
+    previews.forEach((preview, i) => {
+      const option = document.createElement('option');
+      option.value = String(i);
+      option.textContent = preview.label;
+      output._previewSelector.append(option);
+    });
+    output._previewSelector.value = '0';
+    output._previewSelector.disabled = false;
+    output._previewPicker.hidden = false;
+    output.textContent = previews[0].text;
+  } catch (error) { if (request === output._previewRequest) output.textContent = error.message; }
+}
+
+function ensureCommandTemplatePreview(kind) {
+  const prefix = kind === 'stored' ? 'stored' : 'start';
+  const modalId = prefix === 'stored' ? 'storedCommandsModal' : 'startCommandsModal';
+  const body = document.querySelector(`#${modalId} .modal-body`);
+  if (!body || document.getElementById(`${prefix}-template-controls`)) return;
+  const panel = createCommandTemplatePanel(prefix);
+  panel.querySelector('[data-role="template-preview"]').addEventListener('click', () => {
+    const state = prefix === 'stored' ? STORED_COMMAND_MODAL_STATE : START_COMMAND_MODAL_STATE;
+    const target = { index: Number(document.getElementById(`${prefix}-preview-index`).value), name: state.vmName };
+    const vmid = document.getElementById(`${prefix}-preview-vmid`).value;
+    if (vmid) target.vmid = Number(vmid);
+    const commands = (state.steps || []).flatMap(step => step.commands || [])
+      .filter(command => command.enabled !== false && String(command.command || '').trim())
+      .map(command => ({command: String(command.command), render_template_variables: command.renderTemplateVariables !== false}));
+    return previewCommandTemplates(panel.querySelector('pre'), [{pid: state.pid, targets: [target]}], commands);
+  });
+  body.prepend(panel);
+}
+
 function renderStartCommandsModal() {
+  invalidateCommandTemplatePreview('start');
+  ensureCommandTemplatePreview('start');
   const modalTitle = document.getElementById('startCommandsModalLabel');
   if (modalTitle) {
     const name = START_COMMAND_MODAL_STATE.vmName ? ` — ${START_COMMAND_MODAL_STATE.vmName}` : '';
@@ -5664,6 +5827,13 @@ function renderStartCommandsModal() {
           </div>
         </div>
         <div class="row g-2 align-items-center ms-4 mt-1" data-role="cmd-meta-row">
+          <div class="col-12">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="start-cmd-${stepIdx}-${cmdIdx}-render" data-role="cmd-render" ${commandObj.renderTemplateVariables !== false ? 'checked' : ''}>
+              <label class="form-check-label small" for="start-cmd-${stepIdx}-${cmdIdx}-render">Render template variables</label>
+              <span class="small text-muted ms-2">Off sends {{...}} literally.</span>
+            </div>
+          </div>
           <div class="col-sm-6 col-md-4">
             <div class="form-check form-switch m-0">
               <input class="form-check-input" type="checkbox" id="${escHtml(longId)}" data-role="cmd-long" ${longRunning ? 'checked' : ''} title="${longTitle}" aria-label="${longTitle}">
@@ -5749,6 +5919,7 @@ function openStartCommandsManager(pid, idx) {
       enabled: cmd.enabled !== false,
       longRunning: cmd.longRunning === true,
       timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+      renderTemplateVariables: cmd.renderTemplateVariables !== false,
     }))
   }));
   renderStartCommandsModal();
@@ -5780,6 +5951,7 @@ async function saveStartCommandsFromModal() {
         enabled: cmd.enabled !== false,
         longRunning: cmd.longRunning === true,
         timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+        renderTemplateVariables: cmd.renderTemplateVariables !== false,
       }))
     }));
     setVmStatus(pid, idx, 'Saved', 'text-success');
@@ -5828,6 +6000,7 @@ function wireStartCommandsModal() {
       const stepIdx = Number(stepEl.dataset.stepIndex);
       if (Number.isNaN(stepIdx) || !START_COMMAND_MODAL_STATE.steps[stepIdx]) return;
       const role = target.getAttribute('data-role');
+      invalidateCommandTemplatePreview('start');
       if (role === 'cmd-input') {
         const cmdEl = target.closest('[data-cmd-index]');
         if (!cmdEl) return;
@@ -5866,7 +6039,7 @@ function wireStartCommandsModal() {
       const target = ev.target;
       if (!target) return;
       const role = target.getAttribute('data-role');
-      if (role !== 'cmd-toggle' && role !== 'cmd-long') return;
+      if (!['cmd-toggle', 'cmd-long', 'cmd-render'].includes(role)) return;
       const stepEl = target.closest('[data-step-index]');
       const cmdEl = target.closest('[data-cmd-index]');
       if (!stepEl || !cmdEl) return;
@@ -5876,6 +6049,11 @@ function wireStartCommandsModal() {
       const commands = START_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(START_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? START_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
       if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
         commands[cmdIdx] = createEmptyCommandEntry();
+      }
+      invalidateCommandTemplatePreview('start');
+      if (role === 'cmd-render') {
+        commands[cmdIdx].renderTemplateVariables = !!target.checked;
+        return;
       }
       if (role === 'cmd-long') {
         commands[cmdIdx].longRunning = !!target.checked;
@@ -5963,6 +6141,8 @@ function wireStartCommandsModal() {
 }
 
 function renderStoredCommandsModal() {
+  invalidateCommandTemplatePreview('stored');
+  ensureCommandTemplatePreview('stored');
   const modalTitle = document.getElementById('storedCommandsModalLabel');
   if (modalTitle) {
     const name = STORED_COMMAND_MODAL_STATE.vmName ? ` — ${STORED_COMMAND_MODAL_STATE.vmName}` : '';
@@ -6029,6 +6209,13 @@ function renderStoredCommandsModal() {
           </div>
         </div>
         <div class="row g-2 align-items-center ms-4 mt-1" data-role="cmd-meta-row">
+          <div class="col-12">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" id="stored-cmd-${stepIdx}-${cmdIdx}-render" data-role="cmd-render" ${commandObj.renderTemplateVariables !== false ? 'checked' : ''}>
+              <label class="form-check-label small" for="stored-cmd-${stepIdx}-${cmdIdx}-render">Render template variables</label>
+              <span class="small text-muted ms-2">Off sends {{...}} literally.</span>
+            </div>
+          </div>
           <div class="col-sm-6 col-md-4">
             <div class="form-check form-switch m-0">
               <input class="form-check-input" type="checkbox" id="${escHtml(longId)}" data-role="cmd-long" ${longRunning ? 'checked' : ''} title="${longTitle}" aria-label="${longTitle}">
@@ -6110,6 +6297,7 @@ function openStoredCommandsManager(pid, idx) {
       enabled: cmd.enabled !== false,
       longRunning: cmd.longRunning === true,
       timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+      renderTemplateVariables: cmd.renderTemplateVariables !== false,
     }))
   }));
   renderStoredCommandsModal();
@@ -6141,6 +6329,7 @@ async function saveStoredCommandsFromModal() {
         enabled: cmd.enabled !== false,
         longRunning: cmd.longRunning === true,
         timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds),
+        renderTemplateVariables: cmd.renderTemplateVariables !== false,
       }))
     }));
     setVmStatus(pid, idx, 'Saved', 'text-success');
@@ -6189,6 +6378,7 @@ function wireStoredCommandsModal() {
       const stepIdx = Number(stepEl.dataset.stepIndex);
       if (Number.isNaN(stepIdx) || !STORED_COMMAND_MODAL_STATE.steps[stepIdx]) return;
       const role = target.getAttribute('data-role');
+      invalidateCommandTemplatePreview('stored');
       if (role === 'cmd-input') {
         const cmdEl = target.closest('[data-cmd-index]');
         if (!cmdEl) return;
@@ -6227,7 +6417,7 @@ function wireStoredCommandsModal() {
       const target = ev.target;
       if (!target) return;
       const role = target.getAttribute('data-role');
-      if (role !== 'cmd-toggle' && role !== 'cmd-long') return;
+      if (!['cmd-toggle', 'cmd-long', 'cmd-render'].includes(role)) return;
       const stepEl = target.closest('[data-step-index]');
       const cmdEl = target.closest('[data-cmd-index]');
       if (!stepEl || !cmdEl) return;
@@ -6237,6 +6427,11 @@ function wireStoredCommandsModal() {
       const commands = STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands = Array.isArray(STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands) ? STORED_COMMAND_MODAL_STATE.steps[stepIdx].commands : [];
       if (!commands[cmdIdx] || typeof commands[cmdIdx] !== 'object') {
         commands[cmdIdx] = createEmptyCommandEntry();
+      }
+      invalidateCommandTemplatePreview('stored');
+      if (role === 'cmd-render') {
+        commands[cmdIdx].renderTemplateVariables = !!target.checked;
+        return;
       }
       if (role === 'cmd-long') {
         commands[cmdIdx].longRunning = !!target.checked;

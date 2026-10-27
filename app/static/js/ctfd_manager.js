@@ -224,6 +224,26 @@ let CTFD_CHALLENGE_HIDE_EXPECTED = false;
 let CTFD_LOAD_REQUEST_COUNTER = 0;
 let CTFD_LOAD_ACTIVE_TOKEN = 0;
 let CTFD_CONFIG_REQUEST_TOKEN = 0;
+const CTFD_SOLVE_RETRACTION_SETTINGS = new Map();
+let CTFD_SETTINGS_REQUEST_TOKEN = 0;
+let CTFD_SETTINGS_UPDATE_PID = '';
+let CTFD_USER_ACTION_ACTIVE = false;
+
+function ctfdBeginUserAction() {
+  if (CTFD_USER_ACTION_ACTIVE) return false;
+  CTFD_USER_ACTION_ACTIVE = true;
+  // Any refresh started before the mutation may contain a partial user list.
+  CTFD_LOAD_ACTIVE_TOKEN = ++CTFD_LOAD_REQUEST_COUNTER;
+  try { window.CTFD_AUTO_CTRL?.pause('users-action'); } catch { }
+  try { updateCtfdControlsEnabled(); } catch { }
+  return true;
+}
+
+function ctfdEndUserAction() {
+  CTFD_USER_ACTION_ACTIVE = false;
+  try { updateCtfdControlsEnabled(); } catch { }
+  try { window.CTFD_AUTO_CTRL?.resume('users-action'); } catch { }
+}
 
 const CTFD_SCROLL_KEY = 'toolhub.ctfdManager.scrollTop';
 
@@ -4690,7 +4710,7 @@ function wireCtfdVerifySsl() {
   verifyEl._toolhubBound = true;
 }
 
-async function ctfdLoadProjectConfig(pid) {
+async function ctfdLoadProjectConfig(pid, options = {}) {
   try {
     const id = String(pid || '').trim(); if (!id) return;
     const priorPid = String(PROJ && PROJ.id !== undefined ? PROJ.id : '').trim();
@@ -4740,7 +4760,9 @@ async function ctfdLoadProjectConfig(pid) {
     if (!keepExistingTableVisible) {
       renderCtfdTable(PROJ);
     }
-    try { await hydrateCtfdCredsFromPersisted(PROJ.id); } catch { }
+    if (!options.skipCredentials) {
+      try { await hydrateCtfdCredsFromPersisted(PROJ.id); } catch { }
+    }
     updateCtfdControlsEnabled();
     ctfdRestoreSkippedIndicator();
   } catch (e) { try { shell.logError(`CTFd config load failed: ${e?.message || e}`); } catch { } }
@@ -4779,6 +4801,7 @@ async function ctfdLoadProjectById(pid, opts) {
   // Prevent any implicit auto-refresh on initial page load
   if (!CTFD_ALLOW_LOAD) { try { shell.logDebug('CTFd: load blocked until user action'); } catch { } return; }
   const options = opts || {};
+  if (CTFD_USER_ACTION_ACTIVE && !options.afterUserAction) return;
   const id = String(pid || '').trim();
   if (!id) return;
   const tableHost = document.getElementById('ctfd-table');
@@ -4912,6 +4935,7 @@ async function ctfdLoadProjectById(pid, opts) {
       let animPct = 72;
       animTimer = setInterval(() => {
         try {
+          if (abortIfStale()) return;
           animPct = Math.min(animPct + 2, 88);
           setProgress(`Step 3/${totalSteps}: Checking CTFd users (bulk)…`, animPct, true, `Checking CTFd users for ${currentProject?.name || id} with a bulk request…`);
         } catch { }
@@ -4952,6 +4976,10 @@ async function ctfdLoadProjectById(pid, opts) {
         bulkSucceeded = true;
         setProgress(`Step 3/${totalSteps}: Users loaded (${list.length})`, 90, false, `Loaded ${list.length} CTFd user state entr${list.length === 1 ? 'y' : 'ies'} for ${currentProject?.name || id}.`);
       } catch (bulkErr) {
+        // Splitting a failed refresh into many requests worsens throttling,
+        // network failures and authentication errors. Only retry smaller input
+        // batches when the server explicitly rejects the bulk payload.
+        if (![400, 413, 422].includes(Number(bulkErr?.status))) throw bulkErr;
         try { console.warn('CTFd users bulk check failed; falling back to per-user mode:', bulkErr); } catch { }
         if (animTimer) { try { clearInterval(animTimer); } catch { } animTimer = null; }
       }
@@ -5055,6 +5083,7 @@ async function ctfdPreflightPids(pids) {
 // opts: { suppressLoginModal?: boolean }
 async function ctfdRefreshMulti(opts) {
   const options = opts || {};
+  if (CTFD_USER_ACTION_ACTIVE && !options.afterUserAction) return;
   const pids = Array.isArray(CTFD_SELECTED_PIDS) ? CTFD_SELECTED_PIDS.slice() : [];
   if (!pids.length) return;
   const loadToken = options.loadToken || ++CTFD_LOAD_REQUEST_COUNTER;
@@ -5289,6 +5318,7 @@ function ctfdRestoreSkippedIndicator() {
 }
 
 async function ctfdRefresh() {
+  if (CTFD_USER_ACTION_ACTIVE) return;
   try {
     CTFD_ALLOW_LOAD = true;
     const target = PROJ && PROJ.id !== undefined ? PROJ.id : ctfdCurrentPid();
@@ -5371,8 +5401,12 @@ function wireCtfdFilter() {
 // Initialization
 document.addEventListener('DOMContentLoaded', async () => {
   try { shell.logDebug('CTFd: init DOMContentLoaded'); } catch { }
+  // Keep authentication available while sidebar and server settings are loading.
+  wireCtfdLogin();
   try { ctfdTryRestoreSnapshotEarly(); } catch { }
-  await shell.initShell('vm'); // reuse same sidebar population logic
+  try { await shell.initShell('vm'); } catch (e) {
+    try { shell.logError(`CTFd: page initialization failed: ${e?.message || e}`); } catch { }
+  } // reuse same sidebar population logic
   // First try to restore previous in-session view so page switch won't blank the table
   let restoredSnapshot = false;
   try {
@@ -5384,7 +5418,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   } catch { }
   try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
   wireCtfdFilter();
-  wireCtfdLogin();
   wireCtfdVerifySsl();
   wireCtfdCols();
   try { ctfdWireNotifyConfig(); } catch { }
@@ -5428,6 +5461,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
     function busy() {
+      if (CTFD_USER_ACTION_ACTIVE) return true;
       try {
         const wrap = document.getElementById('ctfd-progress');
         if (wrap && !wrap.classList.contains('d-none')) return true;
@@ -5560,22 +5594,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     const ch = document.getElementById('ctfd-toggle-chals');
     const sc = document.getElementById('ctfd-toggle-scoreboard');
     const pa = document.getElementById('ctfd-toggle-paused');
+    const clear = document.getElementById('ctfd-toggle-clear-submissions');
     if (ch) ch.addEventListener('change', () => ctfdUpdateSettings({ challenges_visible: !!ch.checked }));
     if (sc) sc.addEventListener('change', () => ctfdUpdateSettings({ scoreboard_visible: !!sc.checked }));
     if (pa) pa.addEventListener('change', () => ctfdUpdateSettings({ ctfd_paused: !!pa.checked }));
+    if (clear) clear.addEventListener('change', () => ctfdUpdateSettings({ users_can_clear_submissions: !!clear.checked }));
     // Initialize tooltips on the toggle controls
     if (window.bootstrap) {
-      [ch, sc, pa].forEach(el => { if (el) { try { const wrap = el.closest('[data-bs-toggle="tooltip"]'); if (wrap) bootstrap.Tooltip.getOrCreateInstance(wrap); } catch { } } });
+      [ch, sc, pa, clear].forEach(el => { if (el) { try { const wrap = el.closest('[data-bs-toggle="tooltip"]'); if (wrap) bootstrap.Tooltip.getOrCreateInstance(wrap); } catch { } } });
     }
   } catch { }
   // Sort Missing Fields tooltip removed
 });
 
 // --- CTFd Settings: load + update ---
+function ctfdReflectSolveRetractionSetting(projectId, response) {
+  const supported = response?.capabilities?.solve_retraction === true;
+  CTFD_SOLVE_RETRACTION_SETTINGS.set(String(projectId), {
+    supported,
+    enabled: supported && !!response?.settings?.users_can_clear_submissions,
+  });
+  if (ctfdSelectionChanged(projectId)) return;
+  const toggle = document.getElementById('ctfd-toggle-clear-submissions');
+  if (toggle) {
+    toggle.checked = supported && !!response?.settings?.users_can_clear_submissions;
+    const wrap = toggle.closest('[data-bs-toggle="tooltip"]');
+    if (wrap) {
+      const title = supported
+        ? 'Requires a CTFd admin. Allow retracting correct submissions and their points for the user or team. Failed attempts, hint purchases, and awards remain.'
+        : 'Update the custom CTFd server build to support configurable solve retraction.';
+      wrap.setAttribute('title', title);
+      wrap.setAttribute('data-bs-original-title', title);
+    }
+  }
+  updateCtfdControlsEnabled();
+}
+
 async function ctfdLoadSettings(projectOverride) {
   const project = projectOverride || PROJ || null;
   const projectId = String(project?.id || '').trim();
   if (!projectId) return;
+  if (CTFD_SETTINGS_UPDATE_PID === projectId) return;
+  const requestToken = ++CTFD_SETTINGS_REQUEST_TOKEN;
   const projectName = String(project?.name || projectId);
   const selectionChanged = () => {
     const current = String(ctfdCurrentPid() || '').trim();
@@ -5592,7 +5652,8 @@ async function ctfdLoadSettings(projectOverride) {
     await runQueued(`CTFd load settings for ${projectName}`, async () => {
       res = await http('POST', `/api/projects/${projectId}/ctfd/settings`, payload);
     }, { projectId });
-    if (selectionChanged()) return;
+    if (selectionChanged() || requestToken !== CTFD_SETTINGS_REQUEST_TOKEN) return;
+    ctfdReflectSolveRetractionSetting(projectId, res);
     const st = res?.settings || {};
     const ch = document.getElementById('ctfd-toggle-chals');
     if (ch) {
@@ -5614,18 +5675,26 @@ async function ctfdLoadSettings(projectOverride) {
 }
 
 async function ctfdUpdateSettings(updates) {
-  if (!PROJ) return;
-  const liveStateDecision = await ctfdEnsureLiveStateBeforeAction([PROJ.id]);
-  if (liveStateDecision !== 'continue') return;
-  const sess = await hydrateCtfdCredsFromPersisted(PROJ.id);
+  const project = PROJ;
+  if (!project || CTFD_SETTINGS_UPDATE_PID) return;
+  const projectId = String(project.id);
+  // This explicit permission setting does not depend on cached leaderboard data.
+  if (!Object.prototype.hasOwnProperty.call(updates || {}, 'users_can_clear_submissions')) {
+    const liveStateDecision = await ctfdEnsureLiveStateBeforeAction([projectId]);
+    if (liveStateDecision !== 'continue') return;
+  }
+  const sess = await hydrateCtfdCredsFromPersisted(projectId);
+  if (ctfdSelectionChanged(projectId) || CTFD_SETTINGS_UPDATE_PID) return;
   if (!(sess?.validated && (sess.username && sess.password))) return;
-  const baseUrl = (PROJ.challenge_url || '').trim();
-  const port = Number(PROJ.challenge_port || 443);
-  const verifySSL = ctfdCurrentVerifySSL(PROJ);
+  const baseUrl = (project.challenge_url || '').trim();
+  const port = Number(project.challenge_port || 443);
+  const verifySSL = ctfdCurrentVerifySSL(project);
   const payload = { baseUrl, port, ...ctfdAuthPayload(sess), verifySSL, ...updates };
   const statusEl = document.getElementById('ctfd-settings-status');
-  const tgls = [document.getElementById('ctfd-toggle-chals'), document.getElementById('ctfd-toggle-scoreboard'), document.getElementById('ctfd-toggle-paused')];
+  const tgls = ['ctfd-toggle-chals', 'ctfd-toggle-scoreboard', 'ctfd-toggle-paused', 'ctfd-toggle-clear-submissions'].map(id => document.getElementById(id));
   const chToggle = document.getElementById('ctfd-toggle-chals');
+  CTFD_SETTINGS_UPDATE_PID = projectId;
+  ++CTFD_SETTINGS_REQUEST_TOKEN;
   // Temporarily disable toggles to prevent flapping
   try { tgls.forEach(el => { if (el) el.disabled = true; }); } catch { }
   const togglingChallenges = updates && Object.prototype.hasOwnProperty.call(updates, 'challenges_visible');
@@ -5641,9 +5710,12 @@ async function ctfdUpdateSettings(updates) {
   try { if (statusEl) { statusEl.textContent = 'Applying…'; statusEl.className = 'small text-muted'; } } catch { }
   try {
     let res;
-    await runQueued(`CTFd update settings for ${PROJ?.name || PROJ?.id || ''}`, async () => {
-      res = await http('POST', `/api/projects/${PROJ.id}/ctfd/settings/update`, payload);
-    }, { projectId: PROJ?.id });
+    await runQueued(`CTFd update settings for ${project.name || projectId}`, async () => {
+      res = await http('POST', `/api/projects/${projectId}/ctfd/settings/update`, payload);
+    }, { projectId });
+    if (ctfdSelectionChanged(projectId)) return;
+    if (res?.ok === false) throw new Error(res.error || 'CTFd did not apply the settings.');
+    ctfdReflectSolveRetractionSetting(projectId, res);
     const st = res?.settings || {};
     CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
     const ch = document.getElementById('ctfd-toggle-chals');
@@ -5659,6 +5731,7 @@ async function ctfdUpdateSettings(updates) {
       if (statusEl) { statusEl.textContent = 'Applied'; statusEl.className = 'small text-success'; setTimeout(() => { try { statusEl.textContent = ''; statusEl.className = 'small text-muted'; } catch { } }, 1200); }
     } catch { }
   } catch (e) {
+    if (ctfdSelectionChanged(projectId)) return;
     CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
     CTFD_CHALLENGE_REVEAL_EXPECTED = false;
     CTFD_CHALLENGE_HIDE_EXPECTED = false;
@@ -5667,11 +5740,14 @@ async function ctfdUpdateSettings(updates) {
       chToggle.removeAttribute('data-ctfd-pending-reveal');
     }
     // Reload last-known-good
-    try { await ctfdLoadSettings(); } catch { }
+    CTFD_SETTINGS_UPDATE_PID = '';
+    try { await ctfdLoadSettings(project); } catch { }
+    if (ctfdSelectionChanged(projectId)) return;
     try { shell.logError(`CTFd settings update failed: ${e?.message || e}`); } catch { }
-    try { if (statusEl) { statusEl.textContent = 'Error'; statusEl.className = 'small text-danger'; setTimeout(() => { try { statusEl.textContent = ''; statusEl.className = 'small text-muted'; } catch { } }, 2000); } } catch { }
+    try { if (statusEl) { statusEl.textContent = `Error: ${e?.message || e}`; statusEl.className = 'small text-danger'; } } catch { }
   }
   finally {
+    CTFD_SETTINGS_UPDATE_PID = '';
     // Re-enable toggles based on auth state
     CTFD_CHALLENGE_REVEAL_IN_PROGRESS = false;
     CTFD_CHALLENGE_REVEAL_EXPECTED = false;
@@ -5900,13 +5976,15 @@ function updateCtfdControlsEnabled() {
   const singleReady = !!PROJ && hasAuth;
   const multi = Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
   if (btnLogin) {
+    btnLogin.disabled = CTFD_USER_ACTION_ACTIVE;
+    btnLogin.textContent = hasAuth ? 'Re-authenticate to CTFd' : 'Authenticate to CTFd';
     btnLogin.setAttribute('title', multi ? 'Update CTFd credentials for all selected projects' : 'Update CTFd URL, port, and credentials');
   }
   // Refresh is allowed in multi mode (we'll preflight per-pid) or when single-project auth is valid
-  const refreshEnabled = (multi || hasAuth);
+  const refreshEnabled = !CTFD_USER_ACTION_ACTIVE && (multi || hasAuth);
   if (refresh) refresh.disabled = !refreshEnabled;
   // Users actions: enabled if single-project auth OR multi-project mode (we'll preflight each pid)
-  if (usersBtn) usersBtn.disabled = !(singleReady || (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1));
+  if (usersBtn) usersBtn.disabled = CTFD_USER_ACTION_ACTIVE || !(singleReady || (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1));
   if (statsBtn) statsBtn.disabled = !singleReady;
   if (dlBtn) dlBtn.disabled = !singleReady;
   // Toggle config-only notice visibility based on auth
@@ -5948,7 +6026,14 @@ function updateCtfdControlsEnabled() {
   const ch = document.getElementById('ctfd-toggle-chals');
   const sc = document.getElementById('ctfd-toggle-scoreboard');
   const pa = document.getElementById('ctfd-toggle-paused');
-  [ch, sc, pa].forEach(el => { if (el) el.disabled = !singleReady; });
+  const settingsReady = singleReady && !CTFD_USER_ACTION_ACTIVE && !CTFD_SETTINGS_UPDATE_PID;
+  [ch, sc, pa].forEach(el => { if (el) el.disabled = !settingsReady; });
+  const clear = document.getElementById('ctfd-toggle-clear-submissions');
+  if (clear) {
+    const retraction = CTFD_SOLVE_RETRACTION_SETTINGS.get(String(activePid));
+    clear.checked = !!retraction?.enabled;
+    clear.disabled = !settingsReady || !retraction?.supported;
+  }
 }
 async function handleCtfdLoginClick(ev) {
   try { ev?.preventDefault?.(); } catch { }
@@ -6030,44 +6115,71 @@ async function ctfdStats(kind) {
   }
 }
 async function openCtfdLoginModal() {
-  const el = document.getElementById('ctfdLoginModal'); if (!el || !window.bootstrap) return; const m = new bootstrap.Modal(el); // prefill
-  try {
-    const url = document.getElementById('ctfd-url');
-    const port = document.getElementById('ctfd-port');
-    const usernameEl = document.getElementById('ctfd-username');
-    const passwordEl = document.getElementById('ctfd-password');
-    const saveBox = document.getElementById('ctfd-save-creds');
-    const fb = document.getElementById('ctfd-login-feedback');
-    // Ensure fields reflect current project's Configuration values even if we haven't fully loaded CTFd data yet
-    try {
-      const pid = (window.shell && shell.getCurrentProjectId) ? shell.getCurrentProjectId() : '';
-      if (pid && (!PROJ || PROJ.id !== pid)) {
-        // Load lightweight config to prefill, without contacting CTFd (no await inside non-async)
-        ctfdLoadProjectConfig(pid);
-      }
-    } catch { }
-    if (PROJ) { if (url) url.value = PROJ.challenge_url || ''; if (port) port.value = PROJ.challenge_port ?? 443; }
-    const sess = PROJ ? readCtfdCreds(PROJ.id) : {};
-    if (usernameEl) usernameEl.value = sess.username || '';
-    if (passwordEl) passwordEl.value = sess.password || '';
-    // Reflect whether this project's credentials are saved.
-    try {
-      if (PROJ) {
-        try {
-          if (window.CREDS && typeof CREDS.fetchProjectSecrets === 'function') {
-            await CREDS.fetchProjectSecrets(PROJ.id);
-          }
-        } catch { }
-
-        const persisted = readPersistedCtfdCreds(PROJ.id);
-        if (saveBox) saveBox.checked = !!(persisted.username && persisted.password);
-        if (usernameEl && !usernameEl.value) usernameEl.value = persisted.username || '';
-        if (passwordEl && !passwordEl.value) passwordEl.value = persisted.password || '';
-      }
-    } catch { }
-    if (fb) { fb.textContent = ''; fb.className = 'me-auto small'; }
-  } catch { }
+  const el = document.getElementById('ctfdLoginModal');
+  if (!el || !window.bootstrap) return;
+  const request = Symbol('ctfdLogin');
+  el._ctfdLoginRequest = request;
+  const pid = String(ctfdCurrentPid() || '');
+  const isCurrent = () => el._ctfdLoginRequest === request && String(ctfdCurrentPid() || '') === pid;
+  const m = bootstrap.Modal.getOrCreateInstance(el);
+  const saveBtn = document.getElementById('btn-ctfd-save');
+  const fb = document.getElementById('ctfd-login-feedback');
+  const url = document.getElementById('ctfd-url');
+  const port = document.getElementById('ctfd-port');
+  const usernameEl = document.getElementById('ctfd-username');
+  const passwordEl = document.getElementById('ctfd-password');
+  const saveBox = document.getElementById('ctfd-save-creds');
+  const projectReady = () => !!pid && String(PROJ?.id || '') === pid;
+  const prefillProject = () => {
+    if (url && !url.value) url.value = PROJ.challenge_url || '';
+    if (port && !port.value) port.value = PROJ.challenge_port ?? 443;
+    const verify = document.getElementById('ctfd-verify-ssl');
+    if (verify) {
+      verify.checked = ctfdProjectVerifySSL(PROJ);
+      verify.dataset.projectId = pid;
+    }
+  };
+  if (url) url.value = '';
+  if (port) port.value = '';
+  if (projectReady()) prefillProject();
+  const sess = pid ? readCtfdCreds(pid) : {};
+  const persisted = pid ? readPersistedCtfdCreds(pid) : {};
+  if (usernameEl) usernameEl.value = sess.username || persisted.username || '';
+  if (passwordEl) passwordEl.value = sess.password || persisted.password || '';
+  if (saveBox) saveBox.checked = !!(persisted.username && persisted.password);
+  if (saveBtn) saveBtn.disabled = !projectReady() || isCtfdLoginBusy();
+  if (fb) {
+    fb.textContent = !pid ? 'Select a project from the sidebar before authenticating.' : (!projectReady() ? 'Loading project configuration…' : '');
+    fb.className = 'me-auto small text-muted';
+  }
+  // Show the fields immediately; saved credentials are optional background work.
   m.show();
+  if (!pid) return;
+  try {
+    if (!projectReady()) {
+      await ctfdLoadProjectConfig(pid, { skipCredentials: true });
+      if (!isCurrent()) return;
+      if (!projectReady()) throw new Error('Unable to load this project. Select it again and retry.');
+      prefillProject();
+      if (saveBtn) saveBtn.disabled = isCtfdLoginBusy();
+      if (fb) fb.textContent = '';
+    }
+    const initialUsername = usernameEl?.value;
+    const initialPassword = passwordEl?.value;
+    const initialSave = saveBox?.checked;
+    await window.CREDS?.fetchProjectSecrets?.(pid);
+    if (!isCurrent()) return;
+    const saved = readPersistedCtfdCreds(pid);
+    if (usernameEl && usernameEl.value === initialUsername && !usernameEl.value) usernameEl.value = saved.username || '';
+    if (passwordEl && passwordEl.value === initialPassword && !passwordEl.value) passwordEl.value = saved.password || '';
+    if (saveBox && saveBox.checked === initialSave) saveBox.checked = !!(saved.username && saved.password);
+  } catch (e) {
+    if (!isCurrent()) return;
+    if (!projectReady() && fb) {
+      fb.textContent = String(e?.message || e);
+      fb.className = 'me-auto small text-danger';
+    }
+  }
 }
 async function saveCtfdCredsFromModal() {
   try {
@@ -6337,28 +6449,36 @@ function openCtfdLoginMultiForPids(pids) {
 
 // --- Actions ---
 async function ctfdAction(kind) {
+  if (CTFD_USER_ACTION_ACTIVE) return;
+  // Close the menu before prompts, requests, or disabling its toggle.
+  const usersToggle = document.getElementById('act-ctf-users');
+  if (usersToggle && window.bootstrap?.Dropdown) {
+    bootstrap.Dropdown.getInstance(usersToggle)?.hide();
+  }
   // If multi-project selection is active, run grouped multi-project action
   try {
     if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
       return await ctfdActionMulti(kind);
     }
   } catch { }
-  if (!PROJ) return;
-  const liveStateDecision = await ctfdEnsureLiveStateBeforeAction([PROJ.id]);
-  if (liveStateDecision !== 'continue') return;
-  const sess = await hydrateCtfdCredsFromPersisted(PROJ.id);
+  const project = PROJ;
+  if (!project) return;
+  const liveStateDecision = await ctfdEnsureLiveStateBeforeAction([project.id]);
+  if (liveStateDecision !== 'continue' || ctfdSelectionChanged(project.id)) return;
+  const sess = await hydrateCtfdCredsFromPersisted(project.id);
+  if (ctfdSelectionChanged(project.id)) return;
   if (!(sess?.validated && (sess.username && sess.password))) {
     return alert('Please set CTFd credentials first.');
   }
-  const baseUrl = (PROJ.challenge_url || '').trim();
-  const port = Number(PROJ.challenge_port || 443);
-  const verifySSL = ctfdCurrentVerifySSL(PROJ);
+  const baseUrl = (project.challenge_url || '').trim();
+  const port = Number(project.challenge_port || 443);
+  const verifySSL = ctfdCurrentVerifySSL(project);
   // If any credentials are selected, build an 'only' list of usernames for those instance indices
   let only = undefined;
   try {
     if (CTFD_SELECTED_INDICES && CTFD_SELECTED_INDICES.size > 0) {
       const indices = new Set(CTFD_SELECTED_INDICES);
-      const creds = Array.isArray(PROJ.credentials) ? PROJ.credentials : [];
+      const creds = Array.isArray(project.credentials) ? project.credentials : [];
       const names = [];
       indices.forEach(i => { const c = creds[i - 1]; if (c && c.username) names.push(String(c.username)); });
       only = names;
@@ -6366,8 +6486,8 @@ async function ctfdAction(kind) {
   } catch { }
   if (Array.isArray(only) && !only.length) return alert('The selected CTFd users are no longer in this project. Refresh and select them again.');
   const payload = { baseUrl, port, ...ctfdAuthPayload(sess), verifySSL, ...(only !== undefined ? { only } : {}) };
-  const projectLabel = PROJ?.name || PROJ?.id || 'project';
-  const targetCount = ctfdCountProjectUserTargets(PROJ, only);
+  const projectLabel = project?.name || project?.id || 'project';
+  const targetCount = ctfdCountProjectUserTargets(project, only);
   const targetScope = Array.isArray(only) && only.length > 0 ? 'selected' : 'configured';
   const userCountLabel = `Users 0/${targetCount}`;
   if (kind === 'users_delete' && !confirm(`Delete ${targetCount} ${targetScope} CTFd account${targetCount === 1 ? '' : 's'} and their progress from ${projectLabel}?`)) return;
@@ -6376,11 +6496,13 @@ async function ctfdAction(kind) {
   const usersBtn = document.getElementById('act-ctf-users');
   const refreshBtn = document.getElementById('btn-ctfd-refresh');
   const loginBtn = document.getElementById('btn-ctfd-login');
+  if (!ctfdBeginUserAction()) return;
   try {
     if (usersBtn) usersBtn.disabled = true;
     if (refreshBtn) refreshBtn.disabled = true;
     if (loginBtn) loginBtn.disabled = true;
   } catch { }
+  let summary = null;
   try {
     let title = '';
     if (kind === 'users_create') title = 'CTFd Users Create';
@@ -6400,9 +6522,9 @@ async function ctfdAction(kind) {
     updateActionProgress(10, (kind === 'users_create' || kind === 'users_delete') ? userCountLabel : 'Request 0/1', initialDetail);
     if (kind === 'users_create') {
       let res;
-      await runQueued(`CTFd create users for ${PROJ?.name || PROJ?.id || ''}`, async () => {
-        res = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_create`, payload);
-      }, { projectId: PROJ?.id });
+      await runQueued(`CTFd create users for ${project?.name || project?.id || ''}`, async () => {
+        res = await http('POST', `/api/projects/${project.id}/ctfd/users_create`, payload);
+      }, { projectId: project?.id });
       try {
         const logs = Array.isArray(res?.logs) ? res.logs : [];
         logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch { } });
@@ -6424,17 +6546,22 @@ async function ctfdAction(kind) {
       } catch { }
       shell.logSuccess(`CTFd users create: created=${res.created} updated=${res.updated}`);
       updateActionProgress(80, `Users ${targetCount}/${targetCount}`, `Received create results for ${projectLabel}. Refreshing CTFd user state…`);
-      try { showActionSummary('CTFd Users Create', buildCtfdResultsSummary('create', res)); } catch { }
+      summary = { title: 'CTFd Users Create', body: buildCtfdResultsSummary('create', res) };
       // Refresh existence and table
       updateActionProgress(90, `Users ${targetCount}/${targetCount}`, `Refreshing CTFd user state for ${projectLabel}…`);
-      try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch { }
+      try {
+        if (!ctfdSelectionChanged(project.id)) {
+          await ctfdCheckExistence(project);
+          if (!ctfdSelectionChanged(project.id)) renderCtfdTable(project);
+        }
+      } catch { }
       updateActionProgress(95, `Users ${targetCount}/${targetCount}`, `Updated the CTFd view for ${projectLabel}.`);
       shell.endActionContext(true);
     } else if (kind === 'users_delete') {
       let res;
-      await runQueued(`CTFd delete users for ${PROJ?.name || PROJ?.id || ''}`, async () => {
-        res = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_delete`, payload);
-      }, { projectId: PROJ?.id });
+      await runQueued(`CTFd delete users for ${project?.name || project?.id || ''}`, async () => {
+        res = await http('POST', `/api/projects/${project.id}/ctfd/users_delete`, payload);
+      }, { projectId: project?.id });
       try {
         const logs = Array.isArray(res?.logs) ? res.logs : [];
         logs.forEach(l => { try { shell.logDebug(`[CTFd] ${l.event}: ${JSON.stringify(l)}`); } catch { } });
@@ -6455,9 +6582,14 @@ async function ctfdAction(kind) {
       } catch { }
       shell.logSuccess(`CTFd users delete: deleted=${res.deleted}`);
       updateActionProgress(80, `Users ${targetCount}/${targetCount}`, `Received delete results for ${projectLabel}. Refreshing CTFd user state…`);
-      try { showActionSummary('CTFd Users Delete', buildCtfdResultsSummary('delete', res)); } catch { }
+      summary = { title: 'CTFd Users Delete', body: buildCtfdResultsSummary('delete', res) };
       updateActionProgress(90, `Users ${targetCount}/${targetCount}`, `Refreshing CTFd user state for ${projectLabel}…`);
-      try { await ctfdCheckExistence(); renderCtfdTable(PROJ); } catch { }
+      try {
+        if (!ctfdSelectionChanged(project.id)) {
+          await ctfdCheckExistence(project);
+          if (!ctfdSelectionChanged(project.id)) renderCtfdTable(project);
+        }
+      } catch { }
       updateActionProgress(95, `Users ${targetCount}/${targetCount}`, `Updated the CTFd view for ${projectLabel}.`);
       shell.endActionContext(true);
     } else if (kind === 'upload') {
@@ -6481,10 +6613,10 @@ async function ctfdAction(kind) {
       try {
         // Use fetch directly for multipart upload (queued)
         let resp, json;
-        await runQueued(`CTFd upload for ${PROJ?.name || PROJ?.id || ''}`, async () => {
-          resp = await fetch(`/api/projects/${PROJ.id}/ctfd/upload`, { method: 'POST', body: fd });
+        await runQueued(`CTFd upload for ${project?.name || project?.id || ''}`, async () => {
+          resp = await fetch(`/api/projects/${project.id}/ctfd/upload`, { method: 'POST', body: fd });
           json = await resp.json().catch(() => ({}));
-        }, { projectId: PROJ?.id });
+        }, { projectId: project?.id });
         if (!resp.ok || json?.error) {
           throw new Error(json?.error || `Upload failed (${resp.status})`);
         }
@@ -6515,6 +6647,8 @@ async function ctfdAction(kind) {
       if (refreshBtn) refreshBtn.disabled = false;
       if (loginBtn) loginBtn.disabled = false;
     } catch { }
+    ctfdEndUserAction();
+    if (summary) showActionSummary(summary.title, summary.body);
   }
 }
 
@@ -6558,9 +6692,12 @@ async function ctfdActionMulti(kind) {
   // Show indicator for skipped ones but continue for valid
   if (invalidSet.size) ctfdRenderSkippedIndicator(Array.from(invalidSet), 'missing credentials or configuration'); else ctfdRenderSkippedIndicator([], '');
   if (window.ServerQueue) {
+    if (!ctfdBeginUserAction()) return;
     try { return await submitServerCtfdBulk(kind, targets); }
     catch (error) { showActionSummary('CTFd bulk action failed', `<p class="text-danger">${escHtml(error.message || error)}</p>`); return; }
+    finally { ctfdEndUserAction(); }
   }
+  if (!ctfdBeginUserAction()) return;
   // Begin action context and modal
   let title = '';
   if (kind === 'users_create') title = 'CTFd Users Create (Multi)';
@@ -6588,6 +6725,7 @@ async function ctfdActionMulti(kind) {
     });
   }
   const summaries = [];
+  let summaryBody = '';
   let i = 0; const total = targets.length;
   const actionVerb = kind === 'users_delete' ? 'Deleting' : 'Creating';
   try {
@@ -6647,15 +6785,18 @@ async function ctfdActionMulti(kind) {
       );
     }
     updateActionProgress(90, `Projects ${total}/${total}`, `Refreshing the CTFd view across ${total} selected project${total === 1 ? '' : 's'}…`);
-    try { CTFD_ALLOW_LOAD = true; await ctfdRefreshMulti(); } catch { }
+    try { CTFD_ALLOW_LOAD = true; await ctfdRefreshMulti({ afterUserAction: true }); } catch { }
     updateActionProgress(100, `Projects ${total}/${total}`, `Completed ${actionVerb.toLowerCase()} users across ${total} selected project${total === 1 ? '' : 's'}.`);
-    try { showActionSummary(title, summaries.join('') || '<div class="text-muted">No details.</div>'); shell.endActionContext(true); } catch { }
+    summaryBody = summaries.join('') || '<div class="text-muted">No details.</div>';
+    try { shell.endActionContext(true); } catch { }
   } catch (e) {
-    try { showActionSummary(title, `<div class="text-danger">${escHtml(e?.message || e)}</div>`); } catch { }
+    summaryBody = `<div class="text-danger">${escHtml(e?.message || e)}</div>`;
     try { shell.endActionContext(false); } catch { }
   } finally {
     try { hideActionProgress(); } catch { }
     try { if (usersBtn) usersBtn.disabled = false; if (refreshBtn) refreshBtn.disabled = false; if (loginBtn) loginBtn.disabled = false; } catch { }
+    ctfdEndUserAction();
+    showActionSummary(title, summaryBody);
   }
 }
 
@@ -6687,15 +6828,20 @@ function buildCtfdResultsSummary(kind, res) {
 }
 
 // Fetch CTFd existence map for current project's usernames
-async function ctfdCheckExistence() {
-  if (!PROJ) return;
-  const sess = readCtfdCreds(PROJ.id) || {};
+async function ctfdCheckExistence(project = PROJ) {
+  if (!project) return;
+  const pid = String(project.id);
+  const loadToken = ++CTFD_LOAD_REQUEST_COUNTER;
+  CTFD_LOAD_ACTIVE_TOKEN = loadToken;
+  const isCurrent = () => loadToken === CTFD_LOAD_ACTIVE_TOKEN && !ctfdSelectionChanged(pid);
+  const sess = readCtfdCreds(pid) || {};
   if (!(sess?.validated && (sess.username && sess.password))) { CTFD_USER_EXISTS = {}; return; }
-  const baseUrl = (PROJ.challenge_url || '').trim();
-  const port = Number(PROJ.challenge_port || 443);
-  const verifySSL = ctfdCurrentVerifySSL(PROJ);
+  const baseUrl = (project.challenge_url || '').trim();
+  const port = Number(project.challenge_port || 443);
+  const verifySSL = ctfdCurrentVerifySSL(project);
   const payload = { baseUrl, port, ...ctfdAuthPayload(sess), verifySSL };
-  const resp = await http('POST', `/api/projects/${PROJ.id}/ctfd/users_check`, payload);
+  const resp = await http('POST', `/api/projects/${pid}/ctfd/users_check`, payload);
+  if (!isCurrent()) return;
   // Print detailed CTFd request/response logs to console
   try {
     const logs = Array.isArray(resp?.logs) ? resp.logs : [];
@@ -6726,8 +6872,9 @@ async function ctfdCheckExistence() {
       };
     });
   } catch { }
-  ctfdPersistLiveProjectMeta(PROJ?.id, map);
-  ctfdApplyUserMeta(PROJ?.id, map);
+  ctfdPersistLiveProjectMeta(pid, map);
+  ctfdApplyUserMeta(pid, map);
+  ctfdMarkLiveRefreshed(pid);
 }
 
 // Sidebar click fallback to ensure rows render when selecting a project
@@ -6749,6 +6896,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Defensive cleanup for modal backdrops if Cancel/Close leaves a grey screen
 document.addEventListener('hidden.bs.modal', () => {
   try {
+    if (document.querySelector('.modal.show')) return;
     document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('padding-right');
@@ -6764,10 +6912,16 @@ function safeHideModalById(id) {
     try { inst.hide(); } catch { }
   } catch { }
 }
+// Bootstrap ignores hide() during an opening transition. Track its public
+// lifecycle events so results wait for progress to finish closing.
+let CTFD_PROGRESS_MODAL_PHASE = 'hidden';
+['show', 'shown', 'hide', 'hidden'].forEach(phase => {
+  document.addEventListener(`${phase}.bs.modal`, event => {
+    if (event.target?.id === 'actionProgressModal') CTFD_PROGRESS_MODAL_PHASE = phase;
+  });
+});
 function showActionSummary(title, htmlBody) {
   try {
-    // Hide progress before showing summary (avoid overlaps)
-    try { safeHideModalById('actionProgressModal'); } catch { }
     const modal = document.getElementById('actionSummaryModal');
     if (!modal || !window.bootstrap) return;
     const titleEl = document.getElementById('action-summary-title');
@@ -6775,6 +6929,17 @@ function showActionSummary(title, htmlBody) {
     if (titleEl) titleEl.textContent = title || 'Action Results';
     if (bodyEl) bodyEl.innerHTML = htmlBody || '<div class="text-muted">No details.</div>';
     const bs = bootstrap.Modal.getOrCreateInstance(modal);
-    setTimeout(() => { try { bs.show(); } catch { } }, 10);
+    const show = () => queueMicrotask(() => bs.show());
+    const progress = document.getElementById('actionProgressModal');
+    if (progress && (CTFD_PROGRESS_MODAL_PHASE !== 'hidden' || progress.classList.contains('show'))) {
+      progress.addEventListener('hidden.bs.modal', show, { once: true });
+      if (CTFD_PROGRESS_MODAL_PHASE === 'show') {
+        progress.addEventListener('shown.bs.modal', () => safeHideModalById('actionProgressModal'), { once: true });
+      } else {
+        safeHideModalById('actionProgressModal');
+      }
+    } else {
+      show();
+    }
   } catch { }
 }

@@ -65,6 +65,7 @@ class ImportExportRoundTripTests(unittest.TestCase):
                         commands=[
                             StartCommand(
                                 command='echo stored',
+                                render_template_variables=False,
                                 enabled=False,
                                 long_running=True,
                                 timeout_seconds=120,
