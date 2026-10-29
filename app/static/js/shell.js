@@ -1354,6 +1354,14 @@ function agentQueueTranscriptButton(entry) {
   return `<button type="button" class="btn btn-sm btn-outline-primary me-2 ${active ? 'agent-running' : ''}" data-act="q-agent-transcript" data-id="${id}" title="Open agent transcript"><i class="bi bi-robot" aria-hidden="true"></i> ${active ? 'Live transcript' : 'Transcript'}</button>`;
 }
 
+function queueArchiveDownloads(entry) {
+  const id = Number(entry.id);
+  return (Array.isArray(entry.archiveDownloads) ? entry.archiveDownloads : []).map(archive => {
+    if (!new RegExp(`^/api/queue/${id}/files/\\d+$`).test(archive.url || '')) return '';
+    return `<a class="btn btn-sm btn-outline-primary me-2 mt-2" href="${escapeHtml(archive.url)}" download="${escapeHtml(archive.filename)}">Download pulled files · ${escapeHtml(archive.filename)}</a>`;
+  }).join('');
+}
+
 function agentQueueResultContent(entry) {
   const id = Number(entry?.id);
   if (!Number.isInteger(id) || id < 1 || entry.agentReportsUrl !== `/api/queue/${id}/agent-reports`) return '';
@@ -2145,6 +2153,7 @@ const ConsoleDock = (() => {
                   + (item.server && item.logUrl === `/api/queue/${item.id}/log`
                     ? `<a class="queue-log-link" href="${escapeHtml(item.logUrl)}" target="_blank" rel="noopener">View full log ↗</a> <a class="queue-log-link" href="${escapeHtml(item.logUrl)}?download=1" download="queue-${escapeHtml(String(item.id))}-log.txt">Download log</a>` : '')
                   + agentQueueResultContent(item)
+                  + queueArchiveDownloads(item)
                   + `</details>`
                   + `</div>`
                   + `</li>`;

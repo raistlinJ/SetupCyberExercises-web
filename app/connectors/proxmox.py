@@ -160,6 +160,15 @@ class GuestAgentUnavailableError(RuntimeError):
     pass
 
 
+class GuestAgentFileReadError(RuntimeError):
+    """Preserve the HTTP status so callers can retry idempotent file reads."""
+
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.retryable = status_code in {429, 502, 503, 504, 596, 597}
+        super().__init__(f'Proxmox guest agent file-read error {status_code}: {detail}')
+
+
 @dataclass
 class ProxmoxClient:
     base_url: str
@@ -233,6 +242,12 @@ class ProxmoxClient:
 
         session.request = request_with_fallback  # type: ignore[assignment]
         session._sce_proxmox_dns_fallback_installed = True  # type: ignore[attr-defined]
+
+    def close(self) -> None:
+        """Release this client's pooled connections after a batch of reads."""
+        if self._session is not None:
+            self._session.close()
+            self._session = None
 
     def list_nodes(self) -> List[Dict[str, Any]]:
         s = self._ensure_session()
@@ -906,7 +921,13 @@ class ProxmoxClient:
             })
         response = s.get(url, params=params, timeout=60)
         if response.status_code >= 400:
-            raise RuntimeError(f"Proxmox guest agent file-read error {response.status_code}: {response.text}")
+            # Proxy transport failures often have an empty body. Their reason
+            # phrase carries the useful detail (e.g. "Connection timed out").
+            detail = response.text.strip() or str(response.reason or '').strip()
+            if not detail:
+                detail = {596: 'upstream TLS, request or header failure',
+                          597: 'upstream response body transfer failed'}.get(response.status_code, 'empty error response')
+            raise GuestAgentFileReadError(response.status_code, detail)
         data = response.json().get('data', {}) if response.content else {}
         return data if isinstance(data, dict) else {}
 

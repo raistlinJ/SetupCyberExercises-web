@@ -1,11 +1,58 @@
 import base64
 import io
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.routes import api
 from app.storage.projects import Project
+
+
+@pytest.mark.parametrize(('phase', 'expected_parallel'), [
+    ('guest_pull', 2), ('guest_push', 4), ('guest_delete', 4),
+])
+def test_only_pulls_limit_concurrent_qemu_guests_on_one_node(phase, expected_parallel):
+    active = peak = 0
+    lock = threading.Lock()
+    barrier = threading.Barrier(expected_parallel)
+
+    def transfer(entry):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            barrier.wait(timeout=3)
+            time.sleep(0.01)
+            return [], []
+        finally:
+            with lock:
+                active -= 1
+
+    guests = [{'name': str(index), 'node': 'busy-node', 'type': 'qemu'} for index in range(4)]
+    with patch.object(api, '_update_job_detail'), patch.object(api, '_is_cancelled', return_value=False):
+        results = api._run_guest_transfer_tasks(
+            Project(id='p', name='p', proxmox_max_create_jobs=8), 'p', guests, phase, transfer,
+        )
+    assert results == [([], [])] * 4
+    assert peak == expected_parallel
+
+
+def test_qemu_pulls_on_two_nodes_can_run_in_parallel():
+    barrier = threading.Barrier(4)
+
+    def transfer(entry):
+        barrier.wait(timeout=3)
+        return [entry['name']], []
+
+    guests = [{'name': str(index), 'node': f'node-{index % 2}', 'type': 'qemu'} for index in range(4)]
+    with patch.object(api, '_update_job_detail'), patch.object(api, '_is_cancelled', return_value=False):
+        results = api._run_guest_transfer_tasks(
+            Project(id='p', name='p', proxmox_max_create_jobs=8), 'p', guests, 'guest_pull', transfer,
+        )
+    assert results == [([str(index)], []) for index in range(4)]
 
 
 @pytest.mark.parametrize('phase', ['guest_push', 'guest_pull', 'guest_delete'])
@@ -36,8 +83,8 @@ def test_byte_progress_is_independent_of_completed_guest_count(phase):
 def test_qemu_download_reports_actual_archive_byte_percentage():
     client = MagicMock()
     client.agent_file_read.side_effect = [
-        {'content': base64.b64encode(b'a' * (4 * 1024 * 1024)).decode(), 'truncated': True, 'bytes-read': 4 * 1024 * 1024},
-        {'content': base64.b64encode(b'b' * (4 * 1024 * 1024)).decode(), 'bytes-read': 4 * 1024 * 1024},
+        {'content': base64.b64encode(bytes([index]) * (1024 * 1024)).decode(),
+         'truncated': index < 7, 'bytes-read': 1024 * 1024} for index in range(8)
     ]
     def execute(*args, **kwargs):
         return {'stdout': str(8 * 1024 * 1024)}

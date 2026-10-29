@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.connectors.proxmox import ProxmoxClient, _decode_guest_output
+from app.connectors.proxmox import ProxmoxClient, GuestAgentFileReadError, _decode_guest_output
 
 
 class ProxmoxGuestAgentFileTests(unittest.TestCase):
@@ -124,6 +124,28 @@ class ProxmoxGuestAgentFileTests(unittest.TestCase):
 
         params = self.session.get.call_args.kwargs['params']
         self.assertEqual(params, {'file': '/tmp/archive.part.aa'})
+
+    def test_agent_file_read_preserves_empty_body_proxy_reason_and_status(self):
+        for status in (596, 597):
+            with self.subTest(status=status):
+                self.session.get.return_value = MagicMock(status_code=status, text='', reason='Connection timed out')
+                with self.assertRaises(GuestAgentFileReadError) as raised:
+                    self.client.agent_file_read('n', 101, '/tmp/archive.tar')
+                self.assertEqual(raised.exception.status_code, status)
+                self.assertTrue(raised.exception.retryable)
+                self.assertIn('Connection timed out', str(raised.exception))
+
+    def test_agent_file_read_reports_proxy_failure_when_reason_also_empty(self):
+        self.session.get.return_value = MagicMock(status_code=597, text='', reason='')
+        with self.assertRaisesRegex(GuestAgentFileReadError, 'upstream response body transfer failed'):
+            self.client.agent_file_read('n', 101, '/tmp/archive.tar')
+
+    def test_agent_file_read_permission_failure_is_not_retryable(self):
+        self.session.get.return_value = MagicMock(status_code=403, text='permission denied', reason='Forbidden')
+        with self.assertRaises(GuestAgentFileReadError) as raised:
+            self.client.agent_file_read('n', 101, '/tmp/archive.tar')
+        self.assertFalse(raised.exception.retryable)
+        self.assertIn('permission denied', str(raised.exception))
 
 
 if __name__ == '__main__':

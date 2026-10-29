@@ -17,7 +17,7 @@ function browser(fetch, options = {}) {
   }
   const ids = ['lxcPushModal', 'lxcPullModal', 'customCommandModal', 'lxc-push-history', 'lxc-pull-history',
     'custom-command-history', 'lxc-push-type-file', 'lxc-push-type-folder', 'lxc-push-files', 'lxc-push-folder',
-    'lxc-push-destination', 'lxc-push-owner', 'lxc-push-permissions', 'lxc-push-advanced', 'lxc-push-history-help', 'lxc-pull-paths',
+    'lxc-push-destination', 'lxc-push-owner', 'lxc-push-permissions', 'lxc-push-advanced', 'lxc-push-history-help', 'lxc-push-csv-mode', 'lxc-pull-paths',
     'custom-command-input', 'custom-command-timeout', 'custom-render-template-variables'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element()]));
   const callbacks = {};
@@ -76,9 +76,11 @@ test('push history restores settings but requires selection when previous files 
   const settings = { destination: '/data', selectionType: 'folder', ownerOnRemote: '1000', filePermissions: '0755', sourceNames: ['folder/a.txt'] };
   const elements = browser(async () => json([entry(settings)]));
   elements['lxc-push-files'].value = 'old-file'; elements['lxc-push-folder'].value = 'old-folder';
+  elements['lxc-push-csv-mode'].checked = true;
   await elements.lxcPushModal.fire('show.bs.modal');
   elements['lxc-push-history'].value = '1'; await elements['lxc-push-history'].fire('change');
   assert.equal(elements['lxc-push-type-folder'].checked, true);
+  assert.equal(elements['lxc-push-csv-mode'].checked, false);
   assert.equal(elements['lxc-push-destination'].value, '/data');
   assert.equal(elements['lxc-push-owner'].value, '1000');
   assert.equal(elements['lxc-push-permissions'].value, '0755');

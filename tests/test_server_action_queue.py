@@ -3,12 +3,15 @@ import base64
 import zipfile
 import json
 import sqlite3
+import os
+import tarfile
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
-from flask import Flask, jsonify, request, session
+from flask import Flask, g, jsonify, request, session
 
 from app.action_queue import ActionQueue, init_action_queue, public_record
 from app.routes import api
@@ -1207,3 +1210,111 @@ def test_agent_download_requires_completion_and_handles_invalid_archive(harness)
         db.execute('UPDATE actions SET result=? WHERE id=?',
                    (json.dumps({'reports': [], 'outputs_zip': {'filename': 'bad.zip', 'base64': 'not a zip'}}).encode(), job['id']))
     assert client.get(f"/api/queue/{job['id']}/agent-files/0").status_code == 422
+
+
+def test_70_guest_pull_keeps_archive_out_of_sqlite_and_downloads_survive_navigation(harness, monkeypatch):
+    from app.storage.projects import Project
+    app, client, *_ = harness
+    queue = ActionQueue(app)
+    app.extensions['action_queue'] = queue
+    connect = queue.connect
+
+    @contextmanager
+    def limited_connect():
+        with connect() as db:
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 65536)
+            yield db
+
+    monkeypatch.setattr(queue, 'connect', limited_connect)
+    project = Project(id='pull-test', name='Pull Test')
+    guests = [{'name': f'guest-{n}', 'index': n, 'vmid': 100 + n, 'node': 'n', 'type': 'qemu'}
+              for n in range(1, 71)]
+    content = os.urandom(32768)
+    source = io.BytesIO()
+    with tarfile.open(fileobj=source, mode='w') as tar:
+        info = tarfile.TarInfo('home/student/evidence.bin')
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+    monkeypatch.setattr(api, '_guest_transfer_context', lambda *args, **kwargs:
+                        (project, None, '', '', guests, [], []))
+    monkeypatch.setattr(api, '_pull_tar_through_guest_agent', lambda *args: io.BytesIO(source.getvalue()))
+    monkeypatch.setattr(queue, 'schedule_refreshes', lambda *args: None)
+    app.add_url_rule('/api/projects/<pid>/instances/actions/guest_pull',
+                     view_func=api.instances_lxc_pull, methods=['POST'])
+    job = enqueue(client, 'pull-70', steps=[{
+        'method': 'POST', 'url': '/api/projects/pull-test/instances/actions/guest_pull',
+        'body': {'paths': ['/home/student/evidence.bin']},
+    }]).get_json()
+    state = wait_terminal(client, job['id'])
+    assert state['status'] == 'completed', state
+    assert state['itemCompleted'] == state['itemTotal'] == 70
+    result = client.get(f"/api/queue/{job['id']}/result").get_json()
+    assert len(result['pulled']) == 70
+    assert 'base64' not in result['outputs_zip']
+    download = result['outputs_zip']['url']
+    assert state['archiveDownloads'][0]['url'] == download
+    with queue.connect() as db:
+        assert db.execute('SELECT length(result) FROM actions WHERE id=?', (job['id'],)).fetchone()[0] < 65536
+        retained = db.execute('SELECT path, size FROM action_files WHERE job=?', (job['id'],)).fetchone()
+        assert retained['size'] > 2 * 1024 * 1024
+        assert os.stat(retained['path']).st_mode & 0o777 == 0o600
+    response = client.get(download)
+    assert response.status_code == 200
+    assert response.headers['Content-Disposition'].startswith('attachment;')
+    assert response.headers['Cache-Control'] == 'no-store'
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        assert archive.read('guest-70-170/home/student/evidence.bin') == content
+        assert json.loads(archive.read('summary.json'))['status'] == 'completed'
+    assert client.delete('/api/queue/completed').status_code == 200
+    assert client.get(download).status_code == 200
+    with client.session_transaction() as accepted:
+        accepted['user'] = 'bob'
+    assert client.get(download).status_code == 404
+
+
+def test_failed_result_write_does_not_leave_running_job_or_block_next_action(harness, monkeypatch):
+    app, client, *_ = harness
+    queue = ActionQueue(app)
+    app.extensions['action_queue'] = queue
+    connect = queue.connect
+
+    @contextmanager
+    def limited_connect():
+        with connect() as db:
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 16384)
+            yield db
+
+    monkeypatch.setattr(queue, 'connect', limited_connect)
+    monkeypatch.setattr(queue, 'schedule_refreshes', lambda *args: None)
+
+    def oversized_result(pid):
+        archive = g.action_queue_retain_archive(io.BytesIO(b'retained-zip-bytes'), 'evidence.zip')
+        return jsonify(output='x' * 32768, outputs_zip=archive)
+
+    app.add_url_rule('/api/projects/<pid>/instances/actions/guest_pull',
+                     view_func=oversized_result, methods=['POST'])
+    job = enqueue(client, 'oversized', steps=[{
+        'method': 'POST', 'url': '/api/projects/pull-test/instances/actions/guest_pull',
+    }]).get_json()
+    state = wait_terminal(client, job['id'])
+    assert state['status'] == 'error'
+    assert 'Could not save action result' in state['errorMessage']
+    assert client.get(f"/api/queue/{job['id']}/result").status_code == 500
+    assert len(state['archiveDownloads']) == 1
+    assert client.get(state['archiveDownloads'][0]['url']).data == b'retained-zip-bytes'
+    next_job = enqueue(client, 'after-large-result').get_json()
+    assert wait_terminal(client, next_job['id'])['status'] == 'completed'
+
+
+def test_retained_download_is_not_available_until_terminal_state(harness):
+    app, client, started, release, *_ = harness
+    job = enqueue(client, 'first').get_json()
+    assert started.wait(2)
+    queue = app.extensions['action_queue']
+    info = queue.retain_archive(job['id'], io.BytesIO(b'zip-bytes'), 'files.zip')
+    assert client.get(info['url']).status_code == 409
+    release.set()
+    wait_terminal(client, job['id'])
+    assert client.get(info['url']).data == b'zip-bytes'
+    os.unlink(next(iter(Path(queue.output_dir).iterdir())))
+    assert client.get(info['url']).status_code == 404

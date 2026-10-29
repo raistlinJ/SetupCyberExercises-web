@@ -17,7 +17,9 @@ import secrets
 import string
 import logging
 import copy
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 import math
 from flask import g, Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -31,10 +33,11 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, fields
 import time
 from ..guest_push_batch import GuestPushBatch
+from ..host_guest_push import build_host_file_archive_script
 from ..command_templates import (render_command, command_context, VARIABLES,
                                  CommandTemplateError)
 from ..qemu_guest_stream import build_host_script
-from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError
+from ..connectors.proxmox import ProxmoxClient, GuestAgentUnavailableError, GuestAgentFileReadError
 from ..connectors.ctfd import CTFdClient, CTFdError
 from ..connectors.ctfrpg import CTFRPGClient, CTFRPGError
 from ..storage.projects import (
@@ -1162,6 +1165,32 @@ def _qemu_agent_enabled_from_cfg_or_hint(cfg: Dict[str, Any], hint_raw: Any) -> 
     return _qemu_agent_enabled_config({'agent': hint_raw})
 
 
+@contextmanager
+def _refresh_read_pool(proj, item_count, client_factory):
+    """Reuse one client per worker without sharing HTTP sessions across threads."""
+    local = threading.local()
+    clients = []
+
+    def get_client():
+        if not hasattr(local, 'client'):
+            local.client = client_factory()
+            clients.append(local.client)
+        return local.client
+
+    try:
+        with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, item_count, hard_cap=8)) as pool:
+            yield pool, get_client
+    finally:
+        # All worker reads have finished before their connections are closed.
+        for client in clients:
+            close = getattr(client, 'close', None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    LOG.debug('Could not close Proxmox refresh client', exc_info=True)
+
+
 def _prefetch_vm_configs_parallel(
     proj: Optional[Project],
     vm_refs: Iterable[Tuple[str, int]],
@@ -1169,6 +1198,7 @@ def _prefetch_vm_configs_parallel(
     force_refresh: bool,
     client_factory,
     vm_types: Optional[Dict[Tuple[str, int], str]] = None,
+    on_progress=None,
 ) -> Dict[Tuple[str, int], Dict[str, Any]]:
     """Fetch VM configs in parallel for refresh-heavy endpoints.
 
@@ -1187,6 +1217,8 @@ def _prefetch_vm_configs_parallel(
         seen.add(ref)
         unique_refs.append(ref)
 
+    if on_progress:
+        on_progress(0, len(unique_refs), '', 0)
     if not unique_refs:
         return {}
 
@@ -1194,23 +1226,26 @@ def _prefetch_vm_configs_parallel(
 
     def _fetch_one(ref: Tuple[str, int]):
         node, vmid = ref
-        thread_client = client_factory()
+        thread_client = get_client()
         is_lxc = False
         if vm_types and vm_types.get(ref) == 'lxc':
             is_lxc = True
         cfg = _get_cached_vm_config(thread_client, node, vmid, force_refresh=force_refresh, is_lxc=is_lxc) or {}
         return ref, cfg
 
-    workers = _pool_workers_for(proj, len(unique_refs), hard_cap=8)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with _refresh_read_pool(proj, len(unique_refs), client_factory) as (pool, get_client):
         future_map = {pool.submit(_fetch_one, ref): ref for ref in unique_refs}
-        for fut in as_completed(future_map):
+        failed = 0
+        for completed, fut in enumerate(as_completed(future_map), 1):
             ref = future_map[fut]
             try:
                 fetched_ref, cfg = fut.result()
                 results[fetched_ref] = cfg if isinstance(cfg, dict) else {}
             except Exception as exc:
+                failed += 1
                 LOG.warning("Could not fetch config for VM %s/%s: %s", ref[0], ref[1], exc)
+            if on_progress:
+                on_progress(completed, len(unique_refs), ref, failed)
     return results
 
 
@@ -1287,6 +1322,7 @@ def _prefetch_pool_members_parallel(
     *,
     force_refresh: bool,
     client_factory,
+    on_progress=None,
 ) -> Dict[str, Set[int]]:
     unique_poolids: List[str] = []
     seen: Set[str] = set()
@@ -1300,26 +1336,31 @@ def _prefetch_pool_members_parallel(
         seen.add(poolid)
         unique_poolids.append(poolid)
 
+    if on_progress:
+        on_progress(0, len(unique_poolids), '', 0)
     if not unique_poolids:
         return {}
 
     results: Dict[str, Set[int]] = {}
 
     def _fetch_one(poolid: str):
-        thread_client = client_factory()
+        thread_client = get_client()
         return poolid, _get_cached_pool_members(thread_client, poolid, force_refresh=force_refresh)
 
-    workers = _pool_workers_for(proj, len(unique_poolids), hard_cap=8)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with _refresh_read_pool(proj, len(unique_poolids), client_factory) as (pool, get_client):
         future_map = {pool.submit(_fetch_one, poolid): poolid for poolid in unique_poolids}
-        for fut in as_completed(future_map):
+        failed = 0
+        for completed, fut in enumerate(as_completed(future_map), 1):
             poolid = future_map[fut]
             try:
                 fetched_poolid, members = fut.result()
                 results[fetched_poolid] = set(members or set())
             except Exception as exc:
+                failed += 1
                 LOG.warning("Could not fetch pool members for %s: %s", poolid, exc)
                 results[poolid] = set()
+            if on_progress:
+                on_progress(completed, len(unique_poolids), poolid, failed)
     return results
 
 
@@ -1631,6 +1672,33 @@ def _end_job(pid: str, status: str = 'completed', *, job_key=None):
         if rec:
             rec['status'] = status
             rec['ended'] = time.time()
+
+
+def _refresh_progress_reporter(pid, job_key, phase, title, start, end, label=str):
+    """Publish stage counts while limiting queue writes during fast batches."""
+    last_report = None
+
+    def report(completed, total, current='', failed=0):
+        nonlocal last_report
+        now = time.monotonic()
+        if 0 < completed < total and last_report is not None and now - last_report < 0.15:
+            return
+        last_report = now
+        current = label(current) if current else ''
+        message = f'{title} · {completed}/{total} processed' if total else f'{title} · nothing to process'
+        if current:
+            message += f' · {current}'
+        if failed:
+            message += f' · {failed} unavailable'
+        _update_job_detail(
+            pid, job_key=job_key, phase=phase,
+            progress=round(start + (end - start) * completed / total, 1) if total else end,
+            current=current, step=completed, total_steps=total,
+            item_completed=completed, item_total=total, message=message,
+            detail={'kind': 'refresh', 'completed': completed, 'total': total, 'failed': failed},
+        )
+
+    return report
 
 
 def _progress_label(item):
@@ -2254,26 +2322,28 @@ def instances_refresh_vm(pid: str):
         if not selected.issubset(valid_targets):
             return jsonify({'error': 'Selected VMs are not in this project configuration'}), 400
     client = ProxmoxClient(base_url=base_url, token=token or None, username=username, password=password, verify=verify)
+
+    def refresh_client_factory():
+        return ProxmoxClient(base_url=base_url, token=token or None,
+                             username=username, password=password, verify=verify)
+
     try:
         t_start = time.time()
         nodes = client.list_nodes()
         if not nodes:
             raise RuntimeError('No Proxmox nodes were returned; previous inventory retained')
         total_nodes = max(len(nodes), 1)
-        _update_job_detail(pid, job_key=refresh_key, phase='inventory', step=0, total_steps=total_nodes, item_total=total_nodes, item_completed=0, progress=10, message=f'Scanning Proxmox nodes… 0/{total_nodes} complete')
+        node_progress = _refresh_progress_reporter(pid, refresh_key, 'inventory', 'Scanning Proxmox nodes', 5, 25)
+        node_progress(0, total_nodes)
         
         # Build maps of name -> details, vmid -> name, and lowercase-name -> canonical name
         name_map = {}
         id_map = {}
         lower_name_to_canon = {}
-        running_vm_refs: Set[Tuple[str, int]] = set()
-        agent_hint_by_ref: Dict[Tuple[str, int], Any] = {}
         vm_ref_types: Dict[Tuple[str, int], str] = {}
         expected_names = {str(item.get('name') or '').lower()
                           for i, items in expected.items() for item in items
                           if selected is None or (i, str(item.get('name') or '').lower()) in selected}
-        expected_ids = {item['vmid'] for items in expected.values() for item in items
-                        if item.get('vmid') is not None}
         
         # PERFORMANCE OPTIMIZATION: Fetch VMs and LXCs from all nodes in parallel
         def _fetch_node_vms(node_info):
@@ -2286,20 +2356,9 @@ def instances_refresh_vm(pid: str):
             err = None
             try:
                 # Create a new client instance for thread safety (sessions aren't thread-safe)
-                thread_client = ProxmoxClient(base_url=base_url, token=token or None, username=username, password=password, verify=verify)
+                thread_client = get_node_client()
                 try:
                     qemus = thread_client.list_qemu_vms(node) or []
-                    # The inventory endpoint can say running for a paused VM
-                    # and omit qmpstatus. Read the authoritative execution state
-                    # for this project's powered-on guests before publishing.
-                    for q in qemus:
-                        if (str(q.get('status') or '').lower() == 'running'
-                                and (str(q.get('name') or '').lower() in expected_names
-                                     or q.get('vmid') in expected_ids)):
-                            current = thread_client.get_qemu_status_current(node, int(q['vmid']))
-                            for key in ('status', 'qmpstatus'):
-                                if current.get(key):
-                                    q[key] = current[key]
                 except Exception as e:
                     err = RuntimeError(f'Could not list QEMU VMs on node {node}: {e}')
                 try:
@@ -2314,32 +2373,19 @@ def instances_refresh_vm(pid: str):
         
         # Execute node fetching in parallel (typically 2-4 nodes, but can be more)
         processed_nodes = 0
-        with ThreadPoolExecutor(max_workers=min(len(nodes), 8)) as executor:
+        with _refresh_read_pool(proj, len(nodes), refresh_client_factory) as (executor, get_node_client):
             futures = [executor.submit(_fetch_node_vms, n) for n in nodes]
             
             for future in as_completed(futures):
                 node, qemus, lxcs, error = future.result()
                 processed_nodes += 1
-                try:
-                    _update_job_detail(
-                        pid,
-                        job_key=refresh_key,
-                        phase='inventory',
-                        current=str(node or ''),
-                        item_total=total_nodes, item_completed=processed_nodes,
-                        step=processed_nodes,
-                        total_steps=total_nodes,
-                        progress=int(round(10 + (processed_nodes / max(total_nodes, 1)) * 45)),
-                        message=f'Scanned node {node or "(unknown)"}; {processed_nodes}/{total_nodes} complete',
-                        detail={ 'kind': 'batch', 'vm': str(node or ''), 'completed': processed_nodes, 'total': total_nodes, 'verb': 'Scanning' },
-                    )
-                except Exception:
-                    pass
                 # A failed scan is not an empty inventory. Publishing either a
                 # partial node or a partial guest type would mark real guests
                 # missing and overwrite the last successful snapshot.
                 if error:
                     raise RuntimeError(f'{error}; previous inventory retained') from error
+                node_progress(processed_nodes, total_nodes,
+                              f'{node} ({len(qemus)} VMs, {len(lxcs)} containers)')
                 
                 # Build maps (same logic as before, now with parallel-fetched data)
                 for q in qemus:
@@ -2363,11 +2409,6 @@ def instances_refresh_vm(pid: str):
                     try:
                         if vmid_val is not None:
                             vm_ref_types[(str(node), int(vmid_val))] = 'qemu'
-                            agent_hint_by_ref[(str(node), int(vmid_val))] = q.get('agent')
-                            power_state = str(q.get('status') or '').strip().lower()
-                            qmp_state = str(q.get('qmpstatus') or '').strip().lower()
-                            if (qmp_state or power_state) == 'running':
-                                running_vm_refs.add((str(node), int(vmid_val)))
                     except Exception:
                         pass
 
@@ -2392,12 +2433,40 @@ def instances_refresh_vm(pid: str):
                     try:
                         if vmid_val is not None:
                             vm_ref_types[(str(node), int(vmid_val))] = 'lxc'
-                            power_state = str(l.get('status') or '').strip().lower()
-                            if power_state == 'running':
-                                running_vm_refs.add((str(node), int(vmid_val)))
                     except Exception:
                         pass
         
+        # Node inventories omit paused execution states on some Proxmox versions.
+        # Read live state concurrently across the selected project's running VMs,
+        # with one bounded pool even when many guests live on the same node.
+        status_jobs = [dict(detail, name=name) for name, detail in name_map.items()
+                       if name.lower() in expected_names and detail['type'] == 'qemu'
+                       and str(detail['power_state']).lower() == 'running']
+        state_progress = _refresh_progress_reporter(pid, refresh_key, 'vm_states', 'Checking live VM state', 25, 45)
+        state_progress(0, len(status_jobs))
+        if status_jobs:
+
+            def read_current_status(detail):
+                return get_status_client().get_qemu_status_current(detail['node'], int(detail['vmid']))
+
+            with _refresh_read_pool(proj, len(status_jobs), refresh_client_factory) as (pool, get_status_client):
+                futures = {pool.submit(read_current_status, detail): detail for detail in status_jobs}
+                for completed, future in enumerate(as_completed(futures), 1):
+                    detail = futures[future]
+                    try:
+                        current_status = future.result()
+                        matched = name_map[detail['name']]
+                        matched['power_state'] = current_status.get('status') or matched['power_state']
+                        matched['qmp_state'] = current_status.get('qmpstatus') or matched['qmp_state']
+                        matched['state'] = matched['qmp_state'] or matched['power_state']
+                        state_progress(completed, len(status_jobs),
+                                       f"{detail['name']} (VM {detail['vmid']}, {detail['node']})")
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Could not read QEMU state on node {detail['node']} for VM {detail['vmid']}: "
+                            f"{exc}; previous inventory retained"
+                        ) from exc
+
         t_fetch = time.time()
         logging.info(f"VM/LXC refresh: node fetching took {(t_fetch-t_start)*1000:.0f}ms for {len(nodes)} nodes")
     except Exception as e:
@@ -2407,12 +2476,14 @@ def instances_refresh_vm(pid: str):
 
     # Pools list (single call) to avoid per-instance pool existence checks.
     pool_ids = None
+    pool_list_progress = _refresh_progress_reporter(pid, refresh_key, 'pool_list', 'Listing Proxmox pools', 45, 48)
+    pool_list_progress(0, 1)
     try:
-        _update_job_detail(pid, job_key=refresh_key, phase='access', progress=60, message='Checking pools and access controls…')
         pool_ids = { str((p or {}).get('poolid') or '') for p in (client.list_pools() or []) }
         pool_ids = { p for p in pool_ids if p }
     except Exception:
         pool_ids = None
+    pool_list_progress(1, 1, failed=int(pool_ids is None))
 
     def _norm_userid(uname: str) -> str:
         u = str(uname or '').strip()
@@ -2445,18 +2516,20 @@ def instances_refresh_vm(pid: str):
                 except Exception:
                     continue
 
+    names_by_ref = {(str(detail['node']), int(detail['vmid'])): name
+                    for name, detail in name_map.items() if detail.get('vmid') is not None}
+
+    def config_label(ref):
+        return f'{names_by_ref.get(ref, "Guest")} (VM {ref[1]}, {ref[0]})'
+
     prefetched_vm_configs = _prefetch_vm_configs_parallel(
         proj,
         matched_vm_refs,
         force_refresh=force_refresh,
-        client_factory=lambda: ProxmoxClient(
-            base_url=base_url,
-            token=token or None,
-            username=username,
-            password=password,
-            verify=verify,
-        ),
+        client_factory=refresh_client_factory,
         vm_types=vm_ref_types,
+        on_progress=_refresh_progress_reporter(pid, refresh_key, 'vm_configs', 'Reading guest configurations',
+                                               48, 75, label=config_label),
     )
 
     runtime_store = _runtime_store()
@@ -2477,16 +2550,14 @@ def instances_refresh_vm(pid: str):
         proj,
         candidate_poolids,
         force_refresh=force_refresh,
-        client_factory=lambda: ProxmoxClient(
-            base_url=base_url,
-            token=token or None,
-            username=username,
-            password=password,
-            verify=verify,
-        ),
+        client_factory=refresh_client_factory,
+        on_progress=_refresh_progress_reporter(pid, refresh_key, 'pool_members', 'Checking pool membership', 75, 82),
     )
 
+    acl_progress = _refresh_progress_reporter(pid, refresh_key, 'access', 'Checking user access controls', 82, 84)
+    acl_progress(0, 1)
     _effective_user_access = _user_access_checker(client)
+    acl_progress(1, 1)
 
     # Helper: extract network adaptor identifiers from VM config
     def _extract_nets(cfg: dict):
@@ -2511,12 +2582,12 @@ def instances_refresh_vm(pid: str):
     current = { int((e or {}).get('index', 0)): e for e in (proj.instance_statuses or []) }
     out = []
     screenshot_jobs = []
+    summary_total = len({index for index, _ in selected}) if selected is not None else instances
+    summary_completed = 0
+    summary_progress = _refresh_progress_reporter(pid, refresh_key, 'summarizing', 'Compiling instance inventory',
+                                                  84, 90 if update_screenshots else 97)
+    summary_progress(0, summary_total)
     for i in range(1, instances + 1):
-        try:
-            pct = int(round(70 + (i / max(instances or 1, 1)) * 25)) if instances > 0 else 95
-            _update_job_detail(pid, job_key=refresh_key, phase='summarizing', current=f'Instance {i}', item_total=instances, item_completed=i - 1, step=i, total_steps=max(instances, 1), progress=min(pct, 95), message=f'Compiling instance {i}/{max(instances, 1)}…')
-        except Exception:
-            pass
         if selected is not None and not any(index == i for index, _ in selected):
             if i in current:
                 out.append(current[i])
@@ -2742,6 +2813,11 @@ def instances_refresh_vm(pid: str):
         except Exception:
             pass
         out.append(entry)
+        summary_completed += 1
+        summary_progress(summary_completed, summary_total, f'Instance {i} ({len(found_details)} guests found)')
+    screenshot_progress = _refresh_progress_reporter(pid, refresh_key, 'screenshots', 'Capturing display previews', 90, 97)
+    if update_screenshots:
+        screenshot_progress(0, len(screenshot_jobs))
     if screenshot_jobs:
         def capture_display(job):
             detail, node, vmid = job
@@ -2754,16 +2830,22 @@ def instances_refresh_vm(pid: str):
                 detail['screenshot_stale'] = False
             except Exception:
                 detail['screenshot_error'] = 'Display capture unavailable'
-        _update_job_detail(pid, job_key=refresh_key, phase='screenshots', progress=95,
-                           message=f'Capturing {len(screenshot_jobs)} display preview(s)…')
         with ThreadPoolExecutor(max_workers=min(4, len(screenshot_jobs))) as executor:
-            list(executor.map(capture_display, screenshot_jobs))
+            futures = {executor.submit(capture_display, job): job for job in screenshot_jobs}
+            failed = 0
+            for completed, future in enumerate(as_completed(futures), 1):
+                future.result()
+                detail, node, vmid = futures[future]
+                failed += int(bool(detail.get('screenshot_error')))
+                screenshot_progress(completed, len(screenshot_jobs), f"{detail['name']} (VM {vmid}, {node})", failed)
     for entry in out:
         for detail in entry.get('vm_details', []):
             refreshed_screenshot = update_screenshots and (selected is None or
                 (int(entry.get('index', 0)), str(detail.get('name') or '').lower()) in selected)
             if detail.get('screenshot') and not refreshed_screenshot:
                 detail['screenshot_stale'] = True
+    save_progress = _refresh_progress_reporter(pid, refresh_key, 'saving', 'Saving refreshed inventory', 98, 99)
+    save_progress(0, 1)
     inventory_writer = getattr(s, 'update_vm_inventory', None)
     if callable(inventory_writer):
         screenshot_targets = (selected if selected is not None else None) if update_screenshots else set()
@@ -2772,6 +2854,7 @@ def instances_refresh_vm(pid: str):
     else:
         proj.instance_statuses = out
         s.upsert(proj)
+    save_progress(1, 1)
     
     # Log total refresh time for performance monitoring
     t_end = time.time()
@@ -9357,6 +9440,69 @@ def _push_tar_through_guest_agent(
             pass
 
 
+def _decode_guest_agent_file_chunks(content: str) -> bytes:
+    """Decode Proxmox file-read content, including concatenated base64 blocks."""
+    # With decode=0, Proxmox concatenates independently encoded guest-agent
+    # reads. Padding can occur inside the response, so decoding it as a single
+    # base64 string either drops subsequent blocks or raises a padding error.
+    encoded = ''.join(content.split())
+    decoded = bytearray()
+    start = 0
+    while start < len(encoded):
+        padding = encoded.find('=', start)
+        if padding < 0:
+            end = len(encoded)
+        else:
+            end = padding + 1
+            if end < len(encoded) and encoded[end] == '=':
+                end += 1
+        decoded.extend(base64.b64decode(encoded[start:end], validate=True))
+        start = end
+    return bytes(decoded)
+
+
+def _wait_for_guest_read_retry(delay: float):
+    """Allow cancellation while backing off a failed read."""
+    deadline = time.monotonic() + delay
+    while True:
+        _check_transfer_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.25, remaining))
+
+
+def _read_guest_archive_chunk(client, entry, path, offset=0, count=1024 * 1024,
+                              archive_size=None, *, legacy=False):
+    """Retry safe reads at the same offset, shrinking overloaded API requests."""
+    attempts = 4
+    for attempt in range(attempts):
+        _check_transfer_cancelled()
+        try:
+            params = {'legacy': True} if legacy else {'offset': offset, 'count': count, 'decode': False}
+            result = client.agent_file_read(node=str(entry.get('node') or ''),
+                                            vmid=int(entry.get('vmid')), path=path, **params) or {}
+            return result, count
+        except (GuestAgentFileReadError, requests.Timeout, requests.ConnectionError,
+                requests.exceptions.ChunkedEncodingError) as exc:
+            if isinstance(exc, requests.exceptions.SSLError):
+                raise
+            if isinstance(exc, GuestAgentFileReadError) and not exc.retryable:
+                raise
+            if attempt == attempts - 1:
+                raise RuntimeError(
+                    f'Guest archive read failed after {attempts} attempts at byte {offset} '
+                    f'({count} bytes requested): {exc}'
+                ) from exc
+            if not legacy:
+                count = max(min(count, 256 * 1024), count // 2)
+            delay = 2 ** attempt
+            LOG.warning('Retrying guest archive read node=%s vmid=%s offset=%s count=%s attempt=%s/%s: %s',
+                        entry.get('node'), entry.get('vmid'), offset, count, attempt + 2, attempts, exc)
+            _transfer_bytes(f'Retrying download ({attempt + 2}/{attempts})', offset, archive_size)
+            _wait_for_guest_read_retry(delay)
+
+
 def _pull_tar_through_guest_agent(
     client: ProxmoxClient,
     entry: Dict[str, Any],
@@ -9389,26 +9535,28 @@ def _pull_tar_through_guest_agent(
         _transfer_bytes('Downloading from guest', 0, archive_size)
         try:
             offset = 0
-            chunk_size = 4 * 1024 * 1024
-            while True:
-                result = client.agent_file_read(
-                    node=str(entry.get('node') or ''),
-                    vmid=int(entry.get('vmid')),
-                    path=guest_archive,
-                    offset=offset,
-                    count=chunk_size,
-                    decode=False,
-                ) or {}
+            chunk_size = 1024 * 1024
+            while archive_size is None or offset < archive_size:
+                count = min(chunk_size, archive_size - offset) if archive_size is not None else chunk_size
+                result, count = _read_guest_archive_chunk(
+                    client, entry, guest_archive, offset, count, archive_size,
+                )
+                chunk_size = min(chunk_size, count)
                 content = str(result.get('content') or '')
-                chunk = base64.b64decode(content, validate=False) if content else b''
-                bytes_read = int(result.get('bytes-read') or len(chunk) or 0)
+                chunk = _decode_guest_agent_file_chunks(content)
+                bytes_read = result.get('bytes-read')
+                bytes_read = int(bytes_read) if bytes_read is not None else len(chunk)
+                if bytes_read != len(chunk) or len(chunk) > count:
+                    raise RuntimeError('guest-agent archive chunk has an inconsistent byte count')
                 if chunk:
                     tar_stream.write(chunk)
                     _transfer_bytes('Downloading from guest', tar_stream.tell(), archive_size)
                 if bytes_read <= 0:
                     break
                 offset += bytes_read
-                if not result.get('truncated') or bytes_read < chunk_size:
+                # The archive size is authoritative: short reads and the
+                # endpoint's truncated flag need not indicate archive EOF.
+                if archive_size is None and not result.get('truncated'):
                     break
         except RuntimeError as exc:
             # Proxmox versions predating chunked file-read reject offset/count/decode.
@@ -9422,7 +9570,7 @@ def _pull_tar_through_guest_agent(
             legacy_command = (
                 f"rm -f -- {quoted_part_prefix}* && "
                 f"base64 {quoted_archive} | tr -d '\\r\\n' | "
-                f"split -b 12000000 - {quoted_part_prefix} && "
+                f"split -b 1048576 - {quoted_part_prefix} && "
                 f"for part in {quoted_part_prefix}*; do [ -f \"$part\" ] && printf '%s\\n' \"$part\"; done"
             )
             legacy_result = _guest_agent_exec_checked(
@@ -9435,16 +9583,20 @@ def _pull_tar_through_guest_agent(
             if not part_paths:
                 raise RuntimeError('guest-agent did not produce readable archive chunks')
             for part_path in part_paths:
-                result = client.agent_file_read(
-                    node=str(entry.get('node') or ''),
-                    vmid=int(entry.get('vmid')),
-                    path=part_path,
-                    legacy=True,
-                ) or {}
+                result, _ = _read_guest_archive_chunk(
+                    client, entry, part_path, tar_stream.tell(), archive_size=archive_size, legacy=True,
+                )
+                if result.get('truncated'):
+                    raise RuntimeError('guest-agent returned a truncated archive chunk in compatible mode')
                 encoded = ''.join(str(result.get('content') or '').split())
                 if encoded:
                     tar_stream.write(base64.b64decode(encoded, validate=True))
                     _transfer_bytes('Downloading from guest', tar_stream.tell(), archive_size)
+        if archive_size is not None and tar_stream.tell() != archive_size:
+            raise RuntimeError(
+                f'Incomplete guest-agent archive download: received {tar_stream.tell()} '
+                f'of {archive_size} expected bytes'
+            )
         if tar_stream.tell() <= 0:
             raise RuntimeError('guest-agent returned an empty archive')
         tar_stream.seek(0)
@@ -9521,6 +9673,12 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
     lock = threading.Lock()
     completed = 0
     cancelled_result = object()
+    # Large parallel QGA responses can exhaust pveproxy/pvedaemon workers.
+    # Keep distinct nodes busy without flooding any one node with pulls.
+    node_pull_limits = {
+        str(entry.get('node') or ''): threading.BoundedSemaphore(2)
+        for entry in mapped if phase == 'guest_pull' and entry.get('type') == 'qemu'
+    }
 
     def run(entry):
         last = [None, -1, 0.0]
@@ -9543,14 +9701,23 @@ def _run_guest_transfer_tasks(proj, pid, mapped, phase, worker):
         _TRANSFER_PROGRESS.cancelled = lambda: _is_cancelled(pid)
         try:
             _check_transfer_cancelled()
-            return worker(entry)
+            limit = node_pull_limits.get(str(entry.get('node') or '')) if entry.get('type') == 'qemu' else None
+            if limit is None:
+                return worker(entry)
+            while not limit.acquire(timeout=0.25):
+                _check_transfer_cancelled()
+            try:
+                _check_transfer_cancelled()
+                return worker(entry)
+            finally:
+                limit.release()
         except _GuestTransferCancelled:
             return cancelled_result
         finally:
             del _TRANSFER_PROGRESS.report
             del _TRANSFER_PROGRESS.cancelled
 
-    with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(mapped), hard_cap=0)) as pool:
+    with ThreadPoolExecutor(max_workers=_pool_workers_for(proj, len(mapped), hard_cap=4 if phase == 'guest_pull' else 0)) as pool:
         futures = {pool.submit(run, entry): position for position, entry in enumerate(mapped)}
         for future in as_completed(futures):
             position = futures[future]
@@ -9603,6 +9770,150 @@ def _guest_push_metadata_commands(
     return commands
 
 
+def _host_push_file_path(value, label):
+    if (not isinstance(value, str) or not value.startswith('/') or value.endswith('/')
+            or '\0' in value or any(part in {'.', '..'} for part in value.split('/'))):
+        raise ValueError(f'{label} must be an absolute file path, including the filename')
+    return posixpath.normpath('/' + value.lstrip('/'))
+
+
+def _push_host_files_to_guest(proj, client, base_url, password, username, entry, transfers, owner, permissions):
+    """Read source files on this guest's node and copy them without browser uploads."""
+    if entry.get('type') == 'qemu':
+        _ensure_linux_qemu_guest(client, entry)
+    host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
+    ssh_user = _proxmox_ssh_username(proj, username)
+    sudo = ssh_user.lower() != 'root'
+    ssh = _ssh_connect(host, int(getattr(proj, 'proxmox_ssh_port', 22) or 22), ssh_user, password)
+    pushed, errors = [], []
+    try:
+        for transfer in transfers:
+            source = transfer['sourcePath']
+            path = transfer['destinationPath']
+            destination, filename = posixpath.split(path)
+            archive = f'/tmp/deployforge-host-push-{uuid.uuid4().hex}.tar'
+            try:
+                _check_transfer_cancelled()
+                _transfer_bytes('Preparing host file', 0)
+                script = build_host_file_archive_script(source, filename, archive)
+                code, output, error = _ssh_exec_result(
+                    ssh, f'python3 -c {shlex.quote(script)}', sudo=sudo, sudo_password=password,
+                )
+                if code != 0:
+                    raise RuntimeError(error or f'Could not read host source {source}')
+                archive_size = int(output.strip())
+                _check_transfer_cancelled()
+                if entry.get('type') == 'qemu':
+                    _push_staged_tar_to_qemu(ssh, entry, archive, archive_size, destination, sudo, password, owner)
+                else:
+                    _transfer_bytes('Extracting in guest', 0)
+                    inner = (f'{_lxc_prepare_directory_command(destination, owner)} && '
+                             f'tar --overwrite -xpf - -C {shlex.quote(destination)}')
+                    command = (f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(inner)} "
+                               f'< {shlex.quote(archive)}')
+                    code, _, error = _ssh_exec_result(
+                        ssh, f'sh -c {shlex.quote(command)}', sudo=sudo, sudo_password=password,
+                    )
+                    if code != 0:
+                        raise RuntimeError(error or f'pct extract exited with {code}')
+                for command in _guest_push_metadata_commands(destination, [filename], set(), owner, permissions):
+                    _check_transfer_cancelled()
+                    if entry.get('type') == 'qemu':
+                        _guest_agent_exec_checked(client, entry, ['/bin/sh', '-c', command])
+                    else:
+                        code, _, error = _ssh_exec_result(
+                            ssh, f"pct exec {int(entry['vmid'])} -- sh -c {shlex.quote(command)}",
+                            sudo=sudo, sudo_password=password,
+                        )
+                        if code != 0:
+                            raise RuntimeError(error or f'remote metadata command exited with {code}')
+                pushed.append({
+                    'index': entry.get('index'), 'name': entry.get('name'), 'vmid': entry['vmid'],
+                    'node': entry.get('node'), 'type': entry.get('type'), 'source_path': source,
+                    'destination': path, 'file_count': 1, 'item_count': 1, 'bytes': archive_size,
+                    'owner_on_remote': owner or None, 'file_permissions': permissions or None,
+                    'transfer_method': 'qm-over-ssh' if entry.get('type') == 'qemu' else 'pct-over-ssh',
+                })
+            except Exception as exc:
+                errors.append({'name': entry.get('name'), 'vmid': entry['vmid'], 'source_path': source,
+                               'destination': path, 'reason': str(exc)})
+            finally:
+                try:
+                    _ssh_exec_result(ssh, f'rm -f -- {shlex.quote(archive)}', sudo=sudo, sudo_password=password)
+                except Exception:
+                    LOG.warning('Could not remove host push archive %s', archive, exc_info=True)
+    finally:
+        ssh.close()
+    return pushed, errors
+
+
+def _instances_guest_push_host(pid, include_qemu=True):
+    try:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or body.get('source') != 'host':
+            raise ValueError('JSON guest pushes require source=host')
+        owner = body.get('ownerOnRemote', '')
+        permissions = body.get('filePermissions', '')
+        if not isinstance(owner, str) or (owner.strip() and not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\$?', owner.strip())):
+            raise ValueError('Owner on remote must be a username or numeric UID')
+        if not isinstance(permissions, str) or (permissions.strip() and not re.fullmatch(r'[0-7]{3,4}', permissions.strip())):
+            raise ValueError('File permissions must be 3 or 4 octal digits (0–7)')
+        rows = body.get('transfers')
+        if not isinstance(rows, list) or not rows:
+            raise ValueError('At least one CSV transfer is required')
+        transfers, destinations = {}, {}
+        for row in rows:
+            if not isinstance(row, dict) or type(row.get('vmid')) is not int or row['vmid'] <= 0:
+                raise ValueError('CSV VMID must be a positive integer')
+            vmid = row['vmid']
+            source = _host_push_file_path(row.get('sourcePath'), 'Host source')
+            destination = _host_push_file_path(row.get('destinationPath'), 'Guest destination')
+            key = (vmid, destination)
+            if key in destinations:
+                if destinations[key] != source:
+                    raise ValueError(f'VMID {vmid} has multiple source files for {destination}')
+                continue
+            destinations[key] = source
+            transfers.setdefault(vmid, []).append({'sourcePath': source, 'destinationPath': destination})
+        proj, client, base_url, password, mapped, skipped, errors = _guest_transfer_context(pid, body, include_qemu=include_qemu)
+        # Resolve names against fresh inventory, then enforce the explicit CSV IDs
+        # before reading a host file or changing any guest.
+        resolved = [entry['vmid'] for entry in mapped]
+        if skipped or errors or len(resolved) != len(set(resolved)) or set(resolved) != set(transfers):
+            raise ValueError('CSV VMIDs no longer match the selected guests. Refresh states and try again.')
+        if not password:
+            raise ValueError('A Proxmox SSH password is required for host-source CSV pushes')
+    except LookupError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except (ValueError, TypeError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': f'Could not resolve guest targets: {exc}'}), 502
+
+    pushed = []
+    _start_job(pid, 'guest_push', total_steps=len(mapped))
+    try:
+        def transfer_guest(entry):
+            try:
+                return _push_host_files_to_guest(
+                    proj, client, base_url, password, body.get('username'), entry,
+                    transfers[entry['vmid']], owner.strip(), permissions.strip(),
+                )
+            except Exception as exc:
+                return [], [{'name': entry.get('name'), 'vmid': entry['vmid'], 'reason': str(exc)}]
+
+        for guest_results, guest_errors in _run_guest_transfer_tasks(proj, pid, mapped, 'guest_push', transfer_guest):
+            pushed.extend(guest_results)
+            errors.extend(guest_errors)
+    finally:
+        cancelled = _is_cancelled(pid)
+        _update_job_detail(pid, transferProgress=None, transferDirection='',
+                           **({} if cancelled else {'progress': 100}),
+                           message='Guest push cancelled' if cancelled else 'Guest push completed')
+        _end_job(pid, status='cancelled' if cancelled else 'completed')
+    return jsonify({'pushed': pushed, 'skipped': skipped, 'errors': errors})
+
+
 @api_bp.route("/projects/<pid>/instances/actions/guest_push", methods=["POST"])
 @api_bp.route("/projects/<pid>/instances/actions/lxc_push", methods=["POST"])
 def instances_lxc_push(pid: str):
@@ -9610,6 +9921,8 @@ def instances_lxc_push(pid: str):
     blocked = _block_when_remote('Guest file transfer')
     if blocked:
         return blocked
+    if request.is_json:
+        return _instances_guest_push_host(pid, include_qemu=include_qemu)
     try:
         raw_body = request.form.get('payload') or '{}'
         body = json.loads(raw_body)
@@ -9843,18 +10156,91 @@ def instances_lxc_pull(pid: str):
 
     pulled: List[Dict[str, Any]] = []
     _start_job(pid, 'guest_pull', total_steps=len(mapped))
-    zip_stream = io.BytesIO()
-    zip_lock = threading.Lock()
-    with zipfile.ZipFile(zip_stream, mode='w', compression=zipfile.ZIP_DEFLATED) as output_zip:
-        def transfer_guest(entry):
-            pulled = []
-            errors = []
-            ssh_client = None
-            try:
-                guest_type = str(entry.get('type') or '').strip().lower()
-                if guest_type == 'qemu':
-                    tar_stream = _pull_tar_through_guest_agent(client, entry, paths)
+    with tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b') as zip_stream:
+        zip_lock = threading.Lock()
+        with zipfile.ZipFile(zip_stream, mode='w', compression=zipfile.ZIP_DEFLATED) as output_zip:
+            def transfer_guest(entry):
+                pulled = []
+                errors = []
+                ssh_client = None
+                try:
+                    guest_type = str(entry.get('type') or '').strip().lower()
+                    if guest_type == 'qemu':
+                        tar_stream = _pull_tar_through_guest_agent(client, entry, paths)
+                        try:
+                            prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'), _instance_username(proj, entry.get('index')))
+                            _transfer_bytes('Preparing download archive', 0)
+                            with zip_lock:
+                                output_zip.writestr(prefix.rstrip('/') + '/', b'')
+                                file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
+                            pulled.append({
+                                'index': entry.get('index'),
+                                'name': entry.get('name'),
+                                'vmid': entry.get('vmid'),
+                                'node': entry.get('node'),
+                                'type': 'qemu',
+                                'transfer_method': 'qemu-guest-agent',
+                                'paths': paths,
+                                'file_count': file_count,
+                            })
+                        finally:
+                            tar_stream.close()
+                        return pulled, errors
+                    ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
+                    ssh_user = _proxmox_ssh_username(proj, body.get('username'))
+                    use_sudo = ssh_user.lower() != 'root'
+                    ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
+                    ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
+                    tar_paths = [path.lstrip('/') or '.' for path in paths]
+                    quoted_paths = ' '.join(_shell_quote_path_pattern(path) for path in tar_paths)
+                    # Run through the container shell so supported path patterns are
+                    # expanded against the LXC filesystem. Literal segments remain
+                    # shell-quoted by _shell_quote_path_pattern.
+                    # Change directory before invoking tar so the shell expands
+                    # relative patterns against the container root, not /root (or
+                    # another pct exec working directory).
+                    _transfer_bytes('Preparing download', 0)
+                    inner_command = (
+                        "archive=$(mktemp /tmp/deployforge-pull-XXXXXXXX.tar) || exit 1; "
+                        "trap 'rm -f -- \"$archive\"' EXIT; "
+                        f'cd / && tar --exclude="${{archive#/}}" -cf "$archive" -- {quoted_paths} && '
+                        "printf 'TRANSFER_SIZE=%s\\n' \"$(stat -c %s -- \"$archive\")\" && cat -- \"$archive\""
+                    )
+                    command = (
+                        f"pct exec {int(entry['vmid'])} -- sh -c "
+                        f"{shlex.quote(inner_command)}"
+                    )
+                    stdout, stderr = _ssh_run_cmd(
+                        ssh_client,
+                        command,
+                        sudo=use_sudo,
+                        sudo_password=password,
+                        timeout=1800,
+                    )
+                    tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
                     try:
+                        header = stdout.readline()
+                        if isinstance(header, str):
+                            header = header.encode('utf-8', errors='replace')
+                        if not header.startswith(b'TRANSFER_SIZE='):
+                            stderr_raw = stderr.read()
+                            stderr_text = stderr_raw.decode('utf-8', errors='replace') if isinstance(stderr_raw, bytes) else str(stderr_raw or '')
+                            raise RuntimeError(stderr_text.strip() or 'Guest archive size was not returned')
+                        archive_size = int(header.split(b'=', 1)[1])
+                        _transfer_bytes('Downloading from guest', 0, archive_size)
+                        while True:
+                            chunk = stdout.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            if not isinstance(chunk, bytes):
+                                chunk = str(chunk).encode('utf-8', errors='replace')
+                            tar_stream.write(chunk)
+                            _transfer_bytes('Downloading from guest', tar_stream.tell(), archive_size)
+                        stderr_raw = stderr.read()
+                        stderr_text = stderr_raw.decode('utf-8', errors='replace') if isinstance(stderr_raw, bytes) else str(stderr_raw or '')
+                        code = int(stdout.channel.recv_exit_status())
+                        if code != 0:
+                            raise RuntimeError(stderr_text.strip() or f'pct tar exited with {code}')
                         prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'), _instance_username(proj, entry.get('index')))
                         _transfer_bytes('Preparing download archive', 0)
                         with zip_lock:
@@ -9865,144 +10251,79 @@ def instances_lxc_pull(pid: str):
                             'name': entry.get('name'),
                             'vmid': entry.get('vmid'),
                             'node': entry.get('node'),
-                            'type': 'qemu',
-                            'transfer_method': 'qemu-guest-agent',
+                            'type': 'lxc',
+                            'transfer_method': 'pct-over-ssh',
                             'paths': paths,
                             'file_count': file_count,
                         })
                     finally:
                         tar_stream.close()
-                    return pulled, errors
-                ssh_host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
-                ssh_user = _proxmox_ssh_username(proj, body.get('username'))
-                use_sudo = ssh_user.lower() != 'root'
-                ssh_port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
-                ssh_client = _ssh_connect(ssh_host, ssh_port, ssh_user, password)
-                tar_paths = [path.lstrip('/') or '.' for path in paths]
-                quoted_paths = ' '.join(_shell_quote_path_pattern(path) for path in tar_paths)
-                # Run through the container shell so supported path patterns are
-                # expanded against the LXC filesystem. Literal segments remain
-                # shell-quoted by _shell_quote_path_pattern.
-                # Change directory before invoking tar so the shell expands
-                # relative patterns against the container root, not /root (or
-                # another pct exec working directory).
-                _transfer_bytes('Preparing download', 0)
-                inner_command = (
-                    "archive=$(mktemp /tmp/deployforge-pull-XXXXXXXX.tar) || exit 1; "
-                    "trap 'rm -f -- \"$archive\"' EXIT; "
-                    f'cd / && tar --exclude="${{archive#/}}" -cf "$archive" -- {quoted_paths} && '
-                    "printf 'TRANSFER_SIZE=%s\\n' \"$(stat -c %s -- \"$archive\")\" && cat -- \"$archive\""
-                )
-                command = (
-                    f"pct exec {int(entry['vmid'])} -- sh -c "
-                    f"{shlex.quote(inner_command)}"
-                )
-                stdout, stderr = _ssh_run_cmd(
-                    ssh_client,
-                    command,
-                    sudo=use_sudo,
-                    sudo_password=password,
-                    timeout=1800,
-                )
-                tar_stream = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode='w+b')
-                try:
-                    header = stdout.readline()
-                    if isinstance(header, str):
-                        header = header.encode('utf-8', errors='replace')
-                    if not header.startswith(b'TRANSFER_SIZE='):
-                        stderr_raw = stderr.read()
-                        stderr_text = stderr_raw.decode('utf-8', errors='replace') if isinstance(stderr_raw, bytes) else str(stderr_raw or '')
-                        raise RuntimeError(stderr_text.strip() or 'Guest archive size was not returned')
-                    archive_size = int(header.split(b'=', 1)[1])
-                    _transfer_bytes('Downloading from guest', 0, archive_size)
-                    while True:
-                        chunk = stdout.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        if not isinstance(chunk, bytes):
-                            chunk = str(chunk).encode('utf-8', errors='replace')
-                        tar_stream.write(chunk)
-                        _transfer_bytes('Downloading from guest', tar_stream.tell(), archive_size)
-                    stderr_raw = stderr.read()
-                    stderr_text = stderr_raw.decode('utf-8', errors='replace') if isinstance(stderr_raw, bytes) else str(stderr_raw or '')
-                    code = int(stdout.channel.recv_exit_status())
-                    if code != 0:
-                        raise RuntimeError(stderr_text.strip() or f'pct tar exited with {code}')
-                    prefix = _lxc_zip_prefix(entry.get('name'), entry.get('vmid'), _instance_username(proj, entry.get('index')))
-                    _transfer_bytes('Preparing download archive', 0)
-                    with zip_lock:
-                        output_zip.writestr(prefix.rstrip('/') + '/', b'')
-                        file_count = _copy_lxc_tar_into_zip(tar_stream, output_zip, prefix)
-                    pulled.append({
+                except Exception as exc:
+                    errors.append({
                         'index': entry.get('index'),
                         'name': entry.get('name'),
                         'vmid': entry.get('vmid'),
                         'node': entry.get('node'),
-                        'type': 'lxc',
-                        'transfer_method': 'pct-over-ssh',
-                        'paths': paths,
-                        'file_count': file_count,
+                        'reason': f'pull failed: {exc}',
                     })
                 finally:
-                    tar_stream.close()
-            except Exception as exc:
-                errors.append({
-                    'index': entry.get('index'),
-                    'name': entry.get('name'),
-                    'vmid': entry.get('vmid'),
-                    'node': entry.get('node'),
-                    'reason': f'pull failed: {exc}',
-                })
-            finally:
-                if ssh_client is not None:
-                    try:
-                        ssh_client.close()
-                    except Exception:
-                        pass
-            return pulled, errors
+                    if ssh_client is not None:
+                        try:
+                            ssh_client.close()
+                        except Exception:
+                            pass
+                return pulled, errors
 
-        for guest_results, guest_errors in _run_guest_transfer_tasks(
-            proj, pid, mapped, 'guest_pull', transfer_guest,
-        ):
-            pulled.extend(guest_results)
-            errors.extend(guest_errors)
-        cancelled = _is_cancelled(pid)
-        generated_at = datetime.now(timezone.utc)
-        outcome = 'cancelled' if cancelled else ('completed with errors' if errors else 'completed')
-        log = [
-            f"Guest file pull: {outcome}",
-            f"Project: {getattr(proj, 'name', '') or pid} ({pid})",
-            f"Generated: {generated_at.isoformat()}",
-            'Requested paths: ' + ', '.join(paths),
-            f"Guests pulled: {len(pulled)}; skipped: {len(skipped)}; errors: {len(errors)}",
-        ]
-        for label, entries in (('SUCCESS', pulled), ('SKIPPED', skipped), ('ERROR', errors)):
-            for entry in entries:
-                identity = f"{entry.get('name') or 'Unknown guest'} (VMID {entry.get('vmid', '?')}, node {entry.get('node') or '?'})"
-                detail = (f"{entry.get('file_count', 0)} file(s) archived" if label == 'SUCCESS'
-                          else str(entry.get('reason') or entry.get('error') or 'No detail available'))
-                log.append(f'[{label}] {identity}: {detail}')
-        output_zip.writestr('summary.txt', '\n'.join(log) + '\n')
-        output_zip.writestr('summary.json', json.dumps({
-            'project_id': pid, 'project_name': getattr(proj, 'name', ''),
-            'generated_at': generated_at.isoformat(), 'status': outcome,
-            'paths': paths, 'pulled': pulled, 'skipped': skipped, 'errors': errors,
-            'log': log,
-        }, indent=2))
-    zip_bytes = zip_stream.getvalue()
-    timestamp = generated_at.strftime('%Y%m%d_%H%M%S')
-    outputs_zip = {
-        'filename': f"{'guest' if include_qemu else 'lxc'}_pull_{_safe_file_stem(pid)}_{timestamp}.zip",
-        'base64': base64.b64encode(zip_bytes).decode('ascii'),
-        'size': len(zip_bytes),
-        'label': 'Pulled Files and Summary',
-        'auto_download': True,
-    }
-    _update_job_detail(pid, transferProgress=None, transferDirection='',
-                       **({} if cancelled else {'progress': 100}),
-                       message='Guest pull cancelled' if cancelled else 'Guest pull completed')
-    _end_job(pid, status='cancelled' if cancelled else 'completed')
-    return jsonify({'pulled': pulled, 'skipped': skipped, 'errors': errors, 'outputs_zip': outputs_zip})
+            for guest_results, guest_errors in _run_guest_transfer_tasks(
+                proj, pid, mapped, 'guest_pull', transfer_guest,
+            ):
+                pulled.extend(guest_results)
+                errors.extend(guest_errors)
+            cancelled = _is_cancelled(pid)
+            generated_at = datetime.now(timezone.utc)
+            outcome = 'cancelled' if cancelled else ('completed with errors' if errors else 'completed')
+            log = [
+                f"Guest file pull: {outcome}",
+                f"Project: {getattr(proj, 'name', '') or pid} ({pid})",
+                f"Generated: {generated_at.isoformat()}",
+                'Requested paths: ' + ', '.join(paths),
+                f"Guests pulled: {len(pulled)}; skipped: {len(skipped)}; errors: {len(errors)}",
+            ]
+            for label, entries in (('SUCCESS', pulled), ('SKIPPED', skipped), ('ERROR', errors)):
+                for entry in entries:
+                    identity = f"{entry.get('name') or 'Unknown guest'} (VMID {entry.get('vmid', '?')}, node {entry.get('node') or '?'})"
+                    detail = (f"{entry.get('file_count', 0)} file(s) archived" if label == 'SUCCESS'
+                              else str(entry.get('reason') or entry.get('error') or 'No detail available'))
+                    log.append(f'[{label}] {identity}: {detail}')
+            output_zip.writestr('summary.txt', '\n'.join(log) + '\n')
+            output_zip.writestr('summary.json', json.dumps({
+                'project_id': pid, 'project_name': getattr(proj, 'name', ''),
+                'generated_at': generated_at.isoformat(), 'status': outcome,
+                'paths': paths, 'pulled': pulled, 'skipped': skipped, 'errors': errors,
+                'log': log,
+            }, indent=2))
+        _update_job_detail(pid, phase='finalizing_archive', progress=99, current='',
+                           message='Finalizing pulled files archive…')
+        timestamp = generated_at.strftime('%Y%m%d_%H%M%S')
+        outputs_zip = {
+            'filename': f"{'guest' if include_qemu else 'lxc'}_pull_{_safe_file_stem(pid)}_{timestamp}.zip",
+            'size': zip_stream.seek(0, io.SEEK_END),
+            'label': 'Pulled Files and Summary',
+            'auto_download': True,
+        }
+        zip_stream.seek(0)
+        retain_archive = getattr(g, 'action_queue_retain_archive', None)
+        if retain_archive:
+            _update_job_detail(pid, phase='saving_download', progress=99, current='',
+                               message='Saving pulled files for download…')
+            outputs_zip.update(retain_archive(zip_stream, outputs_zip['filename']))
+        else:
+            outputs_zip['base64'] = base64.b64encode(zip_stream.read()).decode('ascii')
+        _update_job_detail(pid, transferProgress=None, transferDirection='',
+                           **({} if cancelled else {'progress': 100}),
+                           message='Guest pull cancelled' if cancelled else 'Guest pull completed')
+        _end_job(pid, status='cancelled' if cancelled else 'completed')
+        return jsonify({'pulled': pulled, 'skipped': skipped, 'errors': errors, 'outputs_zip': outputs_zip})
 
 
 @api_bp.route("/projects/<pid>/instances/actions/guest_delete", methods=["POST"])
@@ -11979,6 +12300,8 @@ def instances_actions_status(pid: str):
         'current': rec.get('current'),
         'message': rec.get('message'),
         'eta': rec.get('eta'),
+        'elapsed_seconds': max(0, (rec.get('ended') or time.time()) - rec['started'])
+                           if rec.get('started') is not None else None,
         'detail': rec.get('detail'),
         'log': rec.get('log', [])[-30:],  # cap to last 30 lines
     })

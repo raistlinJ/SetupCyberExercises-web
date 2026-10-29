@@ -12,6 +12,8 @@ test('failed multi-project refresh keeps saved containers visible and warns unti
   let fail = true;
   let rows;
   const markedLive = [];
+  const progress = [];
+  const stopped = [];
   const noop = () => {};
   const sandbox = {
     window: {}, document: { getElementById: () => note }, console: { log: noop, warn: noop, debug: noop }, performance,
@@ -25,11 +27,16 @@ test('failed multi-project refresh keeps saved containers visible and warns unti
       return { instance_statuses: [{ index: 1, vm_details: [] }] };
     },
     queueRemoteAction: (label, work) => { queueMicrotask(work); return {}; },
+    startVmActionStatusPolling: (pid, options) => {
+      assert.equal(options.scope, 'refresh');
+      options.setProgress(62, 'Configurations 3 of 8', 'Reading guest configurations · 3/8 processed');
+      return () => stopped.push(pid);
+    },
     vmMarkLiveRefreshed: id => markedLive.push(id), vmApplyServerResources: noop,
     renderMergedVmTable: result => { rows = result; },
     _coerceEnabled: (value, fallback) => value == null ? fallback : !!value,
     escHtml: text => text.replace(/</g, '&lt;').replace(/>/g, '&gt;'),
-    showVmInlineProgress: noop, updateVmInlineProgress: noop, hideVmInlineProgress: noop,
+    showVmInlineProgress: noop, updateVmInlineProgress: (...args) => progress.push(args), hideVmInlineProgress: noop,
   };
   vm.createContext(sandbox);
   vm.runInContext(refreshSource, sandbox);
@@ -41,6 +48,10 @@ test('failed multi-project refresh keeps saved containers visible and warns unti
   assert.deepEqual(markedLive, ['two']);
   assert.match(note.innerHTML, /last saved inventory/);
   assert.match(note.innerHTML, /LXC scan timed out &lt;node&gt;/);
+  assert.deepEqual(stopped.sort(), ['one', 'two']);
+  assert(progress.some(([pct, label, detail]) => detail === 'one: Reading guest configurations · 3/8 processed'));
+  assert(progress.some(([pct, label, detail]) => detail === 'two: Reading guest configurations · 3/8 processed'));
+  assert(progress.every(([pct], index) => index === 0 || pct >= progress[index - 1][0]));
   fail = false;
   await sandbox.refreshVmView({ showProgressDialog: false });
   assert.equal(rows.find(row => row.pid === 'one').status, 'missing');
@@ -228,4 +239,54 @@ test('screenshot filter includes current and saved captures, excluding uncapture
     {vmName:'missing', detail:null},
   ];
   assert.deepEqual(Array.from(sandbox.vmFilterScreenshotRows(rows), row=>row.vmName), ['current','saved']);
+});
+
+const progressSource = source.slice(source.indexOf('const VM_STATUS_PHASE_LABELS'), source.indexOf('function normalizeProject('));
+
+test('inline progress displays guest details safely and clears them when finished', () => {
+  const elements = Object.fromEntries(['vm-progress', 'vm-progress-bar', 'vm-progress-detail'].map(id => [id, {
+    classList: {add() {}, remove() {}}, style: {}, setAttribute() {}, removeAttribute() {}, textContent: '',
+  }]));
+  const sandbox = { document: {getElementById: id => elements[id]} };
+  vm.createContext(sandbox);
+  vm.runInContext(progressSource, sandbox);
+  sandbox.updateVmInlineProgress(62, 'Configurations 3 of 8', 'Reading <guest> on node1');
+  assert.equal(elements['vm-progress-detail'].textContent, 'Reading <guest> on node1');
+  assert.equal(elements['vm-progress-bar'].style.width, '62%');
+  assert.equal(elements['vm-progress-bar'].textContent, 'Configurations 3 of 8');
+  sandbox.hideVmInlineProgress();
+  assert.equal(elements['vm-progress-detail'].textContent, '');
+});
+
+test('refresh polling shows stage counts and elapsed time, then ignores late responses after stopping', async () => {
+  const timers = [];
+  const updates = [];
+  let respond;
+  let pending = false;
+  const sandbox = {
+    setTimeout: fn => {timers.push(fn); return timers.length;}, clearTimeout() {},
+    http: async (method, url) => {
+      assert.match(url, /scope=refresh$/);
+      const status = {action: 'refresh_vm', phase: 'vm_configs', status: 'running',
+        progress: 62, step: 3, total_steps: 8, elapsed_seconds: 12.5,
+        current: 'web-set-1', message: 'Reading guest configurations · 3/8 processed · web-set-1'};
+      if (pending) return new Promise(resolve => {respond = () => resolve(status);});
+      return status;
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(progressSource, sandbox);
+  const stop = sandbox.startVmActionStatusPolling('one', {scope: 'refresh', initialDelay: 1,
+    setProgress: (...args) => updates.push(args)});
+  await timers.shift()();
+  assert.equal(updates[0][0], 62);
+  assert.equal(updates[0][1], 'Configurations 3 of 8');
+  assert.match(updates[0][2], /web-set-1 · Elapsed 12s/);
+  pending = true;
+  const inFlight = timers.shift()();
+  stop();
+  respond();
+  await inFlight;
+  assert.equal(updates.length, 1);
+  assert.equal(timers.length, 0);
 });

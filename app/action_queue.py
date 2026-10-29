@@ -40,7 +40,9 @@ class ActionQueue:
         self.app = app
         self.path = os.path.join(app.config['DATA_DIR'], 'action_queue.sqlite3')
         self.upload_dir = os.path.join(app.config['DATA_DIR'], 'queue_uploads')
+        self.output_dir = os.path.join(app.config['DATA_DIR'], 'queue_outputs')
         os.makedirs(self.upload_dir, mode=0o700, exist_ok=True)
+        os.makedirs(self.output_dir, mode=0o700, exist_ok=True)
         self.lock = threading.Lock()
         self._public_cache = OrderedDict()
         self._public_cache_lock = threading.Lock()
@@ -58,6 +60,9 @@ class ActionQueue:
                 UNIQUE(owner, token))''')
             db.execute('''CREATE TABLE IF NOT EXISTS uploads (
                 job INTEGER, name TEXT, filename TEXT, content_type TEXT, body BLOB)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS action_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job INTEGER NOT NULL,
+                filename TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL)''')
             db.execute('''CREATE TABLE IF NOT EXISTS action_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, job INTEGER NOT NULL,
                 created REAL NOT NULL, event TEXT NOT NULL)''')
@@ -125,6 +130,15 @@ class ActionQueue:
         else:
             record['result'] = None
         snapshot = public_record(record)
+        if row['status'] in {'completed', 'error', 'cancelled'}:
+            with self.connect() as db:
+                archives = db.execute('SELECT id, filename, size FROM action_files WHERE job=? ORDER BY id',
+                                      (row['id'],)).fetchall()
+            if archives:
+                snapshot['archiveDownloads'] = [
+                    {'filename': archive['filename'], 'size': archive['size'],
+                     'url': f"/api/queue/{row['id']}/files/{archive['id']}"} for archive in archives
+                ]
         with self._public_cache_lock:
             self._public_cache[key] = snapshot
             self._public_cache.move_to_end(key)
@@ -357,6 +371,26 @@ class ActionQueue:
         with self.connect() as db:
             return bool(db.execute('SELECT cancel FROM actions WHERE id=?', (job_id,)).fetchone()[0])
 
+    def retain_archive(self, job_id, stream, filename):
+        """Keep ZIP bytes outside SQLite and JSON, scoped to their queue owner."""
+        filename = secure_filename(filename) or 'guest_pull.zip'
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.output_dir, delete=False) as target:
+                path = target.name
+                stream.seek(0)
+                shutil.copyfileobj(stream, target, length=1024 * 1024)
+                size = target.tell()
+            with self.connect() as db:
+                cursor = db.execute('INSERT INTO action_files(job, filename, path, size) VALUES (?, ?, ?, ?)',
+                                    (job_id, filename, path, size))
+                file_id = cursor.lastrowid
+        except Exception:
+            if path is not None:
+                os.unlink(path)
+            raise
+        return {'filename': filename, 'size': size, 'url': f'/api/queue/{job_id}/files/{file_id}'}
+
     def dispatch(self, step, payload, job_id, report, push_batch=None):
         headers = dict(step.get('headers') or {})
         if payload.get('api_key'):
@@ -389,6 +423,11 @@ class ActionQueue:
                 g.action_queue_cancelled = lambda: self.cancelled(job_id)
                 g.action_queue_progress = report
                 g.action_queue_event = lambda event: self.append_event(job_id, event)
+                # Agent tools consume their nested pull bytes directly; only
+                # a queued Pull Files step returns a retained download link.
+                g.action_queue_retain_archive = (
+                    lambda stream, filename: self.retain_archive(job_id, stream, filename)
+                ) if urlsplit(step['url']).path.endswith(('/instances/actions/guest_pull', '/instances/actions/lxc_pull')) else None
                 response = self.app.full_dispatch_request()
                 response.direct_passthrough = False
                 try:
@@ -406,6 +445,7 @@ class ActionQueue:
         partial_error_message = 'VM creation reported errors; see results.'
         push_batch = GuestPushBatch()
         attempted_steps = []
+        report = None
         payload = json.loads(row['payload'])
         try:
             for index, step in enumerate(payload['steps']):
@@ -480,17 +520,33 @@ class ActionQueue:
             status, error = 'error', str(exc)
             self.app.logger.exception('Queued action %s failed', job_id)
         finally:
-            push_batch.close()
-            if len(json.loads(row['payload'])['steps']) > 1:
-                body = json.dumps({'results': results}).encode()
-                headers = {'Content-Type': 'application/json'}
-            if self.cancelled(job_id):
-                status, error = 'cancelled', ''
-            self.schedule_refreshes(row, payload, attempted_steps, status != 'completed')
-            with self.connect() as db:
-                db.execute('''UPDATE actions SET status=?, finished=?, result=?, code=?, headers=?, error=?, payload=NULL WHERE id=?''',
-                           (status, time.time(), body, code, json.dumps(headers), error, job_id))
-                self.delete_uploads(db, job_id)
+            try:
+                push_batch.close()
+                if len(payload['steps']) > 1:
+                    body = json.dumps({'results': results}).encode()
+                    headers = {'Content-Type': 'application/json'}
+                if self.cancelled(job_id):
+                    status, error = 'cancelled', ''
+                if report is not None and any(urlsplit(step['url']).path.endswith(
+                        ('/instances/actions/guest_pull', '/instances/actions/lxc_pull')) for step in attempted_steps):
+                    report({'phase': 'saving_result', 'progress': 99, 'current': '',
+                            'message': 'Saving action result…', 'transferProgress': None, 'transferDirection': ''})
+                self.schedule_refreshes(row, payload, attempted_steps, status != 'completed')
+                with self.connect() as db:
+                    db.execute('''UPDATE actions SET status=?, finished=?, result=?, code=?, headers=?, error=?, payload=NULL WHERE id=?''',
+                               (status, time.time(), body, code, json.dumps(headers), error, job_id))
+                    self.delete_uploads(db, job_id)
+            except Exception:
+                self.app.logger.exception('Could not save queued action %s result', job_id)
+                # A failed result write must not permanently block the FIFO.
+                # Retained files remain available from the completed queue.
+                error = 'Could not save action result; see server logs. Any retained downloads are still available.'
+                with self.connect() as db:
+                    db.execute('''UPDATE actions SET status='error', finished=?, result=?, code=500,
+                                  headers=?, error=?, payload=NULL WHERE id=?''',
+                               (time.time(), json.dumps({'error': error}).encode(),
+                                json.dumps({'Content-Type': 'application/json'}), error, job_id))
+                    self.delete_uploads(db, job_id)
 
     def work(self):
         while not self.stopped.is_set():
@@ -777,6 +833,24 @@ def init_action_queue(app):
         headers = json.loads(row['headers'] or '{}')
         headers = {k: v for k, v in headers.items() if k.lower() in {'content-type', 'content-disposition', 'x-deployforge-auth-failure'}}
         return Response(row['result'] or b'{}', status=row['code'] or 200, headers=headers)
+
+    @bp.get('/<int:job_id>/files/<int:file_id>')
+    @_secure_route(api_key=False)
+    def archive_file(job_id, file_id):
+        row = record(job_id, lightweight=True)
+        if not row:
+            return jsonify(error='not found'), 404
+        if row['status'] in {'queued', 'running'}:
+            return jsonify(error='Action is still pending'), 409
+        with queue().connect() as db:
+            archive = db.execute('SELECT filename, path FROM action_files WHERE job=? AND id=?',
+                                 (job_id, file_id)).fetchone()
+        if archive is None or not os.path.isfile(archive['path']):
+            return jsonify(error='not found'), 404
+        response = send_file(archive['path'], mimetype='application/zip', as_attachment=True,
+                             download_name=archive['filename'], max_age=0)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     @bp.get('/<int:job_id>/agent-reports')
     @_secure_route(api_key=False)

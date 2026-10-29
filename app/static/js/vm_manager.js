@@ -327,6 +327,12 @@ var http = (typeof window !== 'undefined' && typeof window.http === 'function')
 
 const VM_STATUS_PHASE_LABELS = Object.freeze({
   inventory: 'Scanning',
+  vm_states: 'VM states',
+  vm_configs: 'Configurations',
+  pool_list: 'Pools',
+  pool_members: 'Pool membership',
+  screenshots: 'Screenshots',
+  saving: 'Saving',
   access: 'Access',
   summarizing: 'Summarizing',
   refreshing: 'Refreshing',
@@ -358,6 +364,8 @@ function showVmInlineProgress(label, percent = 20, detail) {
     bar.style.width = `${pct}%`;
     bar.setAttribute('aria-valuenow', String(pct));
     if (detail || text) bar.title = String(detail || text);
+    const detailEl = document.getElementById('vm-progress-detail');
+    if (detailEl) detailEl.textContent = String(detail || text);
   } catch { }
 }
 
@@ -372,6 +380,8 @@ function hideVmInlineProgress() {
       prog.classList.add('d-none');
       prog.setAttribute('aria-hidden', 'true');
     }
+    const detailEl = document.getElementById('vm-progress-detail');
+    if (detailEl) detailEl.textContent = '';
   } catch { }
 }
 
@@ -542,7 +552,11 @@ function startVmActionStatusPolling(pid, options = {}) {
 
   const applyStatus = (status) => {
     if (!setProgress) return;
-    const message = deriveStatusDetailMessage(status);
+    let message = deriveStatusDetailMessage(status);
+    const elapsed = Number(status?.elapsed_seconds);
+    if (options.scope === 'refresh' && Number.isFinite(elapsed)) {
+      message += `${message ? ' · ' : ''}Elapsed ${Math.floor(elapsed)}s`;
+    }
     const label = deriveStatusProgressLabel(status);
     if (!message && !label) return;
     seenActive = true;
@@ -567,6 +581,7 @@ function startVmActionStatusPolling(pid, options = {}) {
     try {
       const scope = options.scope === 'refresh' ? '?scope=refresh' : '';
       const status = await http('GET', `/api/projects/${encodeURIComponent(projectId)}/instances/actions/status${scope}`);
+      if (stopped) return;
       if (status && !status.error) {
         applyStatus(status);
         const normalized = String(status.status || '').toLowerCase();
@@ -1422,12 +1437,14 @@ async function refreshVmView(opts) {
   // Show progress bar and start timing
   const refreshStartTime = performance.now();
   const setRefreshProg = (pct, text, detail) => {
+    const activePids = getActivePids();
+    if (startPids.length !== activePids.length || !startPids.every(pid => activePids.includes(pid))) return;
     try { updateVmInlineProgress(pct, text, detail); } catch { }
     if (showProgressDialog) {
       try { updateActionProgress(pct, text, detail); } catch { }
     }
   };
-  try { showVmInlineProgress('Projects 0/0', 5, 'Preparing multi-project refresh…'); } catch { }
+  try { showVmInlineProgress('Projects 0/0', 2, 'Preparing multi-project refresh…'); } catch { }
   if (showProgressDialog) {
     try { showActionProgress('VM Refresh', 'Preparing multi-project refresh…'); } catch { }
   }
@@ -1438,6 +1455,16 @@ async function refreshVmView(opts) {
   let refreshedProjects = 0;
   const refreshErrors = [];
   const projectRowsByPid = new Map();
+  const progressByPid = new Map(ok.map(pid => [pid, 0]));
+  const reportProjectProgress = (pid, percent, label, detail) => {
+    const next = Math.max(progressByPid.get(pid) || 0, Math.min(100, Number(percent) || 0));
+    progressByPid.set(pid, next);
+    const values = [...progressByPid.values()];
+    const complete = values.filter(value => value === 100).length;
+    const overall = 2 + (values.reduce((sum, value) => sum + value, 0) / totalRefreshProjects) * 0.9;
+    const project = mapById[canonicalPid(pid)];
+    setRefreshProg(overall, `Projects ${complete}/${totalRefreshProjects}`, `${project?.name || pid}: ${detail || label || 'Refreshing…'}`);
+  };
   const runProjectRefresh = (pid, project) => new Promise((resolve) => {
     let settled = false;
     const finish = (result) => {
@@ -1448,7 +1475,10 @@ async function refreshVmView(opts) {
     const entry = queueRemoteAction(`Refresh VMs for project ${project.name || pid}`, async () => {
       const projectRows = [];
       let resp = { instance_statuses: project.instance_statuses || [] };
+      let stopStatusPoll = null;
+      let resultDetail = 'Refresh complete';
       try {
+        reportProjectProgress(pid, 1, 'Preparing…', 'Loading Proxmox credentials…');
         const sess = await hydrateProxCredsFromPersisted(pid);
         const body = {
           username: sess.username || undefined,
@@ -1461,13 +1491,22 @@ async function refreshVmView(opts) {
           updateScreenshots: !!opts?.updateScreenshots,
         };
         if (!opts?.targetsByPid || opts.targetsByPid[canonicalPid(pid)]?.length) {
+          if (typeof startVmActionStatusPolling === 'function') {
+            stopStatusPoll = startVmActionStatusPolling(pid, {
+              scope: 'refresh', initialDelay: 200, interval: 900,
+              setProgress: (pct, label, detail) => reportProjectProgress(pid, pct, label, detail),
+            });
+          }
           resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/refresh/vm`, body);
         }
         try { vmApplyServerResources(pid, resp?.server_resources); } catch { }
         if (!opts?.targetsByPid && !opts?.targets) vmMarkLiveRefreshed(pid);
       } catch (e) {
+        resultDetail = `Showing saved inventory: ${e?.message || e}`;
         refreshErrors.push(`${project.name || pid}: ${e?.message || e}`);
         try { (window.shell && shell.logWarn) ? shell.logWarn(`Refresh failed for ${project?.name || pid}; showing saved inventory: ${e?.message || e}`) : console.warn('Refresh failed', pid, e); } catch { }
+      } finally {
+        if (typeof stopStatusPoll === 'function') stopStatusPoll();
       }
       const statuses = resp.instance_statuses || [];
       const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
@@ -1493,20 +1532,24 @@ async function refreshVmView(opts) {
           projectRows.push({ pid, project: project.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
         }
       }
+      reportProjectProgress(pid, 100, 'Done', resultDetail);
       finish({ pid, rows: projectRows });
     }, {
       projectId: pid,
       exclusive: false,
       lockProject: true,
       allowDuplicate: true,
-      onCancel: () => finish({ pid, rows: [] }),
+      onCancel: () => {
+        reportProjectProgress(pid, 100, 'Cancelled', 'Refresh cancelled');
+        finish({ pid, rows: [] });
+      },
     });
     if (!entry) finish({ pid, rows: [] });
   });
   const refreshQueue = ok.slice();
   const refreshConcurrency = Math.min(4, Math.max(1, refreshQueue.length));
   setRefreshProg(
-    Math.max(8, Math.min(90, Math.round((refreshedProjects / totalRefreshProjects) * 85))),
+    2,
     `Projects 0/${totalRefreshProjects}`,
     `Refreshing up to ${refreshConcurrency} project(s) in parallel…`
   );
@@ -1520,11 +1563,6 @@ async function refreshVmView(opts) {
       const result = await runProjectRefresh(pid, p);
       projectRowsByPid.set(pid, Array.isArray(result?.rows) ? result.rows : []);
       refreshedProjects += 1;
-      setRefreshProg(
-        Math.max(10, Math.min(92, Math.round((refreshedProjects / totalRefreshProjects) * 90))),
-        `Projects ${refreshedProjects}/${totalRefreshProjects}`,
-        `Refreshed ${refreshedProjects}/${totalRefreshProjects} selected project(s)…`
-      );
     }
   })());
   await Promise.all(workers);
@@ -2050,6 +2088,7 @@ async function vmRefresh(opts) {
     // Capture the project ID at the start to prevent race conditions when switching projects
     const refreshPid = refreshProject.id;
     const setProg = (pct, text, detail) => {
+      if (canonicalPid(PROJ?.id) !== canonicalPid(refreshPid)) return;
       try { updateVmInlineProgress(pct, text, detail); } catch { }
       if (showProgressDialog) {
         try { updateActionProgress(pct, text, detail); } catch { }
@@ -2059,12 +2098,12 @@ async function vmRefresh(opts) {
     try {
       try { shell.beginActionContext('VM Refresh'); } catch { }
       try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: starting…') : console.log('VM Refresh: starting…'); } catch { }
-      try { showVmInlineProgress('Preparing…', 5, 'Preparing VM refresh…'); } catch { }
+      try { showVmInlineProgress('Preparing…', 1, 'Preparing VM refresh…'); } catch { }
       if (showProgressDialog) {
         try { showActionProgress('VM Refresh', 'Preparing VM refresh…'); } catch { }
       }
       try { shell.step('Progress bar shown'); } catch { }
-      setProg(10, 'Preparing…', 'Loading saved Proxmox credentials…');
+      setProg(1, 'Preparing…', 'Loading saved Proxmox credentials…');
       const sess = await hydrateProxCredsFromPersisted(refreshPid);
       const body = {
         username: sess.username || undefined,
@@ -2077,11 +2116,12 @@ async function vmRefresh(opts) {
         updateScreenshots: !!opts?.updateScreenshots,
       };
       try { shell.step('Prepared refresh body'); } catch { }
-      setProg(15, 'Submitting…', 'Requesting live VM inventory from Proxmox…');
+      setProg(2, 'Connecting…', 'Requesting live VM inventory from Proxmox…');
       if (typeof startVmActionStatusPolling === 'function') {
         try { stopStatusPoll = startVmActionStatusPolling(refreshPid, { scope: 'refresh', setProgress: setProg, initialDelay: 200, interval: 900 }); } catch { }
       }
       const resp = await http('POST', `/api/projects/${refreshPid}/instances/refresh/vm`, body);
+      if (typeof stopStatusPoll === 'function') stopStatusPoll();
       try { shell.step('HTTP response received'); } catch { }
       try { vmApplyServerResources(refreshPid, resp?.server_resources); } catch { }
       if (!opts?.targets) vmMarkLiveRefreshed(refreshPid);
@@ -2099,13 +2139,14 @@ async function vmRefresh(opts) {
         try {
           const total = Array.isArray(PROJ.instance_statuses) ? PROJ.instance_statuses.length : 0;
           (window.shell && shell.logInfo) ? shell.logInfo(`VM Refresh: received ${total} instance status entr${total === 1 ? 'y' : 'ies'}`) : console.log('VM Refresh entries:', total);
-          setProg(95, `Instances ${total}/${total || 1}`, `Loaded ${total} instance status entr${total === 1 ? 'y' : 'ies'}`);
+          setProg(99, 'Rendering…', `Loaded ${total} instance status entr${total === 1 ? 'y' : 'ies'}`);
         } catch { }
         try { shell.step('Statuses stored & logged'); } catch { }
         renderVmTable(PROJ);
       } else {
         try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: saved inventory for the original project') : console.log('VM Refresh: original project inventory updated'); } catch { }
       }
+      setProg(100, 'Done', 'VM inventory refreshed');
       try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM Refresh: done') : console.log('VM Refresh: done'); } catch { }
       try { shell.endActionContext(true); } catch { }
     } catch (e) {
@@ -3766,7 +3807,7 @@ function mergeGuestTransferResponses(responses) {
       const items = Array.isArray(response?.[key]) ? response[key] : [];
       items.forEach(item => merged[key].push({ ...(item || {}), project: projectName }));
     });
-    if (response?.outputs_zip?.base64) merged.outputs_zips.push(response.outputs_zip);
+    if (response?.outputs_zip?.base64 || response?.outputs_zip?.url) merged.outputs_zips.push(response.outputs_zip);
   });
   if (merged.outputs_zips.length === 1) merged.outputs_zip = merged.outputs_zips[0];
   return merged;
@@ -3853,6 +3894,16 @@ async function executePersistedGuestTransfer(descriptor, runtimePayload = null) 
   const grouped = deserializeGuestTransferGroups(groups);
   const defaultLabel = kind === 'push' ? 'Push Files' : (kind === 'delete' ? 'Delete Guest Path' : 'Pull Files');
   const label = String(descriptor?.label || defaultLabel);
+  if (kind === 'push' && descriptor?.source === 'host') {
+    return runGuestTransfer(label, async (pid, targets, auth) => {
+      if (!auth.password) throw new Error('A Proxmox SSH password is required for host-source CSV pushes');
+      return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_push`, {
+        ...auth, targets, source: 'host',
+        transfers: descriptor.hostTransfers.filter(transfer => transfer.pid === pid),
+        ownerOnRemote: descriptor.ownerOnRemote || '', filePermissions: descriptor.filePermissions || '',
+      });
+    }, grouped);
+  }
   if (kind === 'pull') {
     const rawPaths = String(descriptor?.paths || '');
     return runGuestTransfer(label, async (pid, targets, auth) => {
@@ -3970,7 +4021,9 @@ function openLxcPushModal() {
   const selected = getSelectedGuestEntries();
   if (!selected.length) return alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
   const summary = document.getElementById('lxc-push-summary');
-  if (summary) summary.textContent = `The selected content will be pushed to ${selected.length} guest${selected.length === 1 ? '' : 's'}. Uploads are staged once per Proxmox host using SSH and reused for its selected guests. QEMU uses a separate guest-agent transfer when SSH credentials are unavailable.`;
+  if (summary) summary.textContent = document.getElementById('lxc-push-csv-mode')?.checked
+    ? 'Each file listed in the CSV is copied from its Proxmox host to its specified guest path. Unlisted guests receive no files.'
+    : `The selected content will be pushed to ${selected.length} guest${selected.length === 1 ? '' : 's'}. Uploads are staged once per Proxmox host using SSH and reused for its selected guests. QEMU uses a separate guest-agent transfer when SSH credentials are unavailable.`;
   const error = document.getElementById('lxc-push-error');
   if (error) { error.textContent = ''; error.classList.add('d-none'); }
   const modal = document.getElementById('lxcPushModal');
@@ -4004,6 +4057,72 @@ function openLxcDeleteModal() {
 }
 
 function wireLxcTransferModals() {
+  const csvMode = document.getElementById('lxc-push-csv-mode');
+  const csvInput = document.getElementById('lxc-push-csv');
+  const csvGroups = () => {
+    const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
+    groups.forEach(group => {
+      const project = guestTransferProject(group.pid);
+      group.projectName = project?.name || group.pid;
+      group.targets.forEach(target => {
+        const detail = _findVmDetailForTarget(project, target);
+        target.vmid = Number(detail?.vmid);
+        target.username = String(project?.credentials?.[Number(target.index) - 1]?.username || '').trim();
+        target.node = String(detail?.node || '');
+      });
+    });
+    return groups;
+  };
+  let csvPreviewGeneration = 0;
+  const updateCsvPreview = async () => {
+    const generation = ++csvPreviewGeneration;
+    const section = document.getElementById('lxc-push-csv-preview');
+    const summary = document.getElementById('lxc-push-csv-preview-summary');
+    const body = document.getElementById('lxc-push-csv-preview-body');
+    if (!section || !summary || !body) return;
+    const file = csvInput?.files?.[0];
+    section.classList.toggle('d-none', !csvMode?.checked || !file);
+    body.replaceChildren();
+    summary.textContent = '';
+    if (!csvMode?.checked || !file) return;
+    summary.textContent = 'Reading CSV…';
+    try {
+      const text = await file.text();
+      if (generation !== csvPreviewGeneration || csvInput.files?.[0] !== file) return;
+      const result = window.GuestPushCsv.preview(text, csvGroups());
+      window.GuestPushCsv.renderPreview(body, result);
+      const counts = `${result.rows.length} CSV row(s) · ${result.transferCount} file transfer(s) · ${result.guestCount} guest(s)`;
+      summary.textContent = counts
+        + (result.errorCount ? ` · ${result.errorCount} row error(s); resolve these before pushing.` : '')
+        + (result.mismatchCount ? ` · ${result.mismatchCount} username difference(s) highlighted.` : '');
+    } catch (previewError) {
+      if (generation !== csvPreviewGeneration) return;
+      summary.textContent = previewError?.message || String(previewError);
+    }
+  };
+  const updateCsvUi = () => {
+    document.getElementById('lxc-push-csv-group')?.classList.toggle('d-none', !csvMode?.checked);
+    document.getElementById('lxc-push-upload-controls')?.classList.toggle('d-none', !!csvMode?.checked);
+    const dialog = document.getElementById('lxc-push-dialog');
+    dialog?.classList.toggle('modal-xl', !!csvMode?.checked);
+    dialog?.classList.toggle('modal-lg', !csvMode?.checked);
+    const summary = document.getElementById('lxc-push-summary');
+    if (summary) summary.textContent = csvMode?.checked
+      ? 'Each file listed in the CSV is copied from its Proxmox host to its specified guest path. Unlisted guests receive no files.'
+      : 'The selected content will be pushed to every selected guest.';
+    return updateCsvPreview();
+  };
+  if (csvMode && !csvMode._csvBound) {
+    csvMode._csvBound = true;
+    csvMode.addEventListener('change', updateCsvUi);
+  }
+  if (csvInput && !csvInput._csvPreviewBound) {
+    csvInput._csvPreviewBound = true;
+    csvInput.addEventListener('change', updateCsvPreview);
+    document.getElementById('lxc-push-csv-preview-refresh')?.addEventListener('click', updateCsvPreview);
+    document.getElementById('lxcPushModal')?.addEventListener('show.bs.modal', updateCsvPreview);
+  }
+  updateCsvUi();
   const updatePushTypeUi = () => {
     const selectionType = document.querySelector('input[name="lxc-push-type"]:checked')?.value === 'folder' ? 'folder' : 'file';
     const filesGroup = document.getElementById('lxc-push-files-group');
@@ -4058,13 +4177,52 @@ function wireLxcTransferModals() {
       const filePermissions = String(document.getElementById('lxc-push-permissions')?.value || '').trim();
       const error = document.getElementById('lxc-push-error');
       const fail = (message) => { if (error) { error.textContent = message; error.classList.remove('d-none'); } };
-      if (!files.length) return fail(selectionType === 'folder' ? 'Select a folder.' : 'Select at least one file.');
-      if (!destination.startsWith('/')) return fail('Enter an absolute destination directory.');
+      if (!csvMode?.checked && !files.length) return fail(selectionType === 'folder' ? 'Select a folder.' : 'Select at least one file.');
+      if (!csvMode?.checked && !destination.startsWith('/')) return fail('Enter an absolute destination directory.');
       if (ownerOnRemote && !/^[A-Za-z0-9_][A-Za-z0-9_.@-]*\$?$/.test(ownerOnRemote)) {
         return fail('Enter a remote username or numeric UID for the owner.');
       }
       if (filePermissions && !/^[0-7]{3,4}$/.test(filePermissions)) {
         return fail('File permissions must be 3 or 4 octal digits (0–7), such as 644 or 0755.');
+      }
+      if (csvMode?.checked) {
+        const csvFile = document.getElementById('lxc-push-csv')?.files?.[0];
+        if (!csvFile) return fail('Select a CSV mapping file.');
+        const originalText = pushButton.textContent;
+        pushButton.disabled = true;
+        pushButton.textContent = 'Preparing CSV…';
+        if (error) { error.textContent = ''; error.classList.add?.('d-none'); }
+        try {
+          const rows = window.GuestPushCsv.parse(await csvFile.text());
+          const groups = csvGroups();
+          const plan = window.GuestPushCsv.plan(rows, groups);
+          const guestCount = plan.groups.reduce((total, group) => total + group.targets.length, 0);
+          const descriptor = {
+            kind: 'push', source: 'host', label: 'Push Files from CSV',
+            hostTransfers: plan.transfers, groups: plan.groups, ownerOnRemote, filePermissions,
+          };
+          const modal = document.getElementById('lxcPushModal');
+          if (!window.ServerQueue) await hideLxcSetupModal(modal);
+          await runQueued(`Push Files from CSV (${guestCount} guests)`, async () => {
+            await executePersistedGuestTransfer(descriptor);
+          }, {
+            projectId: plan.groups[0]?.pid,
+            persist: { key: GUEST_TRANSFER_QUEUE_PERSIST_KEY, data: descriptor },
+            onAccepted: async () => {
+              await hideLxcSetupModal(modal);
+              pushButton.disabled = false;
+              pushButton.textContent = originalText;
+            },
+          });
+        } catch (csvError) {
+          fail(csvError?.message || String(csvError));
+          const modal = document.getElementById('lxcPushModal');
+          if (modal && window.bootstrap) bootstrap.Modal.getOrCreateInstance(modal).show();
+        } finally {
+          pushButton.disabled = false;
+          pushButton.textContent = originalText;
+        }
+        return;
       }
       const relativePaths = files.map(file => String(file.webkitRelativePath || file.name || ''));
       const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
@@ -8121,9 +8279,10 @@ function showActionSummary(actionName, resp) {
     const deletedUsers = Array.isArray(resp.deleted_users) ? resp.deleted_users : [];
     const deletedPools = Array.isArray(resp.deleted_pools) ? resp.deleted_pools : [];
     const updatedUsers = Array.isArray(resp.updated_users) ? resp.updated_users : [];
-    const outputsZipInfo = (resp.outputs_zip && resp.outputs_zip.base64) ? resp.outputs_zip : null;
+    const isOutputArchive = item => item && (item.base64 || /^\/api\/queue\/\d+\/files\/\d+$/.test(item.url || ''));
+    const outputsZipInfo = isOutputArchive(resp.outputs_zip) ? resp.outputs_zip : null;
     const outputsZipInfos = Array.isArray(resp.outputs_zips) && resp.outputs_zips.length
-      ? resp.outputs_zips.filter(item => item && item.base64)
+      ? resp.outputs_zips.filter(isOutputArchive)
       : (outputsZipInfo ? [outputsZipInfo] : []);
     const pushed = Array.isArray(resp.pushed) ? resp.pushed : [];
     const pulled = Array.isArray(resp.pulled) ? resp.pulled : [];
@@ -8445,15 +8604,19 @@ function showActionSummary(actionName, resp) {
     if (outputsZipInfos.length) {
       outputsZipInfos.forEach((archiveInfo, archiveIndex) => {
         try {
-          const base64 = archiveInfo.base64;
-          const binary = atob(base64);
-          const len = binary.length;
-          const bytes = new Uint8Array(len);
-          for (let i = 0; i < len; i += 1) {
-            bytes[i] = binary.charCodeAt(i);
+          let url = archiveInfo.url;
+          let size = archiveInfo.size || 0;
+          let blobUrl = false;
+          if (archiveInfo.base64) {
+            const binary = atob(archiveInfo.base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            size = size || bytes.length;
+            url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+            blobUrl = true;
           }
-          const blob = new Blob([bytes], { type: 'application/zip' });
-          const url = URL.createObjectURL(blob);
           const container = document.createElement('div');
           container.className = 'mt-3';
           const heading = document.createElement('h6');
@@ -8463,7 +8626,7 @@ function showActionSummary(actionName, resp) {
           link.className = 'btn btn-sm btn-outline-primary';
           link.href = url;
           link.download = archiveInfo.filename || `action-output-${archiveIndex + 1}.zip`;
-          const sizeLabel = formatBytes(archiveInfo.size || bytes.length);
+          const sizeLabel = formatBytes(size);
           link.textContent = outputsZipInfos.length > 1 ? `Download ${archiveIndex + 1} (${sizeLabel})` : `Download (${sizeLabel})`;
           container.appendChild(link);
           body.appendChild(container);
@@ -8474,7 +8637,7 @@ function showActionSummary(actionName, resp) {
             note.textContent = 'Download requested automatically. If it did not start, use the link above. The ZIP includes the pull summary and log.';
             container.appendChild(note);
           }
-          if (modalEl && window.bootstrap) {
+          if (blobUrl && modalEl && window.bootstrap) {
             const cleanup = () => {
               try { URL.revokeObjectURL(url); } catch { }
               try { modalEl.removeEventListener('hidden.bs.modal', cleanup); } catch { }

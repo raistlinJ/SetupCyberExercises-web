@@ -12,17 +12,32 @@ function functionSource(name, next) {
 function pushDialog(owner, permissions, selectionType = 'file', options = {}) {
   const elements = new Map();
   for (const [id, value] of Object.entries({
-    'lxc-push-destination': '/opt/scenario', 'lxc-push-owner': owner,
+    'lxc-push-destination': options.destination ?? '/opt/scenario', 'lxc-push-owner': owner,
     'lxc-push-permissions': permissions, 'lxc-push-error': '', 'lxc-push-confirm': '',
-    'lxc-push-files': '', 'lxc-push-folder': '',
-  })) elements.set(id, { value, classList: { remove() {} }, addEventListener(event, fn) { this[event] = fn; } });
+    'lxc-push-files': '', 'lxc-push-folder': '', 'lxc-push-csv-mode': '', 'lxc-push-csv': '',
+    'lxc-push-csv-group': '', 'lxc-push-upload-controls': '',
+  })) elements.set(id, { value, classList: { remove() {}, toggle(name, hidden) { this.hidden = hidden; } }, addEventListener(event, fn) { this[event] = fn; } });
+  const document = { getElementById: id => elements.get(id), querySelector: () => ({ value: selectionType }), querySelectorAll: () => [] };
+  if (options.preview) {
+    class Element {
+      constructor() { this.children = []; this.style = {}; this.ownerDocument = document; this.classList = { toggle(name, hidden) { this.hidden = hidden; } }; }
+      addEventListener(event, fn) { this[event] = fn; }
+      append(child) { this.children.push(child); }
+      replaceChildren(fragment) { this.children = fragment?.children || []; }
+    }
+    document.createElement = () => new Element();
+    document.createDocumentFragment = () => new Element();
+    for (const id of ['lxc-push-csv-preview', 'lxc-push-csv-preview-summary', 'lxc-push-csv-preview-body', 'lxc-push-csv-preview-refresh']) elements.set(id, new Element());
+  }
+  elements.get('lxc-push-csv-mode').checked = options.csv !== undefined;
+  if (options.csv !== undefined) elements.get('lxc-push-csv').files = [new Blob([options.csv])];
   const file = new Blob(['hello']);
   file.name = 'hello.txt';
   file.webkitRelativePath = selectionType === 'folder' ? 'bundle/hello.txt' : '';
-  elements.get(`lxc-push-${selectionType === 'folder' ? 'folder' : 'files'}`).files = [file];
+  elements.get(`lxc-push-${selectionType === 'folder' ? 'folder' : 'files'}`).files = options.files || [file];
   let saved, queued;
   const sandbox = {
-    document: { getElementById: id => elements.get(id), querySelector: () => ({ value: selectionType }), querySelectorAll: () => [] },
+    document,
     window: {
       ServerQueue: options.serverQueue,
       PersistentQueuePayloads: options.noStorage ? undefined : {
@@ -32,7 +47,9 @@ function pushDialog(owner, permissions, selectionType = 'file', options = {}) {
         },
       },
     },
-    serializeGuestTransferGroups: () => [{ pid: 'p', targets: [{ index: 1, name: 'vm' }] }],
+    serializeGuestTransferGroups: () => options.groups || [{ pid: 'p', targets: [{ index: 1, name: 'vm' }] }],
+    guestTransferProject: () => options.project || {},
+    _findVmDetailForTarget: (project, target) => ({ vmid: target.vmid || 101, node: 'node1' }),
     groupSelectedGuestEntriesByProject() {}, hideLxcSetupModal: async () => {},
     GUEST_TRANSFER_QUEUE_PERSIST_KEY: 'vm-manager-guest-transfer-v1',
     runQueued: async (label, fn, opts) => {
@@ -41,10 +58,15 @@ function pushDialog(owner, permissions, selectionType = 'file', options = {}) {
     },
   };
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync('app/static/js/guest_push_csv.js', 'utf8'), sandbox);
   vm.runInContext(functionSource('wireLxcTransferModals', "document.addEventListener('DOMContentLoaded', wireLxcTransferModals)"), sandbox);
   sandbox.wireLxcTransferModals();
   return {
     elements,
+    async preview(file) {
+      if (file !== undefined) elements.get('lxc-push-csv').files = file ? [file] : [];
+      await elements.get('lxc-push-csv').change();
+    },
     async submit() { await elements.get('lxc-push-confirm').click(); return { saved, queued, error: elements.get('lxc-push-error').textContent }; },
   };
 }
@@ -226,5 +248,146 @@ test('multi-project push sends file bytes once and references them in every step
   for (const [i, step] of submitted.steps.entries()) {
     assert.equal(step.files[0][1], 'file-0');
     assert.equal(JSON.parse(step.form[0][1]).username, ['a', 'b', 'c'][i]);
+  }
+});
+
+test('CSV dialog queues host paths and guest destinations without browser files or storage', async () => {
+  const result = await pushDialog('www-data', '0600', 'file', {
+    csv: 'vmid,source,dest,notes\n101,/srv/hello.txt,/opt/renamed.txt,ignored', files: [], noStorage: true, destination: '',
+  }).submit();
+  assert.equal(result.error, '');
+  assert.equal(result.queued.persist.data.source, 'host');
+  assert.equal(result.queued.persist.data.hostTransfers[0].vmid, 101);
+  assert.equal(result.queued.persist.data.hostTransfers[0].sourcePath, '/srv/hello.txt');
+  assert.equal(result.queued.persist.data.hostTransfers[0].destinationPath, '/opt/renamed.txt');
+  assert.equal(result.queued.persist.data.ownerOnRemote, 'www-data');
+  assert.equal(result.queued.persist.data.filePermissions, '0600');
+  assert.equal(result.saved, undefined);
+});
+
+test('CSV toggle swaps mapping and upload controls and restores ordinary upload mode', () => {
+  const { elements } = pushDialog('', '', 'file', { csv: '101,/src,/dest' });
+  assert.equal(elements.get('lxc-push-csv-group').classList.hidden, false);
+  assert.equal(elements.get('lxc-push-upload-controls').classList.hidden, true);
+  elements.get('lxc-push-csv-mode').checked = false;
+  elements.get('lxc-push-csv-mode').change();
+  assert.equal(elements.get('lxc-push-csv-group').classList.hidden, true);
+  assert.equal(elements.get('lxc-push-upload-controls').classList.hidden, false);
+});
+
+test('selecting CSV previews current assigned username beside optional CSV username without queueing', async () => {
+  const dialog = pushDialog('', '', 'file', {
+    preview: true, csv: 'vmid,source,dest,username\n101,/src,/dest,bob',
+    project: { name: 'Exam', credentials: [{ username: 'alice', password: 'secret-never-display' }] },
+  });
+  await dialog.preview();
+  const body = dialog.elements.get('lxc-push-csv-preview-body');
+  assert.equal(body.children.length, 1);
+  assert.equal(body.children[0].children[2].textContent, 'alice');
+  assert.equal(body.children[0].children[3].textContent, 'bob');
+  assert.equal(body.children[0].children[4].textContent, '/src');
+  assert.match(dialog.elements.get('lxc-push-csv-preview-summary').textContent, /1 username difference/);
+  const result = await dialog.submit();
+  assert.ok(result.queued, 'a comparison-only username difference does not block the push');
+  assert.deepEqual(Object.keys(result.queued.persist.data.groups[0].targets[0]).sort(), ['index', 'name', 'type', 'vmid']);
+  assert.equal(result.queued.persist.data.hostTransfers[0].username, undefined);
+});
+
+test('preview refresh uses current assignments and clearing the CSV removes stale rows', async () => {
+  const project = { name: 'Exam', credentials: [{ username: 'alice' }] };
+  const dialog = pushDialog('', '', 'file', { preview: true, csv: '101,/src,/dest,bob', project });
+  await dialog.preview();
+  project.credentials[0].username = 'bob';
+  await dialog.elements.get('lxc-push-csv-preview-refresh').click();
+  const body = dialog.elements.get('lxc-push-csv-preview-body');
+  assert.equal(body.children[0].children[2].textContent, 'bob');
+  assert.equal(body.children[0].children[6].textContent, 'Ready');
+  await dialog.preview(null);
+  assert.equal(body.children.length, 0);
+  assert.equal(dialog.elements.get('lxc-push-csv-preview').classList.hidden, true);
+});
+
+test('preview resolves username by the matched guests instance index', async () => {
+  const dialog = pushDialog('', '', 'file', {
+    preview: true, csv: '202,/src,/dest,bob',
+    groups: [{ pid: 'p', targets: [{ index: 2, name: 'guest-two', vmid: 202, type: 'qemu' }] }],
+    project: { credentials: [{ username: 'alice' }, { username: 'bob' }], vm_user: 'root' },
+  });
+  await dialog.preview();
+  const cells = dialog.elements.get('lxc-push-csv-preview-body').children[0].children;
+  assert.equal(cells[1].textContent, '202');
+  assert.equal(cells[2].textContent, 'bob');
+  assert.equal(cells[3].textContent, 'bob');
+  assert.equal(cells[6].textContent, 'Ready');
+});
+
+test('late CSV reads cannot replace the latest preview and parse errors clear previous rows', async () => {
+  const dialog = pushDialog('', '', 'file', { preview: true, csv: '101,/initial,/dest' });
+  let resolve;
+  const slow = { text: () => new Promise(done => { resolve = done; }) };
+  const pending = dialog.preview(slow);
+  await dialog.preview(new Blob(['101,/latest,/dest']));
+  resolve('101,/stale,/dest');
+  await pending;
+  const body = dialog.elements.get('lxc-push-csv-preview-body');
+  assert.equal(body.children[0].children[4].textContent, '/latest');
+  await dialog.preview(new Blob(['101,"unclosed']));
+  assert.equal(body.children.length, 0);
+  assert.match(dialog.elements.get('lxc-push-csv-preview-summary').textContent, /not closed/);
+});
+
+test('invalid CSV mappings show errors without saving or queueing and allow retry', async () => {
+  for (const csv of ['101,/src', '999,/src,/dest', 'vmid,source,dest', '101,"unclosed']) {
+    const dialog = pushDialog('', '', 'file', { csv });
+    const result = await dialog.submit();
+    assert.ok(result.error);
+    assert.equal(result.saved, undefined);
+    assert.equal(result.queued, undefined);
+    assert.equal(dialog.elements.get('lxc-push-confirm').disabled, false);
+  }
+});
+
+test('server and restored browser CSV queues send only each project mappings as JSON', async () => {
+  const descriptor = {
+    kind: 'push', source: 'host', ownerOnRemote: '1000', filePermissions: '0755',
+    groups: ['p', 'q'].map((pid, index) => ({ pid, targets: [{ name: pid, vmid: 101 + index }] })),
+    hostTransfers: [
+      { pid: 'p', vmid: 101, sourcePath: '/srv/a', destinationPath: '/opt/one' },
+      { pid: 'q', vmid: 102, sourcePath: '/srv/b', destinationPath: '/etc/two' },
+    ],
+  };
+  for (const queue of ['server', 'browser']) {
+    const requests = [];
+    const sandbox = {
+      window: {}, guestTransferAuthPayload: async () => ({ password: 'ssh-password' }),
+      ensureGuestTransferProjects: async () => {}, deserializeGuestTransferGroups: groups => groups,
+      http: async (method, url, body) => { requests.push({ method, url, body }); return {}; },
+      runGuestTransfer: async (label, fn) => {
+        for (const group of descriptor.groups) await fn(group.pid, group.targets, { password: 'ssh-password' });
+      },
+      ServerQueue: { async submit(label, steps, options, files) { requests.push(...steps); assert.equal(files.length, 0); return {}; } },
+    };
+    vm.createContext(sandbox);
+    if (queue === 'server') {
+      vm.runInContext(plans, sandbox);
+      sandbox.finishServerVmAction = async () => {};
+      await sandbox.submitServerGuestTransfer('CSV Push', descriptor, {});
+    } else {
+      const start = manager.indexOf('async function executePersistedGuestTransfer(');
+      vm.runInContext(manager.slice(start, manager.indexOf("if (typeof window.registerRemoteActionHandler", start)), sandbox);
+      await sandbox.executePersistedGuestTransfer(descriptor);
+    }
+    assert.equal(requests.length, 2);
+    for (const [index, request] of requests.entries()) {
+      assert.equal(request.method, 'POST');
+      assert.match(request.url, new RegExp(`/projects/${index ? 'q' : 'p'}/`));
+      assert.equal(request.body.source, 'host');
+      assert.equal(request.body.targets.length, 1);
+      assert.equal(request.body.transfers.length, 1);
+      assert.equal(request.body.transfers[0].vmid, 101 + index);
+      assert.equal(request.body.transfers[0].destinationPath, index ? '/etc/two' : '/opt/one');
+      assert.equal(request.body.ownerOnRemote, '1000');
+      assert.equal(request.body.filePermissions, '0755');
+    }
   }
 });

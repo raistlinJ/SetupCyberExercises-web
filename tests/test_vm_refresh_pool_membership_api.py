@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 import os
+import threading
 from copy import deepcopy
 from unittest.mock import Mock, patch
+from flask import g
 
 from app import create_app
 from app.routes import api
@@ -68,6 +70,65 @@ class _ClientStub:
 
 class VmRefreshPoolMembershipApiTests(unittest.TestCase):
 
+    def test_refresh_reports_stage_counts_to_status_and_persistent_queue(self):
+        reports = []
+        observed = []
+
+        @self.app.before_request
+        def queue_progress():
+            g.action_queue_progress = lambda fields: reports.append(dict(fields))
+
+        class ProgressClient(_ClientStub):
+            def get_qemu_config(self, node, vmid):
+                return {'agent': 1}
+
+        def capture(client, node, vmid):
+            status = self.app.test_client().get(
+                f'/api/projects/{self.project.id}/instances/actions/status?scope=refresh').get_json()
+            observed.append(status)
+            if vmid == 102:
+                raise RuntimeError('Display unavailable')
+            return 'data:image/jpeg;base64,YQ=='
+
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', ProgressClient), \
+                patch('app.connectors.vm_screenshot.capture', side_effect=capture):
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={
+                'forceRefresh': True, 'updateScreenshots': True})
+        self.assertEqual(response.status_code, 200)
+        stages = {report.get('phase') for report in reports}
+        self.assertTrue({'inventory', 'vm_states', 'pool_list', 'vm_configs', 'pool_members',
+                         'access', 'summarizing', 'screenshots', 'saving', 'done'}.issubset(stages))
+        progress = [report['progress'] for report in reports if 'progress' in report]
+        self.assertEqual(progress, sorted(progress))
+        self.assertEqual(progress[-1], 100)
+        for phase, total in [('vm_states', 3), ('vm_configs', 3), ('pool_members', 1), ('screenshots', 3)]:
+            updates = [report for report in reports if report.get('phase') == phase]
+            self.assertEqual(updates[0]['item_completed'], 0)
+            self.assertEqual(updates[-1]['item_completed'], total)
+            self.assertEqual(updates[-1]['item_total'], total)
+        screenshot_done = [report for report in reports if report.get('phase') == 'screenshots'][-1]
+        self.assertIn('1 unavailable', screenshot_done['message'])
+        self.assertIn('node1', screenshot_done['current'])
+        self.assertEqual(len(observed), 3)
+        self.assertTrue(all(status['phase'] == 'screenshots' for status in observed))
+        self.assertTrue(all(status['elapsed_seconds'] >= 0 for status in observed))
+        self.assertTrue(all(status['total_steps'] == 3 for status in observed))
+        self.assertNotIn('password123', str(reports))
+
+    def test_refresh_stage_progress_throttles_fast_updates_but_publishes_final_counts(self):
+        with patch('app.routes.api._update_job_detail') as publish, \
+                patch('app.routes.api.time.monotonic', return_value=1):
+            report = api._refresh_progress_reporter('project', 'refresh:project', 'vm_configs',
+                                                    'Reading guest configurations', 48, 75)
+            report(0, 100)
+            for completed in range(1, 101):
+                report(completed, 100, f'VM {completed}', 1)
+        self.assertEqual(publish.call_count, 2)
+        self.assertEqual(publish.call_args.kwargs['progress'], 75)
+        self.assertEqual(publish.call_args.kwargs['item_completed'], 100)
+        self.assertIn('1 unavailable', publish.call_args.kwargs['message'])
+
     def test_refresh_distinguishes_saved_state_from_stopped(self):
         class StoppedClient(_ClientStub):
             def list_qemu_vms(self, node):
@@ -99,6 +160,85 @@ class VmRefreshPoolMembershipApiTests(unittest.TestCase):
         paused = next(item for item in details if item['vmid'] == 101)
         self.assertEqual(paused['qmp_state'], 'paused')
         self.assertEqual(paused['state'], 'paused')
+
+    def test_live_state_reads_run_concurrently_with_project_limit(self):
+        self.project.proxmox_max_create_jobs = 2
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+        reads = []
+
+        class ConcurrentClient(_ClientStub):
+            def get_qemu_status_current(self, node, vmid):
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                    reads.append(vmid)
+                try:
+                    if vmid in (101, 102):
+                        barrier.wait(timeout=3)
+                    return {'status': 'running', 'qmpstatus': 'paused' if vmid == 101 else 'running'}
+                finally:
+                    with lock:
+                        active -= 1
+
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', ConcurrentClient), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}):
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(peak, 2)
+        self.assertCountEqual(reads, [101, 102, 103])
+        details = response.get_json()['instance_statuses'][0]['vm_details']
+        self.assertEqual(next(d for d in details if d['vmid'] == 101)['state'], 'paused')
+
+    def test_selected_refresh_checks_live_state_only_for_selected_clones(self):
+        self.project.vms[0].vmid = 900
+        reads = []
+
+        class SelectedClient(_ClientStub):
+            def list_qemu_vms(self, node):
+                return super().list_qemu_vms(node) + [
+                    {'vmid': 900, 'name': 'template', 'status': 'running'},
+                    {'vmid': 901, 'name': 'other-project', 'status': 'running'},
+                ]
+
+            def get_qemu_status_current(self, node, vmid):
+                reads.append(vmid)
+                return super().get_qemu_status_current(node, vmid)
+
+        with patch('app.routes.api._store', return_value=_StoreStub(self.project)), \
+                patch('app.routes.api.ProxmoxClient', SelectedClient), \
+                patch('app.routes.api._prefetch_vm_configs_parallel', return_value={}):
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={
+                'targets': [{'index': 1, 'name': 'web-set-1'}]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(reads, [101])
+
+    def test_failed_live_state_read_preserves_previous_snapshot(self):
+        self.project.instance_statuses = [{'index': 1, 'vm_details': [
+            {'name': 'web-set-1', 'vmid': 101, 'state': 'paused'}]}]
+        original = deepcopy(self.project.instance_statuses)
+        store = _StoreStub(self.project)
+        store.upsert = Mock(wraps=store.upsert)
+
+        class FailingClient(_ClientStub):
+            def get_qemu_status_current(self, node, vmid):
+                if vmid == 101:
+                    raise TimeoutError('status timed out')
+                return super().get_qemu_status_current(node, vmid)
+
+        with patch('app.routes.api._store', return_value=store), \
+                patch('app.routes.api.ProxmoxClient', FailingClient), \
+                patch('app.routes.api._prefetch_vm_configs_parallel') as configs:
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/refresh/vm', json={})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('previous inventory retained', response.get_json()['error'])
+        self.assertEqual(self.project.instance_statuses, original)
+        store.upsert.assert_not_called()
+        configs.assert_not_called()
 
     def test_selected_refresh_preserves_other_details_and_captures_only_selected(self):
         previous = {'name': 'db-set-1', 'vmid': 102, 'node': 'node1', 'state': 'old', 'screenshot': 'old-image'}

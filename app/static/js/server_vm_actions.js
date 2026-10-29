@@ -123,13 +123,20 @@ async function submitServerGuestTransfer(label, descriptor, queueOptions) {
   const steps = [];
   const files = [];
   const payload = queueOptions.runtimePayload || (descriptor.payloadId ? await PersistentQueuePayloads.get(descriptor.payloadId) : null);
-  if (descriptor.kind === 'push' && !payload?.files?.length) throw new Error('Upload files are unavailable');
+  if (descriptor.kind === 'push' && descriptor.source !== 'host' && !payload?.files?.length) throw new Error('Upload files are unavailable');
   let sharedFiles;
   for (const group of descriptor.groups || []) {
     const auth = await guestTransferAuthPayload(group.pid, group.targets);
     const body = { ...auth, targets: group.targets };
     const url = `/api/projects/${encodeURIComponent(group.pid)}/instances/actions/guest_${descriptor.kind}`;
-    if (descriptor.kind === 'push') {
+    if (descriptor.kind === 'push' && descriptor.source === 'host') {
+      if (!auth.password) throw new Error('A Proxmox SSH password is required for host-source CSV pushes');
+      Object.assign(body, {
+        source: 'host', transfers: descriptor.hostTransfers.filter(transfer => transfer.pid === group.pid),
+        ownerOnRemote: descriptor.ownerOnRemote || '', filePermissions: descriptor.filePermissions || '',
+      });
+      steps.push({ method: 'POST', url, body });
+    } else if (descriptor.kind === 'push') {
       const destination = String(payload.destination || descriptor.destination || '').trim().replace(/\\/g, '/');
       if (!destination.startsWith('/')) throw new Error('The upload destination must be an absolute guest directory');
       const form = new FormData();

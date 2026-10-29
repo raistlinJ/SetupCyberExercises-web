@@ -56,6 +56,8 @@
     } else if (kind === 'pull') {
       setValue('lxc-pull-paths', settings.paths);
     } else {
+      const csvMode = document.getElementById('lxc-push-csv-mode');
+      if (csvMode) { csvMode.checked = false; csvMode.dispatchEvent(new Event('change', { bubbles: true })); }
       // The mode-change handler clears the inactive picker, so cache both first.
       ['file', 'folder'].forEach(rememberPushSelection);
       const type = settings.selectionType === 'folder' ? 'folder' : 'file';
