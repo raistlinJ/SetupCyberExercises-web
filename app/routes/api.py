@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, fields
 import time
 from ..guest_push_batch import GuestPushBatch
-from ..host_guest_push import build_host_file_archive_script
+from ..host_guest_push import build_host_file_archive_script, server_file_archive
 from ..command_templates import (render_command, command_context, VARIABLES,
                                  CommandTemplateError)
 from ..qemu_guest_stream import build_host_script
@@ -9777,8 +9777,9 @@ def _host_push_file_path(value, label):
     return posixpath.normpath('/' + value.lstrip('/'))
 
 
-def _push_host_files_to_guest(proj, client, base_url, password, username, entry, transfers, owner, permissions):
-    """Read source files on this guest's node and copy them without browser uploads."""
+def _push_host_files_to_guest(proj, client, base_url, password, username, entry, transfers, owner, permissions,
+                             source_location='proxmox'):
+    """Copy files from the app host or guest's node without browser uploads."""
     if entry.get('type') == 'qemu':
         _ensure_linux_qemu_guest(client, entry)
     host = _lxc_transfer_ssh_host(proj, base_url, str(entry.get('node') or ''))
@@ -9795,13 +9796,24 @@ def _push_host_files_to_guest(proj, client, base_url, password, username, entry,
             try:
                 _check_transfer_cancelled()
                 _transfer_bytes('Preparing host file', 0)
-                script = build_host_file_archive_script(source, filename, archive)
-                code, output, error = _ssh_exec_result(
-                    ssh, f'python3 -c {shlex.quote(script)}', sudo=sudo, sudo_password=password,
-                )
-                if code != 0:
-                    raise RuntimeError(error or f'Could not read host source {source}')
-                archive_size = int(output.strip())
+                if source_location == 'server':
+                    with server_file_archive(source, filename) as (stream, archive_size):
+                        sftp = ssh.open_sftp()
+                        try:
+                            _transfer_bytes('Uploading to Proxmox host', 0, archive_size)
+                            sftp.putfo(stream, archive, file_size=archive_size,
+                                       callback=lambda done, total: _transfer_bytes('Uploading to Proxmox host', done, total))
+                            sftp.chmod(archive, 0o600)
+                        finally:
+                            sftp.close()
+                else:
+                    script = build_host_file_archive_script(source, filename, archive)
+                    code, output, error = _ssh_exec_result(
+                        ssh, f'python3 -c {shlex.quote(script)}', sudo=sudo, sudo_password=password,
+                    )
+                    if code != 0:
+                        raise RuntimeError(error or f'Could not read host source {source}')
+                    archive_size = int(output.strip())
                 _check_transfer_cancelled()
                 if entry.get('type') == 'qemu':
                     _push_staged_tar_to_qemu(ssh, entry, archive, archive_size, destination, sudo, password, owner)
@@ -9830,6 +9842,7 @@ def _push_host_files_to_guest(proj, client, base_url, password, username, entry,
                 pushed.append({
                     'index': entry.get('index'), 'name': entry.get('name'), 'vmid': entry['vmid'],
                     'node': entry.get('node'), 'type': entry.get('type'), 'source_path': source,
+                    'source_location': source_location,
                     'destination': path, 'file_count': 1, 'item_count': 1, 'bytes': archive_size,
                     'owner_on_remote': owner or None, 'file_permissions': permissions or None,
                     'transfer_method': 'qm-over-ssh' if entry.get('type') == 'qemu' else 'pct-over-ssh',
@@ -9852,6 +9865,9 @@ def _instances_guest_push_host(pid, include_qemu=True):
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or body.get('source') != 'host':
             raise ValueError('JSON guest pushes require source=host')
+        source_location = body.get('sourceLocation', 'proxmox')
+        if source_location not in {'server', 'proxmox'}:
+            raise ValueError('Source location must be server or proxmox')
         owner = body.get('ownerOnRemote', '')
         permissions = body.get('filePermissions', '')
         if not isinstance(owner, str) or (owner.strip() and not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\$?', owner.strip())):
@@ -9867,7 +9883,10 @@ def _instances_guest_push_host(pid, include_qemu=True):
                 raise ValueError('CSV VMID must be a positive integer')
             vmid = row['vmid']
             source = _host_push_file_path(row.get('sourcePath'), 'Host source')
-            destination = _host_push_file_path(row.get('destinationPath'), 'Guest destination')
+            destination_value = row.get('destinationPath')
+            if isinstance(destination_value, str) and destination_value.endswith('/'):
+                destination_value += posixpath.basename(source)
+            destination = _host_push_file_path(destination_value, 'Guest destination')
             key = (vmid, destination)
             if key in destinations:
                 if destinations[key] != source:
@@ -9876,11 +9895,30 @@ def _instances_guest_push_host(pid, include_qemu=True):
             destinations[key] = source
             transfers.setdefault(vmid, []).append({'sourcePath': source, 'destinationPath': destination})
         proj, client, base_url, password, mapped, skipped, errors = _guest_transfer_context(pid, body, include_qemu=include_qemu)
+        if errors:
+            reasons = '; '.join(str(error.get('reason') or 'Unknown target resolution error') for error in errors)
+            return jsonify({
+                'error': f'Could not verify CSV guests in Proxmox: {reasons}',
+                'errors': errors, 'skipped': skipped,
+            }), 502
+        if skipped:
+            reasons = '; '.join(f"{entry.get('name') or entry.get('vmid') or 'Guest'}: {entry.get('reason') or 'not found'}"
+                                for entry in skipped)
+            raise ValueError(f'Could not resolve selected CSV guests: {reasons}. Refresh states and try again.')
         # Resolve names against fresh inventory, then enforce the explicit CSV IDs
         # before reading a host file or changing any guest.
         resolved = [entry['vmid'] for entry in mapped]
-        if skipped or errors or len(resolved) != len(set(resolved)) or set(resolved) != set(transfers):
-            raise ValueError('CSV VMIDs no longer match the selected guests. Refresh states and try again.')
+        if len(resolved) != len(set(resolved)) or set(resolved) != set(transfers):
+            missing = sorted(set(transfers) - set(resolved))
+            unexpected = sorted(set(resolved) - set(transfers))
+            details = []
+            if missing:
+                details.append('Missing VMIDs: ' + ', '.join(map(str, missing)))
+            if unexpected:
+                details.append('Unexpected VMIDs: ' + ', '.join(map(str, unexpected)))
+            if len(resolved) != len(set(resolved)):
+                details.append('Multiple selected guests resolved to the same VMID')
+            raise ValueError('CSV VMIDs no longer match the selected guests. ' + '. '.join(details) + '. Refresh states and try again.')
         if not password:
             raise ValueError('A Proxmox SSH password is required for host-source CSV pushes')
     except LookupError as exc:
@@ -9897,7 +9935,7 @@ def _instances_guest_push_host(pid, include_qemu=True):
             try:
                 return _push_host_files_to_guest(
                     proj, client, base_url, password, body.get('username'), entry,
-                    transfers[entry['vmid']], owner.strip(), permissions.strip(),
+                    transfers[entry['vmid']], owner.strip(), permissions.strip(), source_location=source_location,
                 )
             except Exception as exc:
                 return [], [{'name': entry.get('name'), 'vmid': entry['vmid'], 'reason': str(exc)}]
@@ -12264,7 +12302,7 @@ def instances_run_stored_cmds(pid: str):
         }
 
     _end_job(pid)
-    response_payload: Dict[str, Any] = { 'ran': ran, 'skipped': skipped, 'errors': errors }
+    response_payload: Dict[str, Any] = { 'project_id': pid, 'ran': ran, 'skipped': skipped, 'errors': errors }
     if zip_payload:
         response_payload['outputs_zip'] = zip_payload
     if selected_commands:

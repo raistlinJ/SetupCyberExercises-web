@@ -18,6 +18,10 @@ def test_lxc_transfer_ui_has_progress_and_typed_push_controls():
     assert '<details id="lxc-push-advanced"' in html
     assert 'for="lxc-push-owner">Owner on remote</label>' in html
     assert 'for="lxc-push-permissions">File permissions</label>' in html
+    push_modal = html.split('id="lxcPushModal"', 1)[1].split('id="lxcPullModal"', 1)[0]
+    assert push_modal.index('id="lxc-push-error"') > push_modal.index('class="modal-footer"')
+    assert '<option value="server" selected>' in push_modal
+    assert 'id="lxc-push-csv-source-location"' in push_modal
     assert 'name="lxc-pull-type"' not in html
     assert 'id="act-guest-files"' in html
     assert '>Guest Files</button>' in html

@@ -80,9 +80,22 @@ test('preview renders CSV values as literal text and highlights username differe
 });
 
 test('CSV rejects empty manifests, invalid IDs, invalid file paths, and malformed quotes', () => {
-  for (const text of ['', 'vmid,source,destination', 'no,/a,/b', '0,/a,/b', '-1,/a,/b', '1.5,/a,/b', '101', '101,/a', '101,/a,relative', '101,relative,/b', '101,/a,/', '101,/a,/b/', '101,/a/../b,/c', '101,"unclosed', '101,"/a"oops,/b']) {
+  for (const text of ['', 'vmid,source,destination', 'no,/a,/b', '0,/a,/b', '-1,/a,/b', '1.5,/a,/b', '101', '101,/a', '101,/a,relative', '101,relative,/b', '101,/a/,/b', '101,/a,/b/../', '101,/a/../b,/c', '101,"unclosed', '101,"/a"oops,/b']) {
     assert.throws(() => csv.parse(text), text);
   }
+});
+
+test('directory destinations preserve source filenames in both preview and execution', () => {
+  for (const directory of ['/memory-hw-graded/', '/']) {
+    const text = `101,/srv/feedback.zip,${directory},alice`;
+    const expected = `${directory}feedback.zip`;
+    const result = csv.preview(text, previewGroups);
+    assert.equal(result.errorCount, 0);
+    assert.equal(result.rows[0].destinationPath, expected);
+    assert.equal(result.rows[0].csvDestinationPath, directory);
+    assert.equal(csv.plan(csv.parse(text), previewGroups).transfers[0].destinationPath, expected);
+  }
+  assert.throws(() => csv.plan(csv.parse('101,/srv/feedback.zip,/dir/\n101,/other.zip,/dir/feedback.zip'), previewGroups), /multiple source files/);
 });
 
 const groups = [{ pid: 'p', targets: [101, 102, 103].map((vmid, index) => ({ vmid, index, name: `vm-${vmid}`, type: 'qemu' })) }];

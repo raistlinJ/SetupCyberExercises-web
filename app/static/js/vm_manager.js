@@ -2027,6 +2027,52 @@ async function importProjectSidebarWithFlags(opts) {
 }
 
 // Apply server-owned refresh results without starting another live inventory scan.
+function vmApplyValidationResults(response, fallbackPid, actionId) {
+  const changed = new Set();
+  const jobId = Number(actionId);
+  const latestJobs = window.__VM_VALIDATION_RESULT_JOBS__ ||= new Map();
+  const outcomes = Array.isArray(response?.results) ? response.results : [response];
+  for (const outcome of outcomes) {
+    const pid = canonicalPid(outcome?.project_id || fallbackPid);
+    if (!pid) continue;
+    if (Number.isSafeInteger(jobId) && jobId < (latestJobs.get(pid) || 0)) continue;
+    const results = (Array.isArray(outcome?.ran) ? outcome.ran : []).filter(item =>
+      Number(item?.validation?.configured_count) > 0 && typeof item?.validation?.all_passed === 'boolean');
+    if (!results.length) continue;
+    if (Number.isSafeInteger(jobId) && jobId > 0) latestJobs.set(pid, jobId);
+    const apply = (detail, index) => {
+      if (!detail || detail.vmid == null) return;
+      const result = results.find(item => Number(item.index) === Number(index)
+        && String(item.name || '') === String(detail.name || '')
+        && Number(item.vmid) === Number(detail.vmid)
+        && (!item.node || String(item.node) === String(detail.node || '')));
+      if (!result) return;
+      detail.qemu_agent_validated = result.validation.all_passed;
+      detail.qemu_agent_validation_state = result.validation.all_passed ? 'passed' : 'failed';
+      detail.validation_commands_configured = true;
+      changed.add(pid);
+    };
+    const projects = new Set([...(ALL_PROJECTS || []), PROJ, window.PROJ_CACHE?.[pid]]);
+    for (const project of projects) {
+      if (!project || canonicalPid(project.id) !== pid) continue;
+      for (const status of project.instance_statuses || []) {
+        for (const detail of status.vm_details || []) apply(detail, status.index);
+      }
+    }
+    for (const row of window.__MERGED_ROWS__ || []) {
+      if (canonicalPid(row.pid) === pid) apply(row.detail, row.index);
+    }
+  }
+  if (!changed.size || window.__VM_REFRESH_VIEW_PENDING__) return;
+  // Publish all returned guests together, using the current filter. A slower
+  // inventory refresh still updates power/network data separately.
+  if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) {
+    if (SELECTED_PIDS.some(pid => changed.has(canonicalPid(pid)))) renderMergedVmTable(window.__MERGED_ROWS__ || []);
+  } else if (PROJ && changed.has(canonicalPid(PROJ.id))) {
+    renderVmTable(PROJ);
+  }
+}
+
 function vmApplyQueuedInventory(pid, resp) {
   // A manual batch publishes its complete table once all projects finish.
   if (window.__VM_REFRESH_VIEW_PENDING__) return;
@@ -3899,6 +3945,7 @@ async function executePersistedGuestTransfer(descriptor, runtimePayload = null) 
       if (!auth.password) throw new Error('A Proxmox SSH password is required for host-source CSV pushes');
       return http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/guest_push`, {
         ...auth, targets, source: 'host',
+        sourceLocation: descriptor.sourceLocation || 'proxmox',
         transfers: descriptor.hostTransfers.filter(transfer => transfer.pid === pid),
         ownerOnRemote: descriptor.ownerOnRemote || '', filePermissions: descriptor.filePermissions || '',
       });
@@ -4022,7 +4069,7 @@ function openLxcPushModal() {
   if (!selected.length) return alert('Select at least one existing LXC container or QEMU VM. Refresh states first if needed.');
   const summary = document.getElementById('lxc-push-summary');
   if (summary) summary.textContent = document.getElementById('lxc-push-csv-mode')?.checked
-    ? 'Each file listed in the CSV is copied from its Proxmox host to its specified guest path. Unlisted guests receive no files.'
+    ? 'Each file listed in the CSV is copied from the selected source host to its specified guest path. Unlisted guests receive no files.'
     : `The selected content will be pushed to ${selected.length} guest${selected.length === 1 ? '' : 's'}. Uploads are staged once per Proxmox host using SSH and reused for its selected guests. QEMU uses a separate guest-agent transfer when SSH credentials are unavailable.`;
   const error = document.getElementById('lxc-push-error');
   if (error) { error.textContent = ''; error.classList.add('d-none'); }
@@ -4059,6 +4106,7 @@ function openLxcDeleteModal() {
 function wireLxcTransferModals() {
   const csvMode = document.getElementById('lxc-push-csv-mode');
   const csvInput = document.getElementById('lxc-push-csv');
+  const csvSource = document.getElementById('lxc-push-csv-source-location');
   const csvGroups = () => {
     const groups = serializeGuestTransferGroups(groupSelectedGuestEntriesByProject());
     groups.forEach(group => {
@@ -4093,6 +4141,7 @@ function wireLxcTransferModals() {
       window.GuestPushCsv.renderPreview(body, result);
       const counts = `${result.rows.length} CSV row(s) · ${result.transferCount} file transfer(s) · ${result.guestCount} guest(s)`;
       summary.textContent = counts
+        + (csvSource?.value === 'proxmox' ? ' · Sources: Proxmox hosts' : ' · Sources: DeployForge server')
         + (result.errorCount ? ` · ${result.errorCount} row error(s); resolve these before pushing.` : '')
         + (result.mismatchCount ? ` · ${result.mismatchCount} username difference(s) highlighted.` : '');
     } catch (previewError) {
@@ -4107,9 +4156,12 @@ function wireLxcTransferModals() {
     dialog?.classList.toggle('modal-xl', !!csvMode?.checked);
     dialog?.classList.toggle('modal-lg', !csvMode?.checked);
     const summary = document.getElementById('lxc-push-summary');
+    summary?.classList.toggle('d-none', !!csvMode?.checked);
+    document.getElementById('lxc-push-history-group')?.classList.toggle('d-none', !!csvMode?.checked);
     if (summary) summary.textContent = csvMode?.checked
-      ? 'Each file listed in the CSV is copied from its Proxmox host to its specified guest path. Unlisted guests receive no files.'
+      ? 'Each file listed in the CSV is copied from the selected source host to its specified guest path. Unlisted guests receive no files.'
       : 'The selected content will be pushed to every selected guest.';
+    if (csvMode?.checked) document.getElementById('lxc-push-modal-body')?.scrollTo?.({ top: 0 });
     return updateCsvPreview();
   };
   if (csvMode && !csvMode._csvBound) {
@@ -4119,6 +4171,7 @@ function wireLxcTransferModals() {
   if (csvInput && !csvInput._csvPreviewBound) {
     csvInput._csvPreviewBound = true;
     csvInput.addEventListener('change', updateCsvPreview);
+    csvSource?.addEventListener('change', updateCsvPreview);
     document.getElementById('lxc-push-csv-preview-refresh')?.addEventListener('click', updateCsvPreview);
     document.getElementById('lxcPushModal')?.addEventListener('show.bs.modal', updateCsvPreview);
   }
@@ -4198,7 +4251,7 @@ function wireLxcTransferModals() {
           const plan = window.GuestPushCsv.plan(rows, groups);
           const guestCount = plan.groups.reduce((total, group) => total + group.targets.length, 0);
           const descriptor = {
-            kind: 'push', source: 'host', label: 'Push Files from CSV',
+            kind: 'push', source: 'host', sourceLocation: csvSource?.value === 'proxmox' ? 'proxmox' : 'server', label: 'Push Files from CSV',
             hostTransfers: plan.transfers, groups: plan.groups, ownerOnRemote, filePermissions,
           };
           const modal = document.getElementById('lxcPushModal');
@@ -7205,6 +7258,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
         const existingSkipped = Array.isArray(resp?.skipped) ? resp.skipped : [];
         resp.skipped = [...validateSkipped, ...existingSkipped];
       }
+      vmApplyValidationResults(resp, PROJ?.id);
       const verifiedCount = Number(retryOutcome?.verifiedCount || 0);
       // Determine counts based on action response keys
       const keyMap = { start: 'started', unlock: 'unlocked', suspend: 'suspended', hibernate: 'suspended', poweroff: 'powered_off', snapshot: 'snapshotted', restore: 'restored', run_startup_cmds: 'ran', run_stored_cmds: 'ran', validate: 'ran', apply_scenario: 'applied' };
@@ -7934,6 +7988,7 @@ async function vmActionMultiExec(action, opts = {}) {
         const actionRetryOutcome = await maybeRetryVerifiedVmAction({ proj, action, resp, requestPath: actionPath, requestBody: baseBody, setProgress: setAp, contextLabel: projName });
         resp = actionRetryOutcome.resp;
         ['started', 'resumed', 'suspended', 'unlocked', 'powered_off', 'snapshotted', 'restored', 'skipped', 'errors', 'notices', 'infos', 'ran'].forEach(k => addArr(k, resp[k], projName));
+        vmApplyValidationResults(resp, pid);
         if (action === 'validate') {
           const { failed: vFailed, backends: vBackends } = vmBuildRestartTargetsForFailedValidation(proj, resp.ran || []);
           if (vFailed.length) validateRestartPlan.push({ proj, failed: vFailed, backends: vBackends });

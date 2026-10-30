@@ -16,6 +16,7 @@ function pushDialog(owner, permissions, selectionType = 'file', options = {}) {
     'lxc-push-permissions': permissions, 'lxc-push-error': '', 'lxc-push-confirm': '',
     'lxc-push-files': '', 'lxc-push-folder': '', 'lxc-push-csv-mode': '', 'lxc-push-csv': '',
     'lxc-push-csv-group': '', 'lxc-push-upload-controls': '',
+    'lxc-push-csv-source-location': options.sourceLocation || 'server',
   })) elements.set(id, { value, classList: { remove() {}, toggle(name, hidden) { this.hidden = hidden; } }, addEventListener(event, fn) { this[event] = fn; } });
   const document = { getElementById: id => elements.get(id), querySelector: () => ({ value: selectionType }), querySelectorAll: () => [] };
   if (options.preview) {
@@ -257,12 +258,23 @@ test('CSV dialog queues host paths and guest destinations without browser files 
   }).submit();
   assert.equal(result.error, '');
   assert.equal(result.queued.persist.data.source, 'host');
+  assert.equal(result.queued.persist.data.sourceLocation, 'server');
   assert.equal(result.queued.persist.data.hostTransfers[0].vmid, 101);
   assert.equal(result.queued.persist.data.hostTransfers[0].sourcePath, '/srv/hello.txt');
   assert.equal(result.queued.persist.data.hostTransfers[0].destinationPath, '/opt/renamed.txt');
   assert.equal(result.queued.persist.data.ownerOnRemote, 'www-data');
   assert.equal(result.queued.persist.data.filePermissions, '0600');
   assert.equal(result.saved, undefined);
+});
+
+test('CSV directory mapping queues the resolved filename and the selected source host', async () => {
+  for (const sourceLocation of ['server', 'proxmox']) {
+    const dialog = pushDialog('', '', 'file', { csv: '101,/srv/feedback.zip,/memory-hw-graded/,alice', sourceLocation });
+    const result = await dialog.submit();
+    assert.equal(result.error, '');
+    assert.equal(result.queued.persist.data.sourceLocation, sourceLocation);
+    assert.equal(result.queued.persist.data.hostTransfers[0].destinationPath, '/memory-hw-graded/feedback.zip');
+  }
 });
 
 test('CSV toggle swaps mapping and upload controls and restores ordinary upload mode', () => {
@@ -349,7 +361,7 @@ test('invalid CSV mappings show errors without saving or queueing and allow retr
 
 test('server and restored browser CSV queues send only each project mappings as JSON', async () => {
   const descriptor = {
-    kind: 'push', source: 'host', ownerOnRemote: '1000', filePermissions: '0755',
+    kind: 'push', source: 'host', sourceLocation: 'server', ownerOnRemote: '1000', filePermissions: '0755',
     groups: ['p', 'q'].map((pid, index) => ({ pid, targets: [{ name: pid, vmid: 101 + index }] })),
     hostTransfers: [
       { pid: 'p', vmid: 101, sourcePath: '/srv/a', destinationPath: '/opt/one' },
@@ -382,6 +394,7 @@ test('server and restored browser CSV queues send only each project mappings as 
       assert.equal(request.method, 'POST');
       assert.match(request.url, new RegExp(`/projects/${index ? 'q' : 'p'}/`));
       assert.equal(request.body.source, 'host');
+      assert.equal(request.body.sourceLocation, 'server');
       assert.equal(request.body.targets.length, 1);
       assert.equal(request.body.transfers.length, 1);
       assert.equal(request.body.transfers[0].vmid, 101 + index);

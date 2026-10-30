@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import shlex
 import shutil
@@ -11,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from flask import Flask
 
-from app.host_guest_push import build_host_file_archive_script
+from app.host_guest_push import build_host_file_archive_script, server_file_archive
 from app.routes import api
 from app.storage.projects import Project
 
@@ -52,10 +53,92 @@ def test_host_csv_routes_only_each_vmids_files_and_preserves_metadata(host_push)
     resolve.assert_called_once()
 
 
+@pytest.mark.parametrize('directory', ['/memory-hw-graded/', '/'])
+def test_server_source_and_directory_destinations_are_resolved_before_copy(host_push, directory):
+    client, resolve, push = host_push
+    payload = {**body(), 'sourceLocation': 'server'}
+    payload['transfers'][0]['destinationPath'] = directory
+    response = client.post('/api/projects/p/instances/actions/guest_push', json=payload)
+    assert response.status_code == 200
+    calls = {call.args[5]['vmid']: call for call in push.call_args_list}
+    assert calls[101].args[6] == [{'sourcePath': '/srv/one', 'destinationPath': directory + 'one'}]
+    assert calls[101].kwargs['source_location'] == 'server'
+
+
+def test_server_archive_reads_local_binary_file_without_modifying_it(tmp_path):
+    source = tmp_path / "feedback 'quoted'.zip"
+    source.write_bytes(b'\0binary\xff')
+    with server_file_archive(str(source), 'renamed.zip') as (stream, size):
+        assert size > 0
+        with tarfile.open(fileobj=stream) as archive:
+            assert archive.getnames() == ['renamed.zip']
+            assert archive.extractfile('renamed.zip').read() == b'\0binary\xff'
+    assert stream.closed
+    assert source.read_bytes() == b'\0binary\xff'
+
+
+@pytest.mark.parametrize('guest_type', ['qemu', 'lxc'])
+@pytest.mark.parametrize('failure', [False, True])
+def test_server_source_is_uploaded_to_correct_guest_and_cleaned_up(tmp_path, guest_type, failure):
+    source = tmp_path / 'feedback.zip'
+    source.write_bytes(b'feedback data')
+    ssh = MagicMock()
+    staged, copied = {}, []
+
+    def upload(stream, path, file_size, callback):
+        staged[path] = stream.read()
+        assert len(staged[path]) == file_size
+        callback(file_size, file_size)
+
+    ssh.open_sftp.return_value.putfo.side_effect = upload
+
+    def copy(path):
+        with tarfile.open(fileobj=io.BytesIO(staged[path])) as archive:
+            assert archive.getnames() == ['renamed.zip']
+            copied.append(archive.extractfile('renamed.zip').read())
+        if failure:
+            raise RuntimeError('copy failed')
+
+    def execute(client, command, **kwargs):
+        args = shlex.split(command)
+        if args[:3] == ['rm', '-f', '--']:
+            staged.pop(args[3], None)
+        elif args[:2] == ['sh', '-c']:
+            inner = shlex.split(args[2])
+            assert inner[:3] == ['pct', 'exec', '101']
+            copy(inner[-1])
+        else:
+            assert args[0] != 'python3', 'Server paths must not be opened on Proxmox'
+        return 0, b'', ''
+
+    def qemu(client, entry, path, size, destination, *args):
+        assert entry['vmid'] == 101
+        assert destination == '/memory-hw-graded'
+        copy(path)
+
+    with patch.object(api, '_ssh_connect', return_value=ssh), \
+            patch.object(api, '_ssh_exec_result', side_effect=execute), \
+            patch.object(api, '_ensure_linux_qemu_guest'), \
+            patch.object(api, '_push_staged_tar_to_qemu', side_effect=qemu):
+        pushed, errors = api._push_host_files_to_guest(
+            Project(id='p', name='p'), MagicMock(), 'https://host', 'password', 'root@pam',
+            {'vmid': 101, 'name': 'guest', 'node': '127.0.0.1', 'type': guest_type},
+            [{'sourcePath': str(source), 'destinationPath': '/memory-hw-graded/renamed.zip'}], '', '',
+            source_location='server',
+        )
+    assert copied == [b'feedback data']
+    assert not staged
+    assert bool(errors) == failure
+    assert bool(pushed) != failure
+    ssh.open_sftp.return_value.close.assert_called_once()
+    ssh.open_sftp.return_value.chmod.assert_called_once()
+    ssh.close.assert_called_once()
+
+
 @pytest.mark.parametrize('field,value', [('vmid', 999), ('vmid', '101'), ('vmid', True), ('vmid', 0),
     ('sourcePath', 'relative'), ('sourcePath', '/srv/'), ('sourcePath', '/srv/../secret'),
-    ('sourcePath', '/srv/\0bad'), ('destinationPath', '/'), ('destinationPath', 'relative'),
-    ('destinationPath', '/opt/../secret'), ('destinationPath', '/opt/')])
+    ('sourcePath', '/srv/\0bad'), ('destinationPath', ''), ('destinationPath', 'relative'),
+    ('destinationPath', '/opt/../secret'), ('destinationPath', '/opt/../')])
 def test_invalid_or_changed_csv_target_never_reads_host_files(host_push, field, value):
     client, resolve, push = host_push
     payload = body()
@@ -65,7 +148,7 @@ def test_invalid_or_changed_csv_target_never_reads_host_files(host_push, field, 
     push.assert_not_called()
 
 
-@pytest.mark.parametrize('change', ['missing', 'extra', 'duplicate', 'inventory_error', 'no_password', 'conflict'])
+@pytest.mark.parametrize('change', ['missing', 'extra', 'duplicate', 'no_password', 'conflict'])
 def test_csv_requires_exact_resolved_vmids_and_host_credentials(host_push, change):
     client, resolve, push = host_push
     context = list(resolve.return_value)
@@ -76,8 +159,6 @@ def test_csv_requires_exact_resolved_vmids_and_host_credentials(host_push, chang
         context[4] = context[4] + [{**context[4][0], 'vmid': 103}]
     elif change == 'duplicate':
         context[4] = context[4] + context[4][:1]
-    elif change == 'inventory_error':
-        context[6] = [{'reason': 'inventory unavailable'}]
     elif change == 'no_password':
         context[3] = ''
     else:
@@ -88,8 +169,46 @@ def test_csv_requires_exact_resolved_vmids_and_host_credentials(host_push, chang
     push.assert_not_called()
 
 
+def test_csv_preserves_inventory_connection_failures_instead_of_reporting_vmid_mismatch(host_push):
+    client, resolve, push = host_push
+    context = list(resolve.return_value)
+    context[4] = []
+    context[6] = [{'reason': 'failed to list nodes: Connection to yeast.utep.edu:8006 timed out'}]
+    resolve.return_value = tuple(context)
+    response = client.post('/api/projects/p/instances/actions/guest_push', json=body())
+    assert response.status_code == 502
+    assert 'timed out' in response.json['error']
+    assert 'CSV VMIDs no longer match' not in response.json['error']
+    assert response.json['errors'] == context[6]
+    push.assert_not_called()
+
+
+def test_csv_reports_specific_missing_and_unexpected_vmids(host_push):
+    client, resolve, push = host_push
+    context = list(resolve.return_value)
+    context[4] = [{**context[4][0], 'vmid': 999}, context[4][1]]
+    resolve.return_value = tuple(context)
+    response = client.post('/api/projects/p/instances/actions/guest_push', json=body())
+    assert response.status_code == 400
+    assert 'Missing VMIDs: 101' in response.json['error']
+    assert 'Unexpected VMIDs: 999' in response.json['error']
+    push.assert_not_called()
+
+
+def test_csv_preserves_the_reason_a_guest_was_skipped(host_push):
+    client, resolve, push = host_push
+    context = list(resolve.return_value)
+    context[4] = context[4][:1]
+    context[5] = [{'name': 'guest-two', 'reason': 'not found'}]
+    resolve.return_value = tuple(context)
+    response = client.post('/api/projects/p/instances/actions/guest_push', json=body())
+    assert response.status_code == 400
+    assert 'guest-two: not found' in response.json['error']
+    push.assert_not_called()
+
+
 @pytest.mark.parametrize('changes', [
-    {'source': 'other'}, {'transfers': []}, {'transfers': [None]},
+    {'source': 'other'}, {'sourceLocation': 'other'}, {'transfers': []}, {'transfers': [None]},
     {'ownerOnRemote': '-R'}, {'ownerOnRemote': 'root;id'}, {'ownerOnRemote': None},
     {'filePermissions': '888'}, {'filePermissions': 644},
 ])

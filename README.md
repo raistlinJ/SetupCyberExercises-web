@@ -23,6 +23,12 @@ responses are disabled. Unchanged polls do not redraw the dock; progress updates
 preserve its scroll position and expanded results. Refreshing the page only
 reconnects to existing work and does not resubmit it.
 
+Validation waits for all selected guest checks, including slower checks and
+timeouts. When the run finishes, its returned results update the VM table and
+the active filter together, before the completion summary appears. The separate
+inventory refresh can finish later; older refreshes and delayed validation
+responses cannot replace results from a newer completed run.
+
 Navigation and background inventory, CTFd, and CTF-RPG reads run outside the
 action queue, so they can finish while a submitted action is running. Identical
 overlapping reads share work within a browser page and within each server
@@ -95,7 +101,7 @@ does not immediately fail later guests. A missing SSH exit status leaves the
 affected transfer's completion unknown; it is not automatically replayed.
 
 In **Push to Guests**, enable **Map files to VMIDs using CSV** to copy files
-already on each selected guest's Proxmox host. CSV columns are
+already on the DeployForge server or each selected guest's Proxmox host. CSV columns are
 `vmid,source-path-on-host,destination-path-in-guest,username`; the fourth column
 (username) and header are optional. Columns after the fourth are ignored. For example:
 
@@ -105,13 +111,17 @@ vmid,source,destination,username,notes
 102,/srv/configs/second.json,/opt/scenario/settings.json,bob,ignored
 ```
 
-Both paths must be absolute file paths, including the destination filename.
-Sources are read on the Proxmox node currently running the specified VMID;
-no local file selection or browser upload is needed. VMIDs must match selected
+Both paths must be absolute. A destination ending in `/` is a directory: the
+source filename is appended, and the preview shows the resulting full path.
+Otherwise the destination specifies the full filename, allowing files to be renamed.
+**Read source files from** defaults to **DeployForge server (this host)**. Choose
+**Proxmox host running each guest** when sources are on the Proxmox nodes.
+No local file selection or browser upload is needed. VMIDs must match selected
 guests. Guests absent from the CSV receive no files. Existing guest files are
 overwritten and missing destination directories are created. The Advanced owner
 and file permissions apply to all rows. This mode requires Proxmox SSH credentials
-and `python3` on each source host; QEMU also requires a working guest agent.
+for both source locations. Reading sources on Proxmox also requires `python3`
+there; QEMU requires a working guest agent.
 Choosing a CSV automatically previews every row alongside the VM's assigned
 username (the VM table's Credentials column), guest name, project, and Proxmox
 node. The optional CSV username appears separately for comparison; differences

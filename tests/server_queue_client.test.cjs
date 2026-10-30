@@ -721,3 +721,36 @@ test('all VM transfer policy actions submit through the server queue for single 
     }
   }
 });
+
+for (const status of ['completed', 'error']) {
+  test(`validation updates table before showing the final summary (${status})`, async () => {
+    const events = [];
+    const result = { project_id: 'one', ran: [{ validation: { configured_count: 1, all_passed: false } }] };
+    const sandbox = {
+      ServerQueue: { wait: async () => ({ status }), nativeFetch: async () => json(result) },
+      vmApplyValidationResults: data => { assert.equal(data.project_id, 'one'); events.push('table'); },
+      mergeVmActionSummaryData: (a, b) => ({ ...a, ...b }),
+      showActionSummary: () => events.push('summary'), emitActionLogs() {},
+    };
+    vm.createContext(sandbox); vm.runInContext(plans, sandbox);
+    await sandbox.finishServerVmAction('Validate', { id: 10, projectId: 'one' });
+    assert.deepEqual(events, ['table', 'summary']);
+  });
+}
+
+test('an older inventory response cannot overwrite results from a later validation', async () => {
+  let release;
+  const completed = [{ id: 4, projectId: 'one', inventoryRefresh: true, status: 'completed' }];
+  const applied = [];
+  const ServerQueue = {
+    state: () => ({ completed }),
+    nativeFetch: () => new Promise(resolve => { release = resolve; }),
+  };
+  const sandbox = { ServerQueue, window: { ServerQueue }, vmApplyQueuedInventory: () => applied.push('stale inventory') };
+  vm.createContext(sandbox); vm.runInContext(plans, sandbox);
+  const pending = sandbox.applyCompletedServerInventory();
+  completed.push({ id: 5, projectId: 'one', inventoryRefresh: false, status: 'error', label: 'Validate' });
+  release(json({ projects: [{ id: 'one', instance_statuses: ['old validation results'] }] }));
+  await pending;
+  assert.deepEqual(applied, []);
+});

@@ -290,3 +290,70 @@ test('refresh polling shows stage counts and elapsed time, then ignores late res
   assert.equal(updates.length, 1);
   assert.equal(timers.length, 0);
 });
+
+const validationApplySource = source.slice(source.indexOf('function vmApplyValidationResults('), source.indexOf('function vmApplyQueuedInventory('));
+
+function validationBrowser(multi = false) {
+  const detail = (index, state = 'passed') => ({ name: `guest-${index}`, vmid: 100 + index, node: 'node1', qemu_agent_enabled: true,
+    validation_commands_configured: true, qemu_agent_validation_state: state, qemu_agent_validated: state === 'passed' });
+  const project = id => ({ id, instance_statuses: [1, 2, 3].map(index => ({ index, vm_details: [detail(index, index === 1 ? 'failed' : 'passed')] })) });
+  const one = project('one'), two = project('two'), cached = project('one');
+  const rows = [one, two].flatMap(project => project.instance_statuses.map(status => ({ pid: project.id, index: status.index, detail: { ...status.vm_details[0] } })));
+  const rendered = [];
+  const sandbox = { ALL_PROJECTS: [one, two], PROJ: one, SELECTED_PIDS: multi ? ['one', 'two'] : ['one'], canonicalPid: String,
+    window: { PROJ_CACHE: { one: cached }, __MERGED_ROWS__: rows },
+    renderVmTable: project => rendered.push(project.instance_statuses.flatMap(status => status.vm_details).filter(detail => detail.qemu_agent_validation_state.includes('fail')).map(detail => detail.name)),
+    renderMergedVmTable: rows => rendered.push(rows.filter(row => row.detail.qemu_agent_validation_state.includes('fail')).map(row => `${row.pid}/${row.detail.name}`)),
+  };
+  vm.createContext(sandbox); vm.runInContext(validationApplySource, sandbox);
+  return { sandbox, one, two, cached, rows, rendered };
+}
+const validationResult = (index, passed, extra = {}) => ({ index, name: `guest-${index}`, vmid: 100 + index, node: 'node1',
+  validation: { configured_count: 1, all_passed: passed }, ...extra });
+
+test('completed validation replaces old fail-filter results in one render before inventory refresh', () => {
+  const { sandbox, one, two, cached, rows, rendered } = validationBrowser();
+  sandbox.vmApplyValidationResults({ project_id: 'one', ran: [validationResult(1, true), validationResult(2, false), validationResult(3, false)] });
+  assert.deepEqual(rendered, [['guest-2', 'guest-3']]);
+  for (const project of [one, cached]) {
+    assert.deepEqual(project.instance_statuses.map(status => status.vm_details[0].qemu_agent_validation_state), ['passed', 'failed', 'failed']);
+  }
+  assert.deepEqual(rows.filter(row => row.pid === 'one').map(row => row.detail.qemu_agent_validated), [true, false, false]);
+  assert.equal(two.instance_statuses[1].vm_details[0].qemu_agent_validation_state, 'passed');
+});
+
+test('multi-project validation applies all returned projects together including failed checks', () => {
+  const { sandbox, rendered } = validationBrowser(true);
+  sandbox.vmApplyValidationResults({ results: [
+    { project_id: 'one', ran: [validationResult(1, true), validationResult(2, false)], errors: [{ reason: 'check failed' }] },
+    { project_id: 'two', ran: [validationResult(1, true), validationResult(3, false)] },
+  ] });
+  assert.deepEqual(rendered, [['one/guest-2', 'two/guest-3']]);
+});
+
+test('validation results cannot mark another guest, node, project or unvalidated commands', () => {
+  const { sandbox, rendered, one } = validationBrowser();
+  sandbox.vmApplyValidationResults({ project_id: 'one', ran: [
+    validationResult(2, false, { vmid: 999 }), validationResult(2, false, { node: 'other' }),
+    validationResult(2, false, { name: 'other-guest' }), validationResult(2, false, { validation: { configured_count: 0, all_passed: false } }),
+  ] });
+  sandbox.vmApplyValidationResults({ project_id: 'unavailable', ran: [validationResult(2, false)] });
+  assert.equal(one.instance_statuses[1].vm_details[0].qemu_agent_validation_state, 'passed');
+  assert.deepEqual(rendered, []);
+});
+
+test('hidden project caches update without rerendering the current project', () => {
+  const { sandbox, one, rendered } = validationBrowser();
+  sandbox.PROJ = sandbox.ALL_PROJECTS[1];
+  sandbox.vmApplyValidationResults({ ran: [validationResult(2, false)] }, 'one');
+  assert.equal(one.instance_statuses[1].vm_details[0].qemu_agent_validation_state, 'failed');
+  assert.deepEqual(rendered, []);
+});
+
+test('a delayed older validation response cannot replace a newer completed run', () => {
+  const { sandbox, one, rendered } = validationBrowser();
+  sandbox.vmApplyValidationResults({ project_id: 'one', ran: [validationResult(2, false)] }, 'one', 12);
+  sandbox.vmApplyValidationResults({ project_id: 'one', ran: [validationResult(2, true)] }, 'one', 11);
+  assert.equal(one.instance_statuses[1].vm_details[0].qemu_agent_validation_state, 'failed');
+  assert.equal(rendered.length, 1);
+});

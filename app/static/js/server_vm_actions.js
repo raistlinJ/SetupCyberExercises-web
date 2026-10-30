@@ -109,6 +109,7 @@ async function finishServerVmAction(label, job) {
   const state = await ServerQueue.wait(job);
   const response = await ServerQueue.nativeFetch(`/api/queue/${job.id}/result`, { credentials: 'same-origin' });
   const result = await response.json();
+  if (typeof vmApplyValidationResults === 'function') vmApplyValidationResults(result, job.projectId, job.id);
   const summary = (result.results || [result]).reduce((merged, item) => mergeVmActionSummaryData(merged, item || {}), {});
   const archives = (result.results || [result]).flatMap(item => item?.outputs_zips || (item?.outputs_zip ? [item.outputs_zip] : []));
   if (archives.length) summary.outputs_zips = archives;
@@ -133,6 +134,7 @@ async function submitServerGuestTransfer(label, descriptor, queueOptions) {
       if (!auth.password) throw new Error('A Proxmox SSH password is required for host-source CSV pushes');
       Object.assign(body, {
         source: 'host', transfers: descriptor.hostTransfers.filter(transfer => transfer.pid === group.pid),
+        sourceLocation: descriptor.sourceLocation || 'proxmox',
         ownerOnRemote: descriptor.ownerOnRemote || '', filePermissions: descriptor.filePermissions || '',
       });
       steps.push({ method: 'POST', url, body });
@@ -190,8 +192,10 @@ async function applyCompletedServerInventory() {
     if (!response.ok) throw new Error('Could not load refreshed inventory');
     const projects = (await response.json()).projects || [];
     for (const job of jobs) {
-      const newer = (window.ServerQueue.state().completed || []).some(item =>
-        item.inventoryRefresh && item.status === 'completed' && item.projectId === job.projectId && item.id > job.id);
+      const state = window.ServerQueue.state();
+      const newer = [...(state.completed || []), ...(state.activeItems || []), ...(state.items || [])].some(item =>
+        item.projectId === job.projectId && item.id > job.id
+        && (!item.inventoryRefresh || item.status === 'completed'));
       const project = projects.find(project => String(project.id) === String(job.projectId));
       if (!newer && project) vmApplyQueuedInventory(job.projectId, project);
       appliedServerInventory.add(job.id);

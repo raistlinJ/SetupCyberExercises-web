@@ -597,6 +597,50 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertEqual(runtime_store.calls[0]['vm_name'], self.target_name)
             self.assertTrue(runtime_store.calls[0]['passed'])
 
+    def test_validation_response_includes_slower_failures_and_project_identity(self):
+        self.project.vms[0].validation_commands = [
+            {'command': 'check-service', 'match': '^active$', 'is_regex': True, 'enabled': True},
+        ]
+        mapped = [
+            {'index': 1, 'name': self.target_name, 'vmid': 101, 'node': 'node1'},
+            {'index': 2, 'name': 'alpha-lab-2', 'vmid': 102, 'node': 'node1'},
+        ]
+        fast_persisted = threading.Event()
+        runtime = _RuntimeStoreStub()
+        original_set = runtime.set_vm_validation_state
+
+        def persist(*args, **kwargs):
+            result = original_set(*args, **kwargs)
+            if kwargs.get('vmid') == 101:
+                fast_persisted.set()
+            return result
+
+        runtime.set_vm_validation_state = persist
+
+        def execute(**kwargs):
+            if kwargs['m']['vmid'] == 102:
+                self.assertTrue(fast_persisted.wait(2))
+                return {'stdout': 'inactive', 'stderr': '', 'exitcode': 0}
+            return {'stdout': 'active', 'stderr': '', 'exitcode': 0}
+
+        with ExitStack() as stack:
+            for context in self._common_patches():
+                stack.enter_context(context)
+            stack.enter_context(patch('app.routes.api._resolve_targets_to_vm_info', return_value=(mapped, [], [])))
+            stack.enter_context(patch('app.routes.api._runtime_store', return_value=runtime))
+            stack.enter_context(patch('app.routes.api._pool_workers_for', return_value=2))
+            stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            stack.enter_context(patch('app.routes.api._execute_instance_command', side_effect=execute))
+            response = self.client.post(f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds', json={
+                'username': 'root@pam', 'password': 'secret', 'baseUrl': 'https://proxmox.local',
+                'validateOnly': True, 'targets': [{'index': item['index'], 'name': item['name']} for item in mapped],
+            })
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['project_id'], self.project.id)
+        self.assertEqual([item['validation']['all_passed'] for item in payload['ran']], [True, False])
+        self.assertEqual(len(runtime.calls), 2)
+
     def test_run_stored_cmds_validate_only_uses_project_limited_parallel_workers(self):
         vm = self.project.vms[0]
         vm.validation_commands = [

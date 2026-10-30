@@ -39,8 +39,9 @@
         error = 'VMID must be a positive integer.';
       }
       for (const [label, path] of [['host source', sourcePath], ['guest destination', destinationPath]]) {
-        if (!error && (!path.startsWith('/') || path.endsWith('/') || path.includes('\0') || path.split('/').some(part => part === '.' || part === '..'))) {
-          error = `${label} must be an absolute file path, including the filename.`;
+        if (!error && (!path.startsWith('/') || (label === 'host source' && path.endsWith('/')) || path.includes('\0') || path.split('/').some(part => part === '.' || part === '..'))) {
+          error = label === 'host source' ? `${label} must be an absolute file path, including the filename.`
+            : 'guest destination must be an absolute path. End it with / to use a directory.';
         }
       }
       const entry = { vmid: error ? rawVmid : Number(rawVmid), sourcePath, destinationPath, username };
@@ -61,6 +62,10 @@
       : `VMID ${vmid} is not among the selected guests. Select it and refresh states if needed.`;
   }
 
+  function destinationFor(sourcePath, destinationPath) {
+    return (destinationPath.endsWith('/') ? destinationPath + sourcePath.split('/').pop() : destinationPath).replace(/\/+/g, '/');
+  }
+
   function plan(rows, groups) {
     const transfers = [], selectedGroups = new Map();
     for (const { vmid, sourcePath, destinationPath } of rows) {
@@ -68,7 +73,7 @@
       const error = targetError(vmid, matches);
       if (error) throw new Error(error);
       const { pid, target } = matches[0];
-      const destination = destinationPath.replace(/\/+/g, '/');
+      const destination = destinationFor(sourcePath, destinationPath);
       const source = sourcePath.replace(/\/+/g, '/');
       const previous = transfers.find(item => item.pid === pid && item.vmid === vmid && item.destinationPath === destination);
       if (previous && previous.sourcePath !== source) throw new Error(`VMID ${vmid} has multiple source files for ${destination}.`);
@@ -93,11 +98,13 @@
       const match = matches.length === 1 ? matches[0] : null;
       const result = {
         ...row, assignedUsername: String(match?.target.username || '').trim(),
+        csvDestinationPath: row.destinationPath,
+        destinationPath: row.error ? row.destinationPath : destinationFor(row.sourcePath, row.destinationPath),
         guestName: match?.target.name || '', node: match?.target.node || '', projectName: match?.projectName || '',
         error: row.error || targetError(row.vmid, matches), duplicate: false,
       };
       if (!result.error) {
-        const key = JSON.stringify([match.pid, row.vmid, row.destinationPath.replace(/\/+/g, '/')]);
+        const key = JSON.stringify([match.pid, row.vmid, result.destinationPath]);
         const previous = destinations.get(key);
         if (previous && previous !== row.sourcePath.replace(/\/+/g, '/')) {
           result.error = `Multiple source files for ${row.destinationPath}.`;
@@ -134,6 +141,12 @@
           const context = document.createElement('div');
           context.className = 'small text-muted';
           context.textContent = [row.guestName, row.projectName, row.node].filter(Boolean).join(' · ');
+          td.append(context);
+        }
+        if (index === 5 && row.csvDestinationPath !== row.destinationPath) {
+          const context = document.createElement('div');
+          context.className = 'small text-muted';
+          context.textContent = `CSV directory: ${row.csvDestinationPath}`;
           td.append(context);
         }
         tr.append(td);
