@@ -3,6 +3,7 @@
   // Keep File references for this page only; history on the server stores names/settings.
   const HISTORY_LIMIT = 10;
   const pushSelections = new Map();
+  let pushSelectionGeneration = 0;
   const pushInput = type => document.getElementById(type === 'folder' ? 'lxc-push-folder' : 'lxc-push-files');
   const sourceNames = files => Array.from(files || [], file => String(file.webkitRelativePath || file.name || ''));
   const selectionKey = (type, names) => JSON.stringify([type, [...names].sort()]);
@@ -16,26 +17,73 @@
     while (pushSelections.size > HISTORY_LIMIT) pushSelections.delete(pushSelections.keys().next().value);
   }
 
-  function restorePushSelection(type, settings) {
+  function selectionWarning(type, messages = []) {
+    const warning = document.getElementById(`lxc-push-${type === 'folder' ? 'folder' : 'files'}-warning`);
+    if (!warning) return;
+    warning.classList.toggle('d-none', !messages.length);
+    warning.title = messages.join('\n');
+    warning.setAttribute('aria-label', warning.title);
+  }
+
+  async function restorePushSelection(type, settings, executedAt) {
     const input = pushInput(type);
     if (!input) return;
     const names = Array.isArray(settings.sourceNames) ? settings.sourceNames : [];
     const key = selectionKey(type, names);
-    let retained = names.length && selectionKey(type, sourceNames(input.files)) === key;
-    if (!retained && pushSelections.has(key)) {
+    // Recall changes settings; an existing selection always takes precedence.
+    if (!input.files?.length && pushSelections.has(key)) {
       try {
         const transfer = new DataTransfer();
         pushSelections.get(key).forEach(file => transfer.items.add(file));
         input.files = transfer.files;
-        retained = selectionKey(type, sourceNames(input.files)) === key;
       } catch { /* Browsers without assignable FileLists require another selection. */ }
     }
-    if (!retained) input.value = '';
     input.dispatchEvent(new Event('change', { bubbles: true }));
+    const generation = ++pushSelectionGeneration;
+    const files = Array.from(input.files || []);
+    const checkFile = async file => {
+      const name = String(file.webkitRelativePath || file.name || '');
+      let message = names.includes(name) && Number(executedAt) > 0 && file.lastModified > Number(executedAt)
+        ? `${name}: changed since this run.` : '';
+      try {
+        // Read only one byte, including for large uploads. File snapshots can
+        // become unreadable after a local edit; browsers cannot re-stat them.
+        if (typeof file.slice === 'function') await file.slice(0, 1).arrayBuffer();
+      } catch (error) {
+        if (error?.name === 'NotFoundError') return { file, missing: true };
+        message = `${name}: ${error?.name === 'NotReadableError' ? 'changed or is no longer readable' : 'could not be checked'}. Select it again to use the current file.`;
+      }
+      return { file, message };
+    };
+    const checks = [];
+    for (let offset = 0; offset < files.length; offset += 16) {
+      checks.push(...await Promise.all(files.slice(offset, offset + 16).map(checkFile)));
+      if (generation !== pushSelectionGeneration) return;
+    }
+    if (generation !== pushSelectionGeneration || files.some((file, index) => input.files?.[index] !== file)
+        || input.files?.length !== files.length) return;
+    const missing = checks.filter(check => check.missing);
+    if (missing.length) {
+      pushSelections.delete(selectionKey(type, sourceNames(files)));
+      const remaining = checks.filter(check => !check.missing).map(check => check.file);
+      if (!remaining.length) input.value = '';
+      else {
+        try {
+          const transfer = new DataTransfer();
+          remaining.forEach(file => transfer.items.add(file));
+          input.files = transfer.files;
+        } catch {
+          checks.push({ message: 'Some selected files no longer exist. Select the remaining files again.' });
+        }
+      }
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    selectionWarning(type, checks.map(check => check.message).filter(Boolean));
     const help = document.getElementById('lxc-push-history-help');
-    if (help) help.textContent = retained
-      ? 'Previous file selection is ready. Check the files and destination before pushing.'
-      : 'Choose the original files or folder again. File selections can only be recalled while this page remains open.';
+    if (help) help.textContent = input.files?.length
+      ? 'Your file selection is ready. Check the files and destination before pushing.'
+      : missing.length ? 'The selected files no longer exist. Choose files or a folder again.'
+        : 'Choose the original files or folder again. File selections can only be recalled while this page remains open.';
   }
 
   function setValue(id, value, event = 'input') {
@@ -45,7 +93,7 @@
     element.dispatchEvent(new Event(event, { bubbles: true }));
   }
 
-  function apply(kind, settings) {
+  async function apply(kind, settings, executedAt) {
     if (kind === 'custom') {
       setValue('custom-command-input', settings.command);
       setValue('custom-command-timeout', settings.timeoutSeconds);
@@ -61,15 +109,18 @@
       if (csvMode) { csvMode.checked = false; csvMode.dispatchEvent(new Event('change', { bubbles: true })); }
       // The mode-change handler clears the inactive picker, so cache both first.
       ['file', 'folder'].forEach(rememberPushSelection);
-      const type = settings.selectionType === 'folder' ? 'folder' : 'file';
+      const preferredType = settings.selectionType === 'folder' ? 'folder' : 'file';
+      const currentType = ['file', 'folder'].find(type => document.getElementById(`lxc-push-type-${type}`)?.checked && pushInput(type)?.files?.length)
+        || ['file', 'folder'].find(type => pushInput(type)?.files?.length);
+      const type = currentType || preferredType;
       const radio = document.getElementById(`lxc-push-type-${type}`);
-      if (radio) { radio.checked = true; radio.dispatchEvent(new Event('change', { bubbles: true })); }
-      restorePushSelection(type, settings);
+      if (radio && !radio.checked) { radio.checked = true; radio.dispatchEvent(new Event('change', { bubbles: true })); }
       setValue('lxc-push-destination', settings.destination);
       setValue('lxc-push-owner', settings.ownerOnRemote);
       setValue('lxc-push-permissions', settings.filePermissions);
       const advanced = document.getElementById('lxc-push-advanced');
       if (advanced) advanced.open = !!(settings.ownerOnRemote || settings.filePermissions);
+      await restorePushSelection(type, settings, executedAt);
     }
   }
 
@@ -97,9 +148,9 @@
       select.replaceChildren(new Option(text, ''));
       select.disabled = true;
     };
-    select.addEventListener('change', () => {
+    select.addEventListener('change', async () => {
       const entry = entries.find(item => String(item.id) === select.value);
-      if (entry) { apply(kind, entry.settings); select.value = ''; }
+      if (entry) { select.value = ''; await apply(kind, entry.settings, entry.executedAt); }
     });
     modal.addEventListener('show.bs.modal', async () => {
       const current = ++generation;
@@ -111,7 +162,7 @@
         if (!response.ok) throw new Error('History unavailable');
         const data = await response.json();
         if (current !== generation) return;
-        entries = (Array.isArray(data.items) ? data.items : []).slice(0, 5);
+        entries = (Array.isArray(data.items) ? data.items : []).slice(0, HISTORY_LIMIT);
         placeholder(entries.length ? 'Recall a previous run…' : 'No recent runs');
         entries.forEach(entry => {
           const option = new Option(description(kind, entry), String(entry.id));
@@ -127,7 +178,11 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     ['file', 'folder'].forEach(type => {
-      pushInput(type)?.addEventListener('change', () => rememberPushSelection(type));
+      pushInput(type)?.addEventListener('change', () => {
+        pushSelectionGeneration++;
+        selectionWarning(type);
+        rememberPushSelection(type);
+      });
     });
     wire('push', 'lxcPushModal', 'lxc-push-history');
     wire('pull', 'lxcPullModal', 'lxc-pull-history');

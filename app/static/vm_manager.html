@@ -504,7 +504,7 @@
             <div id="lxc-push-history-group" class="mb-3">
               <label class="form-label" for="lxc-push-history">History — last 10 runs</label>
               <select id="lxc-push-history" class="form-select" disabled><option>No recent runs</option></select>
-              <div id="lxc-push-history-help" class="form-text" aria-live="polite">Recall settings and files selected while this page remains open. After reloading, choose the files again.</div>
+              <div id="lxc-push-history-help" class="form-text" aria-live="polite">Recall keeps your selected files. A (!) marks changed or unreadable files; hover for details. After reloading, choose the files again.</div>
             </div>
             <div id="lxc-push-csv-group" class="mb-3 d-none">
               <div class="row g-2 align-items-end mb-2">
@@ -561,11 +561,13 @@
               </fieldset>
               <div id="lxc-push-files-group" class="mb-3">
                 <label class="form-label" for="lxc-push-files">Files</label>
+                <span id="lxc-push-files-warning" class="small text-warning-emphasis ms-1 d-none" role="img" tabindex="0" aria-label="Selected file changed">(!)</span>
                 <input id="lxc-push-files" class="form-control" type="file" multiple>
                 <div class="form-text">Select one or more individual files.</div>
               </div>
               <div id="lxc-push-folder-group" class="mb-3 d-none">
                 <label class="form-label" for="lxc-push-folder">Folder</label>
+                <span id="lxc-push-folder-warning" class="small text-warning-emphasis ms-1 d-none" role="img" tabindex="0" aria-label="Selected file changed">(!)</span>
                 <input id="lxc-push-folder" class="form-control" type="file" webkitdirectory directory multiple>
                 <div class="form-text">Select one folder. Its files and relative directory structure will be preserved.</div>
               </div>
@@ -744,7 +746,7 @@
   <script src="/static/js/login_time.js?v=20261029-login-source"></script>
   <script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
 <script src="/static/js/vm_manager.js?v=20261030-create-feedback"></script>
-  <script src="/static/js/action_history.js?v=20261030-history-10"></script>
+  <script src="/static/js/action_history.js?v=20261031-keep-push-selection"></script>
   <script src="/static/js/server_vm_actions.js?v=20261030-create-feedback"></script>
   <script src="/static/js/plugin_loader.js?v=20261015-agent-tabs"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->

@@ -48,7 +48,10 @@ and timeout, pull history restores the paths, and push history restores the
 destination, file/folder mode, owner, and permissions. Push recall retains matching
 selected files and can restore the last ten file/folder selections from the same
 open page. After a page reload, or if that selection is unavailable, choose the
-local files again. A different history entry never silently keeps unrelated files.
+local files again. Recall keeps the current file or folder selection while restoring
+the saved destination and options. A small **(!)** marks files changed since the
+recalled run or no longer readable; hover for details. Files reported missing by
+the browser are removed from the selection.
 Recall never submits an action or changes the currently selected guests.
 Connection credentials, target lists, and uploaded file contents are not stored
 in recall history. Existing completed jobs are not backfilled, and clearing the
