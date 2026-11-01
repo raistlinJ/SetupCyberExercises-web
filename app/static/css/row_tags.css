@@ -1,0 +1,16 @@
+.row-tag {
+  display: inline-flex;
+  width: .9rem;
+  height: .9rem;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.row-tag svg { display: block; width: 100%; height: 100%; }
+.row-tag-blue { color: #2563eb; }
+.row-tag-green { color: #168247; }
+.row-tag-amber { color: #b7790d; }
+.row-tag-purple { color: #7c3aed; }
+.row-tag-rose { color: #db3a66; }
+.row-tag-menu { min-width: 260px; }
+.row-tag-notice { font-size: .8rem; }
+.row-tag-badges { display: inline-flex; gap: .2rem; flex-wrap: wrap; margin-left: .4rem; }

@@ -131,19 +131,23 @@ test('recall never reuses unrelated selections with the same leaf filename in an
   assert.match(elements['lxc-push-history-help'].textContent, /Choose the original files/);
 });
 
-test('only the last five selections remain available and a new page cannot recall old File objects', async () => {
+test('the last ten selections remain available and a new page cannot recall old File objects', async () => {
   const settings = { destination: '/data', selectionType: 'file', sourceNames: ['0.txt'] };
   const fetch = async () => json([entry(settings)]);
-  const elements = browser(fetch);
-  for (let i = 0; i < 6; i++) {
-    elements['lxc-push-files'].files = [{ name: `${i}.txt` }];
-    await elements['lxc-push-files'].fire('change');
-  }
-  for (const page of [elements, browser(fetch)]) {
+  for (const count of [10, 11]) {
+    const page = browser(fetch);
+    for (let i = 0; i < count; i++) {
+      page['lxc-push-files'].files = [{ name: `${i}.txt` }];
+      await page['lxc-push-files'].fire('change');
+    }
     await page.lxcPushModal.fire('show.bs.modal');
     page['lxc-push-history'].value = '1'; await page['lxc-push-history'].fire('change');
-    assert.equal(page['lxc-push-files'].files.length, 0);
+    assert.equal(page['lxc-push-files'].files.length, count === 10 ? 1 : 0);
   }
+  const fresh = browser(fetch);
+  await fresh.lxcPushModal.fire('show.bs.modal');
+  fresh['lxc-push-history'].value = '1'; await fresh['lxc-push-history'].fire('change');
+  assert.equal(fresh['lxc-push-files'].files.length, 0);
 });
 
 test('history refreshes on every opening and handles empty and unavailable history', async () => {

@@ -8,14 +8,10 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <link href="/static/css/shell.css?v=20261013-integrations" rel="stylesheet">
+  <link href="/static/css/row_tags.css?v=20261029-tag-icons" rel="stylesheet">
+  <link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
   <style>
-    .vm-table-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: center; gap: .75rem; }
-    .vm-filter-group { min-width: 0; }
-    .vm-filter-group .form-control { min-width: 100px; }
-    .vm-table-tools { display: flex; align-items: center; gap: .5rem; white-space: nowrap; }
-    .vm-auto-control { width: 124px; }
-    .vm-filter-options { min-width: 220px; }
     #vm-table { overscroll-behavior: contain; }
     @media (min-width: 768px) {
       html.vm-manager-document { height: 100%; overflow: hidden; }
@@ -36,14 +32,10 @@
       .vm-manager-page .shell-content > .card { flex: 0 0 auto; }
       .vm-manager-page #vm-table { max-height: 40vh; }
     }
-    @media (max-width: 1000px) {
-      .vm-table-toolbar { grid-template-columns: 1fr; }
-      .vm-table-tools { flex-wrap: wrap; }
-    }
   </style>
 </head>
 
-<body class="shell-body vm-manager-page">
+<body class="shell-body manager-page vm-manager-page">
   <header class="app-banner">
     <div class="container-fluid d-flex align-items-center justify-content-between py-2">
       <div class="d-flex align-items-center gap-2">
@@ -119,10 +111,10 @@
                 id="nav-proxmox-link" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true"
                 tabindex="-1" title="Open this project's Proxmox UI">
                 <span id="nav-proxmox-server-label">Server: —</span>
-                <span class="ms-1" title="Space"><i class="bi bi-device-hdd me-1" aria-hidden="true"></i><span
-                    class="visually-hidden">Space: </span><span id="nav-proxmox-space-label">— / —</span></span>
-                <span class="ms-1" title="Memory"><i class="bi bi-memory me-1" aria-hidden="true"></i><span
-                    class="visually-hidden">Memory: </span><span id="nav-proxmox-memory-label">— / —</span></span>
+                <span class="ms-1" title="Disk space used"><i class="bi bi-device-hdd me-1" aria-hidden="true"></i><span
+                    class="visually-hidden">Disk: </span><span id="nav-proxmox-space-label">—</span></span>
+                <span class="ms-1" title="RAM used"><i class="bi bi-memory me-1" aria-hidden="true"></i><span
+                    class="visually-hidden">RAM: </span><span id="nav-proxmox-memory-label">—</span></span>
               </a>
             </li>
           </ul>
@@ -144,13 +136,11 @@
               </div>
               <div id="vm-progress-detail" class="small text-muted mt-1 text-break" role="status" aria-live="polite"></div>
             </div>
-            <div class="vm-table-toolbar mb-2">
-              <div class="input-group input-group-sm vm-filter-group">
-                <input id="vm-filter" type="text" class="form-control" placeholder="Filter VMs…"
-                  aria-label="Filter VMs" title="Filter rows by text; type screenshot to show VMs with saved screenshots; use Options for Regex or selected VMs" />
-                <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown"
-                  data-bs-auto-close="outside" aria-expanded="false" title="Filter options">Options</button>
-                <div class="dropdown-menu p-3 vm-filter-options">
+            <div class="manager-table-toolbar mb-2" role="group" aria-label="Table controls">
+              <div class="input-group input-group-sm manager-filter-group">
+                <input id="vm-filter" type="text" class="form-control" placeholder="Filter rows…" aria-label="Filter VMs" title="Filter rows by text; type screenshot to show VMs with saved screenshots; use Options for Regex or selected VMs" />
+                <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" title="Filter options">Options</button>
+                <div class="dropdown-menu p-3 manager-filter-options">
                   <div class="form-check mb-2">
                     <input id="vm-filter-selected" class="form-check-input" type="checkbox" aria-describedby="vm-selected-filter-notice">
                     <label for="vm-filter-selected" class="form-check-label">Show only selected</label>
@@ -160,88 +150,66 @@
                       <input id="vm-filter-regex" class="form-check-input" type="checkbox" title="Treat filter as JavaScript RegExp (case-insensitive)">
                       <label for="vm-filter-regex" class="form-check-label">Regex</label>
                     </div>
-                    <button type="button" class="btn btn-link btn-sm p-0" data-bs-toggle="modal"
-                      data-bs-target="#vmRegexHelpModal" aria-label="Show regular expression examples" title="Regular expression examples">
+                    <button type="button" class="btn btn-link btn-sm p-0" data-bs-toggle="modal" data-bs-target="#vmRegexHelpModal" aria-label="Show regular expression examples" title="Regular expression examples">
                       <i class="bi bi-info-circle" aria-hidden="true"></i>
                     </button>
                   </div>
+                  <div id="vm-tag-filters"></div>
                 </div>
                 <button class="btn btn-outline-secondary" type="button" title="Clear all filters" onclick="vmClearFilter()">Clear</button>
               </div>
-              <div class="vm-table-tools">
-                <button id="btn-prox-login" class="btn btn-sm btn-outline-primary"
-                  title="Update Proxmox URL/ports and credentials">Proxmox login</button>
-                <span id="refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip"
-                  data-bs-placement="left" title="Please authenticate to Proxmox first.">
-                  <button id="btn-refresh" class="btn btn-sm btn-outline-secondary"
-                    onclick="vmShowRefreshOptions()" disabled>Refresh VMs</button>
+              <div class="manager-table-tools">
+                <button id="btn-prox-login" class="btn btn-sm btn-outline-primary" title="Update Proxmox URL/ports and credentials">Connection</button>
+                <span id="refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="left" title="Please authenticate to Proxmox first.">
+                  <button id="btn-refresh" class="btn btn-sm btn-outline-secondary" onclick="vmShowRefreshOptions()" disabled>Refresh</button>
                 </span>
-                <div class="input-group input-group-sm vm-auto-control">
-                  <span class="input-group-text">Auto</span>
-                  <select id="vm-auto-interval" class="form-select"
-                    title="Automatically refresh at an interval (requires Proxmox auth)">
-                    <option value="0">Off</option>
-                    <option value="15">15s</option>
-                    <option value="30">30s</option>
-                    <option value="60">60s</option>
-                    <option value="300">5m</option>
-                  </select>
+                <div class="manager-auto-refresh">
+                  <div class="input-group input-group-sm manager-auto-control">
+                    <span class="input-group-text">Auto</span>
+                    <select id="vm-auto-interval" class="form-select" title="Automatically refresh at an interval (requires Proxmox auth)">
+                      <option value="0">Off</option>
+                      <option value="15">15s</option>
+                      <option value="30">30s</option>
+                      <option value="60">60s</option>
+                      <option value="300">5m</option>
+                    </select>
+                  </div>
+                  <span id="vm-auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
                 </div>
-                <span id="vm-auto-badge" class="badge bg-secondary align-self-center ms-1"
-                  title="Auto-refresh status">Off</span>
                 <div class="btn-group btn-group-sm">
-                  <button id="vm-cols-btn" type="button" class="btn btn-outline-secondary dropdown-toggle"
-                    data-bs-toggle="dropdown" aria-expanded="false">Columns</button>
-                  <ul class="dropdown-menu p-2 small" id="vm-cols-menu" style="min-width: 240px;">
-<li class="form-check"><input class="form-check-input" type="checkbox" id="vm-col-screenshot" checked><label class="form-check-label" for="vm-col-screenshot">Screenshot</label></li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-project" checked>
-                      <label class="form-check-label" for="vm-col-project">Project</label>
+                  <button id="vm-cols-btn" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">Columns</button>
+                  <ul class="dropdown-menu dropdown-menu-end manager-columns-menu" id="vm-cols-menu">
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-project"><input class="form-check-input m-0" type="checkbox" id="vm-col-project" checked><span>Project</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-name"><input class="form-check-input m-0" type="checkbox" id="vm-col-name" checked><span>Generated VM Names</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-cred"><input class="form-check-input m-0" type="checkbox" id="vm-col-cred" checked><span>Credentials</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-status"><input class="form-check-input m-0" type="checkbox" id="vm-col-status" checked><span>Status</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-state"><input class="form-check-input m-0" type="checkbox" id="vm-col-state" checked><span>State</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-id"><input class="form-check-input m-0" type="checkbox" id="vm-col-id" checked><span>ID</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-node"><input class="form-check-input m-0" type="checkbox" id="vm-col-node" checked><span>Node Name</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-template"><input class="form-check-input m-0" type="checkbox" id="vm-col-template" checked><span>TemplateName/ID</span></label></li>
+                    <li>
+                      <label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-last_login" title="Latest retained Proxmox authentication, not guest OS login; enable and refresh VMs to load">
+                        <input class="form-check-input m-0" type="checkbox" id="vm-col-last_login">
+                        <span>Last login</span>
+                      </label>
                     </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-name" checked>
-                      <label class="form-check-label" for="vm-col-name">Generated VM Names</label>
-                    </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-cred" checked>
-                      <label class="form-check-label" for="vm-col-cred">Credentials</label>
-                    </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-status" checked>
-                      <label class="form-check-label" for="vm-col-status">Status</label>
-                    </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-state" checked>
-                      <label class="form-check-label" for="vm-col-state">State</label>
-                    </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-id" checked>
-                      <label class="form-check-label" for="vm-col-id">ID</label>
-                    </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-node" checked>
-                      <label class="form-check-label" for="vm-col-node">Node Name</label>
-                    </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-template" checked>
-                      <label class="form-check-label" for="vm-col-template">TemplateName/ID</label>
-                    </li>
-                    <li class="form-check">
-                      <input class="form-check-input" type="checkbox" id="vm-col-nets" checked>
-                      <label class="form-check-label" for="vm-col-nets">Adaptors</label>
-                    </li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-screenshot"><input class="form-check-input m-0" type="checkbox" id="vm-col-screenshot" checked><span>Screenshot</span></label></li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-nets"><input class="form-check-input m-0" type="checkbox" id="vm-col-nets" checked><span>Adaptors</span></label></li>
                   </ul>
                 </div>
               </div>
             </div>
             <div class="d-flex align-items-center gap-2 small">
-              <span id="vm-selected-filter-notice" class="badge bg-warning text-dark d-none mb-2" role="status">Showing only selected VMs · Clear to show all</span>
+              <span id="vm-selected-filter-notice" class="small text-warning-emphasis d-none mb-2" role="status">Showing only selected VMs · Clear to show all</span>
               <span id="vm-filter-error" class="text-danger d-none mb-2">Invalid regular expression</span>
             </div>
+            <div id="vm-tag-notice" class="row-tag-notice d-none mb-2" role="status"></div>
+            <div id="vm-action-status" class="d-none" role="status" aria-live="polite"></div>
             <div id="vm-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status"
               aria-live="polite" aria-atomic="true"></div>
             <!-- Actions toolbar -->
-            <div class="d-flex flex-wrap gap-2 mb-3" id="vm-actions-bar">
+            <div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3" id="vm-actions-bar">
+              <div id="vm-tag-assignment" class="dropdown"></div>
               <!-- Lifecycle & Setup group -->
               <div class="btn-group btn-group-sm">
                 <button id="act-lifecycle" type="button" class="btn btn-outline-secondary dropdown-toggle"
@@ -250,13 +218,14 @@
                 <ul class="dropdown-menu">
                   <li><button class="dropdown-item" type="button" onclick="vmAction('create')"
                       title="Create new VMs based on the configuration">Create</button></li>
-                  <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('delete')"
+                  <li><hr class="dropdown-divider"></li>
+                <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('delete')"
                       title="Delete the selected VMs from Proxmox">Delete</button></li>
                 </ul>
               </div>
               <!-- Power group -->
               <div class="btn-group btn-group-sm">
-                <button id="act-power" type="button" class="btn btn-outline-primary dropdown-toggle"
+                <button id="act-power" type="button" class="btn btn-outline-secondary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled
                   title="Start, resume, pause, or power off selected VMs">Power</button>
                 <ul class="dropdown-menu">
@@ -335,9 +304,6 @@
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_create')"
                       title="Create a Proxmox user and pool, and add selected VMs to the pool">Create User /
                       Pool</button></li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('users_delete')"
-                      title="Delete the Proxmox user and pool associated with the credential">Delete User /
-                      Pool</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_perms')"
                       title="Set user permissions for selected VMs">Set User
                       Perms</button></li>
@@ -368,12 +334,16 @@
                       title="Enroll the selected rows' PVE users in the orchestrator; access applies to the configured orchestrator instance">Enable orchestration access (dangerous)</button></li>
                   <li data-orchestration-permissions class="d-none" hidden><button class="dropdown-item" type="button" onclick="vmAction('users_orchestration_disable')"
                       title="Remove the selected users' orchestrator enrollment across projects">Disable orchestration access</button></li>
+                <li><hr class="dropdown-divider"></li>
+                  <li><button class="dropdown-item text-danger" type="button" onclick="vmAction('users_delete')"
+                      title="Delete the Proxmox user and pool associated with the credential">Delete User /
+                      Pool</button></li>
                 </ul>
               </div>
             </div>
             <div id="vm-config-only-alert" class="alert alert-info py-2 px-3 small mb-3" role="alert">
               Showing project configuration only. VM states and metrics will appear as <code>n/a</code> until you log in
-              to Proxmox and press <em>Refresh VMs</em>.
+              to Proxmox and press <em>Refresh</em>.
             </div>
 
             <div id="vm-skipped-note" class="mb-2"></div>
@@ -532,7 +502,7 @@
             </div>
             <div id="lxc-push-summary" class="text-muted small mb-3"></div>
             <div id="lxc-push-history-group" class="mb-3">
-              <label class="form-label" for="lxc-push-history">History — last 5 runs</label>
+              <label class="form-label" for="lxc-push-history">History — last 10 runs</label>
               <select id="lxc-push-history" class="form-select" disabled><option>No recent runs</option></select>
               <div id="lxc-push-history-help" class="form-text" aria-live="polite">Recall settings and files selected while this page remains open. After reloading, choose the files again.</div>
             </div>
@@ -643,7 +613,7 @@
           <div class="modal-body">
             <div id="lxc-pull-summary" class="text-muted small mb-3"></div>
             <div class="mb-3">
-              <label class="form-label" for="lxc-pull-history">History — last 5 runs</label>
+              <label class="form-label" for="lxc-pull-history">History — last 10 runs</label>
               <select id="lxc-pull-history" class="form-select" disabled><option>No recent runs</option></select>
             </div>
             <div class="mb-2">
@@ -771,9 +741,11 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/static/js/orchestration_access.js?v=20261009-flags"></script>
   <script src="/static/js/guest_push_csv.js?v=20261028-csv-submit"></script>
-  <script src="/static/js/vm_manager.js?v=20261029-validation-results"></script>
-  <script src="/static/js/action_history.js?v=20261028-csv-push"></script>
-  <script src="/static/js/server_vm_actions.js?v=20261029-validation-results"></script>
+  <script src="/static/js/login_time.js?v=20261029-login-source"></script>
+  <script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
+<script src="/static/js/vm_manager.js?v=20261030-create-feedback"></script>
+  <script src="/static/js/action_history.js?v=20261030-history-10"></script>
+  <script src="/static/js/server_vm_actions.js?v=20261030-create-feedback"></script>
   <script src="/static/js/plugin_loader.js?v=20261015-agent-tabs"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
@@ -943,7 +915,7 @@
       <div class="modal-body">
         <p id="custom-command-summary" class="small text-muted"></p>
         <div class="mb-3">
-          <label class="form-label" for="custom-command-history">History — last 5 runs</label>
+          <label class="form-label" for="custom-command-history">History — last 10 runs</label>
           <select id="custom-command-history" class="form-select" disabled><option>No recent runs</option></select>
         </div>
         <label for="custom-command-input" class="form-label">Command</label>
@@ -1012,8 +984,8 @@
         if (!pid) return;
         const input = document.getElementById('vm-proj-id');
         if (input) input.value = pid;
-        try { 
-          await vmLoadProjectById(pid); 
+        try {
+          await vmLoadProjectById(pid);
           const u = new URL(window.location.href);
           if (u.searchParams.get('refresh') === '1') {
             // Auto-refresh once after load if requested by redirect

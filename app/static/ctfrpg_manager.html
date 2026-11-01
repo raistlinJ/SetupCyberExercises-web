@@ -6,10 +6,12 @@
   <title>DeployForge — CTF-RPG Manager</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/static/css/shell.css?v=20261013-integrations" rel="stylesheet">
+  <link href="/static/css/row_tags.css?v=20261029-tag-icons" rel="stylesheet">
+  <link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
   <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </head>
-<body class="shell-body">
+<body class="shell-body manager-page">
 <header class="app-banner">
   <div class="container-fluid d-flex align-items-center justify-content-between py-2">
     <div class="d-flex align-items-center gap-2">
@@ -41,25 +43,58 @@
       <div class="d-flex align-items-center gap-2"><div class="btn-group btn-group-sm" role="group" aria-label="Projects selection"><button id="choose-projects" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#projects-modal" type="button" title="Choose one or more projects">Projects <span id="projects-count" class="badge bg-secondary ms-1">0</span></button></div></div>
     </div>
     <div class="card"><div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-        <div class="input-group input-group-sm" style="max-width:460px">
-          <span class="input-group-text">Filter</span>
-          <input id="filter" type="text" class="form-control" placeholder="Text or RegExp (when enabled)" title="Filter rows by text; enable Regex for advanced matching">
-          <span class="input-group-text"><input id="filter-regex" class="form-check-input mt-0" type="checkbox" title="Treat filter as JavaScript RegExp (case-insensitive)" aria-label="Regex"><span class="ms-1">Regex</span></span>
-          <button id="clear-filter" class="btn btn-outline-secondary" type="button" title="Clear filter">Clear</button>
+      <div class="manager-table-toolbar mb-2" role="group" aria-label="Table controls">
+        <div class="input-group input-group-sm manager-filter-group">
+          <input id="filter" aria-label="Filter rows" type="text" class="form-control" placeholder="Filter rows…" title="Filter rows by text; enable Regex for advanced matching">
+          <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" title="Filter options">Options</button>
+          <div class="dropdown-menu p-3 manager-filter-options">
+            <div class="form-check mb-2"><input id="ctfrpg-filter-selected" class="form-check-input" type="checkbox"><label for="ctfrpg-filter-selected" class="form-check-label">Show only selected</label></div>
+            <div class="form-check">
+              <input id="filter-regex" class="form-check-input" type="checkbox" title="Treat filter as a case-insensitive regular expression">
+              <label for="filter-regex" class="form-check-label">Regex</label>
+            </div>
+            <div id="ctfrpg-tag-filters"></div>
+          </div>
+          <button id="clear-filter" class="btn btn-outline-secondary" type="button" title="Clear all filters">Clear</button>
         </div>
-        <span id="filter-error" class="text-danger small d-none">Invalid regular expression</span>
-        <div class="d-flex align-items-center gap-2 flex-wrap">
-          <button id="connection-button" class="btn btn-sm btn-outline-primary" type="button" title="Update CTF-RPG URL and credentials">Re-authenticate to CTF-RPG</button>
-          <button id="refresh-button" class="btn btn-sm btn-outline-secondary" type="button">Refresh States</button>
-          <div class="input-group input-group-sm" style="width:200px"><label class="input-group-text" for="auto-interval">Auto</label><select id="auto-interval" class="form-select" title="Automatically refresh at an interval"><option value="0" selected>Off</option><option value="15">15s</option><option value="30">30s</option><option value="60">60s</option><option value="300">5m</option></select></div>
-          <span id="auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
-          <div class="btn-group btn-group-sm ms-2"><button id="columns-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">Columns</button><ul id="columns-menu" class="dropdown-menu p-2 small" style="min-width:190px"><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="project">Project</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="user" checked>User</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="team" checked>Team</label></li><li><hr class="dropdown-divider"></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="user_points" checked>User Points</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="team_points" checked>Team Points</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="character" checked>Character</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="completed" checked>Completed</label></li><li><label class="dropdown-item"><input class="form-check-input column-check me-2" type="checkbox" value="state" checked>State</label></li></ul></div>
-          <button id="export-button" class="btn btn-sm btn-outline-secondary ms-2" type="button" title="Download table data as CSV">Download Data</button>
+        <div class="manager-table-tools">
+          <button id="connection-button" class="btn btn-sm btn-outline-primary" type="button" title="Update CTF-RPG URL and credentials">Connection</button>
+          <button id="refresh-button" class="btn btn-sm btn-outline-secondary" type="button">Refresh</button>
+          <div class="manager-auto-refresh">
+            <div class="input-group input-group-sm manager-auto-control">
+              <label class="input-group-text" for="auto-interval">Auto</label>
+              <select id="auto-interval" class="form-select" title="Automatically refresh at an interval">
+                <option value="0" selected>Off</option>
+                <option value="15">15s</option>
+                <option value="30">30s</option>
+                <option value="60">60s</option>
+                <option value="300">5m</option>
+              </select>
+            </div>
+            <span id="auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
+          </div>
+          <div class="btn-group btn-group-sm">
+            <button id="columns-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">Columns</button>
+            <ul class="dropdown-menu dropdown-menu-end manager-columns-menu" id="columns-menu">
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="project"><span>Project</span></label></li>
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="user" checked><span>User</span></label></li>
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="team" checked><span>Team</span></label></li>
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="user_points" checked><span>User Points</span></label></li>
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="team_points" checked><span>Team Points</span></label></li>
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="character" checked><span>Character</span></label></li>
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="completed" checked><span>Completed</span></label></li>
+              <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 column-check" type="checkbox" value="state" checked><span>State</span></label></li>
+            </ul>
+          </div>
+          <button id="export-button" class="btn btn-sm btn-outline-secondary" type="button" title="Download table data as CSV">Download Data</button>
         </div>
       </div>
-      <div class="d-flex flex-wrap gap-2 mb-3 align-items-center" id="ctfrpg-actions-bar">
-        <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">Users</button><ul class="dropdown-menu"><li><button id="create-users" class="dropdown-item" type="button">Create / update</button></li><li><button id="delete-users" class="dropdown-item text-danger" type="button">Delete</button></li></ul></div>
+    <span id="filter-error" class="text-danger small d-none">Invalid regular expression</span>
+      <div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3" id="ctfrpg-actions-bar">
+        <div id="ctfrpg-tag-assignment" class="dropdown"></div>
+        <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Users</button><ul class="dropdown-menu"><li><button id="create-users" class="dropdown-item" type="button">Create / update</button></li><li><hr class="dropdown-divider"></li>
+                <li><button id="delete-users" class="dropdown-item text-danger" type="button">Delete</button></li></ul></div>
+
         <button id="select-visible" class="btn btn-sm btn-outline-secondary" type="button">Select visible</button>
         <button id="clear-selection" class="btn btn-sm btn-outline-secondary" type="button">Clear selection</button>
         <span id="selected-count" class="small text-muted">0 selected</span>
@@ -72,6 +107,8 @@
       <div class="tab-content pt-3">
         <div class="tab-pane fade show active" id="users-pane" role="tabpanel" aria-labelledby="users-tab" tabindex="0">
           <div id="status" class="small mb-3 text-muted" role="status" aria-live="polite">Select a project to get started.</div>
+          <div id="ctfrpg-selected-filter-notice" class="small text-warning-emphasis d-none mb-2" role="status">Showing only selected users · Clear to show all</div>
+          <div id="ctfrpg-tag-notice" class="row-tag-notice d-none mb-2" role="status"></div>
           <div id="project-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status" aria-live="polite" aria-label="Selected users per project"></div>
       <div class="table-responsive data-scrollbox"><table class="table table-sm table-hover align-middle"><thead><tr>
         <th scope="col" data-col="project"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="project">Project<span class="sort-icon"></span></button></th>
@@ -107,7 +144,8 @@
 <script src="/static/js/shell.js?v=20261020-stable-queue"></script>
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/ctfrpg_audio.js?v=20261019-notifications"></script>
-<script src="/static/js/ctfrpg_table.js?v=20261019-unified"></script>
-<script src="/static/js/ctfrpg_manager.js?v=20261019-unified"></script>
+<script src="/static/js/ctfrpg_table.js?v=20261029-login-source"></script>
+<script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
+<script src="/static/js/ctfrpg_manager.js?v=20261029-login-source"></script>
 </body>
 </html>

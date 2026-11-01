@@ -102,6 +102,7 @@ async function submitServerVmAction(label, descriptor, queueOptions) {
     }
   }
   const job = await ServerQueue.submit(label, steps, queueOptions);
+  await queueOptions.onAccepted?.(job);
   return finishServerVmAction(label, job);
 }
 

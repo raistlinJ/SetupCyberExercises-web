@@ -56,6 +56,7 @@ function actionPage(accept, multi = false) {
  const selected = projects();
  const calls = [];
  const page = vm.createContext({
+  document: {getElementById: () => null, querySelectorAll: () => [], addEventListener() {}},
   PROJ: selected[0].project, vmIsMulti: () => multi,
   listSelectedEntriesForPid: () => selected[0].targets,
   listSelectedEntries: () => selected.flatMap(p => p.targets.map(t => ({ ...t, pid: p.project.id }))),

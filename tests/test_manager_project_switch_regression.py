@@ -408,8 +408,10 @@ class ManagerProjectSwitchRegressionTests(unittest.TestCase):
               const spaceLabel = document.getElementById('nav-proxmox-space-label');
               const memoryLabel = document.getElementById('nav-proxmox-memory-label');
               assert(serverLabel.textContent === 'Server: prox.example:8006', 'Server host and port should be displayed');
-              assert(spaceLabel.textContent === '20 / 100 GiB', 'Space usage should use the compact used / total format');
-              assert(memoryLabel.textContent === '8 / 32 GiB', 'Memory usage should use the compact used / total format');
+              assert(spaceLabel.textContent === '20% used', 'Disk should explicitly identify the used percentage');
+              assert(memoryLabel.textContent === '25% used', 'RAM should explicitly identify the used percentage');
+              assert(spaceLabel.title === '20 GiB used · 80 GiB free · 100 GiB total', 'Disk details should distinguish used, free, and total');
+              assert(memoryLabel.title === '8 GiB used · 24 GiB free · 32 GiB total', 'RAM details should distinguish used, free, and total');
               assert(link.title.includes('(pve1)'), 'Resource tooltip should identify the configured node');
 
               runQueued = async (_label, fn) => await fn();
@@ -439,8 +441,8 @@ class ManagerProjectSwitchRegressionTests(unittest.TestCase):
               };
 
               await vmRefresh({ showProgressDialog: false });
-              assert(spaceLabel.textContent === '25 / 100 GiB', 'VM operation refreshes should update space usage');
-              assert(memoryLabel.textContent === '10 / 32 GiB', 'VM operation refreshes should update memory usage');
+              assert(spaceLabel.textContent === '25% used', 'VM operation refreshes should update space usage');
+              assert(memoryLabel.textContent === '31% used', 'VM operation refreshes should update memory usage');
             })();
             """
         )

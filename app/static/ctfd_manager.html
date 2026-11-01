@@ -7,9 +7,11 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <link href="/static/css/shell.css?v=20261013-integrations" rel="stylesheet">
+  <link href="/static/css/row_tags.css?v=20261029-tag-icons" rel="stylesheet">
+  <link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
 </head>
-<body class="shell-body">
+<body class="shell-body manager-page">
 <header class="app-banner">
   <div class="container-fluid d-flex align-items-center justify-content-between py-2">
     <div class="d-flex align-items-center gap-2">
@@ -78,76 +80,71 @@
           <div id="ctfd-progress" class="progress mb-2 d-none" aria-hidden="true">
             <div id="ctfd-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100">Refreshing…</div>
           </div>
-          <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-            <div class="input-group input-group-sm" style="max-width: 460px;">
-              <span class="input-group-text">Filter</span>
-              <input id="ctfd-filter" type="text" class="form-control" placeholder="Text or RegExp (when enabled)" title="Filter rows by text; enable Regex for advanced matching" />
-              <span class="input-group-text">
-                <input id="ctfd-filter-regex" class="form-check-input mt-0" type="checkbox" title="Treat filter as JavaScript RegExp (case-insensitive)" aria-label="Regex" />
-                <span class="ms-1">Regex</span>
-              </span>
-              <button class="btn btn-outline-secondary" type="button" title="Clear filter" onclick="document.getElementById('ctfd-filter').value=''; CTFD_FILTER_TEXT=''; renderCtfdTable(PROJ);">Clear</button>
-            </div>
-            <span id="ctfd-filter-error" class="text-danger small d-none">Invalid regular expression</span>
-            <div class="d-flex align-items-center gap-2">
-              <button id="btn-ctfd-login" type="button" class="btn btn-sm btn-outline-primary" title="Enter your CTFd URL, port, username, and password">Authenticate to CTFd</button>
-              <span id="ctfd-refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="left" title="Please authenticate to CTFd first.">
-                <button id="btn-ctfd-refresh" class="btn btn-sm btn-outline-secondary" onclick="ctfdRefresh()" disabled>Refresh States</button>
-              </span>
-              <div class="input-group input-group-sm" style="width: 200px;">
-                <span class="input-group-text">Auto</span>
-                <select id="ctfd-auto-interval" class="form-select" title="Automatically refresh at an interval (requires a valid login)">
-                  <option value="0">Off</option>
-                  <option value="15">15s</option>
-                  <option value="30">30s</option>
-                  <option value="60">60s</option>
-                  <option value="300">5m</option>
-                </select>
+          <div class="manager-table-toolbar mb-2" role="group" aria-label="Table controls">
+            <div class="input-group input-group-sm manager-filter-group">
+              <input id="ctfd-filter" aria-label="Filter rows" type="text" class="form-control" placeholder="Filter rows…" title="Filter rows by text; enable Regex for advanced matching" />
+              <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" title="Filter options">Options</button>
+              <div class="dropdown-menu p-3 manager-filter-options">
+                <div class="form-check mb-2"><input id="ctfd-filter-selected" class="form-check-input" type="checkbox"><label for="ctfd-filter-selected" class="form-check-label">Show only selected</label></div>
+                <div class="form-check">
+                  <input id="ctfd-filter-regex" class="form-check-input" type="checkbox" title="Treat filter as a case-insensitive regular expression">
+                  <label for="ctfd-filter-regex" class="form-check-label">Regex</label>
+                </div>
+                <div id="ctfd-tag-filters"></div>
               </div>
-              <span id="ctfd-auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
-              <div class="btn-group btn-group-sm ms-2">
-                <button id="ctfd-cols-btn" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">Columns</button>
-                <ul class="dropdown-menu p-2 small" id="ctfd-cols-menu" style="min-width: 220px;">
-                  <li class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ctfd-col-project">
-                    <label class="form-check-label" for="ctfd-col-project">Project</label>
+              <button class="btn btn-outline-secondary" type="button" title="Clear all filters" onclick="ctfdClearFilter()">Clear</button>
+            </div>
+            <div class="manager-table-tools">
+              <button id="btn-ctfd-login" type="button" class="btn btn-sm btn-outline-primary" title="Enter your CTFd URL, port, username, and password">Connection</button>
+              <span id="ctfd-refresh-wrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="left" title="Please authenticate to CTFd first.">
+                <button id="btn-ctfd-refresh" class="btn btn-sm btn-outline-secondary" onclick="ctfdRefresh()" disabled>Refresh</button>
+              </span>
+              <div class="manager-auto-refresh">
+                <div class="input-group input-group-sm manager-auto-control">
+                  <span class="input-group-text">Auto</span>
+                  <select id="ctfd-auto-interval" class="form-select" title="Automatically refresh at an interval (requires a valid login)">
+                    <option value="0">Off</option>
+                    <option value="15">15s</option>
+                    <option value="30">30s</option>
+                    <option value="60">60s</option>
+                    <option value="300">5m</option>
+                  </select>
+                </div>
+                <span id="ctfd-auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
+              </div>
+              <div class="btn-group btn-group-sm">
+                <button id="ctfd-cols-btn" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">Columns</button>
+                <ul class="dropdown-menu dropdown-menu-end manager-columns-menu" id="ctfd-cols-menu">
+                  <li><label class="dropdown-item d-flex align-items-center gap-2" for="ctfd-col-project"><input class="form-check-input m-0" type="checkbox" id="ctfd-col-project"><span>Project</span></label></li>
+                  <li><label class="dropdown-item d-flex align-items-center gap-2" for="ctfd-col-cred"><input class="form-check-input m-0" type="checkbox" id="ctfd-col-cred" checked><span>User / Password</span></label></li>
+                  <li><label class="dropdown-item d-flex align-items-center gap-2" for="ctfd-col-team"><input class="form-check-input m-0" type="checkbox" id="ctfd-col-team" checked><span>Team</span></label></li>
+                  <li>
+                    <label class="dropdown-item d-flex align-items-center gap-2" for="ctfd-col-user_points"><input class="form-check-input m-0" type="checkbox" id="ctfd-col-user_points" checked><span>User Points</span></label>
                   </li>
-                  <li class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ctfd-col-cred" checked>
-                    <label class="form-check-label" for="ctfd-col-cred">User / Password</label>
+                  <li>
+                    <label class="dropdown-item d-flex align-items-center gap-2" for="ctfd-col-team_points"><input class="form-check-input m-0" type="checkbox" id="ctfd-col-team_points" checked><span>Team Points</span></label>
                   </li>
-                  <li class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ctfd-col-team" checked>
-                    <label class="form-check-label" for="ctfd-col-team">Team</label>
+                  <li>
+                    <label class="dropdown-item d-flex align-items-center gap-2" for="ctfd-col-user_last"><input class="form-check-input m-0" type="checkbox" id="ctfd-col-user_last" checked><span>User Last Solved</span></label>
                   </li>
-                  <li><hr class="dropdown-divider"></li>
-                  <li class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ctfd-col-user_points" checked>
-                    <label class="form-check-label" for="ctfd-col-user_points">User Points</label>
-                  </li>
-                  <li class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ctfd-col-team_points" checked>
-                    <label class="form-check-label" for="ctfd-col-team_points">Team Points</label>
-                  </li>
-                  <li class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ctfd-col-user_last" checked>
-                    <label class="form-check-label" for="ctfd-col-user_last">User Last Solved</label>
-                  </li>
-                  <li class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ctfd-col-team_last" checked>
-                    <label class="form-check-label" for="ctfd-col-team_last">Team Last Solved</label>
+                  <li>
+                    <label class="dropdown-item d-flex align-items-center gap-2" for="ctfd-col-team_last"><input class="form-check-input m-0" type="checkbox" id="ctfd-col-team_last" checked><span>Team Last Solved</span></label>
                   </li>
                 </ul>
               </div>
-              <button id="ctfd-download" class="btn btn-sm btn-outline-secondary ms-2" type="button" title="Download table data (all rows) as CSV" onclick="openCtfdDownloadModal()" disabled>Download Data</button>
+              <button id="ctfd-download" class="btn btn-sm btn-outline-secondary" type="button" title="Download table data (all rows) as CSV" onclick="openCtfdDownloadModal()" disabled>Download Data</button>
             </div>
           </div>
-          <div class="d-flex flex-wrap gap-2 mb-3 align-items-center" id="ctfd-actions-bar">
+    <span id="ctfd-filter-error" class="text-danger small d-none">Invalid regular expression</span>
+          <div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3" id="ctfd-actions-bar">
+            <div id="ctfd-tag-assignment" class="dropdown"></div>
+
             <div class="btn-group btn-group-sm" id="ctfd-users-group" data-bs-toggle="tooltip" data-bs-placement="top" title="Create or delete CTFd users for project credentials.">
               <button id="act-ctf-users" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled>Users</button>
               <ul class="dropdown-menu">
                 <li><button class="dropdown-item" type="button" onclick="ctfdAction('users_create')">Create / update</button></li>
-                <li><button class="dropdown-item" type="button" onclick="ctfdAction('users_delete')">Delete</button></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><button class="dropdown-item text-danger" type="button" onclick="ctfdAction('users_delete')">Delete</button></li>
               </ul>
             </div>
             <div class="btn-group btn-group-sm" id="ctfd-stats-group" data-bs-toggle="tooltip" data-bs-placement="top" title="Quick CTFd stats">
@@ -177,7 +174,7 @@
             </div>
           </div>
           <div id="ctfd-config-only-alert" class="alert alert-info py-2 px-3 small mb-3" role="alert">
-            Showing project configuration only. Select a project, then click <em>Authenticate to CTFd</em> above to enter your CTFd username and password. CTFd values (rank, points, last solves, teams) will appear as <code>n/a</code> until you authenticate.
+            Showing project configuration only. Select a project, then click <em>Connection</em> above to enter your CTFd username and password. CTFd values (rank, points, last solves, teams) will appear as <code>n/a</code> until you authenticate.
           </div>
 
           <ul class="nav nav-tabs" id="ctfd-main-tabs" role="tablist">
@@ -191,6 +188,8 @@
           <div class="tab-content pt-3" id="ctfd-main-tabs-content">
             <div class="tab-pane fade show active" id="ctfd-tab-table" role="tabpanel" aria-labelledby="ctfd-tab-table-btn" tabindex="0">
               <div id="ctfd-info" class="mb-3 text-muted small">Select a project from the left. CTFd mapping overview is shown below.</div>
+              <div id="ctfd-selected-filter-notice" class="small text-warning-emphasis d-none mb-2" role="status">Showing only selected users · Clear to show all</div>
+              <div id="ctfd-tag-notice" class="row-tag-notice d-none mb-2" role="status"></div>
               <div id="ctfd-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status" aria-live="polite" aria-label="Selected users per project"></div>
               <div id="ctfd-table" class="table-responsive data-scrollbox"></div>
             </div>
@@ -292,7 +291,7 @@
               </div>
             </div>
           </div>
-          
+
         </div>
       </div>
     </main>
@@ -306,7 +305,8 @@
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/app.js?v=20261026-http-status"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/js/ctfd_manager.js?v=20261026-responsive-reads"></script>
+<script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
+<script src="/static/js/ctfd_manager.js?v=20261030-unified-controls"></script>
 <script>
   let ctfdChallengesPopupRef = null;
   let ctfdChallengesPopupUrl = '';

@@ -1,6 +1,7 @@
 // Recall settings only: selecting history never submits work or changes targets.
 (function () {
   // Keep File references for this page only; history on the server stores names/settings.
+  const HISTORY_LIMIT = 10;
   const pushSelections = new Map();
   const pushInput = type => document.getElementById(type === 'folder' ? 'lxc-push-folder' : 'lxc-push-files');
   const sourceNames = files => Array.from(files || [], file => String(file.webkitRelativePath || file.name || ''));
@@ -12,7 +13,7 @@
     const key = selectionKey(type, sourceNames(files));
     pushSelections.delete(key);
     pushSelections.set(key, files);
-    while (pushSelections.size > 5) pushSelections.delete(pushSelections.keys().next().value);
+    while (pushSelections.size > HISTORY_LIMIT) pushSelections.delete(pushSelections.keys().next().value);
   }
 
   function restorePushSelection(type, settings) {

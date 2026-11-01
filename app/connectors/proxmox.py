@@ -258,6 +258,30 @@ class ProxmoxClient:
         data = resp.json()
         return data.get("data", [])
 
+    def last_user_authentications(self) -> Dict[str, float]:
+        """Latest successful authentication events visible in the retained cluster log."""
+        session = self._ensure_session()
+        response = session.get(f"{self.base_url.rstrip('/')}/api2/json/cluster/log",
+                               params={"max": 1000}, timeout=20)
+        response.raise_for_status()
+        entries = response.json().get("data", [])
+        latest = {}
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            match = re.fullmatch(r"successful auth for user '([^']+)'", str(entry.get("msg") or "").strip())
+            if not match:
+                continue
+            try:
+                timestamp = float(entry.get("time"))
+            except (TypeError, ValueError):
+                continue
+            if not 0 < timestamp < float("inf"):
+                continue
+            user = match.group(1)
+            latest[user] = max(latest.get(user, 0), timestamp)
+        return latest
+
     def list_qemu_vms(self, node: str) -> List[Dict[str, Any]]:
         s = self._ensure_session()
         url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu"

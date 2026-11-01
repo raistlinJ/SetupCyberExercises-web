@@ -5,6 +5,51 @@ let CTFD_SELECTED_PIDS = null; // null implies single-project (sidebar selection
 let CTFD_SORT = { key: 'cred', dir: 'asc' }; // cred|team|user_points|team_points|user_last|team_last|project
 let CTFD_FILTER_TEXT = '';
 let CTFD_FILTER_IS_REGEX = false;
+let CTFD_FILTER_SELECTED_ONLY = false;
+let CTFD_ROW_TAGS = null;
+function ctfdRowTags() { return CTFD_ROW_TAGS ||= window.RowTags.create('ctfd'); }
+function ctfdTagKey(row) { return `${row.pid ?? PROJ?.id}:${row.index}`; }
+function ctfdSelectedTagKeys() {
+  if (Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1) {
+    return [...CTFD_SELECTED_KEYS].filter(key => CTFD_SELECTED_PIDS.some(pid => key.startsWith(`${pid}:`)));
+  }
+  return PROJ ? [...CTFD_SELECTED_INDICES].map(index => `${PROJ.id}:${index}`) : [];
+}
+function ctfdUpdateSelectedFilter() {
+  const selected = document.getElementById('ctfd-filter-selected');
+  if (selected) selected.checked = CTFD_FILTER_SELECTED_ONLY;
+  document.getElementById('ctfd-selected-filter-notice')?.classList.toggle('d-none', !CTFD_FILTER_SELECTED_ONLY);
+  const input = document.getElementById('ctfd-filter');
+  const regex = document.getElementById('ctfd-filter-regex');
+  if (input) input.disabled = CTFD_FILTER_SELECTED_ONLY;
+  if (regex) regex.disabled = CTFD_FILTER_SELECTED_ONLY;
+  if (CTFD_FILTER_SELECTED_ONLY) document.getElementById('ctfd-filter-error')?.classList.add('d-none');
+}
+function ctfdClearFilter() {
+  CTFD_FILTER_TEXT = '';
+  CTFD_FILTER_SELECTED_ONLY = false;
+  document.getElementById('ctfd-filter').value = '';
+  document.getElementById('ctfd-filter-error')?.classList.add('d-none');
+  ctfdRowTags().clearFilter();
+  ctfdUpdateSelectedFilter();
+  if (PROJ) writeCtfdUiState(PROJ.id, {filterText: ''});
+  renderCtfdTable(PROJ);
+}
+function ctfdInitRowTags() {
+  ctfdRowTags().mount({
+    filterHost: document.getElementById('ctfd-tag-filters'),
+    assignmentHost: document.getElementById('ctfd-tag-assignment'),
+    notice: document.getElementById('ctfd-tag-notice'),
+    getProjectIds: () => Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1 ? CTFD_SELECTED_PIDS : (PROJ ? [PROJ.id] : []),
+    getSelectedKeys: ctfdSelectedTagKeys,
+    onChange: () => renderCtfdTable(PROJ),
+  });
+  document.getElementById('ctfd-filter-selected')?.addEventListener('change', event => {
+    CTFD_FILTER_SELECTED_ONLY = event.target.checked;
+    ctfdUpdateSelectedFilter();
+    renderCtfdTable(PROJ);
+  });
+}
 let CTFD_SHOW_PASSWORDS = false;
 // Gate to ensure no data loads occur until the user explicitly acts
 let CTFD_ALLOW_LOAD = false;
@@ -3585,6 +3630,11 @@ function sortIconCtfd(key) { if (CTFD_SORT.key !== key) return ''; const cls = C
 function ariaSortCtfd(key) { if (CTFD_SORT.key !== key) return 'none'; return CTFD_SORT.dir === 'asc' ? 'ascending' : 'descending'; }
 
 function applyCtfdFilter(list) {
+  list = list.filter(row => ctfdRowTags().matches(ctfdTagKey(row)));
+  if (CTFD_FILTER_SELECTED_ONLY) {
+    const selected = new Set(ctfdSelectedTagKeys());
+    return list.filter(row => selected.has(ctfdTagKey(row)));
+  }
   if (!CTFD_FILTER_TEXT) return list;
   try {
     const norm = (v) => String(v == null ? '' : v).toLowerCase();
@@ -4111,6 +4161,7 @@ function mapRowStatus(raw) {
 }
 
 function updateCtfdSelectionCount(project = PROJ) {
+  CTFD_ROW_TAGS?.refreshControls();
   const host = document.getElementById('ctfd-selection-count');
   if (!host) return;
   const multi = Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
@@ -4382,7 +4433,7 @@ function renderCtfdTable(proj) {
         `<div class=\"d-flex align-items-center\">` +
         `<div class=\"flex-grow-1\">` +
         `<input type=\"checkbox\" class=\"ctfd-cred-chk form-check-input me-2\" data-index=\"${idx}\" ${checked} />` +
-        `${credText}` +
+        `${credText}<span class="row-tag-badges">${ctfdRowTags().badges(ctfdTagKey(r))}</span>` +
         `</div>` +
         `<div class=\"ms-2\">${existIcon}</div>` +
         `</div>` +
@@ -4429,6 +4480,7 @@ function renderCtfdTable(proj) {
         // Persist selection
         updateCtfdSelectionCount();
         if (PROJ) writeCtfdUiState(PROJ.id, { selectedIndices: Array.from(CTFD_SELECTED_INDICES) });
+        if (CTFD_FILTER_SELECTED_ONLY) renderCtfdTable(PROJ);
       });
     }
     document.querySelectorAll('#ctfd-table .ctfd-cred-chk').forEach(cb => {
@@ -4441,6 +4493,7 @@ function renderCtfdTable(proj) {
         // Persist selection
         updateCtfdSelectionCount();
         if (PROJ) writeCtfdUiState(PROJ.id, { selectedIndices: Array.from(CTFD_SELECTED_INDICES) });
+        if (CTFD_FILTER_SELECTED_ONLY) renderCtfdTable(PROJ);
       });
     });
   } catch { }
@@ -4604,7 +4657,7 @@ function ctfdRenderTableMerged() {
       if (CTFD_COLS.project) html += `<td>${escHtml(r._proj?.name || '')}<div class=\"small text-muted\">${escHtml(r._proj?.tag || '')}</div></td>`;
       if (CTFD_COLS.cred) html += `<td><div class=\"d-flex align-items-center\"><div class=\"flex-grow-1\">` +
         `<input type=\"checkbox\" class=\"ctfd-cred-chk-multi form-check-input me-2\" data-key=\"${key}\" ${checked} />` +
-        `${credText}</div><div class=\"ms-2\">${existIcon}</div></div></td>`;
+        `${credText}<span class="row-tag-badges">${ctfdRowTags().badges(ctfdTagKey(r))}</span></div><div class=\"ms-2\">${existIcon}</div></div></td>`;
       if (CTFD_COLS.team) html += `<td>${teamHtml}</td>`;
       if (CTFD_COLS.user_points) html += `<td>${userPts}</td>`;
       if (CTFD_COLS.team_points) html += `<td>${teamPts}</td>`;
@@ -4636,6 +4689,7 @@ function ctfdRenderTableMerged() {
           });
           updateCtfdSelectionCount();
           sessionStorage.setItem('toolhub.ctfd.mgr.selectedKeys.v1', JSON.stringify(Array.from(CTFD_SELECTED_KEYS)));
+        if (CTFD_FILTER_SELECTED_ONLY) renderCtfdTable(PROJ);
         } catch { }
       });
     }
@@ -4647,6 +4701,7 @@ function ctfdRenderTableMerged() {
         const hdr = document.getElementById('ctfd-chk-all-multi'); if (hdr) hdr.checked = allSel2;
         updateCtfdSelectionCount();
         sessionStorage.setItem('toolhub.ctfd.mgr.selectedKeys.v1', JSON.stringify(Array.from(CTFD_SELECTED_KEYS)));
+          if (CTFD_FILTER_SELECTED_ONLY) renderCtfdTable(PROJ);
       });
     });
   } catch { }
@@ -5407,6 +5462,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { await shell.initShell('vm'); } catch (e) {
     try { shell.logError(`CTFd: page initialization failed: ${e?.message || e}`); } catch { }
   } // reuse same sidebar population logic
+  ctfdInitRowTags();
   // First try to restore previous in-session view so page switch won't blank the table
   let restoredSnapshot = false;
   try {
@@ -5977,8 +6033,10 @@ function updateCtfdControlsEnabled() {
   const multi = Array.isArray(CTFD_SELECTED_PIDS) && CTFD_SELECTED_PIDS.length > 1;
   if (btnLogin) {
     btnLogin.disabled = CTFD_USER_ACTION_ACTIVE;
-    btnLogin.textContent = hasAuth ? 'Re-authenticate to CTFd' : 'Authenticate to CTFd';
-    btnLogin.setAttribute('title', multi ? 'Update CTFd credentials for all selected projects' : 'Update CTFd URL, port, and credentials');
+    btnLogin.textContent = 'Connection';
+    btnLogin.setAttribute('title', hasAuth
+      ? (multi ? 'Update CTFd credentials for all selected projects' : 'Update CTFd URL, port, and credentials')
+      : 'Connect to CTFd with an administrator or teacher account');
   }
   // Refresh is allowed in multi mode (we'll preflight per-pid) or when single-project auth is valid
   const refreshEnabled = !CTFD_USER_ACTION_ACTIVE && (multi || hasAuth);

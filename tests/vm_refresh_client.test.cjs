@@ -101,6 +101,7 @@ for (const switchDuringRefresh of [false, true]) {
       },
       vmApplyServerResources: noop, vmMarkLiveRefreshed: noop,
       showVmInlineProgress: noop, updateVmInlineProgress: noop, hideVmInlineProgress: noop,
+      document: {getElementById: () => null},
       renderVmTable: p => rendered.push(p.id),
       alert: message => assert.fail(message),
     };

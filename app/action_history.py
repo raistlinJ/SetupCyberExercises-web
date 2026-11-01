@@ -1,9 +1,10 @@
-"""The last five distinct executed settings per user and operation."""
+"""The last ten distinct executed settings per user and operation."""
 import json
 import time
 from urllib.parse import urlsplit
 
 KINDS = {'push', 'pull', 'custom'}
+HISTORY_LIMIT = 10
 
 
 def init_history(db):
@@ -67,12 +68,12 @@ def remember(db, owner, kind, settings):
     db.execute('INSERT INTO action_history(owner,kind,settings,executed) VALUES (?,?,?,?)',
                (owner, kind, encoded, time.time()))
     db.execute('''DELETE FROM action_history WHERE owner=? AND kind=? AND id NOT IN
-        (SELECT id FROM action_history WHERE owner=? AND kind=? ORDER BY id DESC LIMIT 5)''',
-               (owner, kind, owner, kind))
+        (SELECT id FROM action_history WHERE owner=? AND kind=? ORDER BY id DESC LIMIT ?)''',
+               (owner, kind, owner, kind, HISTORY_LIMIT))
 
 
 def recent(db, owner, kind):
     return [{'id': row['id'], 'executedAt': row['executed'] * 1000,
              'settings': json.loads(row['settings'])}
-            for row in db.execute('SELECT * FROM action_history WHERE owner=? AND kind=? ORDER BY id DESC LIMIT 5',
-                                  (owner, kind))]
+            for row in db.execute('SELECT * FROM action_history WHERE owner=? AND kind=? ORDER BY id DESC LIMIT ?',
+                                  (owner, kind, HISTORY_LIMIT))]

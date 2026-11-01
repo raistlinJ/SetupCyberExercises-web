@@ -1,0 +1,47 @@
+/* Shared control layout for VM, CTFd, and CTF-RPG managers. */
+.manager-table-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem .75rem;
+}
+.manager-filter-group {
+  flex: 1 1 16rem;
+  min-width: min(100%, 16rem);
+}
+.manager-filter-group .form-control { min-width: 5rem; }
+.manager-table-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+.manager-table-tools > *, .manager-actions > .btn-group, .manager-actions > .dropdown {
+  flex-shrink: 0;
+}
+.manager-auto-refresh { display: flex; align-items: center; gap: .25rem; }
+.manager-auto-control { width: 124px; }
+.manager-filter-options, .manager-columns-menu { min-width: 260px; }
+.manager-columns-menu {
+  padding: .5rem;
+  max-height: min(70dvh, 30rem);
+  overflow-y: auto;
+}
+.manager-columns-menu .dropdown-item {
+  padding: .35rem .5rem;
+  margin: 0;
+  border-radius: .25rem;
+  cursor: pointer;
+  white-space: normal;
+}
+.manager-columns-menu .form-check-input { flex-shrink: 0; }
+.manager-page .manager-columns-menu,
+.manager-page .manager-actions .dropdown-menu,
+.manager-filter-options { font-size: .875rem; }
+.manager-filter-options .form-check-label { cursor: pointer; }
+.manager-actions .dropdown-item { line-height: 1.4; padding: .4rem 1rem; }
+.manager-actions .dropdown-divider { margin: .4rem 0; }
+@media (max-width: 767px) {
+  .manager-filter-group { flex-basis: 100%; }
+  .manager-table-tools { width: 100%; }
+}

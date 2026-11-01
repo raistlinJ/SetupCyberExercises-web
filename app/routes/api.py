@@ -2578,6 +2578,15 @@ def instances_refresh_vm(pid: str):
             pass
         return nets
 
+    # Cluster log access is optional and must not prevent normal inventory refreshes.
+    include_last_login = data.get('includeLastLogin') is True
+    last_authentications = {}
+    if include_last_login:
+        try:
+            last_authentications = client.last_user_authentications()
+        except Exception:
+            pass
+
     # Update statuses
     current = { int((e or {}).get('index', 0)): e for e in (proj.instance_statuses or []) }
     out = []
@@ -2610,6 +2619,9 @@ def instances_refresh_vm(pid: str):
         except Exception:
             userid = None
             poolid = None
+        if include_last_login:
+            entry['proxmox_login_user'] = userid
+            entry['proxmox_last_login'] = last_authentications.get(userid)
         # Mark created if all expected VM names exist; partial -> pending
         count = 0
         found_details = []
@@ -9770,6 +9782,16 @@ def _guest_push_metadata_commands(
     return commands
 
 
+def _guest_push_error_reason(exc: Exception, owner: str) -> str:
+    reason = str(exc)
+    if owner and re.search(r'\bchown:\s+(?:invalid|unknown) user\b', reason):
+        return (
+            f"Guest owner '{owner}' does not exist in this guest. "
+            'Set "Owner on remote" to an existing guest username or numeric UID.'
+        )
+    return reason
+
+
 def _host_push_file_path(value, label):
     if (not isinstance(value, str) or not value.startswith('/') or value.endswith('/')
             or '\0' in value or any(part in {'.', '..'} for part in value.split('/'))):
@@ -9849,7 +9871,7 @@ def _push_host_files_to_guest(proj, client, base_url, password, username, entry,
                 })
             except Exception as exc:
                 errors.append({'name': entry.get('name'), 'vmid': entry['vmid'], 'source_path': source,
-                               'destination': path, 'reason': str(exc)})
+                               'destination': path, 'reason': _guest_push_error_reason(exc, owner)})
             finally:
                 try:
                     _ssh_exec_result(ssh, f'rm -f -- {shlex.quote(archive)}', sudo=sudo, sudo_password=password)
@@ -10146,7 +10168,7 @@ def instances_lxc_push(pid: str):
                 errors.append({
                     'index': entry.get('index'), 'name': entry.get('name'),
                     'vmid': entry.get('vmid'), 'node': entry.get('node'),
-                    'reason': f'{failure_stage}: {exc}',
+                    'reason': f'{failure_stage}: {_guest_push_error_reason(exc, owner)}',
                 })
             return pushed, errors
 
@@ -14404,6 +14426,43 @@ def update_project(pid: str):
     s.upsert(proj)
     d = _project_to_json(proj)
     return jsonify(d)
+
+
+@api_bp.route("/projects/<pid>/row-tags/<scope>", methods=["GET", "PATCH"])
+@_secure_route()
+def project_row_tags(pid: str, scope: str):
+    if scope not in {"vm", "ctfd", "ctfrpg"}:
+        return jsonify({"error": "Unknown row tag scope"}), 400
+    store = _store()
+    project = store.get(pid)
+    if not project:
+        return jsonify({"error": "Not found"}), 404
+    if request.method == "GET":
+        return jsonify({"row_tags": project.row_tags.get(scope, {})})
+
+    data = request.get_json(force=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Tag operation must be an object"}), 400
+    valid_key = lambda key: isinstance(key, str) and bool(key) and len(key) <= 1024
+    merge = data.get("merge")
+    if "merge" in data:
+        if (set(data) != {"merge"} or not isinstance(merge, dict)
+                or any(not valid_key(key) or not isinstance(ids, list)
+                       or any(type(tag) is not int or not 1 <= tag <= 5 for tag in ids)
+                       for key, ids in merge.items())):
+            return jsonify({"error": "Invalid tag migration"}), 400
+        project = store.patch_row_tags(pid, scope, merge=merge)
+    else:
+        rows = data.get("rows")
+        tag_id = data.get("tag_id")
+        enabled = data.get("enabled", True)
+        if (not isinstance(rows, list) or not rows or not all(valid_key(key) for key in rows)
+                or "tag_id" not in data
+                or (tag_id is not None and (type(tag_id) is not int or not 1 <= tag_id <= 5))
+                or type(enabled) is not bool):
+            return jsonify({"error": "Invalid tag operation"}), 400
+        project = store.patch_row_tags(pid, scope, rows=rows, tag_id=tag_id, enabled=enabled)
+    return jsonify({"row_tags": project.row_tags.get(scope, {})})
 
 
 def _validate_audio_payload(payload):

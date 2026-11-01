@@ -350,6 +350,29 @@ class VMConfig:
     vm_pass: Optional[str] = None
 
 
+ROW_TAG_SCOPES = {"vm", "ctfd", "ctfrpg"}
+
+
+def sanitize_row_tags(value: Any) -> Dict[str, Dict[str, List[int]]]:
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for scope in ROW_TAG_SCOPES:
+        rows = value.get(scope)
+        if not isinstance(rows, dict):
+            continue
+        clean = {}
+        for key, ids in rows.items():
+            if not isinstance(key, str) or not key or len(key) > 1024 or not isinstance(ids, list):
+                continue
+            valid = sorted({tag for tag in ids if type(tag) is int and 1 <= tag <= 5})
+            if valid:
+                clean[key] = valid
+        if clean:
+            result[scope] = clean
+    return result
+
+
 @dataclass
 class Project:
     id: str
@@ -358,6 +381,7 @@ class Project:
     vms: List[VMConfig] = field(default_factory=list)
     materials: List[str] = field(default_factory=list)  # filenames under materials dir
     exports: List[Dict[str, Any]] = field(default_factory=list)  # export records: {id,timestamp,include_creds,include_vms,remote_path,host}
+    row_tags: Dict[str, Dict[str, List[int]]] = field(default_factory=dict)
     audio: Dict[str, Any] = field(default_factory=dict)  # notification audio configuration (data URLs + metadata)
     # Per-project associations (other project IDs logically linked to this one)
     associated_projects: List[str] = field(default_factory=list)
@@ -931,6 +955,8 @@ class ProjectStore:
                     base["associated_projects"] = dedup
                 except Exception:
                     base["associated_projects"] = []
+            elif k == "row_tags":
+                base[k] = sanitize_row_tags(v)
             elif k == "audio":
                 try:
                     base["audio"] = self._sanitize_audio_map(v)
@@ -1006,12 +1032,44 @@ class ProjectStore:
             self._write_all(allp)
         return proj
 
-    def upsert(self, project: Project) -> Project:
+    def upsert(self, project: Project, *, preserve_row_tags: bool = True) -> Project:
         with self._write_lock:
             allp = self._read_all()
+            # Inventory and other long-running operations can hold an older Project.
+            # Only the focused tag update path may replace existing assignments.
+            if preserve_row_tags and project.id in allp:
+                project.row_tags = sanitize_row_tags(allp[project.id].get("row_tags"))
             allp[project.id] = asdict(project)
             self._write_all(allp)
         return project
+
+    def patch_row_tags(self, pid: str, scope: str, *, rows=None, tag_id=None, enabled=True, merge=None) -> Project:
+        """Apply one tag operation to the latest project without replacing other groups."""
+        if scope not in ROW_TAG_SCOPES:
+            raise ValueError("Unknown row tag scope")
+        with self._write_lock:
+            project = self.get(pid)
+            if not project:
+                raise KeyError("Project not found")
+            groups = project.row_tags.setdefault(scope, {})
+            if merge is not None:
+                for key, ids in merge.items():
+                    groups[key] = sorted(set(groups.get(key, [])) | set(ids))
+            else:
+                for key in rows or []:
+                    ids = set(groups.get(key, []))
+                    if tag_id is None:
+                        ids.clear()
+                    elif enabled:
+                        ids.add(tag_id)
+                    else:
+                        ids.discard(tag_id)
+                    if ids:
+                        groups[key] = sorted(ids)
+                    else:
+                        groups.pop(key, None)
+            project.row_tags = sanitize_row_tags(project.row_tags)
+            return self.upsert(project, preserve_row_tags=False)
 
     def update_vm_inventory(self, pid: str, statuses: list, screenshot_targets=None) -> Project:
         """Merge inventory with screenshots saved by overlapping refreshes.

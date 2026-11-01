@@ -5,11 +5,12 @@
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const projectPath = pid => `/api/projects/${encodeURIComponent(pid)}`;
   const keyFor = (pid, username) => JSON.stringify([pid, username]);
+  const rowTags = window.RowTags.create('ctfrpg');
   const columnIds = ['project', 'user', 'team', 'user_points', 'team_points', 'character', 'completed', 'state'];
   const defaultColumns = (multi = false) => ({project: multi, user: true, team: true, user_points: true,
     team_points: true, character: true, completed: true, state: true});
   const state = { projects: [], selectedProjects: new Set(), selectedUsers: new Set(), rows: [], teams: [], errors: {}, characters: [], refreshSeq: 0, busy: false, refreshPending: false, timer: null,
-    sort: {key: 'user', dir: 'asc'}, userSortMode: 'name', teamSortMode: 'name', columns: defaultColumns() };
+    selectedOnly: false, sort: {key: 'user', dir: 'asc'}, userSortMode: 'name', teamSortMode: 'name', columns: defaultColumns() };
 
   async function api(path, options = {}) {
     const response = await fetch(path, { credentials: 'same-origin', ...options });
@@ -103,9 +104,20 @@
     }
   }
 
+  function setSelectedFilter(enabled) {
+    state.selectedOnly = !!enabled;
+    $('ctfrpg-filter-selected').checked = state.selectedOnly;
+    $('filter').disabled = state.selectedOnly;
+    $('filter-regex').disabled = state.selectedOnly;
+    $('ctfrpg-selected-filter-notice').classList.toggle('d-none', !state.selectedOnly);
+  }
+
   function credentialsRows() {
     const rows = CTFRPG_Table.buildRows(state.projects, state.selectedProjects, state.rows, state.teams, state.errors);
-    const filtered = CTFRPG_Table.filterRows(rows, $('filter').value, $('filter-regex').checked);
+    const tagged = rows.filter(row => rowTags.matches(keyFor(row.project.id, row.username)));
+    const filtered = state.selectedOnly
+      ? {rows: tagged.filter(row => state.selectedUsers.has(keyFor(row.project.id, row.username))), error: false}
+      : CTFRPG_Table.filterRows(tagged, $('filter').value, $('filter-regex').checked);
     $('filter-error').classList.toggle('d-none', !filtered.error);
     return CTFRPG_Table.sortRows(filtered.rows, state.sort, state.userSortMode, state.teamSortMode);
   }
@@ -131,7 +143,7 @@
       const cell = (column, value) => `<td data-col="${column}" ${state.columns[column] ? '' : 'class="d-none"'}>${value}</td>`;
       const rankLabel = rank => rank !== null ? ` <span class="text-muted">(#${escapeHtml(rank)})</span>` : '';
       return `<tr>${cell('project', escapeHtml(project.name) + (project.tag ? `<div class="small text-muted">${escapeHtml(project.tag)}</div>` : ''))}`
-        + cell('user', `<input class="form-check-input user-check me-2" type="checkbox" data-key="${escapeHtml(key)}" aria-label="Select ${escapeHtml(username)}" ${state.selectedUsers.has(key) ? 'checked' : ''}><code>${escapeHtml(username)}</code>${rankLabel(userRank)}`)
+        + cell('user', `<input class="form-check-input user-check me-2" type="checkbox" data-key="${escapeHtml(key)}" aria-label="Select ${escapeHtml(username)}" ${state.selectedUsers.has(key) ? 'checked' : ''}><code>${escapeHtml(username)}</code>${rankLabel(userRank)}<span class="row-tag-badges">${rowTags.badges(key)}</span>`)
         + cell('team', teamName ? `${escapeHtml(teamName)}${rankLabel(teamRank)}` : 'n/a')
         + cell('user_points', userPoints ?? 'n/a')
         + cell('team_points', teamPoints ?? 'n/a')
@@ -143,12 +155,13 @@
     tbody.querySelectorAll('.user-check').forEach(input => input.addEventListener('change', () => {
       if (input.checked) state.selectedUsers.add(input.dataset.key);
       else state.selectedUsers.delete(input.dataset.key);
-      updateSelection();
+      if (state.selectedOnly) render(); else updateSelection();
     }));
     updateSelection();
   }
 
   function updateSelection() {
+    rowTags.refreshControls();
     const visible = credentialsRows().map(({project, username}) => keyFor(project.id, username));
     let total = 0;
     $('project-selection-count').innerHTML = state.projects.filter(project => state.selectedProjects.has(project.id)).map(project => {
@@ -349,6 +362,16 @@
   }
 
   document.addEventListener('DOMContentLoaded', async () => {
+    rowTags.mount({
+      filterHost: $('ctfrpg-tag-filters'), assignmentHost: $('ctfrpg-tag-assignment'), notice: $('ctfrpg-tag-notice'),
+      getProjectIds: () => [...state.selectedProjects],
+      getSelectedKeys: () => [...state.selectedUsers].filter(key => state.selectedProjects.has(JSON.parse(key)[0])),
+      onChange: render,
+    });
+    $('ctfrpg-filter-selected').addEventListener('change', event => {
+      setSelectedFilter(event.target.checked);
+      render();
+    });
     $('connection-button').addEventListener('click', openConnection);
     $('test-connection').addEventListener('click', () => { testConnection().catch(() => {}); });
     $('save-connection').addEventListener('click', saveConnection);
@@ -360,7 +383,12 @@
     $('export-button').addEventListener('click', exportCsv);
     $('filter').addEventListener('input', () => { saveTablePrefs(); render(); });
     $('filter-regex').addEventListener('change', () => { saveTablePrefs(); render(); });
-    $('clear-filter').addEventListener('click', () => { $('filter').value = ''; saveTablePrefs(); render(); });
+    $('clear-filter').addEventListener('click', () => {
+      $('filter').value = '';
+      setSelectedFilter(false);
+      rowTags.clearFilter();
+      saveTablePrefs(); render();
+    });
     document.querySelectorAll('.table-sort').forEach(button => button.addEventListener('click', () => {
       const key = button.dataset.sort;
       state.sort = state.sort.key === key ? {key, dir: state.sort.dir === 'asc' ? 'desc' : 'asc'} : {key, dir: 'asc'};

@@ -40,13 +40,13 @@ Queue polls load lightweight job state and reuse summaries by persisted revision
 retained archives are loaded for a new completed revision or an explicit result
 request. Mutating actions continue to run in submission order across users.
 
-Push, Pull, and Custom Command dialogs each have a **History — last 5 runs**
+Push, Pull, and Custom Command dialogs each have a **History — last 10 runs**
 selector. History is saved on the server for the signed-in user when a run starts,
 including failed attempts; cancelled waiting jobs are excluded. Repeating the same
 settings moves that entry to the top. Custom history restores the complete command
 and timeout, pull history restores the paths, and push history restores the
 destination, file/folder mode, owner, and permissions. Push recall retains matching
-selected files and can restore the last five file/folder selections from the same
+selected files and can restore the last ten file/folder selections from the same
 open page. After a page reload, or if that selection is unavailable, choose the
 local files again. A different history entry never silently keeps unrelated files.
 Recall never submits an action or changes the currently selected guests.

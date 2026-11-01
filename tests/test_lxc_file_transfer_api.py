@@ -520,7 +520,7 @@ class LxcFileTransferApiTests(unittest.TestCase):
                 body = response.get_json()
                 self.assertFalse(body['pushed'])
                 self.assertIn('files uploaded, but setting remote ownership or permissions failed', body['errors'][0]['reason'])
-                self.assertIn('invalid user', body['errors'][0]['reason'])
+                self.assertIn("Guest owner 'missing-user' does not exist in this guest", body['errors'][0]['reason'])
                 if guest_type == 'lxc':
                     self.assertEqual(len(ssh.sftp.removed), 1)
                     self.assertTrue(ssh.closed)

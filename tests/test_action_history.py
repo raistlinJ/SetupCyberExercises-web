@@ -68,20 +68,20 @@ def test_history_records_execution_not_submission_or_cancelled_waiting_jobs(hist
     ('push', 'guest_push', lambda i: {'destination': f'/data/{i}', 'relativePaths': ['folder/a.txt'],
                                      'selectionType': 'folder', 'ownerOnRemote': '1000', 'filePermissions': '0640'}),
 ])
-def test_five_distinct_recent_entries_per_kind_and_repeats_move_to_top(history_app, kind, action, body):
+def test_ten_distinct_recent_entries_per_kind_and_repeats_move_to_top(history_app, kind, action, body):
     app, client = history_app
-    for i in range(7):
+    for i in range(13):
         submit(client, action, body(i), multipart=kind == 'push')
         drain(app)
     saved = entries(client, kind)
-    assert len(saved) == 5
+    assert len(saved) == 10
     assert [item['id'] for item in saved] == sorted([item['id'] for item in saved], reverse=True)
-    submit(client, action, body(4), multipart=kind == 'push')
+    submit(client, action, body(10), multipart=kind == 'push')
     drain(app)
     repeated = entries(client, kind)
-    assert len(repeated) == 5
+    assert len(repeated) == 10
     assert repeated[0]['settings'] == saved[2]['settings']
-    assert len({json.dumps(item['settings'], sort_keys=True) for item in repeated}) == 5
+    assert len({json.dumps(item['settings'], sort_keys=True) for item in repeated}) == 10
     assert all(item['executedAt'] > 0 for item in repeated)
 
 

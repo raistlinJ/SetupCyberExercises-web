@@ -19,7 +19,7 @@ function manager() {
     elements.set(id, {
       value: '', checked: false, disabled: false, dataset: {}, textContent: '',
       addEventListener(event, fn) { this[event] = fn; },
-      setAttribute() {}, removeAttribute() {},
+      setAttribute(name, value) { this[name] = value; }, removeAttribute() {},
     });
   }
   const c = {
@@ -126,13 +126,15 @@ test('missing project selection explains the next step and prevents Save', async
   assert.match(m.elements.get('ctfd-login-feedback').textContent, /Select a project/);
 });
 
-test('the login label distinguishes first authentication from re-authentication', () => {
+test('the shared Connection label remains stable while its title reflects authentication', () => {
   const m = manager();
   m.project({ id: 'one' });
   m.c.updateCtfdSelectionCount = () => {};
   m.c.updateCtfdControlsEnabled();
-  assert.equal(m.elements.get('btn-ctfd-login').textContent, 'Authenticate to CTFd');
+  assert.equal(m.elements.get('btn-ctfd-login').textContent, 'Connection');
+  assert.match(m.elements.get('btn-ctfd-login').title, /Connect to CTFd/);
   m.c.writeCtfdCreds('one', { username: 'admin', password: 'password', validated: true });
   m.c.updateCtfdControlsEnabled();
-  assert.equal(m.elements.get('btn-ctfd-login').textContent, 'Re-authenticate to CTFd');
+  assert.equal(m.elements.get('btn-ctfd-login').textContent, 'Connection');
+  assert.match(m.elements.get('btn-ctfd-login').title, /Update CTFd/);
 });
