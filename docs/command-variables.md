@@ -20,6 +20,8 @@ Each startup/stored/validation command has a **Render template variables** switc
 
 **Custom Command** has the same switch. Its setting travels with queued execution and is restored when recalling a command from history. This controls SCE-web's substitution only; the guest shell or an application may still interpret the command it receives.
 
+The **Run Stored Command** dialog also shows a **Render template variables** switch for each command. It starts with the saved setting. Changes in this dialog apply only to that run, including queued execution. A mixed indicator means the grouped commands have different saved settings; leaving it unchanged preserves those settings.
+
 ## Preview commands
 
 Expand **Advanced** in **Manage Start Commands**, **Manage Stored Commands**, **Manage Validation Commands**, or **Custom Command** to access **Template variables and command preview**. This section is collapsed by default. Click the small **?** button to show or hide all available variables and their meanings.

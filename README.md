@@ -309,7 +309,7 @@ ScenarioForge/CoreVM/participant roles or change VM ACLs. See [setup, scope, rev
 
 In **Configuration**, expand a VM or LXC card and click **Manage** under **Materials**, alongside the stored/validation command controls. The modal supports adding, editing and removing title/URL pairs, plus an optional **Project display name**. Only absolute HTTP/HTTPS links are accepted; links can point to web instructions, PDFs or hosted downloads. File uploads are not part of this editor.
 
-**Save** persists these defaults in the VM/LXC configuration. **Apply to existing instances now** is checked by default and publishes the metadata to that template's existing instances through the project's Proxmox credentials or API token. Turn it off to save configuration without contacting Proxmox. Publication failures leave the modal open with an error and retain the saved configuration so the operation can be retried. Live publication requires an administrator. New clones and **Apply Scenario Notes** also receive the configured links and display name.
+**Save** persists these defaults in the VM/LXC configuration without contacting Proxmox. To apply them to existing instances, select the VMs in **VM Manager** and choose **Users & Access → Set Metadata**. This writes credentials and materials together, including the configured links and display name. New clones also receive these settings.
 
 The resulting Proxmox Notes contain a single `AccessForge` object:
 

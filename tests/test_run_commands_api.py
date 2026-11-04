@@ -440,6 +440,54 @@ class RunCommandsApiTests(unittest.TestCase):
             self.assertEqual(len(command_list), 1)
             self.assertEqual(command_list[0].get('command'), override_text)
 
+    def test_stored_command_run_render_choice_overrides_saved_setting_only_for_selected_command(self):
+        original = 'echo {{instance_index}}'
+        for saved_mode in (False, True):
+            for run_mode in (False, True):
+                for override_text in (None, 'echo override {{instance_index}}'):
+                    with self.subTest(saved=saved_mode, run=run_mode, text=override_text), ExitStack() as stack:
+                        saved_command = StartCommand(command=original, render_template_variables=saved_mode)
+                        self.project.vms[0].stored_commands = [StartCommandStep(commands=[
+                            saved_command, StartCommand(command='echo {{project_id}}', render_template_variables=False),
+                        ])]
+                        for ctx in self._common_patches():
+                            stack.enter_context(ctx)
+                        guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+                        guest.agent_exec.return_value = {'exitcode': 0, 'stdout': '', 'stderr': ''}
+                        override = {'templateKey': self.template_key, 'stepIndex': 1, 'commandIndex': 1,
+                                    'renderTemplateVariables': run_mode}
+                        if override_text:
+                            override['text'] = override_text
+                        response = self.client.post(
+                            f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                            json={'username': 'root@pam', 'password': 'secret',
+                                  'targets': [{'index': 1, 'name': self.target_name}],
+                                  'commands': [original, 'echo {{project_id}}'], 'storedCommandOverrides': [override]})
+                        self.assertEqual(response.status_code, 200)
+                        expected = override_text or original
+                        if run_mode:
+                            expected = expected.replace('{{instance_index}}', '1')
+                        self.assertCountEqual([call.kwargs['command'] for call in guest.agent_exec.call_args_list],
+                                              [expected, 'echo {{project_id}}'])
+                        summary = self._decode_outputs_zip(response.json['outputs_zip'])
+                        self.assertCountEqual([item['command'] for item in summary['commands']],
+                                              [expected, 'echo {{project_id}}'])
+                        self.assertEqual(saved_command.command, original)
+                        self.assertIs(saved_command.render_template_variables, saved_mode)
+
+    def test_stored_command_run_render_choice_rejects_non_boolean(self):
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={'storedCommandOverrides': [{'templateKey': self.template_key, 'stepIndex': 1,
+                       'commandIndex': 1, 'renderTemplateVariables': 'false'}]})
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('must be a boolean', response.json['error'])
+            guest.agent_exec.assert_not_called()
+
     def test_run_startup_cmds_reports_skipped_when_no_commands(self):
         vm = VMConfig(name='alpha', start_commands=[], stored_commands=[])
         project = Project(id='proj-run', name='Run Project', tag='-lab-', vms=[vm])

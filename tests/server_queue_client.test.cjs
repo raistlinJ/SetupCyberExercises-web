@@ -445,6 +445,21 @@ test('custom command plans carry the default or selected timeout to every projec
   }
 });
 
+test('stored command plans retain per-command render choices for every selected project', () => {
+  const sandbox = {deriveBaseVmName: (project, name) => name};
+  vm.createContext(sandbox); vm.runInContext(plans, sandbox);
+  const overrides = [{templateKey: 'one|vm|9000', stepIndex: 1, commandIndex: 1, renderTemplateVariables: false}];
+  const steps = sandbox.buildServerVmSteps('run_stored_cmds', {
+    selectedCommands: ['echo {{instance_index}}'], storedCommandOverrides: overrides,
+  }, ['one', 'two'].map(id => ({project: {id}, targets: [{index: 1, name: 'vm'}], auth: {}})));
+  assert.equal(steps.length, 2);
+  for (const step of steps) {
+    const body = JSON.parse(JSON.stringify(step.body));
+    assert.deepEqual(body.storedCommandOverrides, overrides);
+    assert.equal(body.commands[0], 'echo {{instance_index}}');
+  }
+});
+
 test('wizard captures dynamically created project references and per-template accessibility', () => {
   const sandbox = {
     wizardNormalizeVmCreateOptions: value => value,

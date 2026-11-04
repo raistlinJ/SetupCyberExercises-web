@@ -4802,12 +4802,12 @@ async function runVmCreateFollowUpActions({ proj, targets, baseBody, createOptio
         requestTargets,
         setProgress,
         progress: 92,
-        label: 'Credentials Metadata…',
-        detail: `Setting credentials metadata${contextLabel ? ` in ${contextLabel}` : ''}…`,
+        label: 'Metadata…',
+        detail: `Setting metadata${contextLabel ? ` in ${contextLabel}` : ''}…`,
       });
       mergedResp = mergeVmActionSummaryData(mergedResp, scenarioResp);
     } catch (err) {
-      addFollowUpError('Credentials metadata follow-up', err);
+      addFollowUpError('Metadata follow-up', err);
     }
   }
 
@@ -5042,7 +5042,7 @@ function deriveCredsRepairTargetsFromChecked(checked) {
 
 function friendlyActionName(action) {
   const map = {
-    apply_scenario: 'Set Credentials Metadata',
+    apply_scenario: 'Set Metadata',
     suspend: 'Pause',
     hibernate: 'Suspend',
     unlock: 'Unlock',
@@ -5502,6 +5502,7 @@ function collectStoredCommandOptions() {
     const commandIndex = Number.isFinite(meta.commandIndex) ? Number(meta.commandIndex) : null;
     const delayValue = Number.isFinite(meta.delaySeconds) ? Number(meta.delaySeconds) : null;
     const longRunningFlag = meta.longRunning;
+    const renderTemplateVariables = meta.renderTemplateVariables !== false;
     const projectRef = meta.projectRef || null;
     const timeoutValue = Number.isFinite(meta.timeoutSeconds) && meta.timeoutSeconds > 0 ? Number(meta.timeoutSeconds) : null;
     const templateKey = meta.templateKey;
@@ -5604,11 +5605,13 @@ function collectStoredCommandOptions() {
             delaySeconds: delayValue && delayValue > 0 ? delayValue : null,
             timeoutSeconds: timeoutValue,
             longRunning: longRunningFlag === true,
+            renderTemplateVariables,
             contexts: [],
           };
           templateEntry._commandMap.set(templateCmdKey, cmdEntry);
           templateEntry.commands.push(cmdEntry);
         }
+        if (cmdEntry.renderTemplateVariables !== renderTemplateVariables) cmdEntry.renderTemplateVariables = null;
         if (hostContext) {
           if (!cmdEntry._contextHostKeys) cmdEntry._contextHostKeys = new Set();
           const ctxPid = canonicalPid(hostContext.pid || hostContext.pidRaw || '');
@@ -5685,6 +5688,7 @@ function collectStoredCommandOptions() {
           commandIndex: cmdIdx + 1,
           delaySeconds: Number(step?.delaySeconds) || 0,
           longRunning,
+          renderTemplateVariables: typeof entry === 'object' ? entry.renderTemplateVariables !== false : true,
           timeoutSeconds,
           templateKey,
           templateLabel,
@@ -6021,7 +6025,7 @@ async function promptStoredCommandSelection() {
 
   const getCommandRowMeta = (input) => {
     if (!input) return null;
-    const item = input.closest('label.list-group-item');
+    const item = input.closest('[data-stored-command-row]');
     if (!item) return null;
     const original = item.dataset.originalCommand || input.value || '';
     const normalizedOriginal = normalizeInlineCommandText(original);
@@ -6037,6 +6041,7 @@ async function promptStoredCommandSelection() {
       templateKey,
       stepIndex,
       commandIndex,
+      renderTemplateVariables: item.dataset.renderOverride === undefined ? undefined : item.dataset.renderOverride === 'true',
       element: item,
     };
   };
@@ -6060,12 +6065,13 @@ async function promptStoredCommandSelection() {
         seen.add(entry.normalizedOriginal);
         commands.push(entry.original);
       }
-      if (entry.override && Number.isFinite(entry.stepIndex) && Number.isFinite(entry.commandIndex)) {
+      if ((entry.override || typeof entry.renderTemplateVariables === 'boolean') && Number.isFinite(entry.stepIndex) && Number.isFinite(entry.commandIndex)) {
         overrides.push({
           templateKey: entry.templateKey || '',
           stepIndex: entry.stepIndex,
           commandIndex: entry.commandIndex,
-          text: entry.override,
+          ...(entry.override ? {text: entry.override} : {}),
+          ...(typeof entry.renderTemplateVariables === 'boolean' ? {renderTemplateVariables: entry.renderTemplateVariables} : {}),
         });
       }
     });
@@ -6325,7 +6331,7 @@ async function promptStoredCommandSelection() {
     return btn;
   };
 
-  const applyInfoToDom = (data, preserveSelections) => {
+  const applyInfoToDom = (data, preserveSelections, preserveRenderModes = new Map()) => {
     info = data;
     const preserveSet = preserveSelections instanceof Set ? preserveSelections : null;
     relevantPidSet = new Set();
@@ -6383,8 +6389,10 @@ async function promptStoredCommandSelection() {
           const groupList = document.createElement('div');
           groupList.className = 'list-group list-group-flush';
           group.commands.forEach((cmd, idx) => {
-            const item = document.createElement('label');
+            const item = document.createElement('div');
             item.className = 'list-group-item d-flex align-items-start gap-2 flex-column flex-sm-row';
+            item.setAttribute('data-stored-command-row', 'true');
+            item.dataset.renderKey = JSON.stringify([group.key, cmd.stepIndex, cmd.commandIndex]);
             item.dataset.originalCommand = cmd.command || '';
             if (group.key) item.dataset.templateKey = group.key;
             if (Number.isFinite(cmd.stepIndex)) item.dataset.stepIndex = String(cmd.stepIndex);
@@ -6400,6 +6408,7 @@ async function promptStoredCommandSelection() {
             const input = document.createElement('input');
             input.type = 'checkbox';
             input.name = `stored-cmd-template-${groupIdx}-${idx}`;
+            input.id = input.name;
             input.className = 'form-check-input mt-1';
             input.value = cmd.command;
             input.checked = preserveSet ? preserveSet.has(cmd.command) : false;
@@ -6432,7 +6441,10 @@ async function promptStoredCommandSelection() {
             const title = document.createElement('code');
             title.className = 'text-wrap flex-grow-1';
             title.textContent = cmd.command;
-            headingWrap.appendChild(title);
+            const selectionLabel = document.createElement('label');
+            selectionLabel.htmlFor = input.id;
+            selectionLabel.appendChild(title);
+            headingWrap.appendChild(selectionLabel);
             const editedBadge = document.createElement('span');
             editedBadge.className = 'badge bg-info text-dark ms-2 stored-cmd-inline-edited d-none';
             editedBadge.textContent = 'Edited';
@@ -6469,6 +6481,28 @@ async function promptStoredCommandSelection() {
               row.appendChild(inlineEdit.button);
             }
             wrapper.appendChild(row);
+            const renderLabel = document.createElement('label');
+            renderLabel.className = 'form-check form-switch mt-2 mb-0';
+            const renderInput = document.createElement('input');
+            renderInput.type = 'checkbox';
+            renderInput.className = 'form-check-input';
+            renderInput.setAttribute('data-stored-render', 'true');
+            const preservedMode = preserveRenderModes.get(item.dataset.renderKey);
+            renderInput.checked = preservedMode ?? (cmd.renderTemplateVariables !== false);
+            renderInput.indeterminate = preservedMode === undefined && cmd.renderTemplateVariables === null;
+            if (preservedMode !== undefined) item.dataset.renderOverride = String(preservedMode);
+            const renderText = document.createElement('span');
+            renderText.className = 'form-check-label small';
+            renderText.textContent = renderInput.indeterminate ? 'Render template variables (mixed saved settings)' : 'Render template variables';
+            renderLabel.title = 'Changes apply only to this run. Turn off to send {{...}} literally.';
+            renderInput.addEventListener('change', () => {
+              item.dataset.renderOverride = String(renderInput.checked);
+              renderInput.indeterminate = false;
+              renderText.textContent = 'Render template variables';
+            });
+            renderLabel.appendChild(renderInput);
+            renderLabel.appendChild(renderText);
+            wrapper.appendChild(renderLabel);
             if (inlineEdit && inlineEdit.container) {
               wrapper.appendChild(inlineEdit.container);
             }
@@ -6497,7 +6531,10 @@ async function promptStoredCommandSelection() {
     const eventPid = canonicalPid(event?.detail?.pid);
     if (eventPid && relevantPidSet.size && !relevantPidSet.has(eventPid)) return;
     const preserve = new Set(collectSelections().map(entry => entry.original));
-    applyInfoToDom(collectStoredCommandOptions(), preserve);
+    const renderModes = new Map(Array.from(listEl?.querySelectorAll('[data-stored-command-row]') || [])
+      .filter(item => item.dataset.renderOverride !== undefined)
+      .map(item => [item.dataset.renderKey, item.dataset.renderOverride === 'true']));
+    applyInfoToDom(collectStoredCommandOptions(), preserve, renderModes);
   };
   document.addEventListener('stored-commands-updated', handleStoredCommandsUpdated);
 
@@ -6597,8 +6634,11 @@ function coerceStoredCommandOverrides(value) {
     const stepIndex = Number(entry.stepIndex);
     const commandIndex = Number(entry.commandIndex);
     const text = normalizeOverrideText(entry.text ?? entry.command ?? entry.override);
-    if (!text || !Number.isFinite(stepIndex) || !Number.isFinite(commandIndex)) return;
-    out.push({ templateKey, stepIndex, commandIndex, text });
+    if ((!text && typeof entry.renderTemplateVariables !== 'boolean') || !Number.isFinite(stepIndex) || !Number.isFinite(commandIndex)) return;
+    out.push({ templateKey, stepIndex, commandIndex,
+      ...(text ? {text} : {}),
+      ...(typeof entry.renderTemplateVariables === 'boolean' ? {renderTemplateVariables: entry.renderTemplateVariables} : {}),
+    });
   });
   return out.length ? out : null;
 }
@@ -7241,7 +7281,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
         run_startup_cmds: ['Running…', 'Running startup commands', 'Ran startup cmds'],
         run_stored_cmds: ['Running…', 'Running stored commands', 'Ran stored cmds'],
         validate: ['Validating…', 'Running validation checks', 'Validated'],
-        apply_scenario: ['Setting…', 'Setting credentials metadata', 'Credentials metadata set']
+        apply_scenario: ['Setting…', 'Setting metadata', 'Metadata set']
       };
       const [shortStart, longStart, pastTense] = verbMap[action] || ['Working…', 'Working', 'Done'];
       let validateSkipped = [];
@@ -7293,6 +7333,7 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
           stepIndex: entry.stepIndex,
           commandIndex: entry.commandIndex,
           text: entry.text,
+          ...(typeof entry.renderTemplateVariables === 'boolean' ? {renderTemplateVariables: entry.renderTemplateVariables} : {}),
         }));
       }
       const requestPromise = http('POST', path, payload);
@@ -7813,6 +7854,7 @@ async function vmActionMultiExec(action, opts = {}) {
         stepIndex: entry.stepIndex,
         commandIndex: entry.commandIndex,
         text: entry.text,
+        ...(typeof entry.renderTemplateVariables === 'boolean' ? {renderTemplateVariables: entry.renderTemplateVariables} : {}),
       }));
     }
     let targets = (byPid.get(pid) || []).map(t => ({ index: Number(t.index), name: String(t.name) }));
@@ -7985,7 +8027,7 @@ async function vmActionMultiExec(action, opts = {}) {
         continue;
       }
       if (action === 'apply_scenario') {
-        setAp(Math.max(20, pct), 'Working…', `Setting credentials metadata in ${projName}…`);
+        setAp(Math.max(20, pct), 'Working…', `Setting metadata in ${projName}…`);
         const requestPromise = makeReq(`/instances/actions/apply_scenario`, { ...baseBody, targets });
         let stopStatusPoll = null;
         if (vmActionShouldPollStatus(action) && typeof startVmActionStatusPolling === 'function') {

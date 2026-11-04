@@ -25,11 +25,7 @@
             <p class="small text-muted">Add links to instructions, documents or hosted downloads. These appear in the AccessForge project box with this VM or LXC.</p>
             <div id="vm-materials-list"></div>
             <button class="btn btn-sm btn-outline-primary mb-3" id="vm-materials-add" type="button">Add link</button>
-            <div class="form-check">
-              <input class="form-check-input" type="checkbox" id="vm-materials-apply" checked>
-              <label class="form-check-label" for="vm-materials-apply">Apply to existing instances now</label>
-            </div>
-            <p class="small text-muted mt-1">Turn this off to save defaults only. New clones and Apply Scenario Notes also receive these links.</p>
+            <p class="small text-muted mt-1">Save these settings, then use VM Manager → Users &amp; Access → Set Metadata to apply credentials and materials to selected instances. New clones also receive these links.</p>
             <div class="alert alert-danger d-none mb-0" id="vm-materials-error" role="alert"></div>
           </div>
           <div class="modal-footer">
@@ -105,34 +101,20 @@
       return;
     }
     const fields = {materials, project_name: modal.querySelector('#vm-materials-project-name').value.trim()};
-    const apply = modal.querySelector('#vm-materials-apply').checked;
     const {pid, idx, name} = state;
     state.saving = true;
     form.querySelectorAll('input,button').forEach(el => { el.disabled = true; });
-    let saved = false;
     try {
       await saveVM(pid, name, fields, {silent: true, rethrow: true});
-      saved = true;
       updateSummary(pid, name, idx, fields);
-      if (apply) {
-        const project = (window.PROJ_CACHE || {})[pid];
-        const creds = typeof readProxCreds === 'function' ? (readProxCreds(pid) || {}) : {};
-        const result = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/materials`, {
-          templates: [name], username: creds.username || undefined, password: creds.password || undefined,
-          baseUrl: project?.proxmox_url, apiPort: project?.proxmox_api_port,
-          verifySSL: project?.proxmox_verify_ssl !== false,
-        });
-        const failures = [...(result.errors || []), ...(result.skipped || [])];
-        if (failures.length) throw new Error(failures.map(item => item.reason || item.name).join('; '));
-      }
       setVmStatus(pid, idx, 'Saved', 'text-success');
       state.saving = false;
       bootstrap.Modal.getInstance(modal)?.hide();
       if (typeof showToast === 'function') showToast('Materials saved.', 'success');
     } catch (err) {
-      error.textContent = (saved ? 'Configuration saved, but materials were not fully applied: ' : 'Could not save materials: ') + err.message;
+      error.textContent = 'Could not save materials: ' + err.message;
       error.classList.remove('d-none');
-      setVmStatus(pid, idx, saved ? 'Saved; apply failed' : 'Save failed', 'text-danger');
+      setVmStatus(pid, idx, 'Save failed', 'text-danger');
     } finally {
       if (state) state.saving = false;
       form.querySelectorAll('input,button').forEach(el => { el.disabled = false; });
@@ -149,7 +131,6 @@
     modal.querySelector('#vm-materials-project-name').value = vm.project_name || '';
     modal.querySelector('#vm-materials-list').replaceChildren();
     for (const entry of (Array.isArray(vm.materials) ? vm.materials : [])) addRow(entry);
-    modal.querySelector('#vm-materials-apply').checked = true;
     modal.querySelector('#vm-materials-error').classList.add('d-none');
     bootstrap.Modal.getOrCreateInstance(modal).show();
   };

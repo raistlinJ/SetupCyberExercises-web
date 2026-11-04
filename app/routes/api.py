@@ -6050,7 +6050,7 @@ def instances_apply_scenario(pid: str):
     delay = float(getattr(proj, 'proxmox_update_delay_seconds', 0.5))
     total_mapped = len(mapped)
     if total_mapped > 0:
-        _job_emit_batch_progress(pid, 'applying', 'Set Credentials Metadata', 0, total_mapped, message=f'Setting credentials metadata… 0/{total_mapped} complete')
+        _job_emit_batch_progress(pid, 'applying', 'Set Metadata', 0, total_mapped, message=f'Setting metadata… 0/{total_mapped} complete')
     
     # Map configurations by name for easy lookup
     cfg_map = {}
@@ -6060,7 +6060,7 @@ def instances_apply_scenario(pid: str):
             cfg_map[name.lower()] = cfg
 
     def do_apply(m):
-        _job_current(pid, 'scenario', 'Setting credentials metadata on', m)
+        _job_current(pid, 'scenario', 'Setting metadata on', m)
         if _is_cancelled(pid):
             raise RuntimeError('cancelled')
             
@@ -6143,7 +6143,7 @@ def instances_apply_scenario(pid: str):
             finally:
                 if total_mapped > 0:
                     done = len(applied) + len(errors)
-                    _job_emit_batch_progress(pid, 'applying', 'Set Credentials Metadata', done, total_mapped, current=str(m.get('name') or ''), message=f'Set credentials metadata for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
+                    _job_emit_batch_progress(pid, 'applying', 'Set Metadata', done, total_mapped, current=str(m.get('name') or ''), message=f'Set metadata for {m.get("name") or "VM"}; {done}/{total_mapped} complete')
     _end_job(pid)
     return jsonify({ 'applied': applied, 'skipped': skipped, 'errors': errors })
 
@@ -11206,7 +11206,7 @@ def instances_run_stored_cmds(pid: str):
             })
         return out
     raw_override_list = body.get('storedCommandOverrides')
-    override_lookup: Dict[Tuple[str, int, int], str] = {}
+    override_lookup: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
     if isinstance(raw_override_list, list):
         for entry in raw_override_list:
             if not isinstance(entry, dict):
@@ -11218,9 +11218,15 @@ def instances_run_stored_cmds(pid: str):
             except (TypeError, ValueError):
                 continue
             override_text = _normalize_command_text(entry.get('text') or entry.get('command') or entry.get('override'))
-            if not override_text:
-                continue
-            override_lookup[(template_key, step_idx, cmd_idx)] = override_text
+            override = {}
+            if override_text:
+                override['text'] = override_text
+            if 'renderTemplateVariables' in entry:
+                if type(entry['renderTemplateVariables']) is not bool:
+                    return jsonify({'error': 'Stored command renderTemplateVariables must be a boolean'}), 400
+                override['render_template_variables'] = entry['renderTemplateVariables']
+            if override:
+                override_lookup[(template_key, step_idx, cmd_idx)] = override
     if not base_url or not (username and password) and not getattr(proj, 'proxmox_api_token', ''):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
@@ -11826,7 +11832,7 @@ def instances_run_stored_cmds(pid: str):
                     if isinstance(cmd_idx_value, int):
                         override_key = (template_key, step_idx + 1, cmd_idx_value)
                         if override_key in override_lookup:
-                            cmd_entry['text'] = override_lookup[override_key]
+                            cmd_entry.update(override_lookup[override_key])
                     adjusted_commands.append(cmd_entry)
                 commands = adjusted_commands
             if not commands:

@@ -297,7 +297,7 @@
               </div>
               <!-- Users & Access group -->
               <div class="btn-group btn-group-sm" id="users-group" data-bs-toggle="tooltip" data-bs-placement="top"
-                title="Manage users, pools, credentials metadata, and VM access.">
+                title="Manage users, pools, credentials and materials metadata, and VM access.">
                 <button id="act-users" type="button" class="btn btn-outline-secondary dropdown-toggle"
                   data-bs-toggle="dropdown" aria-expanded="false" disabled>Users &amp; Access</button>
                 <ul class="dropdown-menu">
@@ -313,7 +313,7 @@
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_creds_set')"
                       title="Set selected Proxmox users, pools, memberships, and VM access to match the current credential list">Set Credentials to Current List</button></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('apply_scenario')"
-                      title="Write the current project and credential metadata to the selected VM notes">Set Credentials Metadata</button></li>
+                      title="Credentials and materials">Set Metadata</button></li>
                   <li>
                     <hr class="dropdown-divider" />
                   </li>
@@ -430,8 +430,8 @@
             </div>
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" role="switch" id="vm-create-opt-scenario" checked>
-              <label class="form-check-label" for="vm-create-opt-scenario">Set Credentials Metadata</label>
-              <div class="form-text">Writes the current project and credential metadata to the selected VM notes after cloning.</div>
+              <label class="form-check-label" for="vm-create-opt-scenario" title="Credentials and materials">Set Metadata</label>
+              <div class="form-text">Writes the current project, credentials and materials metadata to the selected VM notes after cloning.</div>
             </div>
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" role="switch" id="vm-create-opt-network" checked>
@@ -893,7 +893,7 @@
         </div>
         <div class="modal-body">
           <div id="stored-cmd-picker-summary" class="small text-muted mb-2"></div>
-          <div class="text-muted small mb-2">Select one or more stored commands to run on every selected VM.</div>
+          <div class="text-muted small mb-2">Select one or more stored commands to run on every selected VM. Each render toggle starts with its saved setting; changes apply only to this run.</div>
           <div id="stored-cmd-picker-missing" class="alert alert-warning py-2 px-3 small d-none" role="alert"></div>
           <div id="stored-cmd-picker-list" class="mb-2" role="group" aria-label="Stored commands"></div>
           <div id="stored-cmd-picker-empty" class="text-muted small d-none">No stored commands are enabled for the

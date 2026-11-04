@@ -127,19 +127,28 @@ class VmMaterialsTests(unittest.TestCase):
         self.assertEqual(read_policy(written), {'file_upload': False, 'file_download': True})
 
     def test_apply_scenario_includes_materials_on_both_guest_types(self):
+        self.store.update_vm('p', 'web', vm_user='student', vm_pass='guest-password')
         for guest_type in ('qemu', 'lxc'):
             with self.subTest(guest_type=guest_type):
                 target = {'index': 1, 'name': 'web-set-1', 'node': 'node', 'vmid': 101, 'type': guest_type}
                 upstream = Mock()
                 getter = upstream.get_lxc_config if guest_type == 'lxc' else upstream.get_qemu_config
                 setter = upstream.set_lxc_options if guest_type == 'lxc' else upstream.set_qemu_options
-                getter.return_value = {'description': 'Human notes'}
+                getter.return_value = {'description': 'Human notes\n{"Scenario":"Old","User":"old-user"}\n' +
+                                       json.dumps({'AccessForge': {'custom': 'preserved', 'materials': []}})}
                 with patch.object(api, 'ProxmoxClient', return_value=upstream), patch.object(
                     api, '_resolve_targets_to_vm_info', return_value=([target], [], [])):
                     result = self.client.post('/api/projects/p/instances/actions/apply_scenario', json={'targets': [target]})
                 self.assertEqual(result.status_code, 200)
                 self.assertEqual(result.json['errors'], [])
-                self.assertEqual(metadata(setter.call_args.kwargs['options']['description'])['materials'], LINKS)
+                description = setter.call_args.kwargs['options']['description']
+                self.assertIn('Human notes', description)
+                credentials = next(obj for obj in api._iter_json_dicts_from_text(description) if 'Scenario' in obj)
+                self.assertEqual(credentials, {'Scenario': 'Demo', 'User': 'student', 'Pass': 'guest-password'})
+                published = metadata(description)
+                self.assertEqual(published['materials'], LINKS)
+                self.assertEqual(published['Project Name'], 'Display name')
+                self.assertEqual(published['custom'], 'preserved')
 
     def test_new_qemu_and_lxc_clones_receive_materials(self):
         for guest_type in ('qemu', 'lxc'):
