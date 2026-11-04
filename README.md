@@ -307,9 +307,9 @@ ScenarioForge/CoreVM/participant roles or change VM ACLs. See [setup, scope, rev
 
 ## VM/LXC materials links
 
-In **Configuration**, expand a VM or LXC card and click **Manage** under **Materials**, alongside the stored/validation command controls. The modal supports adding, editing and removing title/URL pairs, plus an optional **Project display name**. Only absolute HTTP/HTTPS links are accepted; links can point to web instructions, PDFs or hosted downloads. File uploads are not part of this editor.
+In **Configuration**, expand a VM or LXC card and click **Manage** under **Materials**, alongside the stored/validation command controls. The modal supports adding, editing and removing title/URL pairs, plus an optional **Material Category** (blank uses **Misc**). Only absolute HTTP/HTTPS links are accepted; links can point to web instructions, PDFs or hosted downloads. File uploads are not part of this editor.
 
-**Save** persists these defaults in the VM/LXC configuration without contacting Proxmox. To apply them to existing instances, select the VMs in **VM Manager** and choose **Users & Access → Set Metadata**. This writes credentials and materials together, including the configured links and display name. New clones also receive these settings.
+**Save** persists these defaults in the VM/LXC configuration without contacting Proxmox. To apply them to existing instances, select the VMs in **VM Manager** and choose **Users & Access → Set Metadata**. This writes credentials and materials together, including the configured links and material category. New clones also receive these settings.
 
 The resulting Proxmox Notes contain a single `AccessForge` object:
 
@@ -318,7 +318,7 @@ The resulting Proxmox Notes contain a single `AccessForge` object:
   "AccessForge": {
     "file_upload": false,
     "file_download": false,
-    "Project Name": "Network Fundamentals",
+    "Material Category": "Network Fundamentals",
     "materials": [
       {"title": "Lab instructions", "url": "https://example.edu/labs/networking"},
       {"title": "Reference PDF", "url": "https://example.edu/files/reference.pdf"}
@@ -327,9 +327,9 @@ The resulting Proxmox Notes contain a single `AccessForge` object:
 }
 ```
 
-Updating materials preserves existing live transfer flags, human notes, scenario metadata and credentials. Changing transfer flags preserves materials and display names. Removing all links publishes an empty `materials` list; clearing the display name removes `Project Name` so AccessForge falls back to `Scenario`. Materials survive save/reload, VM rename, and project export/import. Existing project-level uploaded files in SCE-web's Materials panel are separate and unchanged.
+Updating materials preserves existing live transfer flags, human notes, scenario metadata and credentials. Changing transfer flags preserves materials and categories. Removing all links publishes an empty `materials` list; clearing the category publishes `Material Category: Misc`. Materials survive save/reload, VM rename, and project export/import. Existing project-level uploaded files in SCE-web's Materials panel are separate and unchanged.
 
-AccessForge combines links from visible VMs/LXCs in the same Scenario and renders them above the VM cards in the project box. Reload AccessForge after applying metadata. This editor configures links on VM/LXC templates; it does not introduce a separate project-level link store.
+AccessForge combines links from visible VMs/LXCs in the same Scenario and renders them in a dropdown for each material category above the VM cards in the project box. Scenario headings stay unchanged. Reload AccessForge after applying metadata. This editor configures links on VM/LXC templates; it does not introduce a separate project-level link store.
 
 ## Per-VM console file transfer
 

@@ -29,7 +29,7 @@ Base path: `/api`. The table below keeps the long-form reference out of the READ
 | Download material | `GET /api/projects/{id}/materials/{fname}` |
 | Delete material | `DELETE /api/projects/{id}/materials/{fname}` |
 
-VM configuration accepts `project_name` (optional display-name string) and `materials` (an array of `{title, url}` HTTP/HTTPS links). The materials action accepts `templates: [name, ...]` to publish configured links and display names to every existing instance of those VM/LXC templates, or `targets` for selected instances. It uses the same Proxmox connection fields as other instance actions and requires an administrator. Results include `infos`, `skipped`, and `errors`; live transfer flags and unrelated Notes are preserved. These links are separate from the project-level uploaded-file endpoints above.
+VM configuration accepts `material_category` (optional category string; blank uses `Misc`) and `materials` (an array of `{title, url}` HTTP/HTTPS links). The materials action accepts `templates: [name, ...]` to publish configured links and categories to every existing instance of those VM/LXC templates, or `targets` for selected instances. It uses the same Proxmox connection fields as other instance actions and requires an administrator. Results include `infos`, `skipped`, and `errors`; live transfer flags and unrelated Notes are preserved. Notes use `Material Category`. These links are separate from the project-level uploaded-file endpoints above.
 
 ## Connectors
 

@@ -6869,7 +6869,7 @@ function renderProjectCard(p) {
           <label class="form-label mt-2">Materials</label>
           <div class="d-flex align-items-center gap-2 mb-2">
             <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button" aria-label="Manage materials for ${escHtml(v.name)}" onclick='openVmMaterialsManager(${escHtml(JSON.stringify(String(p.id)))},${i})'>Manage</button>
-            <div id="vm-${p.id}-${i}-materials-summary" class="small text-muted">${Array.isArray(v.materials) ? v.materials.length : 0} links${v.project_name ? ' · ' + escHtml(v.project_name) : ''}</div>
+            <div id="vm-${p.id}-${i}-materials-summary" class="small text-muted">${Array.isArray(v.materials) ? v.materials.length : 0} links · ${escHtml(v.material_category || 'Misc')}</div>
           </div>
         </div>
     <div class="col-md-4">
@@ -8161,7 +8161,7 @@ async function saveVM(id, name, fields, opts = {}) {
   } catch { }
   try {
     if (!silent) { try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: saving VM ${name}`) : console.log('Saving VM', name); } catch { } }
-    await http('PATCH', `/api/projects/${id}/vms/${encodeURIComponent(name)}`, fields);
+    const savedProject = await http('PATCH', `/api/projects/${id}/vms/${encodeURIComponent(name)}`, fields);
     if (['file_upload', 'file_download', 'viewable_to_user'].some(key => Object.prototype.hasOwnProperty.call(fields, key))) {
       const project = (window.PROJ_CACHE || {})[id];
       const sess = typeof readProxCreds === 'function' ? (readProxCreds(id) || {}) : {};
@@ -8183,6 +8183,7 @@ async function saveVM(id, name, fields, opts = {}) {
       try { if (window.shell && shell.refreshSidebar) shell.refreshSidebar('config'); } catch { }
       try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: VM saved') : console.log('VM saved'); } catch { }
     }
+    return savedProject;
   }
   catch (e) {
     if (!silent) alert('Error saving VM: ' + e.message);

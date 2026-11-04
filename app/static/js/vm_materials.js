@@ -19,9 +19,9 @@
         </div>
         <form id="vm-materials-form" class="d-flex flex-column overflow-hidden" style="min-height:0">
           <div class="modal-body">
-            <label class="form-label" for="vm-materials-project-name">Project display name (optional)</label>
-            <input class="form-control mb-1" id="vm-materials-project-name" type="text">
-            <p class="small text-muted">Heading in AccessForge. Leave blank to use the Scenario name.</p>
+            <label class="form-label" for="vm-materials-category">Material Category (optional)</label>
+            <input class="form-control mb-1" id="vm-materials-category" type="text">
+            <p class="small text-muted">Groups these links in AccessForge. Leave blank to use Misc.</p>
             <p class="small text-muted">Add links to instructions, documents or hosted downloads. These appear in the AccessForge project box with this VM or LXC.</p>
             <div id="vm-materials-list"></div>
             <button class="btn btn-sm btn-outline-primary mb-3" id="vm-materials-add" type="button">Add link</button>
@@ -73,7 +73,7 @@
     const summary = document.getElementById(`vm-${pid}-${idx}-materials-summary`);
     if (summary) {
       const count = fields.materials.length;
-      summary.textContent = `${count} link${count === 1 ? '' : 's'}${fields.project_name ? ' · ' + fields.project_name : ''}`;
+      summary.textContent = `${count} link${count === 1 ? '' : 's'} · ${fields.material_category || 'Misc'}`;
     }
   }
 
@@ -100,13 +100,19 @@
       error.classList.remove('d-none');
       return;
     }
-    const fields = {materials, project_name: modal.querySelector('#vm-materials-project-name').value.trim()};
+    const fields = {materials, material_category: modal.querySelector('#vm-materials-category').value.trim()};
     const {pid, idx, name} = state;
     state.saving = true;
     form.querySelectorAll('input,button').forEach(el => { el.disabled = true; });
     try {
-      await saveVM(pid, name, fields, {silent: true, rethrow: true});
-      updateSummary(pid, name, idx, fields);
+      const savedProject = await saveVM(pid, name, fields, {silent: true, rethrow: true});
+      const savedVm = savedProject?.vms?.find(vm => vm.name === name);
+      if (!savedVm || savedVm.material_category !== fields.material_category || !Array.isArray(savedVm.materials)
+          || savedVm.materials.length !== materials.length
+          || !savedVm.materials.every((entry, index) => entry.title === materials[index].title && entry.url === materials[index].url)) {
+        throw new Error('The server did not retain the materials settings. Restart DeployForge with the current version, then save again.');
+      }
+      updateSummary(pid, name, idx, {materials: savedVm.materials, material_category: savedVm.material_category});
       setVmStatus(pid, idx, 'Saved', 'text-success');
       state.saving = false;
       bootstrap.Modal.getInstance(modal)?.hide();
@@ -128,7 +134,7 @@
     const modal = ensureModal();
     state = {pid, idx, name: vm.name, saving: false};
     modal.querySelector('#vmMaterialsModalLabel').textContent = `Manage Materials — ${vm.name}`;
-    modal.querySelector('#vm-materials-project-name').value = vm.project_name || '';
+    modal.querySelector('#vm-materials-category').value = vm.material_category || '';
     modal.querySelector('#vm-materials-list').replaceChildren();
     for (const entry of (Array.isArray(vm.materials) ? vm.materials : [])) addRow(entry);
     modal.querySelector('#vm-materials-error').classList.add('d-none');

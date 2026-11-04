@@ -35,6 +35,7 @@ def normalize_material_links(value, *, strict=False):
 
 
 def config_materials(vm):
-    name = getattr(vm, 'project_name', '')
-    return {'Project Name': (name.strip() or None) if isinstance(name, str) else None,
+    category = getattr(vm, 'material_category', '')
+    category = category.strip() if isinstance(category, str) else ''
+    return {'Material Category': category or 'Misc',
             'materials': normalize_material_links(getattr(vm, 'materials', []))}

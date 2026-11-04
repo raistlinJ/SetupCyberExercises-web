@@ -28,7 +28,7 @@ class VmMaterialsTests(unittest.TestCase):
         self.client = self.app.test_client()
         self.project = Project(id='p', name='Demo', instances=2, tag='-set-',
                                proxmox_url='https://node.test', proxmox_api_token='test',
-                               vms=[VMConfig(name='web', materials=LINKS, project_name='Display name')])
+                               vms=[VMConfig(name='web', materials=LINKS, material_category='Networking')])
         self.store = ProjectStore(self.tmp.name)
         self.store.upsert(self.project)
         self.store_patch = patch.object(api, '_store', return_value=self.store)
@@ -40,28 +40,43 @@ class VmMaterialsTests(unittest.TestCase):
 
     def test_save_reload_rename_and_export_import_preserve_materials(self):
         route = '/api/projects/p/vms/web'
-        result = self.client.patch(route, json={'materials': LINKS * 2, 'project_name': ' New title '})
+        result = self.client.patch(route, json={'materials': LINKS * 2, 'material_category': ' Lab guides '})
         self.assertEqual(result.status_code, 200)
         vm = ProjectStore(self.tmp.name).get('p').vms[0]
         self.assertEqual(vm.materials, LINKS)
-        self.assertEqual(vm.project_name, 'New title')
+        self.assertEqual(vm.material_category, 'Lab guides')
+        # Navigation reloads configuration from this endpoint, not the browser cache.
+        projects = self.client.get('/api/projects').json['projects']
+        reloaded = next(project for project in projects if project['id'] == 'p')['vms'][0]
+        self.assertEqual(reloaded['materials'], LINKS)
+        self.assertEqual(reloaded['material_category'], 'Lab guides')
+        with patch.dict(os.environ, {'AUTH_ENABLE': '0', 'DATA_DIR': self.tmp.name}):
+            restarted = create_app()
+        try:
+            projects = restarted.test_client().get('/api/projects').json['projects']
+            reloaded = next(project for project in projects if project['id'] == 'p')['vms'][0]
+            self.assertEqual(reloaded['materials'], LINKS)
+            self.assertEqual(reloaded['material_category'], 'Lab guides')
+        finally:
+            if queue := restarted.extensions.get('action_queue'):
+                queue.close()
         renamed = self.store.rename_vm('p', 'web', 'renamed')
         self.assertEqual(renamed.vms[0].materials, LINKS)
-        self.assertEqual(renamed.vms[0].project_name, 'New title')
+        self.assertEqual(renamed.vms[0].material_category, 'Lab guides')
         with self.app.app_context():
             exported = api._project_to_json_filtered(renamed, include_creds=False, include_vms=False)
         imported = api._sanitize_import_vms(exported['vms'], keep_vmid=False, include_creds=False)
         vm = self.store._coerce_vm(imported[0])
         self.assertEqual(vm.materials, LINKS)
-        self.assertEqual(vm.project_name, 'New title')
+        self.assertEqual(vm.material_category, 'Lab guides')
 
     def test_configuration_save_does_not_require_proxmox_connection(self):
         with patch.object(api, 'ProxmoxClient', side_effect=AssertionError('Unexpected connection')):
-            result = self.client.patch('/api/projects/p/vms/web', json={'materials': [], 'project_name': ''})
+            result = self.client.patch('/api/projects/p/vms/web', json={'materials': [], 'material_category': ''})
         self.assertEqual(result.status_code, 200)
         vm = self.store.get('p').vms[0]
         self.assertEqual(vm.materials, [])
-        self.assertEqual(vm.project_name, '')
+        self.assertEqual(vm.material_category, '')
 
     def test_invalid_links_are_rejected_before_persistence(self):
         invalid = [None, {}, 'text', [None], [{}], [{'title': 'x', 'url': 'javascript:alert(1)'}],
@@ -74,7 +89,7 @@ class VmMaterialsTests(unittest.TestCase):
                 result = self.client.patch('/api/projects/p/vms/web', json={'materials': links})
                 self.assertEqual(result.status_code, 400)
                 self.assertEqual(self.store.get('p').vms[0].materials, LINKS)
-        self.assertEqual(self.client.patch('/api/projects/p/vms/web', json={'project_name': 123}).status_code, 400)
+        self.assertEqual(self.client.patch('/api/projects/p/vms/web', json={'material_category': 123}).status_code, 400)
 
     def test_sync_updates_qemu_and_lxc_without_altering_live_policy_or_other_notes(self):
         for guest_type in ('qemu', 'lxc'):
@@ -96,21 +111,21 @@ class VmMaterialsTests(unittest.TestCase):
                 self.assertIn('Human notes', options['description'])
                 self.assertIn('"User":"student"', options['description'])
                 self.assertEqual(metadata(options['description']), {
-                    'Project Name': 'Display name', 'materials': LINKS,
+                    'Material Category': 'Networking', 'materials': LINKS,
                     'file_upload': True, 'file_download': False, 'custom': 'preserved'})
 
     def test_clearing_removes_previous_title_and_links(self):
-        self.client.patch('/api/projects/p/vms/web', json={'materials': [], 'project_name': ''})
+        self.client.patch('/api/projects/p/vms/web', json={'materials': [], 'material_category': ''})
         upstream = Mock()
         upstream.get_qemu_config.return_value = {'description': json.dumps({'AccessForge': {
-            'Project Name': 'Old', 'materials': LINKS, 'file_upload': True}})}
+            'Material Category': 'Old', 'materials': LINKS, 'file_upload': True}})}
         target = {'index': 1, 'name': 'web-set-1', 'node': 'node', 'vmid': 101, 'type': 'qemu'}
         with patch.object(api, 'ProxmoxClient', return_value=upstream), patch.object(
             api, '_resolve_targets_to_vm_info', return_value=([target], [], [])):
             result = self.client.post('/api/projects/p/instances/actions/materials', json={'templates': ['web']})
         self.assertEqual(result.json['errors'], [])
         written = metadata(upstream.set_qemu_options.call_args.kwargs['options']['description'])
-        self.assertNotIn('Project Name', written)
+        self.assertEqual(written['Material Category'], 'Misc')
         self.assertEqual(written['materials'], [])
         self.assertTrue(written['file_upload'])
 
@@ -119,11 +134,11 @@ class VmMaterialsTests(unittest.TestCase):
         self.app.current_user = lambda: {'roles': ['user']}
         self.assertEqual(self.client.post('/api/projects/p/instances/actions/materials', json={'templates': ['web']}).status_code, 403)
 
-    def test_transfer_changes_preserve_materials_and_display_name(self):
-        original = json.dumps({'AccessForge': {'materials': LINKS, 'Project Name': 'Demo', 'file_upload': True}})
+    def test_transfer_changes_preserve_materials_and_category(self):
+        original = json.dumps({'AccessForge': {'materials': LINKS, 'Material Category': 'Demo', 'file_upload': True}})
         written = write_policy(original, {'file_upload': False, 'file_download': True})
         self.assertEqual(metadata(written)['materials'], LINKS)
-        self.assertEqual(metadata(written)['Project Name'], 'Demo')
+        self.assertEqual(metadata(written)['Material Category'], 'Demo')
         self.assertEqual(read_policy(written), {'file_upload': False, 'file_download': True})
 
     def test_apply_scenario_includes_materials_on_both_guest_types(self):
@@ -147,7 +162,7 @@ class VmMaterialsTests(unittest.TestCase):
                 self.assertEqual(credentials, {'Scenario': 'Demo', 'User': 'student', 'Pass': 'guest-password'})
                 published = metadata(description)
                 self.assertEqual(published['materials'], LINKS)
-                self.assertEqual(published['Project Name'], 'Display name')
+                self.assertEqual(published['Material Category'], 'Networking')
                 self.assertEqual(published['custom'], 'preserved')
 
     def test_new_qemu_and_lxc_clones_receive_materials(self):
@@ -181,7 +196,7 @@ class VmMaterialsTests(unittest.TestCase):
                 published = [metadata(desc) for desc in descriptions if 'AccessForge' in desc]
                 self.assertTrue(published)
                 self.assertEqual(published[-1]['materials'], LINKS)
-                self.assertEqual(published[-1]['Project Name'], 'Display name')
+                self.assertEqual(published[-1]['Material Category'], 'Networking')
 
 
 class MaterialNormalizationTests(unittest.TestCase):

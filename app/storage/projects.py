@@ -338,7 +338,7 @@ class VMConfig:
     viewable_to_user: bool = True
     file_upload: bool = False
     file_download: bool = False
-    project_name: str = ""
+    material_category: str = ""
     materials: List[Dict[str, str]] = field(default_factory=list)
     start_commands: List[StartCommandStep] = field(default_factory=list)
     stored_commands: List[StartCommandStep] = field(default_factory=list)
@@ -865,7 +865,8 @@ class ProjectStore:
             for direction in ("file_upload", "file_download"):
                 base[direction] = _coerce_enabled(base.get(direction), False)
             base['materials'] = normalize_material_links(base.get('materials'))
-            base['project_name'] = base['project_name'].strip() if isinstance(base.get('project_name'), str) else ''
+            category = v.get('material_category', '')
+            base['material_category'] = category.strip() if isinstance(category, str) else ''
             # Normalize vmid to int if present
             if base.get("vmid") is not None:
                 try:
@@ -1231,7 +1232,7 @@ class ProjectStore:
                         "viewable_to_user",
                         "file_upload",
                         "file_download",
-                        "project_name",
+                        "material_category",
                         "materials",
                         "start_commands",
                         "stored_commands",
@@ -1265,7 +1266,8 @@ class ProjectStore:
                     vm_data["stored_commands"] = sanitize_start_command_steps(vm_data.get("stored_commands"))
                     vm_data["validation_commands"] = sanitize_validation_commands(vm_data.get("validation_commands"))
                     vm_data['materials'] = normalize_material_links(vm_data.get('materials'))
-                    vm_data['project_name'] = vm_data['project_name'].strip() if isinstance(vm_data.get('project_name'), str) else ''
+                    category = vm_data.get('material_category')
+                    vm_data['material_category'] = category.strip() if isinstance(category, str) else ''
                     proj.vms[i] = VMConfig(**vm_data)
                     break
             if not found:
@@ -1291,7 +1293,7 @@ class ProjectStore:
                                            vm_type=getattr(vm, 'vm_type', 'qemu'),
                                            viewable_to_user=vm.viewable_to_user,
                                            file_upload=vm.file_upload, file_download=vm.file_download,
-                                           project_name=vm.project_name, materials=list(vm.materials),
+                                           material_category=vm.material_category, materials=list(vm.materials),
                                            start_commands=sanitize_start_command_steps(vm.start_commands),
                                            stored_commands=sanitize_start_command_steps(vm.stored_commands),
                                            validation_commands=sanitize_validation_commands(getattr(vm, 'validation_commands', [])),

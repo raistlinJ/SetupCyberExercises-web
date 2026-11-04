@@ -17015,10 +17015,10 @@ def update_vm(pid: str, name: str):
     try:
         if 'materials' in data:
             data['materials'] = normalize_material_links(data['materials'], strict=True)
-        if 'project_name' in data:
-            if not isinstance(data['project_name'], str):
-                raise ValueError('project_name must be a string')
-            data['project_name'] = data['project_name'].strip()
+        if 'material_category' in data:
+            if not isinstance(data['material_category'], str):
+                raise ValueError('material_category must be a string')
+            data['material_category'] = data['material_category'].strip()
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
     policy_change = any(key in data for key in ("file_upload", "file_download"))
@@ -17089,7 +17089,7 @@ def update_vm(pid: str, name: str):
     try:
         # Only update fields explicitly provided in the payload to avoid accidental clearing
         fields = {}
-        for key in ('materials', 'project_name'):
+        for key in ('materials', 'material_category'):
             if key in data:
                 fields[key] = data[key]
         if "vmid" in data:
