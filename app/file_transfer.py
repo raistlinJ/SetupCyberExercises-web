@@ -9,10 +9,11 @@ def config_policy(vm):
 
 
 def write_policy(description, policy):
-    # Preserve human notes, credentials and unrelated JSON; replace only our namespace.
+    # Merge our fields without deleting materials, display names or other metadata.
     source = str(description or "")
     decoder = json.JSONDecoder()
     parts = []
+    existing = {}
     cursor = 0
     while cursor < len(source):
         start = source.find("{", cursor)
@@ -29,6 +30,8 @@ def write_policy(description, policy):
             continue
         parts.append(source[cursor:start])
         if isinstance(obj, dict) and "AccessForge" in obj:
+            if isinstance(obj['AccessForge'], dict):
+                existing.update(obj['AccessForge'])
             del obj["AccessForge"]
             if obj:
                 parts.append(json.dumps(obj, indent=4))
@@ -36,7 +39,12 @@ def write_policy(description, policy):
             parts.append(source[start:start + length])
         cursor = start + length
     clean = ''.join(parts).strip()
-    metadata = json.dumps({"AccessForge": policy}, indent=4)
+    for key, value in policy.items():
+        if value is None:
+            existing.pop(key, None)
+        else:
+            existing[key] = value
+    metadata = json.dumps({"AccessForge": existing}, indent=4)
     return (clean + "\n\n" if clean else "") + metadata
 
 

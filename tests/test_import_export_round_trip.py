@@ -79,6 +79,7 @@ class ImportExportRoundTripTests(unittest.TestCase):
                     'match': '^active$',
                     'is_regex': True,
                     'timeout_seconds': 19,
+                    'render_template_variables': False,
                 }],
                 internal_network_adaptors=['LAN'],
                 internet_connected_adaptors=['vmbr0'],
@@ -187,6 +188,7 @@ class ImportExportRoundTripTests(unittest.TestCase):
         self.assertFalse(vm['stored_commands'][0]['commands'][0]['enabled'])
         self.assertEqual(vm['validation_commands'][0]['command'], 'systemctl is-active demo')
         self.assertEqual(vm['validation_commands'][0]['match'], '^active$')
+        self.assertFalse(vm['validation_commands'][0]['render_template_variables'])
         restored_access = {vm_config['name']: vm_config['viewable_to_user'] for vm_config in restored['vms']}
         self.assertEqual(restored_access, {
             'container-template': True,

@@ -7,6 +7,7 @@ import ast
 import threading
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
+from ..materials import normalize_material_links
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
 DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS = 10
@@ -301,6 +302,7 @@ def sanitize_validation_commands(value: Any) -> List[Dict[str, Any]]:
                 "match": _coerce_match(match_hint),
                 "is_regex": _coerce_enabled(is_regex_hint, True),
                 "timeout_seconds": _coerce_timeout(timeout_hint, default=DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+                "render_template_variables": _coerce_enabled(entry.get('render_template_variables', entry.get('renderTemplateVariables', True))),
             })
             return
         if isinstance(entry, (list, tuple, set)):
@@ -316,6 +318,7 @@ def sanitize_validation_commands(value: Any) -> List[Dict[str, Any]]:
             "match": "",
             "is_regex": True,
             "timeout_seconds": DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS,
+            "render_template_variables": True,
         })
 
     if isinstance(value, (list, tuple, set)):
@@ -335,6 +338,8 @@ class VMConfig:
     viewable_to_user: bool = True
     file_upload: bool = False
     file_download: bool = False
+    project_name: str = ""
+    materials: List[Dict[str, str]] = field(default_factory=list)
     start_commands: List[StartCommandStep] = field(default_factory=list)
     stored_commands: List[StartCommandStep] = field(default_factory=list)
     validation_commands: List[Dict[str, Any]] = field(default_factory=list)
@@ -859,6 +864,8 @@ class ProjectStore:
                 base["viewable_to_user"] = True
             for direction in ("file_upload", "file_download"):
                 base[direction] = _coerce_enabled(base.get(direction), False)
+            base['materials'] = normalize_material_links(base.get('materials'))
+            base['project_name'] = base['project_name'].strip() if isinstance(base.get('project_name'), str) else ''
             # Normalize vmid to int if present
             if base.get("vmid") is not None:
                 try:
@@ -1043,6 +1050,16 @@ class ProjectStore:
             self._write_all(allp)
         return project
 
+    def update_project(self, pid: str, **fields) -> Project:
+        """Apply explicit fields to the latest project under the write lock."""
+        with self._write_lock:
+            project = self.get(pid)
+            if not project:
+                raise KeyError("Project not found")
+            for key, value in fields.items():
+                setattr(project, key, value)
+            return self.upsert(project)
+
     def patch_row_tags(self, pid: str, scope: str, *, rows=None, tag_id=None, enabled=True, merge=None) -> Project:
         """Apply one tag operation to the latest project without replacing other groups."""
         if scope not in ROW_TAG_SCOPES:
@@ -1179,107 +1196,117 @@ class ProjectStore:
         return True
 
     def add_vm(self, pid: str, vm_name: str, vm_type: str = "qemu") -> Project:
-        proj = self.get(pid)
-        if not proj:
-            raise KeyError("Project not found")
-        exists = any(vm.name == vm_name for vm in proj.vms)
-        if not exists:
-            proj.vms.append(VMConfig(name=vm_name, vm_type=vm_type))
-            self.upsert(proj)
-        return proj
+        with self._write_lock:
+            proj = self.get(pid)
+            if not proj:
+                raise KeyError("Project not found")
+            exists = any(vm.name == vm_name for vm in proj.vms)
+            if not exists:
+                proj.vms.append(VMConfig(name=vm_name, vm_type=vm_type))
+                self.upsert(proj)
+            return proj
 
     def remove_vm(self, pid: str, vm_name: str) -> Project:
-        proj = self.get(pid)
-        if not proj:
-            raise KeyError("Project not found")
-        proj.vms = [v for v in proj.vms if v.name != vm_name]
-        self.upsert(proj)
-        return proj
+        with self._write_lock:
+            proj = self.get(pid)
+            if not proj:
+                raise KeyError("Project not found")
+            proj.vms = [v for v in proj.vms if v.name != vm_name]
+            self.upsert(proj)
+            return proj
 
     def update_vm(self, pid: str, vm_name: str, **fields) -> Project:
-        proj = self.get(pid)
-        if not proj:
-            raise KeyError("Project not found")
-        found = False
-        for i, vm in enumerate(proj.vms):
-            if vm.name == vm_name:
-                found = True
-                vm_data = asdict(vm)
-                for k in [
-                    "vmid",
-                    "viewable_to_user",
-                    "file_upload",
-                    "file_download",
-                    "start_commands",
-                    "stored_commands",
-                    "validation_commands",
-                    "internal_network_adaptors",
-                    "internet_connected_adaptors",
-                    "use_linked_clone",
-                    "clone_timeout_sec",
-                    "storage_volume",
-                    "skip_post_clone_snapshot",
-                    "vm_user",
-                    "vm_pass",
-                    "vm_type",
-                ]:
-                    if k in fields:
-                        if k == "start_commands":
-                            vm_data[k] = sanitize_start_command_steps(fields[k])
-                        elif k == "stored_commands":
-                            vm_data[k] = sanitize_start_command_steps(fields[k])
-                        elif k == "validation_commands":
-                            vm_data[k] = sanitize_validation_commands(fields[k])
-                        else:
-                            vm_data[k] = fields[k]
-                # Coerce vmid to int or None
-                if "vmid" in vm_data:
-                    try:
-                        vm_data["vmid"] = int(vm_data["vmid"]) if str(vm_data["vmid"]).strip() != "" else None
-                    except Exception:
-                        vm_data["vmid"] = None
-                vm_data["start_commands"] = sanitize_start_command_steps(vm_data.get("start_commands"))
-                vm_data["stored_commands"] = sanitize_start_command_steps(vm_data.get("stored_commands"))
-                vm_data["validation_commands"] = sanitize_validation_commands(vm_data.get("validation_commands"))
-                proj.vms[i] = VMConfig(**vm_data)
-                break
-        if not found:
-            raise KeyError("VM not found")
-        self.upsert(proj)
-        return proj
+        # Lock the read and merge too; locking only upsert can restore stale flags.
+        with self._write_lock:
+            proj = self.get(pid)
+            if not proj:
+                raise KeyError("Project not found")
+            found = False
+            for i, vm in enumerate(proj.vms):
+                if vm.name == vm_name:
+                    found = True
+                    vm_data = asdict(vm)
+                    for k in [
+                        "vmid",
+                        "viewable_to_user",
+                        "file_upload",
+                        "file_download",
+                        "project_name",
+                        "materials",
+                        "start_commands",
+                        "stored_commands",
+                        "validation_commands",
+                        "internal_network_adaptors",
+                        "internet_connected_adaptors",
+                        "use_linked_clone",
+                        "clone_timeout_sec",
+                        "storage_volume",
+                        "skip_post_clone_snapshot",
+                        "vm_user",
+                        "vm_pass",
+                        "vm_type",
+                    ]:
+                        if k in fields:
+                            if k == "start_commands":
+                                vm_data[k] = sanitize_start_command_steps(fields[k])
+                            elif k == "stored_commands":
+                                vm_data[k] = sanitize_start_command_steps(fields[k])
+                            elif k == "validation_commands":
+                                vm_data[k] = sanitize_validation_commands(fields[k])
+                            else:
+                                vm_data[k] = fields[k]
+                    # Coerce vmid to int or None
+                    if "vmid" in vm_data:
+                        try:
+                            vm_data["vmid"] = int(vm_data["vmid"]) if str(vm_data["vmid"]).strip() != "" else None
+                        except Exception:
+                            vm_data["vmid"] = None
+                    vm_data["start_commands"] = sanitize_start_command_steps(vm_data.get("start_commands"))
+                    vm_data["stored_commands"] = sanitize_start_command_steps(vm_data.get("stored_commands"))
+                    vm_data["validation_commands"] = sanitize_validation_commands(vm_data.get("validation_commands"))
+                    vm_data['materials'] = normalize_material_links(vm_data.get('materials'))
+                    vm_data['project_name'] = vm_data['project_name'].strip() if isinstance(vm_data.get('project_name'), str) else ''
+                    proj.vms[i] = VMConfig(**vm_data)
+                    break
+            if not found:
+                raise KeyError("VM not found")
+            self.upsert(proj)
+            return proj
 
     def rename_vm(self, pid: str, old_name: str, new_name: str) -> Project:
-        proj = self.get(pid)
-        if not proj:
-            raise KeyError("Project not found")
-        new_name = (new_name or "").strip()
-        if not new_name:
-            raise ValueError("New VM name must be non-empty")
-        if any(vm.name == new_name for vm in proj.vms):
-            raise ValueError("A VM with that name already exists")
-        changed = False
-        for i, vm in enumerate(proj.vms):
-            if vm.name == old_name:
-                proj.vms[i] = VMConfig(name=new_name,
-                                       vmid=vm.vmid,
-                                       vm_type=getattr(vm, 'vm_type', 'qemu'),
-                                       viewable_to_user=vm.viewable_to_user,
-                                       file_upload=vm.file_upload, file_download=vm.file_download,
-                                       start_commands=sanitize_start_command_steps(vm.start_commands),
-                                       stored_commands=sanitize_start_command_steps(vm.stored_commands),
-                                       validation_commands=sanitize_validation_commands(getattr(vm, 'validation_commands', [])),
-                                       internal_network_adaptors=vm.internal_network_adaptors,
-                                       internet_connected_adaptors=vm.internet_connected_adaptors,
-                                       use_linked_clone=vm.use_linked_clone,
-                                       clone_timeout_sec=vm.clone_timeout_sec,
-                                       storage_volume=vm.storage_volume,
-                                       skip_post_clone_snapshot=vm.skip_post_clone_snapshot)
-                changed = True
-                break
-        if not changed:
-            raise KeyError("VM not found")
-        self.upsert(proj)
-        return proj
+        with self._write_lock:
+            proj = self.get(pid)
+            if not proj:
+                raise KeyError("Project not found")
+            new_name = (new_name or "").strip()
+            if not new_name:
+                raise ValueError("New VM name must be non-empty")
+            if any(vm.name == new_name for vm in proj.vms):
+                raise ValueError("A VM with that name already exists")
+            changed = False
+            for i, vm in enumerate(proj.vms):
+                if vm.name == old_name:
+                    proj.vms[i] = VMConfig(name=new_name,
+                                           vmid=vm.vmid,
+                                           vm_type=getattr(vm, 'vm_type', 'qemu'),
+                                           viewable_to_user=vm.viewable_to_user,
+                                           file_upload=vm.file_upload, file_download=vm.file_download,
+                                           project_name=vm.project_name, materials=list(vm.materials),
+                                           start_commands=sanitize_start_command_steps(vm.start_commands),
+                                           stored_commands=sanitize_start_command_steps(vm.stored_commands),
+                                           validation_commands=sanitize_validation_commands(getattr(vm, 'validation_commands', [])),
+                                           internal_network_adaptors=vm.internal_network_adaptors,
+                                           internet_connected_adaptors=vm.internet_connected_adaptors,
+                                           use_linked_clone=vm.use_linked_clone,
+                                           clone_timeout_sec=vm.clone_timeout_sec,
+                                           storage_volume=vm.storage_volume,
+                                           skip_post_clone_snapshot=vm.skip_post_clone_snapshot)
+                    changed = True
+                    break
+            if not changed:
+                raise KeyError("VM not found")
+            self.upsert(proj)
+            return proj
 
     def add_material(self, pid: str, filename: str) -> Project:
         proj = self.get(pid)

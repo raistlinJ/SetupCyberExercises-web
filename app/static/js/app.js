@@ -5418,7 +5418,7 @@ function sanitizeValidationCommands(commands) {
     if (typeof entry === 'string' || typeof entry === 'number') {
       const text = String(entry).trim();
       if (!text) continue;
-      list.push({ command: text, enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS });
+      list.push({ command: text, enabled: true, match: '', timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS, renderTemplateVariables: true });
       continue;
     }
     if (typeof entry !== 'object') continue;
@@ -5430,7 +5430,8 @@ function sanitizeValidationCommands(commands) {
     let isRegex = entry.is_regex ?? entry.isRegex;
     if (isRegex === undefined) isRegex = true;
     const timeoutSeconds = normalizeCommandTimeout(entry.timeoutSeconds ?? entry.timeout_seconds ?? entry.timeout, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS);
-    list.push({ command, enabled: toBool(enabled, true), match, timeoutSeconds, is_regex: toBool(isRegex, true) });
+    list.push({ command, enabled: toBool(enabled, true), match, timeoutSeconds, is_regex: toBool(isRegex, true),
+      renderTemplateVariables: toBool(entry.renderTemplateVariables ?? entry.render_template_variables, true) });
   }
   return list;
 }
@@ -5442,6 +5443,7 @@ function validationCommandsToServerPayload(commands) {
     match: cmd.match || '',
     is_regex: cmd.is_regex !== false,
     timeout_seconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+    render_template_variables: cmd.renderTemplateVariables !== false,
   }));
 }
 
@@ -5736,17 +5738,17 @@ async function previewCommandTemplates(output, groups, commands) {
 }
 
 function ensureCommandTemplatePreview(kind) {
-  const prefix = kind === 'stored' ? 'stored' : 'start';
-  const modalId = prefix === 'stored' ? 'storedCommandsModal' : 'startCommandsModal';
+  const prefix = ['stored', 'validation'].includes(kind) ? kind : 'start';
+  const modalId = {stored: 'storedCommandsModal', validation: 'validationCommandsModal', start: 'startCommandsModal'}[prefix];
   const body = document.querySelector(`#${modalId} .modal-body`);
   if (!body || document.getElementById(`${prefix}-template-controls`)) return;
   const panel = createCommandTemplatePanel(prefix);
   panel.querySelector('[data-role="template-preview"]').addEventListener('click', () => {
-    const state = prefix === 'stored' ? STORED_COMMAND_MODAL_STATE : START_COMMAND_MODAL_STATE;
+    const state = {stored: STORED_COMMAND_MODAL_STATE, validation: VALIDATION_COMMAND_MODAL_STATE, start: START_COMMAND_MODAL_STATE}[prefix];
     const target = { index: Number(document.getElementById(`${prefix}-preview-index`).value), name: state.vmName };
     const vmid = document.getElementById(`${prefix}-preview-vmid`).value;
     if (vmid) target.vmid = Number(vmid);
-    const commands = (state.steps || []).flatMap(step => step.commands || [])
+    const commands = (prefix === 'validation' ? state.commands || [] : (state.steps || []).flatMap(step => step.commands || []))
       .filter(command => command.enabled !== false && String(command.command || '').trim())
       .map(command => ({command: String(command.command), render_template_variables: command.renderTemplateVariables !== false}));
     return previewCommandTemplates(panel.querySelector('pre'), [{pid: state.pid, targets: [target]}], commands);
@@ -6519,6 +6521,8 @@ function wireStoredCommandsModal() {
 }
 
 function renderValidationCommandsModal() {
+  invalidateCommandTemplatePreview('validation');
+  ensureCommandTemplatePreview('validation');
   const modalTitle = document.getElementById('validationCommandsModalLabel');
   if (modalTitle) {
     const name = VALIDATION_COMMAND_MODAL_STATE.vmName ? ` - ${VALIDATION_COMMAND_MODAL_STATE.vmName}` : '';
@@ -6557,6 +6561,10 @@ function renderValidationCommandsModal() {
           <button type="button" class="btn btn-outline-secondary" data-role="validation-down" ${downDisabled} title="Move down"><span aria-hidden="true">&#8595;</span></button>
           <button type="button" class="btn btn-outline-danger" data-role="validation-delete">Remove</button>
         </div>
+      </div>
+      <div class="form-check form-switch mb-2">
+        <input class="form-check-input" type="checkbox" id="validation-cmd-${idx}-render" data-role="validation-render" ${commandObj.renderTemplateVariables !== false ? 'checked' : ''}>
+        <label class="form-check-label small" for="validation-cmd-${idx}-render">Render template variables</label>
       </div>
       <div class="row g-2 align-items-center">
         <div class="col-md-8">
@@ -6605,6 +6613,7 @@ function openValidationCommandsManager(pid, idx) {
     match: cmd.match || '',
     is_regex: cmd.is_regex !== false,
     timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+    renderTemplateVariables: cmd.renderTemplateVariables !== false,
   }));
   renderValidationCommandsModal();
   const modalEl = document.getElementById('validationCommandsModal');
@@ -6636,6 +6645,7 @@ async function saveValidationCommandsFromModal() {
       match: cmd.match || '',
       is_regex: cmd.is_regex !== false,
       timeoutSeconds: normalizeCommandTimeout(cmd.timeoutSeconds, DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS),
+      renderTemplateVariables: cmd.renderTemplateVariables !== false,
     }));
     setVmStatus(pid, idx, 'Saved', 'text-success');
     setTimeout(() => {
@@ -6668,7 +6678,7 @@ function wireValidationCommandsModal() {
   if (addBtn) {
     addBtn.addEventListener('click', () => {
       const list = VALIDATION_COMMAND_MODAL_STATE.commands;
-      list.push({ command: '', enabled: true, match: '', is_regex: true, timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS });
+      list.push({ command: '', enabled: true, match: '', is_regex: true, timeoutSeconds: DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS, renderTemplateVariables: true });
       renderValidationCommandsModal();
     });
   }
@@ -6676,6 +6686,7 @@ function wireValidationCommandsModal() {
   const listEl = document.getElementById('validation-commands-list');
   if (listEl) {
     listEl.addEventListener('input', (ev) => {
+      invalidateCommandTemplatePreview('validation');
       const target = ev.target;
       if (!target) return;
       const row = target.closest && target.closest('[data-validation-index]');
@@ -6695,15 +6706,18 @@ function wireValidationCommandsModal() {
     });
 
     listEl.addEventListener('change', (ev) => {
+      invalidateCommandTemplatePreview('validation');
       const target = ev.target;
       if (!target) return;
       const role = target.getAttribute('data-role');
-      if (role !== 'validation-toggle' && role !== 'validation-regex-toggle') return;
+      if (!['validation-toggle', 'validation-regex-toggle', 'validation-render'].includes(role)) return;
       const row = target.closest && target.closest('[data-validation-index]');
       if (!row) return;
       const idx = Number(row.dataset.validationIndex);
       if (!Number.isFinite(idx) || !VALIDATION_COMMAND_MODAL_STATE.commands[idx]) return;
-      if (role === 'validation-toggle') {
+      if (role === 'validation-render') {
+        VALIDATION_COMMAND_MODAL_STATE.commands[idx].renderTemplateVariables = !!target.checked;
+      } else if (role === 'validation-toggle') {
         VALIDATION_COMMAND_MODAL_STATE.commands[idx].enabled = !!target.checked;
         renderValidationCommandsModal();
       } else if (role === 'validation-regex-toggle') {
@@ -6852,6 +6866,11 @@ function renderProjectCard(p) {
           </div>
           <input type="hidden" id="vm-${p.id}-${i}-validation-data" value="${validationDataValue}">`;
     })()}
+          <label class="form-label mt-2">Materials</label>
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button" aria-label="Manage materials for ${escHtml(v.name)}" onclick='openVmMaterialsManager(${escHtml(JSON.stringify(String(p.id)))},${i})'>Manage</button>
+            <div id="vm-${p.id}-${i}-materials-summary" class="small text-muted">${Array.isArray(v.materials) ? v.materials.length : 0} links${v.project_name ? ' · ' + escHtml(v.project_name) : ''}</div>
+          </div>
         </div>
     <div class="col-md-4">
           <label class="form-label">Network Interfaces</label>

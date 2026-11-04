@@ -22,11 +22,14 @@ Base path: `/api`. The table below keeps the long-form reference out of the READ
 | Add VM | `POST /api/projects/{id}/vms` |
 | Rename VM | `POST /api/projects/{id}/vms/{name}/rename` |
 | Update VM | `PATCH /api/projects/{id}/vms/{name}` |
+| Apply VM/LXC materials links | `POST /api/projects/{id}/instances/actions/materials` |
 | Delete VM | `DELETE /api/projects/{id}/vms/{name}` |
 | List materials | `GET /api/projects/{id}/materials` |
 | Upload material | `POST /api/projects/{id}/materials` |
 | Download material | `GET /api/projects/{id}/materials/{fname}` |
 | Delete material | `DELETE /api/projects/{id}/materials/{fname}` |
+
+VM configuration accepts `project_name` (optional display-name string) and `materials` (an array of `{title, url}` HTTP/HTTPS links). The materials action accepts `templates: [name, ...]` to publish configured links and display names to every existing instance of those VM/LXC templates, or `targets` for selected instances. It uses the same Proxmox connection fields as other instance actions and requires an administrator. Results include `infos`, `skipped`, and `errors`; live transfer flags and unrelated Notes are preserved. These links are separate from the project-level uploaded-file endpoints above.
 
 ## Connectors
 

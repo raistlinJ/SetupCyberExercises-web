@@ -115,12 +115,16 @@ def test_saved_render_choice_survives_project_reload(client):
         {'command': 'echo {{literal}}', 'render_template_variables': False},
         {'command': 'echo {{instance_index}}'},
     ]}]
-    store.update_vm('one', 'core', start_commands=steps, stored_commands=steps)
+    store.update_vm('one', 'core', start_commands=steps, stored_commands=steps,
+                    validation_commands=steps[0]['commands'])
     loaded = ProjectStore(client.application.config['DATA_DIR']).get('one')
     for name in ('start_commands', 'stored_commands'):
         commands = getattr(loaded.vms[0], name)[0].commands
         assert commands[0].render_template_variables is False
         assert commands[1].render_template_variables is True
+    commands = loaded.vms[0].validation_commands
+    assert commands[0]['render_template_variables'] is False
+    assert commands[1]['render_template_variables'] is True
 
 
 def test_legacy_network_metadata_does_not_prevent_project_loading(client):

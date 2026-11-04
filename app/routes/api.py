@@ -54,6 +54,7 @@ from ..storage.user_secrets import UserSecretsStore
 from ..read_coalescing import coalesce_read, invalidate_reads_for_write
 
 from ..file_transfer import config_policy, write_policy, read_policy
+from ..materials import config_materials, normalize_material_links
 
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
@@ -3425,12 +3426,11 @@ def instances_create(pid: str):
             skip_snap = False
         skip_snap = bool(skip_snap) or (not take_snapshot)
         
-        if not is_lxc:
-            policy_cfg = client.get_qemu_config(node=node, vmid=int(newid)) or {}
-            client.set_qemu_options(node=node, vmid=int(newid), options={
-                'description': write_policy(policy_cfg.get('description'), config_policy(cfg)),
-                **({'digest': policy_cfg['digest']} if policy_cfg.get('digest') else {}),
-            })
+        policy_cfg = (client.get_lxc_config if is_lxc else client.get_qemu_config)(node=node, vmid=int(newid)) or {}
+        (client.set_lxc_options if is_lxc else client.set_qemu_options)(node=node, vmid=int(newid), options={
+            'description': write_policy(policy_cfg.get('description'), {**config_policy(cfg), **config_materials(cfg)}),
+            **({'digest': policy_cfg['digest']} if policy_cfg.get('digest') else {}),
+        })
         if apply_scenario:
             try:
                 cfg_user = getattr(cfg, 'vm_user', None)
@@ -4559,6 +4559,7 @@ def instances_create_preflight(pid: str):
                 'match': match_expr,
                 'is_regex': is_regex,
                 'timeout_seconds': timeout_seconds,
+                'render_template_variables': entry.get('render_template_variables', True),
             })
         return out
     DEFAULT_CMD_TIMEOUT = 300
@@ -6113,10 +6114,10 @@ def instances_apply_scenario(pid: str):
         else:
             new_desc = json_notes
             
+        new_desc = write_policy(new_desc, {**config_policy(cfg), **config_materials(cfg)})
         if is_lxc:
             client.set_lxc_options(node=node, vmid=int(vmid), options={'description': new_desc})
         else:
-            new_desc = write_policy(new_desc, config_policy(cfg))
             client.set_qemu_options(node=node, vmid=int(vmid), options={'description': new_desc})
         return ('applied', { 'index': m['index'], 'name': m['name'], 'vmid': vmid, 'node': node })
 
@@ -11201,6 +11202,7 @@ def instances_run_stored_cmds(pid: str):
                 'match': match_expr,
                 'is_regex': is_regex,
                 'timeout_seconds': timeout_seconds,
+                'render_template_variables': entry.get('render_template_variables', True),
             })
         return out
     raw_override_list = body.get('storedCommandOverrides')
@@ -11381,6 +11383,8 @@ def instances_run_stored_cmds(pid: str):
                         continue
 
                 try:
+                    v_command = render_command(v_command, proj, m,
+                                               enabled=vcmd.get('render_template_variables', True))
                     res = _execute_instance_command(
                         proj=proj,
                         base_url=base_url,
@@ -12010,6 +12014,8 @@ def instances_run_stored_cmds(pid: str):
                         pass
                     continue
             try:
+                v_command = render_command(v_command, proj, m,
+                                           enabled=vcmd.get('render_template_variables', True))
                 res = _execute_instance_command(
                     proj=proj,
                     base_url=base_url,
@@ -14373,7 +14379,8 @@ def update_project(pid: str):
     errs = _validate_project_fields(data)
     if errs:
         return jsonify({"errors": errs}), 400
-    # Updatable fields
+    # Merge only explicit fields into the latest project when saving.
+    fields = {}
     for key in [
         "name",
     "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
@@ -14391,17 +14398,17 @@ def update_project(pid: str):
         if key in data:
             if key == "vms" and isinstance(data[key], list):
                 try:
-                    proj.vms = [s._coerce_vm(x) for x in data[key]]
+                    fields[key] = [s._coerce_vm(x) for x in data[key]]
                 except Exception as e:
                     LOG.error(f"Failed to coerce vms list: {e}")
-                    setattr(proj, key, data[key])
+                    fields[key] = data[key]
             else:
-                setattr(proj, key, data[key])
+                fields[key] = data[key]
     # Handle associated_projects update with sanitization against known IDs
     if 'associated_projects' in data:
         ap = data.get('associated_projects')
         if not isinstance(ap, list):
-            proj.associated_projects = []
+            fields['associated_projects'] = []
         else:
             # Coerce to list[str]
             try:
@@ -14422,8 +14429,11 @@ def update_project(pid: str):
             except Exception:
                 known = set()
             filtered = [x for x in filtered if (not known) or (x in known)]
-            proj.associated_projects = filtered
-    s.upsert(proj)
+            fields['associated_projects'] = filtered
+    try:
+        proj = s.update_project(pid, **fields)
+    except KeyError:
+        return jsonify({"error": "Not found"}), 404
     d = _project_to_json(proj)
     return jsonify(d)
 
@@ -16996,6 +17006,15 @@ def remove_vm(pid: str, name: str):
 @_secure_route()
 def update_vm(pid: str, name: str):
     data = request.get_json(force=True) or {}
+    try:
+        if 'materials' in data:
+            data['materials'] = normalize_material_links(data['materials'], strict=True)
+        if 'project_name' in data:
+            if not isinstance(data['project_name'], str):
+                raise ValueError('project_name must be a string')
+            data['project_name'] = data['project_name'].strip()
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
     policy_change = any(key in data for key in ("file_upload", "file_download"))
     if policy_change or "viewable_to_user" in data:
         if current_app.config.get('AUTH_ENABLE'):
@@ -17064,6 +17083,9 @@ def update_vm(pid: str, name: str):
     try:
         # Only update fields explicitly provided in the payload to avoid accidental clearing
         fields = {}
+        for key in ('materials', 'project_name'):
+            if key in data:
+                fields[key] = data[key]
         if "vmid" in data:
             fields["vmid"] = data.get("vmid")
         if "viewable_to_user" in data:
@@ -18411,13 +18433,23 @@ def ctfd_challenges_visibility(pid: str):
 @api_bp.route("/projects/<pid>/instances/actions/file_transfer", methods=["POST"])
 @_secure_route(required_roles=['admin'])
 def instances_file_transfer(pid):
+    return _sync_accessforge_metadata(pid)
+
+
+@api_bp.route("/projects/<pid>/instances/actions/materials", methods=["POST"])
+@_secure_route(required_roles=['admin'])
+def instances_materials(pid):
+    return _sync_accessforge_metadata(pid, materials_only=True)
+
+
+def _sync_accessforge_metadata(pid, materials_only=False):
     proj = _store().get(pid)
     if not proj:
         return jsonify(error="Project not found"), 404
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         return jsonify(error="Invalid transfer request"), 400
-    requested = {key: body[key] for key in ("file_upload", "file_download") if key in body}
+    requested = {} if materials_only else {key: body[key] for key in ("file_upload", "file_download") if key in body}
     for key, value in requested.items():
         if not isinstance(value, bool):
             return jsonify(error=key + " must be a boolean"), 400
@@ -18457,17 +18489,21 @@ def instances_file_transfer(pid):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     result = {'infos': [], 'skipped': skipped, 'errors': errors}
     access_for = _user_access_checker(client) if requested else None
-    for target in _job_items(pid, mapped, 'file_transfer', 'Updating VM transfer policy',
+    for target in _job_items(pid, mapped, 'materials' if materials_only else 'file_transfer',
+                             'Updating VM materials' if materials_only else 'Updating VM transfer policy',
                              report=_queue_progress_reporter(),
                              summary=lambda: f"{len(result['infos'])} updated, {len(result['errors'])} errors"):
         try:
-            if target.get('type') != 'qemu':
+            is_lxc = target.get('type') == 'lxc'
+            if target.get('type') != 'qemu' and not (materials_only and is_lxc):
                 result['skipped'].append({'name': target['name'], 'reason': 'SPICE file transfer requires a QEMU VM'})
                 continue
             normalized = _normalize_project_target(proj, target)
             vm = next(v for v in proj.vms if v.name == normalized['base_name'])
-            config = client.get_qemu_config(node=target['node'], vmid=int(target['vmid'])) or {}
-            if requested:
+            config = (client.get_lxc_config if is_lxc else client.get_qemu_config)(node=target['node'], vmid=int(target['vmid'])) or {}
+            if materials_only:
+                policy = config_materials(vm)
+            elif requested:
                 # Preserve the other direction from this VM's current policy, not template defaults.
                 policy = read_policy(config.get('description'))
                 # Match the VM list: live access overrides the template when known.
@@ -18491,12 +18527,13 @@ def instances_file_transfer(pid):
             options = {'description': write_policy(config.get('description'), policy)}
             if config.get('digest'):
                 options['digest'] = config['digest']
-            client.set_qemu_options(node=target['node'], vmid=int(target['vmid']), options=options)
-            details = '; '.join(f"{direction.capitalize()} {'enabled' if policy['file_' + direction] else 'disabled'}"
-                                for direction in ('upload', 'download'))
+            (client.set_lxc_options if is_lxc else client.set_qemu_options)(node=target['node'], vmid=int(target['vmid']), options=options)
+            details = 'Materials updated' if materials_only else '; '.join(
+                f"{direction.capitalize()} {'enabled' if policy['file_' + direction] else 'disabled'}"
+                for direction in ('upload', 'download'))
             result['infos'].append({'name': target['name'], 'vmid': target['vmid'], 'reason': details})
         except Exception as exc:
             result['errors'].append({'name': target['name'], 'reason': str(exc)})
     _VM_CONFIG_CACHE.clear()
-    result['message'] = f"Updated file transfer policy on {len(result['infos'])} VM(s)."
+    result['message'] = f"Updated {'materials' if materials_only else 'file transfer policy'} on {len(result['infos'])} VM(s)."
     return jsonify(result)

@@ -21,6 +21,7 @@ async function run() {
     setTimeout: callback => { timers.set(++nextTimer, callback); return nextTimer; },
     clearTimeout: timer => timers.delete(timer),
     START_COMMAND_MODAL_STATE: state, STORED_COMMAND_MODAL_STATE: state,
+    VALIDATION_COMMAND_MODAL_STATE: {pid: state.pid, vmName: state.vmName, commands: state.steps[0].commands},
     window: { PROJ_CACHE: { course: {} } },
     document: {
       getElementById: id => elements[id],
@@ -181,6 +182,72 @@ async function run() {
   assert.equal(saved[0].commands[1].render_template_variables, true);
   const reopened = context.normalizeStartCommandSteps(saved);
   assert.equal(reopened[0].commands[0].renderTemplateVariables, false);
+
+  // Stored and validation editors preview their current commands with the same render choices.
+  context.http = async (method, url, payload) => {
+    request = {method, url, payload};
+    return {previews: [{name: 'core-set-7', index: 7, commands: ['configure 7', 'echo {{unknown}}']}]};
+  };
+  for (const kind of ['stored', 'validation']) {
+    elements[`${kind}-preview-index`] = {value: '7'};
+    elements[`${kind}-preview-vmid`] = {value: '1707'};
+    context.ensureCommandTemplatePreview(kind);
+    await panel.querySelector('[data-role="template-preview"]').click();
+    assert.equal(request.payload.targets[0].vmid, 1707);
+    assert.equal(request.payload.commands.length, 2);
+    assert.equal(request.payload.commands[1].render_template_variables, false);
+    assert.equal(panel.querySelector('pre').textContent, '[Rendered]\nconfigure 7');
+  }
+
+  context.DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS = 10;
+  vm.runInContext(source.slice(source.indexOf('function sanitizeValidationCommands('), source.indexOf('function formatValidationCommandsSummary(')), context);
+  const validationSaved = context.validationCommandsToServerPayload([
+    {command: 'echo {{literal}}', match: '{{literal}}', is_regex: false, renderTemplateVariables: false},
+    {command: 'echo {{instance_index}}'},
+    'echo {{vmid}}',
+  ]);
+  assert.equal(validationSaved[0].render_template_variables, false);
+  assert.equal(validationSaved[0].match, '{{literal}}');
+  assert.equal(validationSaved[1].render_template_variables, true);
+  assert.equal(validationSaved[2].render_template_variables, true);
+  const validationReopened = context.parseValidationCommandsValue(JSON.stringify(validationSaved));
+  assert.equal(validationReopened[0].renderTemplateVariables, false);
+
+  // Exercise the editor toggle and confirm reopening retains its saved setting.
+  const handlers = {};
+  elements['validation-commands-list'] = {addEventListener: (event, callback) => { handlers[event] = callback; }};
+  elements.validationCommandsModal = {addEventListener() {}};
+  context.escHtml = value => value;
+  context.window.PROJ_CACHE.course.vms = [{name: 'core', validation_commands: validationSaved}];
+  context.getValidationCommandsFromDom = () => [];
+  context.alert = () => {};
+  vm.runInContext(source.slice(source.indexOf('function renderValidationCommandsModal('), source.indexOf('function showStatusDot(')), context);
+  context.openValidationCommandsManager('course', 0);
+  assert.match(elements['validation-commands-list'].innerHTML, /data-role="validation-render"/);
+  assert.doesNotMatch(elements['validation-commands-list'].innerHTML, /id="validation-cmd-0-render"[^>]*checked/);
+  handlers.change({target: {
+    getAttribute: () => 'validation-render', checked: true,
+    closest: () => ({dataset: {validationIndex: '0'}}),
+  }});
+  assert.equal(context.VALIDATION_COMMAND_MODAL_STATE.commands[0].renderTemplateVariables, true);
+  assert.match(panel.querySelector('pre').textContent, /Settings changed/);
+  handlers.change({target: {
+    getAttribute: () => 'validation-render', checked: false,
+    closest: () => ({dataset: {validationIndex: '0'}}),
+  }});
+  let savedValidationPayload;
+  context.setVmStatus = () => {};
+  context.showToast = () => {};
+  context.updateValidationCommandsDomState = () => {};
+  context.updateValidationCommandsCache = (_, __, commands) => {
+    context.window.PROJ_CACHE.course.vms[0].validation_commands = commands;
+  };
+  context.saveVM = async (_, __, payload) => { savedValidationPayload = payload; };
+  await context.saveValidationCommandsFromModal();
+  assert.equal(savedValidationPayload.validation_commands[0].render_template_variables, false);
+  context.resetValidationCommandsModal();
+  context.openValidationCommandsManager('course', 0);
+  assert.equal(context.VALIDATION_COMMAND_MODAL_STATE.commands[0].renderTemplateVariables, false);
 
   console.log('Command preview selector, literal/render modes, help, stale responses and persistence checks passed.');
 }

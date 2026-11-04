@@ -23,6 +23,7 @@ ACTION_LABELS = {
     'guest_delete': 'Delete guest files', 'lxc_delete': 'Delete container files',
     'reset_ageing_cache': 'Reset bridge ageing cache',
     'file_transfer': 'Update VM transfer policy',
+    'materials': 'Update VM materials',
 }
 
 

@@ -9,7 +9,7 @@ DeployForge is a Dockerized web UI for configuring CTF/scenario “Projects” a
 - Run Proxmox actions (create/refresh/restore, VM manager UI)
 - Manage CTFd settings and challenge visibility (with token-first auth)
 
-Startup, stored, and custom guest commands support [per-instance template variables](docs/command-variables.md), with an optional rendering switch, a command preview, and variable help.
+Startup, stored, validation, and custom guest commands support [per-instance template variables](docs/command-variables.md), with an optional rendering switch, a command preview, and variable help.
 
 Queued actions run on the server in submission order. Once an upload or action
 has been accepted, switching pages, refreshing, closing the tab, or signing out
@@ -304,6 +304,32 @@ Enrollment is user-level, not restricted to the selected rows. Orchestrator 0.6+
 limits each user to their PVE-visible VMs and private results. SCE does not assign
 ScenarioForge/CoreVM/participant roles or change VM ACLs. See [setup, scope, revocation and tests](docs/orchestration-access.md).
 
+
+## VM/LXC materials links
+
+In **Configuration**, expand a VM or LXC card and click **Manage** under **Materials**, alongside the stored/validation command controls. The modal supports adding, editing and removing title/URL pairs, plus an optional **Project display name**. Only absolute HTTP/HTTPS links are accepted; links can point to web instructions, PDFs or hosted downloads. File uploads are not part of this editor.
+
+**Save** persists these defaults in the VM/LXC configuration. **Apply to existing instances now** is checked by default and publishes the metadata to that template's existing instances through the project's Proxmox credentials or API token. Turn it off to save configuration without contacting Proxmox. Publication failures leave the modal open with an error and retain the saved configuration so the operation can be retried. Live publication requires an administrator. New clones and **Apply Scenario Notes** also receive the configured links and display name.
+
+The resulting Proxmox Notes contain a single `AccessForge` object:
+
+```json
+{
+  "AccessForge": {
+    "file_upload": false,
+    "file_download": false,
+    "Project Name": "Network Fundamentals",
+    "materials": [
+      {"title": "Lab instructions", "url": "https://example.edu/labs/networking"},
+      {"title": "Reference PDF", "url": "https://example.edu/files/reference.pdf"}
+    ]
+  }
+}
+```
+
+Updating materials preserves existing live transfer flags, human notes, scenario metadata and credentials. Changing transfer flags preserves materials and display names. Removing all links publishes an empty `materials` list; clearing the display name removes `Project Name` so AccessForge falls back to `Scenario`. Materials survive save/reload, VM rename, and project export/import. Existing project-level uploaded files in SCE-web's Materials panel are separate and unchanged.
+
+AccessForge combines links from visible VMs/LXCs in the same Scenario and renders them above the VM cards in the project box. Reload AccessForge after applying metadata. This editor configures links on VM/LXC templates; it does not introduce a separate project-level link store.
 
 ## Per-VM console file transfer
 

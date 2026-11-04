@@ -1,0 +1,156 @@
+/* VM/LXC material links published through Proxmox Notes to AccessForge. */
+(() => {
+  let state = null;
+
+  function ensureModal() {
+    let modal = document.getElementById('vmMaterialsModal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'vmMaterialsModal';
+    modal.className = 'modal fade';
+    modal.tabIndex = -1;
+    modal.setAttribute('aria-labelledby', 'vmMaterialsModalLabel');
+    modal.setAttribute('aria-hidden', 'true');
+    modal.innerHTML = `
+      <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="vmMaterialsModalLabel">Manage Materials</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <form id="vm-materials-form" class="d-flex flex-column overflow-hidden" style="min-height:0">
+          <div class="modal-body">
+            <label class="form-label" for="vm-materials-project-name">Project display name (optional)</label>
+            <input class="form-control mb-1" id="vm-materials-project-name" type="text">
+            <p class="small text-muted">Heading in AccessForge. Leave blank to use the Scenario name.</p>
+            <p class="small text-muted">Add links to instructions, documents or hosted downloads. These appear in the AccessForge project box with this VM or LXC.</p>
+            <div id="vm-materials-list"></div>
+            <button class="btn btn-sm btn-outline-primary mb-3" id="vm-materials-add" type="button">Add link</button>
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="vm-materials-apply" checked>
+              <label class="form-check-label" for="vm-materials-apply">Apply to existing instances now</label>
+            </div>
+            <p class="small text-muted mt-1">Turn this off to save defaults only. New clones and Apply Scenario Notes also receive these links.</p>
+            <div class="alert alert-danger d-none mb-0" id="vm-materials-error" role="alert"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+            <button class="btn btn-primary" id="vm-materials-save" type="submit">Save</button>
+          </div>
+        </form>
+      </div></div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#vm-materials-add').addEventListener('click', () => {
+      addRow({title: '', url: ''});
+      modal.querySelector('#vm-materials-list > :last-child input').focus();
+    });
+    modal.querySelector('#vm-materials-form').addEventListener('submit', save);
+    modal.addEventListener('hide.bs.modal', event => { if (state?.saving) event.preventDefault(); });
+    modal.addEventListener('hidden.bs.modal', () => { state = null; });
+    return modal;
+  }
+
+  function addRow(entry) {
+    const row = document.createElement('div');
+    row.className = 'border rounded p-2 mb-2';
+    row.innerHTML = `
+      <div class="d-flex gap-2 align-items-start">
+        <div class="flex-grow-1" style="min-width:0">
+          <label class="form-label small d-block">Title
+            <input class="form-control form-control-sm" data-field="title" type="text" required>
+          </label>
+          <label class="form-label small d-block mb-0">URL
+            <input class="form-control form-control-sm" data-field="url" type="url" placeholder="https://" required>
+          </label>
+        </div>
+        <button class="btn btn-sm btn-outline-danger" type="button" aria-label="Remove link">Remove</button>
+      </div>`;
+    row.querySelector('[data-field="title"]').value = typeof entry.title === 'string' ? entry.title : '';
+    row.querySelector('[data-field="url"]').value = typeof entry.url === 'string' ? entry.url : '';
+    row.querySelector('button').addEventListener('click', () => row.remove());
+    document.getElementById('vm-materials-list').appendChild(row);
+  }
+
+  function updateSummary(pid, name, idx, fields) {
+    const project = (window.PROJ_CACHE || {})[pid];
+    const vm = project?.vms?.find(entry => entry.name === name);
+    if (vm) Object.assign(vm, fields);
+    const summary = document.getElementById(`vm-${pid}-${idx}-materials-summary`);
+    if (summary) {
+      const count = fields.materials.length;
+      summary.textContent = `${count} link${count === 1 ? '' : 's'}${fields.project_name ? ' · ' + fields.project_name : ''}`;
+    }
+  }
+
+  async function save(event) {
+    event.preventDefault();
+    if (!state || state.saving) return;
+    const modal = document.getElementById('vmMaterialsModal');
+    const form = modal.querySelector('form');
+    const error = modal.querySelector('#vm-materials-error');
+    error.classList.add('d-none');
+    if (!form.reportValidity()) return;
+    const materials = [], seen = new Set();
+    try {
+      for (const row of modal.querySelector('#vm-materials-list').children) {
+        const title = row.querySelector('[data-field="title"]').value.trim();
+        const url = row.querySelector('[data-field="url"]').value.trim();
+        const parsed = new URL(url);
+        if (!title || !['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || /[\s\x00-\x1f\x7f\\]/.test(url))
+          throw new Error('Each link needs a title and an absolute HTTP or HTTPS URL.');
+        if (!seen.has(url)) { seen.add(url); materials.push({title, url}); }
+      }
+    } catch (err) {
+      error.textContent = err.message;
+      error.classList.remove('d-none');
+      return;
+    }
+    const fields = {materials, project_name: modal.querySelector('#vm-materials-project-name').value.trim()};
+    const apply = modal.querySelector('#vm-materials-apply').checked;
+    const {pid, idx, name} = state;
+    state.saving = true;
+    form.querySelectorAll('input,button').forEach(el => { el.disabled = true; });
+    let saved = false;
+    try {
+      await saveVM(pid, name, fields, {silent: true, rethrow: true});
+      saved = true;
+      updateSummary(pid, name, idx, fields);
+      if (apply) {
+        const project = (window.PROJ_CACHE || {})[pid];
+        const creds = typeof readProxCreds === 'function' ? (readProxCreds(pid) || {}) : {};
+        const result = await http('POST', `/api/projects/${encodeURIComponent(pid)}/instances/actions/materials`, {
+          templates: [name], username: creds.username || undefined, password: creds.password || undefined,
+          baseUrl: project?.proxmox_url, apiPort: project?.proxmox_api_port,
+          verifySSL: project?.proxmox_verify_ssl !== false,
+        });
+        const failures = [...(result.errors || []), ...(result.skipped || [])];
+        if (failures.length) throw new Error(failures.map(item => item.reason || item.name).join('; '));
+      }
+      setVmStatus(pid, idx, 'Saved', 'text-success');
+      state.saving = false;
+      bootstrap.Modal.getInstance(modal)?.hide();
+      if (typeof showToast === 'function') showToast('Materials saved.', 'success');
+    } catch (err) {
+      error.textContent = (saved ? 'Configuration saved, but materials were not fully applied: ' : 'Could not save materials: ') + err.message;
+      error.classList.remove('d-none');
+      setVmStatus(pid, idx, saved ? 'Saved; apply failed' : 'Save failed', 'text-danger');
+    } finally {
+      if (state) state.saving = false;
+      form.querySelectorAll('input,button').forEach(el => { el.disabled = false; });
+    }
+  }
+
+  window.openVmMaterialsManager = (pid, idx) => {
+    if (state?.saving) return;
+    const vm = (window.PROJ_CACHE || {})[pid]?.vms?.[idx];
+    if (!vm) return;
+    const modal = ensureModal();
+    state = {pid, idx, name: vm.name, saving: false};
+    modal.querySelector('#vmMaterialsModalLabel').textContent = `Manage Materials — ${vm.name}`;
+    modal.querySelector('#vm-materials-project-name').value = vm.project_name || '';
+    modal.querySelector('#vm-materials-list').replaceChildren();
+    for (const entry of (Array.isArray(vm.materials) ? vm.materials : [])) addRow(entry);
+    modal.querySelector('#vm-materials-apply').checked = true;
+    modal.querySelector('#vm-materials-error').classList.add('d-none');
+    bootstrap.Modal.getOrCreateInstance(modal).show();
+  };
+})();

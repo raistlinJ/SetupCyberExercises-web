@@ -190,6 +190,70 @@ class RunCommandsApiTests(unittest.TestCase):
                 json={'customCommand': 'echo hello', 'renderTemplateVariables': 'false'})
             self.assertEqual(response.status_code, 400)
 
+    def test_validation_commands_render_per_guest_and_preserve_literal_mode(self):
+        template = 'check {{instance_index}} {{vmid}} {{vm_name}} {{project_id}}'
+        commands = [
+            {'command': template, 'match': 'ready'},
+            {'command': 'echo {{literal}}', 'match': '{{literal}}', 'is_regex': False,
+             'render_template_variables': False},
+        ]
+        self.project.instances = 2
+        self.project.vms[0].validation_commands = commands
+        mapped = [
+            {'index': index, 'name': f'alpha-lab-{index}', 'vmid': 100 + index, 'node': 'node1'}
+            for index in (1, 2)
+        ]
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            stack.enter_context(patch('app.routes.api._resolve_targets_to_vm_info', return_value=(mapped, [], [])))
+            runtime = _RuntimeStoreStub()
+            stack.enter_context(patch('app.routes.api._runtime_store', return_value=runtime))
+            guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+            guest.agent_exec.return_value = {'exitcode': 0, 'stdout': 'ready {{literal}}', 'stderr': ''}
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={'username': 'root@pam', 'password': 'secret', 'validateOnly': True,
+                      'targets': [{'index': m['index'], 'name': m['name']} for m in mapped]})
+        self.assertEqual(response.status_code, 200)
+        expected = [f'check {m["index"]} {m["vmid"]} {m["name"]} {self.project.id}' for m in mapped]
+        expected += ['echo {{literal}}'] * 2
+        self.assertCountEqual([call.kwargs['command'] for call in guest.agent_exec.call_args_list], expected)
+        payload = response.get_json()
+        self.assertTrue(all(entry['validation']['all_passed'] for entry in payload['ran']))
+        self.assertCountEqual([result['command'] for entry in payload['ran']
+                               for result in entry['validation']['results']], expected)
+        summary = self._decode_outputs_zip(payload['outputs_zip'])
+        self.assertCountEqual([entry['command'] for entry in summary['commands']], expected)
+        self.assertEqual(commands[0]['command'], template)
+        self.assertTrue(all(call['passed'] for call in runtime.calls))
+
+    def test_invalid_validation_template_fails_without_dispatching_and_continues(self):
+        self.project.vms[0].validation_commands = [
+            {'command': 'echo {{unknown}}', 'match': 'ready'},
+            {'command': 'echo {{instance_index}}', 'match': 'ready'},
+        ]
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            runtime = _RuntimeStoreStub()
+            stack.enter_context(patch('app.routes.api._runtime_store', return_value=runtime))
+            guest = stack.enter_context(patch('app.routes.api.ProxmoxClient')).return_value
+            guest.agent_exec.return_value = {'exitcode': 0, 'stdout': 'ready', 'stderr': ''}
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/run_stored_cmds',
+                json={'username': 'root@pam', 'password': 'secret', 'validateOnly': True,
+                      'targets': [{'index': 1, 'name': self.target_name}]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(guest.agent_exec.call_count, 1)
+        self.assertEqual(guest.agent_exec.call_args.kwargs['command'], 'echo 1')
+        payload = response.get_json()
+        self.assertIn('Unknown command variable', payload['errors'][0]['reason'])
+        validation = payload['ran'][0]['validation']
+        self.assertFalse(validation['all_passed'])
+        self.assertEqual([result['passed'] for result in validation['results']], [False, True])
+        self.assertFalse(runtime.calls[0]['passed'])
+
     def test_unknown_command_variable_never_reaches_guest(self):
         self.project.vms[0].stored_commands = [StartCommandStep(commands=[StartCommand(command='echo {{wrong_name}}')])]
         with ExitStack() as stack:
