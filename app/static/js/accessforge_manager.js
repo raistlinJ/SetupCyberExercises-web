@@ -5,6 +5,9 @@
   const rowTags=window.RowTags.create('accessforge');
   const tagKey=username=>JSON.stringify([pid,username]);
   const intervals=[0,15,30,60,300];
+  const policyDefaults={allowed_email_patterns:[],allowed_subnets:[],subnet_checkout_limit:0,ipv4_prefix:24,ipv6_prefix:64,global_delay_seconds:0,subnet_delay_seconds:0};
+  function renderPolicy(policy={}){for(const [key,fallback] of Object.entries(policyDefaults)){const value=policy[key]??fallback;el('af-policy-'+key).value=Array.isArray(fallback)?value.join('\n'):value;}}
+  function readPolicy(){return Object.fromEntries(Object.entries(policyDefaults).map(([key,fallback])=>{const value=el('af-policy-'+key).value;return [key,Array.isArray(fallback)?value.split(/[\s,;]+/).filter(Boolean):Number(value===''?fallback:value)];}));}
   let pid='',owner='__anonymous__',version=0,accounts=[],snapshot={},busy=false,loading=false,connected=false,dialogOpen=false,timer=null,columns={},selected=new Set();
   const current=(project,revision)=>project===pid&&revision===version;
   const adminUsername=value=>{const name=String(value??'').trim();return name&&!name.includes('@')?name+'@pam':name;};
@@ -22,7 +25,7 @@
   async function api(project,path,method='GET',data){
     const headers={'Content-Type':'application/json'},temporary=sessionConnection(project);
     if(temporary)headers['X-AccessForge-Connection']=encodeURIComponent(JSON.stringify(temporary));
-    const transport=path==='settings'&&window.ServerQueue?.nativeFetch?window.ServerQueue.nativeFetch:fetch;
+    const transport=window.ServerQueue?.nativeFetch||fetch;
     const response=await transport(`/api/projects/${encodeURIComponent(project)}/accessforge/${path}`,{method,credentials:'same-origin',cache:'no-store',headers,body:data===undefined?undefined:JSON.stringify(data)});
     let result={};try{result=await response.json();}catch{}
     if(!response.ok)throw new Error(result.error||`Request failed (HTTP ${response.status}).`);return result;
@@ -69,7 +72,8 @@
     },seconds*1000);
     updateControls();
   }
-  function status(state){return !state?'Not published':state.releasing?'Disable pending':state.login_disabled?'Disabled':state.email?'Checked out':state.eligible?'Available':'Checkout off';}
+  function status(state){return !state||state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':state.releasing?'Disable pending':state.awaiting_checkout?'Available (login disabled until assigned)':state.login_disabled?'Disabled':state.email?'Checked out':state.eligible?'Available':'Checkout off';}
+  function syncLabel(state){return !state?'Removed':state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':'Synced';}
   function stamp(value){return value?new Date(value*1000).toLocaleString():'—';}
   function render(){
     const marked=new Set(accounts.filter(account=>snapshot.accounts?.[account.username]?.eligible).map(account=>account.username));
@@ -92,7 +96,7 @@
     document.querySelectorAll('#af-table thead th').forEach((cell,index)=>{if(index)cell.hidden=columns[columnIds[index-1]]===false;});
     el('af-selection-count').innerHTML=pid?`<span class="border rounded px-2 py-1">${esc(el('af-project').textContent==='Select a project.'?pid:el('af-project').textContent)}: <strong>${selected.size} selected</strong></span>`:'';
     rowTags.refreshControls();
-    el('af-snapshot').textContent=snapshot.checked_at?`Last refresh: ${new Date(snapshot.checked_at*1000).toLocaleString()}. Use Refresh to update this snapshot.`:'Showing accounts marked for checkout. Refresh AccessForge to sync the authoritative checkout state across all managers.';
+    el('af-snapshot').textContent=snapshot.checked_at?`Last refresh: ${new Date(snapshot.checked_at*1000).toLocaleString()}. Use Refresh to update this snapshot.`:'Showing locally marked accounts. AccessForge status is Unknown until refreshed.';
   }
   function setSnapshot(value){snapshot=value||{};window.CheckoutState?.publish(pid,snapshot);}
   function hideConnection(){window.bootstrap?.Modal.getInstance(el('af-connection'))?.hide();}
@@ -104,6 +108,7 @@
   async function load(){
     const project=window.shell?.getCurrentProjectId()||'';pid=project;const revision=++version;
     loading=true;connected=false;selected.clear();accounts=[];snapshot={};clearPassword();hideConnection();hideCheckoutSettings();window.bootstrap?.Modal.getInstance(el('af-refresh-summary'))?.hide();el('af-refresh-results').innerHTML='';el('af-refresh-totals').textContent='';el('af-refresh-project').textContent='';el('af-checkout-secret').value='';checkoutMessage('');
+    window.bootstrap?.Modal.getInstance(el('af-operation-summary'))?.hide();el('af-operation-results').innerHTML='';el('af-operation-totals').textContent='';el('af-operation-refresh').textContent='';
     el('af-save-creds').checked=false;
     el('af-url').value='';el('af-username').value='';el('af-project').textContent='Select a project.';el('af-disconnect').classList.add('d-none');
     links('');restorePrefs();render();message('');connectionMessage('');applyAuto();
@@ -132,9 +137,11 @@
     const old=before.accounts||{},latest=after.accounts||{};
     const names=[...new Set([...Object.keys(old),...Object.keys(latest)])].filter(username=>old[username]?.eligible||latest[username]?.eligible).sort((a,b)=>a.localeCompare(b));
     const fields=[
+      ['sync_status','Checkout status',value=>value==='unknown'?'Unknown':value==='not_synced'?'Not synced':value==='not_enabled'?'Not enabled':'Synced',value=>value||'synced'],
       ['eligible','Checkout mark',value=>value?'Marked':'Unmarked',value=>!!value],
       ['email','Assigned email',value=>value||'Unassigned'],
       ['name','Name',value=>value||'—'],
+      ['awaiting_checkout','Awaiting checkout',value=>value?'Yes':'No',value=>!!value],
       ['login_disabled','Login',value=>value?'Disabled':'Enabled',value=>!!value],
       ['releasing','Release',value=>value?'Disable pending':'No pending release',value=>!!value],
       ['checked_out_at','Checked out',stamp,value=>Number(value)||0],
@@ -156,7 +163,7 @@
     const changed=rows.filter(row=>row.changes.length).length;
     el('af-refresh-project').textContent=el('af-project').textContent;
     el('af-refresh-totals').textContent=`${rows.length} account(s) checked · ${changed} changed · ${rows.length-changed} unchanged`;
-    el('af-refresh-results').innerHTML=rows.map(({username,account,changes})=>`<tr><td>${esc(username)}</td><td><span class="badge ${account?'bg-success':'bg-secondary'}">${account?'Synced':'Removed'}</span></td><td>${account?(account.eligible?'Marked':'Unmarked'):'—'}</td><td>${esc(account?.email?(account.name?`${account.name} (${account.email})`:account.email):'Unassigned')}</td><td>${account?(account.releasing?'Disable pending':account.login_disabled?'Disabled':'Enabled'):'—'}</td><td>${changes.length?changes.map(change=>`<div>${esc(change)}</div>`).join(''):'<span class="text-muted">No changes</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="text-muted">No accounts marked for checkout. Use Configuration → Credentials → On-demand (checkout) to add accounts for checkout.</td></tr>';
+    el('af-refresh-results').innerHTML=rows.map(({username,account,changes})=>`<tr><td>${esc(username)}</td><td><span class="badge ${syncLabel(account)==='Synced'?'bg-success':'bg-secondary'}">${syncLabel(account)}</span></td><td>${account?(account.eligible?'Marked':'Unmarked'):'—'}</td><td>${esc(account?.email?(account.name?`${account.name} (${account.email})`:account.email):'Unassigned')}</td><td>${account&&'login_disabled' in account?(account.releasing?'Disable pending':account.login_disabled?'Disabled':'Enabled'):'—'}</td><td>${changes.length?changes.map(change=>`<div>${esc(change)}</div>`).join(''):'<span class="text-muted">No changes</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="text-muted">No accounts marked for checkout. Use Configuration → Credentials → On-demand (checkout) to add accounts for checkout.</td></tr>';
     window.bootstrap?.Modal.getOrCreateInstance(el('af-refresh-summary'))?.show();
   }
   async function refresh(project,revision,{summary=false}={}){
@@ -164,6 +171,15 @@
     const previous=snapshot;
     setSnapshot(data.checkout);render();message('Status updated.');
     if(summary)showRefreshSummary(previous,snapshot);
+  }
+  function showOperationSummary(action,results,refreshError){
+    const success=results.filter(row=>row.success===true).length,errors=results.filter(row=>row.success===false).length;
+    el('af-operation-title').textContent=`${action} accounts — results`;
+    el('af-operation-totals').textContent=`${results.length} account(s) · ${success} succeeded · ${errors} errors · ${results.length-success-errors} unconfirmed`;
+    const notice=el('af-operation-refresh');notice.textContent=refreshError?`Status refresh failed: ${refreshError}. Displayed status is the last known snapshot.`:'Status refreshed from AccessForge. Configuration and the other managers were notified.';
+    notice.className=`alert ${refreshError?'alert-warning':'alert-success'} small`;
+    el('af-operation-results').innerHTML=results.map(row=>`<tr><td>${esc(row.username)}</td><td><span class="badge ${row.success===true?'bg-success':row.success===false?'bg-danger':'bg-secondary'}">${row.success===true?'Success':row.success===false?'Error':'Unconfirmed'}</span></td><td>${esc(row.error||(row.success===true?`${action} completed.`:'AccessForge did not confirm the operation.'))}</td><td>${esc(status(snapshot.accounts?.[row.username]))}</td></tr>`).join('');
+    window.bootstrap?.Modal.getOrCreateInstance(el('af-operation-summary'))?.show();
   }
   el('af-connection-form').addEventListener('submit',event=>{event.preventDefault();return run(async(project,revision)=>{
     const url=el('af-url').value.trim().replace(/\/+$/,''),username=adminUsername(el('af-username').value),persist=el('af-save-creds').checked;
@@ -179,7 +195,11 @@
     if(persist&&previous)saveSessionConnection(project,null);
     if(!current(project,revision))return;
     connected=true;clearPassword();el('af-username').value=username;el('af-password').placeholder='Saved; leave blank to keep it';el('af-disconnect').classList.remove('d-none');links(url);
-    connectionMessage(persist?'Credentials saved.':'Connected for this browser session.');message(`Connected as ${result.administrator}. Use Refresh to request status.`);hideConnection();
+    if(result.checkout){setSnapshot(result.checkout);render();}
+    connectionMessage('Connection verified. Loading AccessForge status…');
+    const status=await api(project,'status');if(!current(project,revision))return;
+    setSnapshot(status.checkout);render();
+    connectionMessage(persist?'Credentials saved.':'Connected for this browser session.');message(`Connected as ${result.administrator}. Status updated.`);hideConnection();
   },{connection:true});});
   el('af-disconnect').addEventListener('click',()=>run(async(project,revision)=>{
     if(!confirm('Remove this saved connection? Published accounts and assignments remain in AccessForge.'))return;
@@ -190,8 +210,9 @@
   el('af-checkout-settings').addEventListener('click',()=>run(async(project,revision)=>{
     message('Loading checkout settings…');const data=await api(project,'status');if(!current(project,revision))return;
     setSnapshot(data.checkout);render();
-    if(snapshot.published===false||(!snapshot.id&&!Object.keys(snapshot.accounts||{}).length))throw new Error('Use Configuration → Credentials → On-demand (checkout) before configuring checkout settings.');
+    if(snapshot.published===false||!snapshot.id)throw new Error('Use Accounts → Enable to publish at least one account before configuring checkout settings.');
     el('af-checkout-enabled').checked=!!snapshot.enabled;el('af-checkout-verify').checked=snapshot.verify_email!==false;el('af-checkout-secret').value='';
+    renderPolicy(snapshot.policy);
     el('af-checkout-secret-state').textContent=snapshot.secret_set?'A lab secret is set. Leave this field blank to keep it.':'Set a lab secret of 8–256 characters before enabling student checkout.';
     el('af-checkout-secret').placeholder=snapshot.secret_set?'Leave blank to keep the current secret':'Set a lab secret (8+ characters)';
     el('af-checkout-policy-note').textContent=snapshot.smtp_configured?'Email verification uses AccessForge’s configured mail server.':'Email verification requires SMTP configuration on AccessForge. Turn verification off if it is not needed.';
@@ -199,12 +220,15 @@
   }));
   el('af-checkout-form').addEventListener('submit',event=>{event.preventDefault();return run(async(project,revision)=>{
     checkoutMessage('Saving checkout settings…');
-    const data=await api(project,'settings','PATCH',{enabled:el('af-checkout-enabled').checked,verify_email:el('af-checkout-verify').checked,secret:el('af-checkout-secret').value});
+    const data=await api(project,'settings','PATCH',{enabled:el('af-checkout-enabled').checked,verify_email:el('af-checkout-verify').checked,secret:el('af-checkout-secret').value,policy:readPolicy()});
     if(!current(project,revision))return;
-    el('af-checkout-secret').value='';setSnapshot(data.checkout);render();hideCheckoutSettings();message('Checkout settings saved.');
+    el('af-checkout-secret').value='';setSnapshot(data.checkout);render();
+    try{const live=await api(project,'status');if(!current(project,revision))return;setSnapshot(live.checkout);render();}
+    catch(error){throw new Error(`Checkout settings saved, but status refresh failed: ${error.message}`);}
+    hideCheckoutSettings();message('Checkout settings saved.');
   },{settings:true});});
   for(const [id,operation,confirmation,progress,success] of [
-    ['af-reenable-logins','reenable-logins','Enable the selected accounts? Apply any password changes through VM Manager first. Existing checkout eligibility and lab policy still apply.','Enabling selected accounts…','Selected accounts enabled.'],
+    ['af-reenable-logins','reenable-logins','Enable the selected accounts for checkout? Apply any password changes through VM Manager first. Existing lab policy still applies.','Enabling selected accounts…','Selected accounts enabled.'],
     ['af-relinquish','relinquish-accounts','Relinquish the selected accounts? Students will lose access and their Proxmox logins will be disabled until enabled again.','Relinquishing selected accounts…','Selected accounts relinquished. Their logins remain disabled.'],
     ['af-disable-logins','disable-logins','Disable the selected unassigned accounts?','Disabling selected accounts…','Selected accounts disabled.']
   ])el(id).addEventListener('click',()=>run(async(project,revision)=>{
@@ -212,10 +236,21 @@
     if(!confirm(confirmation))return;
     message(progress);
     const payload={usernames:[...selected]};if(operation==='relinquish-accounts')payload.confirmed=true;
-    const data=await api(project,operation,'POST',payload);if(!current(project,revision))return;
-    setSnapshot(data.checkout);selected.clear();render();
-    const failures=(data.results||[]).filter(row=>!row.success);
-    message(failures.length?failures.map(row=>`${row.username}: ${row.error}`).join(' '):success,!!failures.length);
+    let data=null,operationError='',refreshError='';
+    try{data=await api(project,operation,'POST',payload);if(!current(project,revision))return;setSnapshot(data.checkout);render();}
+    catch(error){operationError=error.message;}
+    if(!current(project,revision))return;
+    try{const live=await api(project,'status');if(!current(project,revision))return;setSnapshot(live.checkout);render();}
+    catch(error){refreshError=error.message;}
+    if(!current(project,revision))return;
+    const canonical=name=>name.includes('@')?name:name+'@pve';
+    const returned=new Map((data?.results||[]).filter(row=>typeof row.username==='string').map(row=>[canonical(row.username),row]));
+    const results=payload.usernames.map(username=>{const row=returned.get(canonical(username));return {username,success:row?.success===true?true:row?.success===false||operationError?false:null,error:row?.error||operationError||(!row?'AccessForge did not return a result for this account.':'')};});
+    render();
+    const failures=results.filter(row=>row.success!==true);
+    const text=operationError||(failures.length?failures.map(row=>`${row.username}: ${row.error||'Operation not confirmed.'}`).join(' '):success);
+    message(text+(refreshError?` Status refresh failed: ${refreshError}`:''),!!operationError||!!failures.length||!!refreshError);
+    showOperationSummary(operation==='reenable-logins'?'Enable':operation==='disable-logins'?'Disable':'Relinquish',results,refreshError);
   }));
   for(const id of ['af-filter','af-filter-regex','af-filter-selected'])el(id).addEventListener(id==='af-filter'?'input':'change',()=>{savePrefs();render();});
   el('af-clear-filter').addEventListener('click',()=>{el('af-filter').value='';el('af-filter-regex').checked=false;el('af-filter-selected').checked=false;rowTags.clearFilter();savePrefs();render();});
@@ -227,6 +262,8 @@
   el('af-connection').addEventListener('hidden.bs.modal',()=>{dialogOpen=false;clearPassword();updateControls();});
   el('af-refresh-summary').addEventListener('show.bs.modal',()=>{dialogOpen=true;updateControls();});
   el('af-refresh-summary').addEventListener('hidden.bs.modal',()=>{dialogOpen=false;updateControls();});
+  el('af-operation-summary').addEventListener('show.bs.modal',()=>{dialogOpen=true;updateControls();});
+  el('af-operation-summary').addEventListener('hidden.bs.modal',()=>{dialogOpen=false;updateControls();});
   el('af-checkout-modal').addEventListener('show.bs.modal',()=>{dialogOpen=true;checkoutMessage('');updateControls();});
   el('af-checkout-modal').addEventListener('hidden.bs.modal',()=>{dialogOpen=false;el('af-checkout-secret').value='';updateControls();});
   el('af-show-password').addEventListener('click',()=>{

@@ -27,7 +27,7 @@ function harness({enabled = true, saveCredentials = true} = {}) {
     }};
   context.window.fetch=context.fetch;
   vm.createContext(context);vm.runInContext(stateSource,context);vm.runInContext(source, context);
-  return {api: context.window.ConfigIntegrations, calls, el, buttons, project, rows, storage, override:fn=>override=fn, publish:checkout=>context.window.CheckoutState.publish('p',checkout)};
+  return {api: context.window.ConfigIntegrations, context, calls, el, buttons, project, rows, storage, override:fn=>override=fn, publish:checkout=>context.window.CheckoutState.publish('p',checkout)};
 }
 
 test('URL and API port round-trip paths, IPv6, HTTP, and embedded custom ports', () => {
@@ -45,9 +45,9 @@ test('bulk checkout saves current credentials first and sends exactly the select
   const h = harness(); h.rows[1].box.checked = false;
   await h.api.mark('p', true);
   assert.deepEqual(h.calls[0], {saveCredentials: 'p'});
-  assert.equal(h.calls[1].options.method, 'PATCH'); assert.equal(h.calls[1].body.url, 'https://accessforge.example:8443');
-  assert.equal(h.calls[2].url, '/api/projects/p/accessforge/checkout-accounts');
-  assert.deepEqual(h.calls[2].body, {usernames: ['alice'], enabled: true});
+  assert.equal(h.calls.length,2);
+  assert.equal(h.calls[1].url, '/api/projects/p/credential-types');
+  assert.deepEqual(h.calls[1].body, {usernames: ['alice'], enabled: true});
   assert.match(h.rows[0].badge.outerHTML, /aria-label="Marked for checkout · Available according to lab policy"/);
   assert.match(h.rows[1].badge.outerHTML, /aria-label="Not marked for checkout · Login disabled"/);
   assert.ok(h.buttons.every(button => !button.disabled));
@@ -59,14 +59,58 @@ test('a failed credential save prevents publication and disabled plugins cannot 
   const off = harness({enabled: false}); await off.api.mark('p', true); assert.equal(off.calls.length, 0);
 });
 
-test('session-only administrator credentials accompany configuration and checkout requests', async () => {
+test('local type changes do not send AccessForge credentials or save its URL', async () => {
   const h = harness(); h.storage.set('toolhub.accessforge.session.instructor.p', JSON.stringify({url: 'https://accessforge.example:8443', username: 'admin@pam', password: 'session-password', verify_ssl: false}));
   await h.api.mark('p', false);
   for (const call of h.calls.filter(call => call.url)) {
-    const connection = JSON.parse(decodeURIComponent(call.options.headers['X-AccessForge-Connection']));
-    assert.equal(connection.password, 'session-password'); assert.equal(connection.verify_ssl, false);
+    assert.equal(call.options.headers['X-AccessForge-Connection'],undefined);
   }
+  assert.equal(h.calls.filter(call=>call.url).length,1);
   assert.deepEqual(h.calls.at(-1).body, {usernames: ['alice', 'bob'], enabled: false});
+});
+
+test('VM Manager marking keeps the existing remote sync endpoint and session credentials',async()=>{
+  const h=harness();h.storage.set('toolhub.accessforge.session.instructor.p',JSON.stringify({url:'https://accessforge.example:8443',username:'admin@pam',password:'session-password',verify_ssl:false}));
+  await h.api.setMarked('p',['alice'],true);
+  assert.equal(h.calls.length,1);assert.equal(h.calls[0].url,'/api/projects/p/accessforge/checkout-accounts');
+  assert.equal(JSON.parse(decodeURIComponent(h.calls[0].options.headers['X-AccessForge-Connection'])).password,'session-password');
+  assert.deepEqual(h.calls[0].body,{usernames:['alice'],enabled:true});
+});
+
+test('the real credential save and type change bypass the queue and only write SCE-web configuration',async()=>{
+  const h=harness(),direct=[];
+  const app=fs.readFileSync('app/static/js/app.js','utf8');
+  h.context.FormData=class {};
+  h.context._credSaveTimers={};h.context.collectCredentials=()=>[{username:'alice',password:'local-password'}];
+  h.context.harmonizeCredentialsToInstances=(_pid,credentials)=>credentials;
+  h.context.setTimeout=()=>0;h.context.clearTimeout=()=>{};
+  h.context.AUTH.me=async()=>{throw Error('Local type changes must not request connector credentials');};
+  h.context.fetch=async()=>{throw Error('The shared queue must not handle a local type change');};
+  h.context.window.ServerQueue={nativeFetch:async(url,options)=>{
+    direct.push({url,options,body:JSON.parse(options.body)});
+    const data=url==='/api/projects/p'?{credentials:[{username:'alice',password:'local-password'}]}:
+      {checkout:{accounts:{alice:{eligible:true,sync_status:'unknown'}}}};
+    return {ok:true,headers:{get:()=> 'application/json'},json:async()=>data};
+  }};
+  vm.runInContext(app.slice(app.indexOf('async function http('),app.indexOf('// UI state helpers')),h.context);
+  vm.runInContext(app.slice(app.indexOf('async function _saveCredentialsNow(')),h.context);
+  h.rows[1].box.checked=false;h.el('cfg-p-accessforge_url').value='invalid unused AccessForge URL';
+  await h.api.setMode('p','on-demand');
+  assert.deepEqual(direct.map(call=>[call.options.method,call.url]),[['PATCH','/api/projects/p'],['POST','/api/projects/p/credential-types']]);
+  assert.equal(direct[1].options.headers['X-AccessForge-Connection'],undefined);
+  assert.equal(h.el('cred-checkout-mode-p').value,'on-demand');
+  assert.match(h.el('cred-checkout-status-p').textContent,/Saved locally in SCE-web/);
+  assert.match(h.rows[0].badge.outerHTML,/Marked for checkout · Unknown/);
+});
+
+test('a missing local save endpoint reports an SCE-web update error and never falls back to AccessForge',async()=>{
+  const h=harness(),direct=[];
+  h.context.window.ServerQueue={nativeFetch:async(url,options)=>{direct.push({url,options});return {ok:false,status:404,json:async()=>{throw Error('HTML response');}};}};
+  h.rows[1].box.checked=false;await h.api.setMode('p','on-demand');
+  assert.equal(direct.length,1);assert.equal(direct[0].url,'/api/projects/p/credential-types');
+  assert.match(h.el('cred-checkout-status-p').textContent,/Update and rebuild SCE-web/);
+  assert.equal(h.el('cred-checkout-mode-p').value,'permanent');
+  assert.equal(h.calls.filter(call=>call.url).length,0);
 });
 
 
@@ -83,7 +127,7 @@ test('Checkout combobox reflects selected credentials and follows synced eligibi
 test('Checkout modes apply only to selected credentials and preserve the existing save-first workflow',async()=>{
   for(const [mode,eligible] of [['on-demand',true],['permanent',false]]){
     const h=harness();h.rows[1].box.checked=false;
-    h.override((url,options)=>url.endsWith('/checkout-accounts')?{ok:true,json:async()=>({checkout:{accounts:{alice:{eligible}}}})}:null);
+    h.override((url,options)=>url.endsWith('/credential-types')?{ok:true,json:async()=>({checkout:{accounts:{alice:{eligible}}}})}:null);
     await h.api.setMode('p',mode);
     assert.deepEqual(h.calls[0],{saveCredentials:'p'});
     assert.deepEqual(h.calls.at(-1).body,{usernames:['alice'],enabled:eligible});
@@ -96,13 +140,12 @@ test('Checkout modes apply only to selected credentials and preserve the existin
 test('a pending mode change disables the combobox and a failed save restores the actual mode',async()=>{
   const h=harness();h.rows[1].box.checked=false;h.api.syncSelection('p');
   const mode=h.el('cred-checkout-mode-p');mode.value='on-demand';let finish;
-  h.override(url=>url.endsWith('/checkout-accounts')?new Promise(resolve=>finish=resolve):null);
+  h.override(url=>url.endsWith('/credential-types')?new Promise(resolve=>finish=resolve):null);
   const changing=h.api.setMode('p','on-demand');
   assert.equal(mode.disabled,true);assert.equal(mode.value,'on-demand');
   while(!finish)await new Promise(resolve=>setImmediate(resolve));
   finish({ok:false,status:502,json:async()=>({error:'AccessForge unavailable'})});await changing;
-  // The URL save returned the confirmed snapshot with Alice marked for checkout.
-  assert.equal(mode.value,'on-demand');assert.equal(mode.disabled,false);
+  assert.equal(mode.value,'permanent');assert.equal(mode.disabled,false);
   assert.match(h.el('cred-checkout-status-p').textContent,/AccessForge unavailable/);
   const failed=harness({saveCredentials:false});failed.rows[1].box.checked=false;
   failed.el('cred-checkout-mode-p').value='on-demand';await failed.api.setMode('p','on-demand');

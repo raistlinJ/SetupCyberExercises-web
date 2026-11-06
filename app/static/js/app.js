@@ -432,7 +432,7 @@ function updateStoredCommandsCache(pid, vmName, steps, idxHint) {
 }
 
 // Basic HTTP helper (restored after refactor removed it inadvertently)
-async function http(method, url, body, { signal } = {}) {
+async function http(method, url, body, { signal, direct = false } = {}) {
   const opts = { method, headers: {}, credentials: 'same-origin' };
   if (signal) opts.signal = signal;
   if (body instanceof FormData) {
@@ -444,7 +444,8 @@ async function http(method, url, body, { signal } = {}) {
   try {
     (window.shell && shell.logDebug) ? shell.logDebug(`[HTTP] ${method} ${url}`) : null;
   } catch { }
-  const res = await fetch(url, opts);
+  const send = direct ? (window.ServerQueue?.nativeFetch || fetch) : fetch;
+  const res = await send(url, opts);
   if (!res.ok) {
     let msg = res.statusText;
     let bodyText = '';
@@ -10174,7 +10175,7 @@ function onCredentialChanged(pid) {
   if (status) { status.textContent = 'Saving…'; status.className = 'small text-muted'; }
   _credSaveTimers[pid] = setTimeout(() => _saveCredentialsNow(pid), 600);
 }
-async function _saveCredentialsNow(pid, additionalProjectFields = undefined) {
+async function _saveCredentialsNow(pid, additionalProjectFields = undefined, { direct = false } = {}) {
   if (_credSaveTimers[pid]) {
     try { clearTimeout(_credSaveTimers[pid]); } catch { }
   }
@@ -10184,7 +10185,7 @@ async function _saveCredentialsNow(pid, additionalProjectFields = undefined) {
     const extraFields = (additionalProjectFields && typeof additionalProjectFields === 'object')
       ? additionalProjectFields
       : {};
-    const savedProject = await http('PATCH', `/api/projects/${pid}`, { ...extraFields, credentials: creds });
+    const savedProject = await http('PATCH', `/api/projects/${pid}`, { ...extraFields, credentials: creds }, { direct });
     try {
       const cache = window.PROJ_CACHE || {};
       const cachedProject = cache[pid] || {};

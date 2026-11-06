@@ -1,5 +1,6 @@
 """Optional one-way AccessForge connector: publish credentials and request status."""
 import hashlib
+import ipaddress
 import json
 import os
 import sqlite3
@@ -19,6 +20,45 @@ class AccessForgeError(Exception):
         self.message,self.status=message,status
 
 
+CHECKOUT_POLICY_DEFAULTS = {
+    'allowed_email_patterns': [], 'allowed_subnets': [], 'subnet_checkout_limit': 0,
+    'ipv4_prefix': 24, 'ipv6_prefix': 64, 'global_delay_seconds': 0, 'subnet_delay_seconds': 0,
+}
+
+
+def validate_checkout_policy(value):
+    if not isinstance(value, dict) or set(value)-CHECKOUT_POLICY_DEFAULTS.keys():
+        raise AccessForgeError('Provide valid checkout policy settings.')
+    result = {**CHECKOUT_POLICY_DEFAULTS, **value}
+    for key, maximum in [('subnet_checkout_limit', 2000), ('ipv4_prefix', 32), ('ipv6_prefix', 128),
+                         ('global_delay_seconds', 604800), ('subnet_delay_seconds', 604800)]:
+        if type(result[key]) is not int or not 0 <= result[key] <= maximum:
+            raise AccessForgeError(f'{key} must be a whole number between 0 and {maximum}.')
+    for key in ('allowed_email_patterns', 'allowed_subnets'):
+        entries = result[key]
+        if not isinstance(entries, list) or len(entries) > 50 or any(not isinstance(v, str) for v in entries):
+            raise AccessForgeError(f'{key} must contain at most 50 entries.')
+        normalized = []
+        for entry in entries:
+            entry = entry.strip().casefold()
+            if key == 'allowed_email_patterns':
+                if not 3 <= len(entry) <= 254 or entry.count('@') != 1 or not all(entry.split('@')) or any(c.isspace() or ord(c)<32 or c in '<>[],;\\' for c in entry):
+                    raise AccessForgeError('Use email patterns such as *@example.edu; * matches any text and ? matches one character.')
+            else:
+                try:
+                    entry = str(ipaddress.ip_network(entry, strict=False))
+                except ValueError:
+                    raise AccessForgeError('Allowed checkout networks must be valid IPv4 or IPv6 CIDRs.') from None
+            if entry not in normalized:
+                normalized.append(entry)
+        result[key] = normalized
+    return result
+
+
+def canonical_username(value):
+    return value if '@' in value else value+'@pve'
+
+
 class ConnectionStore:
     def __init__(self):
         self.path=os.path.join(current_app.config['DATA_DIR'],'accessforge_connections.sqlite3')
@@ -29,8 +69,35 @@ class ConnectionStore:
                     owner TEXT NOT NULL,pid TEXT NOT NULL,url TEXT NOT NULL,username TEXT NOT NULL,password_enc TEXT NOT NULL,
                     verify_ssl INTEGER NOT NULL,summary TEXT,checked_at REAL,migrated TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY(owner,pid));
+                CREATE TABLE IF NOT EXISTS credential_types (
+                    pid TEXT NOT NULL,username TEXT NOT NULL,on_demand INTEGER NOT NULL,
+                    updated_at REAL NOT NULL DEFAULT 0,PRIMARY KEY(pid,username));
             ''')
             db.execute('INSERT OR IGNORE INTO metadata VALUES(?,?)',('source',uuid.uuid4().hex))
+            if not db.execute('SELECT 1 FROM metadata WHERE key=?',('credential_types_migrated',)).fetchone():
+                for row in db.execute('SELECT pid,summary FROM connections WHERE summary IS NOT NULL ORDER BY checked_at'):
+                    try:
+                        self._remember_types(db,row['pid'],json.loads(row['summary']))
+                    except (ValueError,TypeError,AttributeError):
+                        continue
+                db.execute('INSERT OR IGNORE INTO metadata VALUES(?,?)',('credential_types_migrated','1'))
+
+    @staticmethod
+    def _remember_types(db,pid,summary):
+        for username,state in summary.get('accounts',{}).items():
+            db.execute('''INSERT INTO credential_types(pid,username,on_demand,updated_at) VALUES(?,?,?,0)
+                          ON CONFLICT(pid,username) DO UPDATE SET on_demand=excluded.on_demand WHERE credential_types.updated_at=0''',
+                       (pid,canonical_username(username),int(bool(state.get('eligible')))))
+
+    def credential_types(self,pid):
+        with self.connect() as db:
+            return {row['username']:dict(row) for row in db.execute('SELECT * FROM credential_types WHERE pid=?',(pid,))}
+
+    def mark_credentials(self,pid,usernames,on_demand):
+        with self.connect() as db:
+            db.executemany('''INSERT INTO credential_types VALUES(?,?,?,?) ON CONFLICT(pid,username)
+                              DO UPDATE SET on_demand=excluded.on_demand,updated_at=excluded.updated_at''',
+                           [(pid,canonical_username(name),int(on_demand),time.time()) for name in usernames])
 
     @contextmanager
     def connect(self):
@@ -66,6 +133,7 @@ class ConnectionStore:
     def cache(self,owner,pid,summary,*,migrated_names=()):
         summary = safe_summary(summary)
         with self.connect() as db:
+            self._remember_types(db,pid,summary)
             row=db.execute('SELECT migrated FROM connections WHERE owner=? AND pid=?',(owner,pid)).fetchone()
             saved=json.loads(str(row['migrated'])) if row else []
             names=set(saved if isinstance(saved,list) else []) | set(migrated_names)
@@ -90,8 +158,15 @@ def safe_summary(data):
     accounts=data.get('accounts')
     if not isinstance(accounts,dict) or len(accounts)>5000:
         raise AccessForgeError('Invalid AccessForge status response.',502)
-    fields=('eligible','email','name','assigned_at','releasing','password_rotated','checked_out_at','checkout_ip','relinquished_at','relinquished_ip','login_disabled')
+    fields=('eligible','email','name','assigned_at','releasing','password_rotated','checked_out_at','checkout_ip','relinquished_at','relinquished_ip','login_disabled','awaiting_checkout')
     clean={key:data[key] for key in ('id','name','enabled','verify_email','secret_set','smtp_configured','published','login_management_ready') if key in data}
+    if 'policy' in data:
+        if not isinstance(data['policy'],dict):
+            raise AccessForgeError('Invalid AccessForge checkout policy.',502)
+        try:
+            clean['policy']=validate_checkout_policy({key:value for key,value in data['policy'].items() if key in CHECKOUT_POLICY_DEFAULTS})
+        except AccessForgeError:
+            raise AccessForgeError('Invalid AccessForge checkout policy.',502) from None
     clean['accounts']={}
     for username,state in accounts.items():
         if not isinstance(username,str) or len(username)>128 or not isinstance(state,dict):
@@ -117,11 +192,26 @@ def checkout_summary(project):
     path=os.path.join(app.config['DATA_DIR'],'accessforge_connections.sqlite3')
     if not os.path.exists(path):
         return {'accounts':{},'checked_at':None,'connected':False}
-    row=ConnectionStore().get(_owner(),project.id)
+    store=ConnectionStore()
+    row=store.get(_owner(),project.id)
+    local=store.credential_types(project.id)
     result=json.loads(row['summary']) if row and row['summary'] else {'accounts':{}}
     # Map canonical Proxmox IDs back to the project's original credential spelling.
     remote=result.get('accounts',{})
-    result['accounts']={c['username']:remote.get(c['username'] if '@' in c['username'] else c['username']+'@pve',{}) for c in project.credentials or [] if c.get('username') and (c['username'] if '@' in c['username'] else c['username']+'@pve') in remote}
+    result['accounts']={}
+    for credential in project.credentials or []:
+        username=credential.get('username')
+        if not username:
+            continue
+        canonical=canonical_username(username)
+        state=remote.get(canonical)
+        kind=local.get(canonical)
+        if state is None and kind is None:
+            continue
+        marked=bool(kind['on_demand']) if kind else bool(state.get('eligible'))
+        checked=row['checked_at'] if row else None
+        sync='unknown' if not checked or (kind and kind['updated_at']>checked) else 'not_synced' if state is None else 'synced' if state.get('eligible') else 'not_enabled'
+        result['accounts'][username]={**(state or {}),'eligible':marked,'remote_eligible':bool(state and state.get('eligible')),'sync_status':sync}
     result['checked_at']=row['checked_at'] if row else None
     result['connected']=bool(row and row['password_enc'])
     result['connection_url']=row['url'] if row else ''
@@ -212,6 +302,26 @@ def remote(connection,method,path,data=None):
     if 300<=response.status_code<400:
         raise AccessForgeError('AccessForge redirected the request. Enter its final HTTPS base URL in Connection.',502)
     if response.status_code>=500:
+        try:
+            failed=response.json()
+            reason=failed.get('error') if isinstance(failed,dict) else None
+        except ValueError:
+            reason=None
+        # Relay only known application diagnostics; never arbitrary upstream pages or exception details.
+        known_errors={
+            "AccessForge could not verify the configured Proxmox API's TLS certificate. Check VERIFY_SSL and the Proxmox certificate trust on AccessForge.",
+            'AccessForge could not establish TLS with the configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, and its TLS configuration.',
+            'AccessForge timed out contacting its configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, and network access from the AccessForge container.',
+            'AccessForge could not connect to its configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, and container DNS/network access.',
+            'AccessForge could not request its configured Proxmox API. Check PROXMOX_HOST and PROXMOX_PORT.',
+            'AccessForge received an invalid Proxmox API response while validating the administrator. Check PROXMOX_HOST, PROXMOX_PORT, and reverse-proxy routing.',
+            'The configured Proxmox API returned a server error during administrator authentication.',
+            'The configured Proxmox API returned a server error while checking administrator permissions.',
+        }
+        if isinstance(reason,str) and reason in known_errors:
+            raise AccessForgeError(reason,502)
+        if reason=='Could not validate the administrator with Proxmox.':
+            raise AccessForgeError('AccessForge is reachable but could not validate the administrator with its configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, VERIFY_SSL, and container network access on AccessForge.',502)
         raise AccessForgeError(f'AccessForge returned HTTP {response.status_code}. Check its application and reverse-proxy logs.',502)
     try:
         result=response.json()
@@ -341,7 +451,7 @@ def register_accessforge_plugin(app):
         if status.get('service')!='AccessForge' or status.get('checkout_api')!=1:
             raise AccessForgeError('That server does not support the AccessForge checkout administration API.',502)
         store.save(_owner(),pid,data['url'],data['username'],data['password'],data['verify_ssl'],persist=persist)
-        return jsonify(connected=True,persist=persist,administrator=status.get('administrator'),cluster=status.get('cluster'),pool_id=store.pool_id(pid))
+        return jsonify(connected=True,persist=persist,administrator=status.get('administrator'),cluster=status.get('cluster'),pool_id=store.pool_id(pid),checkout=checkout_summary(selected))
 
     @bp.get('/api/projects/<pid>/accessforge/accounts')
     @_secure_route(required_roles=['admin'])
@@ -368,11 +478,75 @@ def register_accessforge_plugin(app):
         store.cache(_owner(),pid,result,migrated_names=set(legacy)&set(usernames))
         return selected,store,config
 
+    def enable_existing_api(pid,usernames,known,store,config,payload):
+        """Register checkout accounts using the original API without disabling active logins."""
+        latest=json.loads(store.get(_owner(),pid)['summary'])
+        results={};disabled=[]
+        path='/api/admin/checkouts/pools/'+store.pool_id(pid)
+        def updated(response):
+            if not isinstance(response.get('checkout'),dict):
+                raise AccessForgeError('AccessForge did not return updated checkout status.',502)
+            store.cache(_owner(),pid,response['checkout'])
+            return response['checkout']
+        for username in usernames:
+            canonical=canonical_username(username)
+            state=latest['accounts'].get(canonical)
+            row={'username':canonical,'success':False};results[username]=row
+            if state is None:
+                row['error']='AccessForge did not confirm this account was published.'
+            elif state.get('email') or state.get('releasing'):
+                row['error']='Relinquish the assigned account before enabling it.'
+            elif state.get('login_disabled'):
+                disabled.append(username)
+            else:
+                # This login is already active; only checkout eligibility needs setting.
+                row['success']=True
+        if disabled:
+            try:
+                response=remote(config,'POST',path,{'action':'reenable_logins','accounts':[known[u] for u in disabled]})
+                latest=updated(response)
+                confirmed={canonical_username(row['username']):row for row in response.get('results',[]) if isinstance(row,dict) and isinstance(row.get('username'),str)}
+                for username in disabled:
+                    canonical=canonical_username(username);row=confirmed.get(canonical,{})
+                    success=row.get('success') is True and latest['accounts'].get(canonical,{}).get('login_disabled') is False
+                    results[username].update(success=success)
+                    if not success:
+                        results[username]['error']=row.get('error') or 'AccessForge did not confirm that this login was re-enabled.'
+            except AccessForgeError as exc:
+                for username in disabled:
+                    results[username]['error']='Could not confirm login enable: '+exc.message
+        checkout_names={canonical_username(entry['username']) for entry in payload['accounts'] if entry.get('enable_checkout')}
+        activate=[u for u in usernames if results[u]['success'] and canonical_username(u) in checkout_names
+                  and not latest['accounts'].get(canonical_username(u),{}).get('eligible')]
+        if activate:
+            try:
+                latest=updated(remote(config,'POST',path,{'action':'enable','usernames':activate}))
+                for username in activate:
+                    if latest['accounts'].get(canonical_username(username),{}).get('eligible') is not True:
+                        results[username].update(success=False,error='AccessForge did not confirm checkout was enabled.')
+            except AccessForgeError as exc:
+                for username in activate:
+                    results[username].update(success=False,error='Could not confirm checkout enable: '+exc.message)
+        return {'checkout':latest,'results':[results[u] for u in usernames]}
+
     @bp.post('/api/projects/<pid>/accessforge/publish')
     @_secure_route(required_roles=['admin'])
     def publish(pid):
         selected,store,config=publish_accounts(pid,body())
         return jsonify(checkout=checkout_summary(selected),pool_id=store.pool_id(pid),admin_url=config['url']+'/admin/checkouts',student_url=config['url']+'/checkout')
+
+    @bp.post('/api/projects/<pid>/credential-types')
+    @bp.post('/api/projects/<pid>/accessforge/credential-types')
+    @_secure_route(required_roles=['admin'])
+    def credential_types(pid):
+        submitted=body();selected=project(pid)
+        usernames=submitted.get('usernames');enabled=submitted.get('enabled')
+        known={c.get('username') for c in selected.credentials or []}
+        if type(enabled) is not bool or not isinstance(usernames,list) or not 1<=len(usernames)<=2000 or any(not isinstance(u,str) or u not in known for u in usernames):
+            raise AccessForgeError('Select saved credential usernames and whether checkout is enabled.')
+        usernames=list(dict.fromkeys(usernames))
+        ConnectionStore().mark_credentials(pid,usernames,enabled)
+        return jsonify(checkout=checkout_summary(selected))
 
     @bp.post('/api/projects/<pid>/accessforge/checkout-accounts')
     @_secure_route(required_roles=['admin'])
@@ -383,6 +557,7 @@ def register_accessforge_plugin(app):
         if type(enabled) is not bool or not isinstance(usernames,list) or not 1<=len(usernames)<=2000 or any(not isinstance(u,str) or u not in known for u in usernames):
             raise AccessForgeError('Select saved credential usernames and whether checkout is enabled.')
         usernames=list(dict.fromkeys(usernames))
+        selected_names=list(usernames)
         if enabled:
             selected,store,config=publish_accounts(pid,submitted)
         else:
@@ -393,18 +568,20 @@ def register_accessforge_plugin(app):
                 if exc.status!=404 or exc.message!='Checkout pool not found.':
                     raise
                 status={'accounts':{},'published':False}
-            usernames=[u for u in usernames if (u if '@' in u else u+'@pve') in status['accounts']]
+            usernames=[u for u in usernames if canonical_username(u) in status['accounts']]
             if not usernames:
+                store.mark_credentials(pid,selected_names,False)
                 store.cache(_owner(),pid,status)
                 return jsonify(checkout=checkout_summary(selected))
         result=remote(config,'POST','/api/admin/checkouts/pools/'+store.pool_id(pid),{'action':'enable' if enabled else 'disable','usernames':usernames})
+        store.mark_credentials(pid,selected_names,enabled)
         store.cache(_owner(),pid,result['checkout'])
         return jsonify(checkout=checkout_summary(selected))
 
     @bp.post('/api/projects/<pid>/accessforge/<operation>')
     @_secure_route(required_roles=['admin'])
     def manage_login(pid,operation):
-        actions={'disable-logins':'disable_logins','reset-passwords':'reset_passwords','reenable-logins':'reenable_logins','relinquish-accounts':'release'}
+        actions={'disable-logins':'disable_logins','reset-passwords':'reset_passwords','reenable-logins':'enable_accounts','relinquish-accounts':'release'}
         if operation not in actions:
             raise AccessForgeError('Unknown account operation.',404)
         selected=project(pid)
@@ -423,12 +600,18 @@ def register_accessforge_plugin(app):
         if operation in ('disable-logins','relinquish-accounts'):
             payload['usernames']=usernames
         else:
-            payload['accounts']=[known[u] for u in usernames]
+            marked=(checkout_summary(selected) or {}).get('accounts',{})
+            payload['accounts']=[{**known[u],**({'enable_checkout':bool(marked.get(u,{}).get('eligible'))} if operation=='reenable-logins' else {})} for u in usernames]
         if operation=='reenable-logins':
+            service=remote(config,'GET','/api/admin/checkouts/status')
+            capabilities=service.get('capabilities')
+            modern_setup=isinstance(capabilities,dict) and capabilities.get('account_setup') is True
             # Password updates happen in VM Manager; refresh AccessForge's copy
-            # before enabling without changing checkout eligibility or policy.
+            # before enabling. AccessForge also enables checkout for marked accounts
+            # only after their Proxmox login update succeeds.
             selected,store,config=publish_accounts(pid,{'usernames':usernames})
-        result=remote(config,'POST','/api/admin/checkouts/pools/'+store.pool_id(pid),payload)
+        result=(enable_existing_api(pid,usernames,known,store,config,payload) if operation=='reenable-logins' and not modern_setup
+                else remote(config,'POST','/api/admin/checkouts/pools/'+store.pool_id(pid),payload))
         store.cache(_owner(),pid,result['checkout'])
         results=result.get('results',[])
         if operation=='relinquish-accounts':
@@ -441,6 +624,9 @@ def register_accessforge_plugin(app):
         selected=project(pid)
         store,row,config=connection(pid)
         submitted=body();payload={}
+        if 'policy' in submitted:
+            normalized=validate_checkout_policy(submitted['policy'])
+            payload['policy']={key:normalized[key] for key in submitted['policy']}
         for field in ('enabled','verify_email'):
             if field in submitted:
                 if type(submitted[field]) is not bool:
@@ -458,7 +644,7 @@ def register_accessforge_plugin(app):
             result=remote(config,'PATCH','/api/admin/checkouts/pools/'+store.pool_id(pid),payload)
         except AccessForgeError as exc:
             if exc.status==404 and exc.message=='Checkout pool not found.':
-                raise AccessForgeError('Use Configuration → Credentials → On-demand (checkout) before configuring checkout settings.',409) from None
+                raise AccessForgeError('Use Accounts → Enable to publish at least one account before configuring checkout settings.',409) from None
             raise
         store.cache(_owner(),pid,result)
         return jsonify(checkout=checkout_summary(selected))

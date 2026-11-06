@@ -87,3 +87,13 @@ test('manager icons appear only for marked accounts, including disabled and chec
   assert.equal(h.api.markedIcon(snapshot,'off'),'');assert.equal(h.api.markedIcon(snapshot,'unknown'),'');
   h.context.document.documentElement.dataset.accessforgePlugin='off';assert.equal(h.api.markedIcon(snapshot,'on'),'');
 });
+
+test('awaiting checkout icons indicate availability and explain the disabled login',()=>{
+  const {api}=harness();
+  const state={accounts:{alice:{eligible:true,login_disabled:true,awaiting_checkout:true}}};
+  assert.match(api.icon(state,'alice'),/text-success/);
+  assert.match(api.icon(state,'alice'),/Login disabled until assigned/);
+  state.accounts.alice.awaiting_checkout=false;
+  assert.match(api.icon(state,'alice'),/text-danger/);
+  assert.match(api.icon(state,'alice'),/Login disabled/);
+});

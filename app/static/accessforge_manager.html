@@ -8,6 +8,10 @@
 <link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
 <link href="/static/css/row_tags.css?v=20261029-tag-icons" rel="stylesheet">
 <link rel="icon" href="/static/favicon.ico">
+<style>
+  #af-checkout-modal, #af-operation-summary { z-index:2110 !important; }
+  #af-checkout-modal .modal-dialog, #af-operation-summary .modal-dialog { margin-top:var(--bs-modal-margin, .5rem); }
+</style>
 <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </head>
 <body class="shell-body manager-page">
@@ -70,7 +74,7 @@
 <div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3">
   <div id="af-tag-assignment" class="dropdown"></div>
   <div class="btn-group btn-group-sm"><button id="af-accounts-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" disabled>Accounts</button><ul class="dropdown-menu">
-    <li><button type="button" class="dropdown-item" id="af-reenable-logins" title="Enable selected prepared logins after applying password changes in VM Manager" disabled>Enable</button></li>
+    <li><button type="button" class="dropdown-item" id="af-reenable-logins" title="Publish and enable selected On-Demand accounts after applying password changes in VM Manager" disabled>Enable</button></li>
     <li><button type="button" class="dropdown-item text-danger" id="af-relinquish" title="Release selected student assignments and disable their logins" disabled>Relinquish</button></li>
     <li><button type="button" class="dropdown-item text-danger" id="af-disable-logins" title="Disable selected unassigned logins" disabled>Disable</button></li>
   </ul></div>
@@ -82,7 +86,6 @@
 <div id="af-status" role="status" aria-live="polite" class="small mb-2"></div>
 <p id="af-snapshot" class="small text-muted">No status requested.</p>
 <div class="table-responsive" style="max-height:28rem; overflow:auto"><table id="af-table" class="table table-sm align-middle"><thead><tr><th><input id="af-select-all" type="checkbox" class="form-check-input" aria-label="Select visible accounts"></th><th>Username</th><th>AccessForge status</th><th>Name</th><th>Checked out to</th><th>Checked out</th><th>Checkout IP</th><th>Relinquished</th></tr></thead><tbody id="af-accounts"><tr><td colspan="8" class="text-muted">Select a project.</td></tr></tbody></table></div>
-<p class="small text-muted mb-0">Use Configuration → Credentials → On-demand (checkout) to make accounts eligible. Use Checkout settings for the lab secret and email verification. Relinquish clears the student assignment and disables the login. To reuse an account, update its saved password in Configuration, apply it through VM Manager → Users &amp; Access → Set Credentials to Current List, then choose Enable here when ready. Disable applies to unassigned accounts.</p>
 </div></div>
 </main></div></div>
 <div class="modal fade" id="af-connection" tabindex="-1" aria-labelledby="af-connection-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content">
@@ -98,7 +101,7 @@
     <p class="form-text">Usernames without a realm use @pam. Include @realm to use a different Proxmox realm.</p>
     <div class="form-check mb-2"><input id="af-save-creds" type="checkbox" class="form-check-input"><label for="af-save-creds" class="form-check-label" title="Save the connection credentials encrypted on the server for your user and this project.">Save credentials</label></div>
     <p class="small text-muted">If checked, credentials are saved encrypted on the server for your user and this project, excluded from exports. If unchecked, credentials remain only in this browser tab’s session. Save tests the connection; an administrator on AccessForge’s configured Proxmox cluster is required.</p>
-    <p class="small text-muted mb-0">Publishing also saves the administrator credential encrypted in AccessForge so it can disable relinquished logins. A dedicated Proxmox API token can be configured there instead.</p>
+    <p class="small text-muted mb-0">Administrator account login changes use the Proxmox session authenticated by this connection, with User.Modify permission for the managed users. No additional password prompt is needed. AccessForge’s optional CHECKOUT_PROXMOX_API_TOKEN is used only for student self-service relinquishment. Publishing does not save your administrator password in AccessForge.</p>
   </div>
   <div class="modal-footer">
     <div id="af-connection-feedback" class="me-auto small" role="status" aria-live="polite"></div>
@@ -107,8 +110,8 @@
     <button type="submit" class="btn btn-primary" id="af-save-connection">Save</button>
   </div>
 </form></div></div></div>
-<div class="modal fade" id="af-checkout-modal" tabindex="-1" aria-labelledby="af-checkout-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content">
-<form id="af-checkout-form">
+<div class="modal fade" id="af-checkout-modal" tabindex="-1" aria-labelledby="af-checkout-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+<form id="af-checkout-form" class="d-flex flex-column overflow-hidden">
   <div class="modal-header"><h5 id="af-checkout-title" class="modal-title">Checkout settings</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
   <div class="modal-body">
     <div class="form-check mb-3"><input id="af-checkout-enabled" class="form-check-input" type="checkbox"><label for="af-checkout-enabled" class="form-check-label">Enable student checkout</label></div>
@@ -116,6 +119,23 @@
     <label for="af-checkout-secret" class="form-label">Lab secret</label>
     <input id="af-checkout-secret" type="password" class="form-control" autocomplete="new-password" minlength="8" maxlength="256" placeholder="Set a lab secret (8+ characters)">
     <p id="af-checkout-secret-state" class="form-text"></p>
+    <fieldset class="border rounded p-3 my-3">
+      <legend class="float-none w-auto px-1 fs-6">Checkout restrictions</legend>
+      <label for="af-policy-allowed_email_patterns" class="form-label">Allowed email formats</label>
+      <textarea id="af-policy-allowed_email_patterns" class="form-control" rows="2" placeholder="*@utep.edu&#10;student*@example.org"></textarea>
+      <p class="form-text">One pattern per line. * matches any text; ? matches one character. Leave blank to allow any valid email.</p>
+      <label for="af-policy-allowed_subnets" class="form-label">Allowed checkout IP networks</label>
+      <textarea id="af-policy-allowed_subnets" class="form-control" rows="2" placeholder="192.0.2.0/24&#10;2001:db8::/48"></textarea>
+      <p class="form-text">One IPv4 or IPv6 CIDR per line. Leave blank to allow any network.</p>
+      <div class="row g-3">
+        <div class="col-sm-6"><label for="af-policy-subnet_checkout_limit" class="form-label">Active checkouts per subnet</label><input id="af-policy-subnet_checkout_limit" class="form-control" type="number" min="0" max="2000" step="1" value="0" required></div>
+        <div class="col-sm-6"><label for="af-policy-ipv4_prefix" class="form-label">IPv4 subnet prefix length</label><input id="af-policy-ipv4_prefix" class="form-control" type="number" min="0" max="32" step="1" value="24" required></div>
+        <div class="col-sm-6"><label for="af-policy-ipv6_prefix" class="form-label">IPv6 subnet prefix length</label><input id="af-policy-ipv6_prefix" class="form-control" type="number" min="0" max="128" step="1" value="64" required></div>
+        <div class="col-sm-6"><label for="af-policy-global_delay_seconds" class="form-label">Global delay (seconds)</label><input id="af-policy-global_delay_seconds" class="form-control" type="number" min="0" max="604800" step="1" value="0" required></div>
+        <div class="col-sm-6"><label for="af-policy-subnet_delay_seconds" class="form-label">Subnet delay (seconds)</label><input id="af-policy-subnet_delay_seconds" class="form-control" type="number" min="0" max="604800" step="1" value="0" required></div>
+      </div>
+      <p class="form-text mb-0 mt-3">Limits and delays apply to new student checkouts in this project. 0 means no limit or delay. Global delay covers all networks in this project. Recovering an assignment does not use another slot or restart delays, but must meet the email and allowed-network rules. Administrator assignments bypass these restrictions.</p>
+    </fieldset>
     <p id="af-checkout-policy-note" class="small text-muted mb-0"></p>
   </div>
   <div class="modal-footer">
@@ -129,8 +149,17 @@
   <div class="modal-body">
     <p id="af-refresh-project" class="fw-semibold mb-1"></p>
     <p id="af-refresh-totals" class="small mb-3" role="status"></p>
-    <div class="alert alert-success small">Checkout marks, student assignments, login status, and checkout history were saved to SCE-web’s shared snapshot. Configuration, VM Manager, CTFd Manager, and CTF-RPG Manager were notified to update; returning tabs load the snapshot when shown.</div>
+    <div class="alert alert-success small">Remote checkout status, student assignments, login status, and checkout history were saved to SCE-web’s shared snapshot. Local credential types were retained; accounts missing from AccessForge remain listed as Not synced. Configuration, VM Manager, CTFd Manager, and CTF-RPG Manager were notified to update; returning tabs load the snapshot when shown.</div>
     <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th scope="col">Account</th><th scope="col">Sync result</th><th scope="col">Checkout mark</th><th scope="col">Student</th><th scope="col">Login</th><th scope="col">Changes</th></tr></thead><tbody id="af-refresh-results"></tbody></table></div>
+  </div>
+  <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div>
+</div></div></div>
+<div class="modal fade" id="af-operation-summary" tabindex="-1" aria-labelledby="af-operation-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+  <div class="modal-header"><h5 id="af-operation-title" class="modal-title">Account operation results</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+  <div class="modal-body">
+    <p id="af-operation-totals" class="small" role="status"></p>
+    <div id="af-operation-refresh" class="alert small" role="status"></div>
+    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th scope="col">Account</th><th scope="col">Result</th><th scope="col">Details</th><th scope="col">AccessForge status</th></tr></thead><tbody id="af-operation-results"></tbody></table></div>
   </div>
   <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div>
 </div></div></div>
@@ -138,6 +167,6 @@
 <script src="/static/js/shell.js?v=20261105-accessforge"></script>
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/row_tags.js?v=20261106-accessforge-tags"></script>
-<script src="/static/js/checkout_state.js?v=20261106-checkout-truth"></script>
-<script src="/static/js/accessforge_manager.js?v=20261106-checkout-label"></script>
+<script src="/static/js/checkout_state.js?v=20261106-assignment-login"></script>
+<script src="/static/js/accessforge_manager.js?v=20261106-assignment-login"></script>
 </body></html>

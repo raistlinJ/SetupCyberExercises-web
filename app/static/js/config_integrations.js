@@ -16,15 +16,22 @@
     url.port=String(port);return url.href.replace(/\/$/,'');
   }
   async function api(pid,path,method,data){
-    const me=await AUTH.me(),owner=me?.user?.username||'__anonymous__';
     const headers={'Content-Type':'application/json'};
-    try{
+    if(path!=='credential-types')try{
+      const me=await AUTH.me(),owner=me?.user?.username||'__anonymous__';
       const temporary=JSON.parse(sessionStorage.getItem(`toolhub.accessforge.session.${encodeURIComponent(owner)}.${encodeURIComponent(pid)}`)||'null');
       if(temporary)headers['X-AccessForge-Connection']=encodeURIComponent(JSON.stringify(temporary));
     }catch{}
-    const response=await fetch(`/api/projects/${encodeURIComponent(pid)}/accessforge/${path}`,{method,credentials:'same-origin',cache:'no-store',headers,body:JSON.stringify(data)});
+    const send=path==='credential-types'?(window.ServerQueue?.nativeFetch||fetch):fetch;
+    const url=`/api/projects/${encodeURIComponent(pid)}/${path==='credential-types'?path:'accessforge/'+path}`;
+    let response;
+    try{response=await send(url,{method,credentials:'same-origin',cache:'no-store',headers,body:JSON.stringify(data)});}
+    catch(error){if(path==='credential-types')throw new Error(`SCE-web could not save the local credential type: ${error.message||'Network request failed.'}`);throw error;}
     let result={};try{result=await response.json();}catch{}
-    if(!response.ok)throw new Error(result.error||`Request failed (HTTP ${response.status}).`);
+    if(!response.ok){
+      if(path==='credential-types')throw new Error(`SCE-web could not save the local credential type: ${result.error||(response.status===404?'Local save endpoint not found. Update and rebuild SCE-web.':`HTTP ${response.status}`)}`);
+      throw new Error(result.error||`Request failed (HTTP ${response.status}).`);
+    }
     return result;
   }
   function readFields(urlInput,portInput){
@@ -76,6 +83,10 @@
     const data=await api(pid,'checkout-accounts','POST',{usernames,enabled:marked});
     update(pid,data.checkout);return data.checkout;
   }
+  async function setCredentialTypes(pid,usernames,marked){
+    const data=await api(pid,'credential-types','POST',{usernames,enabled:marked});
+    update(pid,data.checkout);return data.checkout;
+  }
   function checkbox(pid,username){
     return `<div class="col-auto d-flex align-items-center" data-plugin="accessforge"><input type="checkbox" class="form-check-input m-0 credential-select" aria-label="Select ${esc(username||'credential')} for checkout" ${selection(pid).has(username)?'checked':''} onchange="ConfigIntegrations.select('${esc(pid)}',this)"></div>`;
   }
@@ -110,10 +121,9 @@
     if(!names.length){feedback(pid,'Select at least one credential.',true);return;}
     busy.add(pid);syncSelection(pid);document.querySelectorAll(`[data-checkout-action="${CSS.escape(pid)}"]`).forEach(button=>button.disabled=true);
     try{
-      feedback(pid,'Saving credentials and updating checkout availability…');
-      if(!await _saveCredentialsNow(pid))throw new Error('Save the credential list successfully before changing checkout availability.');
-      await saveUrl(pid);
-      await setMarked(pid,names,checkoutEnabled);feedback(pid,`Checkout mode set to ${checkoutEnabled?'On-demand (checkout)':'Permanent'} for ${names.length} selected account(s).`);
+      feedback(pid,'Saving credentials and credential type…');
+      if(!await _saveCredentialsNow(pid,undefined,{direct:true}))throw new Error('Save the credential list successfully in SCE-web before changing its type.');
+      await setCredentialTypes(pid,names,checkoutEnabled);feedback(pid,`Checkout mode set to ${checkoutEnabled?'On-demand (checkout)':'Permanent'} for ${names.length} selected account(s). Saved locally in SCE-web.`);
     }catch(error){feedback(pid,error.message,true);}finally{busy.delete(pid);document.querySelectorAll(`[data-checkout-action="${CSS.escape(pid)}"]`).forEach(button=>button.disabled=false);syncSelection(pid);}
   }
   async function setMode(pid,mode){

@@ -84,7 +84,8 @@ async function harness({connected = true, storage = new Map(), user = 'admin', t
           url: 'https://accessforge.example', username: 'root@pam', verify_ssl: true, administrator: 'root@pam'});
       }
       if (operation === 'accounts') return response({accounts: (credentials[pid] || [`student-${pid}`]).map(username => ({username})), checkout: snapshot(pid)});
-      return response({checkout: snapshot(pid)});
+      const selected=options.body?JSON.parse(options.body).usernames:null;
+      return response({checkout: snapshot(pid),results:(selected||[]).map(username=>({username,success:true}))});
     }};
   window.fetch = context.fetch;
   vm.createContext(context);
@@ -136,7 +137,7 @@ test('Auto cannot overlap an account operation and preserves checkbox selection 
   assert.equal(h.el('af-auto-badge').textContent, 'Busy');
   assert.equal(h.calls.filter(call => call.url.endsWith('/status')).length, 1);
   pending.resolve(response({checkout: h.snapshot('a')})); await enabling;
-  await h.tick(); assert.equal(h.calls.filter(call => call.url.endsWith('/status')).length, 2);
+  await h.tick(); assert.equal(h.calls.filter(call => call.url.endsWith('/status')).length, 3);
 });
 
 test('late refresh responses cannot overwrite a project after switching away and back', async () => {
@@ -225,20 +226,66 @@ test('checkout names are escaped, searchable, and controlled by the Name column 
 });
 
 test('checkout settings load fresh policy, pause Auto, and send the secret without queueing or browser persistence', async () => {
-  const h = await harness(), policy = {...h.snapshot('a'), id: 'pool', enabled: true, verify_email: false, secret_set: true, smtp_configured: true};
+  const restrictions={allowed_email_patterns:['*@utep.edu'],allowed_subnets:['192.0.2.0/24'],subnet_checkout_limit:2,ipv4_prefix:28,ipv6_prefix:56,global_delay_seconds:10,subnet_delay_seconds:60};
+  const h = await harness(), policy = {...h.snapshot('a'), id: 'pool', enabled: true, verify_email: false, secret_set: true, smtp_configured: true,policy:restrictions};
   h.override(url => url.endsWith('/status') ? response({checkout: policy}) : null);
   await h.el('af-checkout-settings').fire();
   assert.equal(h.el('af-checkout-enabled').checked, true);assert.equal(h.el('af-checkout-verify').checked, false);
   assert.match(h.el('af-checkout-secret-state').textContent, /Leave this field blank/);
+  assert.equal(h.el('af-policy-allowed_email_patterns').value,'*@utep.edu');
+  assert.equal(h.el('af-policy-ipv4_prefix').value,28);
   await h.auto(15);await h.el('af-checkout-modal').fire('show.bs.modal');
   const before=h.calls.length;await h.tick();assert.equal(h.calls.length,before);assert.equal(h.el('af-auto-badge').textContent,'Pause');
   const direct=[];h.window.ServerQueue={nativeFetch:async(url,options)=>{direct.push({url,options});return response({checkout:policy});}};
-  h.el('af-checkout-secret').value='new-class-secret';await h.el('af-checkout-form').fire('submit');
-  assert.equal(direct.length,1);assert.equal(direct[0].options.method,'PATCH');
+  h.el('af-checkout-secret').value='new-class-secret';
+  h.el('af-policy-allowed_subnets').value='192.0.2.0/24\n2001:db8::/48';
+  h.el('af-policy-global_delay_seconds').value='20';
+  await h.el('af-checkout-form').fire('submit');
+  assert.equal(direct.length,2);assert.equal(direct[0].options.method,'PATCH');assert.ok(direct[1].url.endsWith('/status'));
   assert.equal(JSON.parse(direct[0].options.body).secret,'new-class-secret');
+  assert.deepEqual(JSON.parse(direct[0].options.body).policy,{...restrictions,allowed_subnets:['192.0.2.0/24','2001:db8::/48'],global_delay_seconds:20});
   assert.equal(h.el('af-checkout-secret').value,'');
   assert.ok(![...h.storage.values()].join('').includes('new-class-secret'));
   assert.ok(!h.calls.some(call=>call.url.endsWith('/settings')));
+});
+
+test('all checkout actions use direct requests and immediately render the live AccessForge response',async()=>{
+  const h=await harness(),direct=[],before=h.calls.length;
+  let live={...h.snapshot('a'),id:'pool',enabled:true,verify_email:false,secret_set:true,smtp_configured:true,
+    accounts:{'student-a':{eligible:true,login_disabled:true,email:null,sync_status:'synced'}}};
+  h.window.ServerQueue={nativeFetch:async(url,options)=>{
+    direct.push({url,options});
+    if(url.endsWith('/connection'))return response({connected:true,administrator:'root@pam',checkout:live});
+    if(url.endsWith('/reenable-logins'))live={...live,accounts:{'student-a':{eligible:true,login_disabled:false,email:null,sync_status:'synced'}}};
+    if(url.endsWith('/disable-logins')||url.endsWith('/relinquish-accounts'))live={...live,accounts:{'student-a':{eligible:true,login_disabled:true,email:null,sync_status:'synced'}}};
+    return response({checkout:live,results:[{username:'student-a',success:true}]});
+  }};
+  for(const [button,label] of [['af-reenable-logins','Available'],['af-disable-logins','Disabled'],['af-relinquish','Disabled']]){
+    h.el('af-select-all').checked=true;await h.el('af-select-all').fire('change');await h.el(button).fire();
+    assert.match(h.el('af-accounts').innerHTML,new RegExp(label));
+    assert.match(h.el('af-selection-count').innerHTML,/1 selected/);
+    assert.equal(h.el('af-accounts').querySelectorAll()[0].checked,true);
+  }
+  h.el('af-password').value='test-admin-password';await h.el('af-connection-form').fire('submit');
+  assert.deepEqual(direct.slice(-2).map(call=>call.url.split('/').at(-1)),['connection','status']);
+  assert.match(h.el('af-status').textContent,/Connected as root@pam\. Status updated/);
+  await h.el('af-refresh').fire();await h.el('af-checkout-settings').fire();
+  await h.el('af-checkout-form').fire('submit');
+  assert.deepEqual(direct.slice(-2).map(call=>call.url.split('/').at(-1)),['settings','status']);
+  assert.equal(direct.at(-2).options.method,'PATCH');
+  for(const call of direct)assert.equal(call.options.cache,'no-store');
+  assert.equal(h.calls.length,before,'live actions must not go through the queued fetch wrapper');
+});
+
+test('a failed live status read after connection does not report a refreshed table or restore stale target status',async()=>{
+  const h=await harness();
+  h.window.ServerQueue={nativeFetch:async(url)=>url.endsWith('/connection')?
+    response({administrator:'root@pam',checkout:{accounts:{'student-a':{eligible:true,sync_status:'unknown'}}}}):
+    response({error:'AccessForge status unavailable.'},false)};
+  h.el('af-password').value='test-admin-password';await h.el('af-connection-form').fire('submit');
+  assert.equal(h.el('af-connection-feedback').textContent,'AccessForge status unavailable.');
+  assert.equal(h.el('af-status').textContent,'AccessForge status unavailable.');
+  assert.match(h.el('af-accounts').innerHTML,/Unknown/);
 });
 
 test('admin relinquishment honors Cancel and displays per-account errors', async () => {
@@ -318,7 +365,8 @@ test('Accounts offers only Enable, Relinquish and Disable and enabling never sub
   assert.deepEqual(JSON.parse(request.options.body),{usernames:['student-a']});
   assert.ok(!h.calls.some(call=>call.url.endsWith('/reset-passwords')||call.url.endsWith('/publish')));
   assert.equal(h.el('af-status').textContent,'Selected accounts enabled.');
-  assert.match(h.el('af-selection-count').innerHTML,/0 selected/);
+  assert.match(h.el('af-selection-count').innerHTML,/1 selected/);
+  assert.equal(h.el('af-accounts').querySelectorAll()[0].checked,true);
 });
 
 
@@ -337,12 +385,100 @@ test('AccessForge refresh and account changes broadcast snapshots and receive up
   assert.equal(h.broadcasts.length,1,'a late refresh must not broadcast a stale snapshot');
 });
 
+test('local On-Demand accounts are visible offline as Unknown and stay visible as Not enabled after refresh',async()=>{
+  const h=await harness({connected:false});
+  h.pushCheckout('a',{accounts:{'student-a':{eligible:true,sync_status:'unknown',remote_eligible:false}}});
+  assert.match(h.el('af-accounts').innerHTML,/student-a/);assert.match(h.el('af-accounts').innerHTML,/Unknown/);
+  assert.equal(h.el('af-reenable-logins').disabled,true);
+  h.pushCheckout('a',{checked_at:12345,accounts:{'student-a':{eligible:true,sync_status:'not_enabled',remote_eligible:false}}});
+  assert.match(h.el('af-accounts').innerHTML,/student-a/);assert.match(h.el('af-accounts').innerHTML,/Not enabled/);
+  assert.doesNotMatch(h.el('af-accounts').innerHTML,/Available/);
+});
+
+test('refresh summary reports an unenabled local account without dropping its type or claiming login is enabled',async()=>{
+  const h=await harness();summaryModal(h);
+  h.pushCheckout('a',{accounts:{'student-a':{eligible:true,sync_status:'unknown',remote_eligible:false}}});
+  h.override(url=>url.endsWith('/status')?response({checkout:{checked_at:1,accounts:{'student-a':{eligible:true,sync_status:'not_enabled',remote_eligible:false}}}}):null);
+  await h.el('af-refresh').fire();
+  assert.match(h.el('af-accounts').innerHTML,/Not enabled/);
+  assert.match(h.el('af-refresh-results').innerHTML,/Not enabled/);
+  assert.match(h.el('af-refresh-results').innerHTML,/Checkout status: Unknown → Not enabled/);
+  assert.doesNotMatch(h.el('af-refresh-results').innerHTML,/>Enabled<|>Removed</);
+});
+
 function summaryModal(h){
   const shown=[];
   const modal={show(){shown.push(h.el('af-refresh-results').innerHTML);h.el('af-refresh-summary').fire('show.bs.modal');},hide(){h.el('af-refresh-summary').fire('hidden.bs.modal');}};
   h.window.bootstrap={Dropdown:{getInstance:()=>null},Modal:{getInstance:()=>modal,getOrCreateInstance:()=>modal}};
   return {shown,close:()=>modal.hide()};
 }
+
+function operationModal(h){
+  const shown=[];
+  const modal={show(){shown.push(h.el('af-operation-results').innerHTML);h.el('af-operation-summary').fire('show.bs.modal');},hide(){h.el('af-operation-summary').fire('hidden.bs.modal');}};
+  h.window.bootstrap={Dropdown:{getInstance:()=>null},Modal:{getInstance:el=>el.id==='af-operation-summary'?modal:null,getOrCreateInstance:()=>modal}};
+  return {shown,close:()=>modal.hide()};
+}
+
+test('Enable shows per-account success/error results after refreshing the actual status',async()=>{
+  const h=await harness({credentials:{a:['alice','bob']}}),modal=operationModal(h),order=[];
+  h.override(url=>{
+    if(url.endsWith('/reenable-logins')){order.push('enable');return response({checkout:h.snapshot('a'),results:[{username:'alice@pve',success:true},{username:'bob@pve',success:false,error:'Denied <script>'}]});}
+    if(url.endsWith('/status')){order.push('refresh');return response({checkout:{accounts:{alice:{eligible:true,sync_status:'synced',login_disabled:false},bob:{eligible:true,sync_status:'not_enabled'}}}});}
+    return null;
+  });
+  h.el('af-select-all').checked=true;await h.el('af-select-all').fire('change');await h.el('af-reenable-logins').fire();
+  assert.deepEqual(order,['enable','refresh']);assert.equal(modal.shown.length,1);
+  assert.equal(h.el('af-operation-totals').textContent,'2 account(s) · 1 succeeded · 1 errors · 0 unconfirmed');
+  assert.match(h.el('af-operation-results').innerHTML,/Success/);assert.match(h.el('af-operation-results').innerHTML,/Denied &lt;script&gt;/);
+  assert.doesNotMatch(h.el('af-operation-results').innerHTML,/<script>/);
+  assert.match(h.el('af-operation-results').innerHTML,/Not enabled/);assert.match(h.el('af-accounts').innerHTML,/Available/);
+  assert.match(h.el('af-operation-refresh').textContent,/Status refreshed/);
+  assert.match(h.el('af-selection-count').innerHTML,/2 selected/);
+  assert.ok(h.el('af-accounts').querySelectorAll().every(box=>box.checked));
+});
+
+test('an operation request error still refreshes and shows its error in the summary',async()=>{
+  const h=await harness(),modal=operationModal(h),order=[];
+  h.override(url=>{
+    if(url.endsWith('/reenable-logins')){order.push('enable');return response({error:'Update and rebuild AccessForge.'},false);}
+    if(url.endsWith('/status')){order.push('refresh');return response({checkout:{accounts:{'student-a':{eligible:true,sync_status:'not_synced'}}}});}
+    return null;
+  });
+  h.el('af-select-all').checked=true;await h.el('af-select-all').fire('change');await h.el('af-reenable-logins').fire();
+  assert.deepEqual(order,['enable','refresh']);assert.equal(modal.shown.length,1);
+  assert.match(h.el('af-operation-totals').textContent,/0 succeeded · 1 errors/);
+  assert.match(h.el('af-operation-results').innerHTML,/Update and rebuild/);assert.match(h.el('af-operation-results').innerHTML,/Not synced/);
+});
+
+test('a refresh failure preserves the action result and clearly marks the status snapshot as stale',async()=>{
+  const h=await harness(),modal=operationModal(h);
+  h.override(url=>url.endsWith('/status')?response({error:'Remote unavailable.'},false):null);
+  h.el('af-select-all').checked=true;await h.el('af-select-all').fire('change');await h.el('af-disable-logins').fire();
+  assert.equal(modal.shown.length,1);assert.match(h.el('af-operation-totals').textContent,/1 succeeded/);
+  assert.match(h.el('af-operation-refresh').textContent,/Status refresh failed: Remote unavailable/);
+  assert.match(h.el('af-operation-refresh').className,/alert-warning/);
+  assert.match(h.el('af-status').textContent,/Status refresh failed/);
+});
+
+test('missing per-account results are unconfirmed instead of reported as success',async()=>{
+  const h=await harness();operationModal(h);
+  h.override(url=>url.endsWith('/reenable-logins')?response({checkout:h.snapshot('a'),results:[]}):null);
+  h.el('af-select-all').checked=true;await h.el('af-select-all').fire('change');await h.el('af-reenable-logins').fire();
+  assert.match(h.el('af-operation-totals').textContent,/0 succeeded · 0 errors · 1 unconfirmed/);
+  assert.match(h.el('af-operation-results').innerHTML,/did not return a result/);
+});
+
+test('operation summaries pause Auto and a project switch discards late results and skips their refresh',async()=>{
+  const h=await harness(),modal=operationModal(h);await h.auto(15);
+  h.el('af-select-all').checked=true;await h.el('af-select-all').fire('change');await h.el('af-reenable-logins').fire();
+  assert.equal(h.el('af-auto-badge').textContent,'Pause');let before=h.calls.length;await h.tick();assert.equal(h.calls.length,before);
+  modal.close();await h.tick();assert.ok(h.calls.length>before);
+  const pending=deferred();h.override(url=>url.endsWith('/reenable-logins')?pending.promise:null);
+  h.el('af-select-all').checked=true;await h.el('af-select-all').fire('change');const operation=h.el('af-reenable-logins').fire();
+  await h.select('b');before=h.calls.length;pending.resolve(response({checkout:{accounts:{private:{eligible:true,email:'private@example.edu'}}},results:[]}));await operation;
+  assert.equal(h.calls.length,before);assert.equal(modal.shown.length,1);assert.equal(h.el('af-operation-results').innerHTML,'');
+});
 test('manual refresh summary lists changed marks, assignments, login state and history safely; unmarked accounts leave its scope',async()=>{
   const h=await harness(),modal=summaryModal(h);
   const checkout={checked_at:1,accounts:{'student-a':{eligible:false,email:'changed@example.edu',name:'Ava <script>',login_disabled:true,checked_out_at:123,checkout_ip:'203.0.113.1',relinquished_at:456,relinquished_ip:'203.0.113.2'}}};
@@ -415,4 +551,14 @@ test('unchanged marked accounts remain explicit in the authoritative refresh sum
   const h=await harness();summaryModal(h);await h.el('af-refresh').fire();
   assert.equal(h.el('af-refresh-totals').textContent,'1 account(s) checked · 0 changed · 1 unchanged');
   assert.match(h.el('af-refresh-results').innerHTML,/No changes/);
+});
+
+test('awaiting checkout stays available while reporting a disabled Proxmox login',async()=>{
+  const h=await harness();
+  h.pushCheckout('a',{accounts:{'student-a':{eligible:true,sync_status:'synced',login_disabled:true,awaiting_checkout:true}}});
+  assert.match(h.el('af-accounts').innerHTML,/Available \(login disabled until assigned\)/);
+  h.override(url=>url.endsWith('/status')?response({checkout:{accounts:{'student-a':{eligible:true,sync_status:'synced',login_disabled:true,awaiting_checkout:false}}}}):null);
+  await h.el('af-refresh').fire();
+  assert.match(h.el('af-accounts').innerHTML,/>Disabled<\/td>/);
+  assert.match(h.el('af-refresh-results').innerHTML,/Awaiting checkout: Yes → No/);
 });

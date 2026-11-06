@@ -70,13 +70,13 @@
   function label(checkout, username) {
     const account = checkout?.accounts?.[username];
     const marked = account?.eligible ? 'Marked for checkout' : 'Not marked for checkout';
-    const status = !account ? 'Not published to AccessForge' : account.releasing ? 'Disable pending'
-      : account.login_disabled ? 'Login disabled' : account.email ? `Checked out to ${account.name ? `${account.name} (${account.email})` : account.email}` : account.eligible ? 'Available according to lab policy' : 'Checkout off';
+    const status = !account || account.sync_status==='unknown' ? 'Unknown' : account.sync_status==='not_synced' ? 'Not synced' : account.sync_status==='not_enabled' ? 'Not enabled' : account.releasing ? 'Disable pending'
+      : account.awaiting_checkout ? 'Available · Login disabled until assigned' : account.login_disabled ? 'Login disabled' : account.email ? `Checked out to ${account.name ? `${account.name} (${account.email})` : account.email}` : account.remote_eligible===true&&!account.eligible ? 'Enabled in AccessForge' : account.eligible ? 'Available according to lab policy' : 'Checkout off';
     return `${marked} · ${status}`;
   }
   function icon(checkout, username) {
     const account = checkout?.accounts?.[username], marked = !!account?.eligible;
-    const color = account?.releasing ? 'text-warning' : account?.login_disabled ? 'text-danger' : account?.email ? 'text-primary' : marked ? 'text-success' : 'text-secondary';
+    const color = ['unknown','not_synced','not_enabled'].includes(account?.sync_status) ? 'text-secondary' : account?.releasing ? 'text-warning' : account?.awaiting_checkout ? 'text-success' : account?.login_disabled ? 'text-danger' : account?.email ? 'text-primary' : marked ? 'text-success' : 'text-secondary';
     const title = esc(label(checkout, username));
     const shape = marked ? '<path d="m7 12 3 3 7-7"/>' : '<path d="M8 12h8"/>';
     return `<span class="credential-checkout-state d-inline-flex align-items-center ${color}" data-checkout-marked="${marked}" role="img" tabindex="0" aria-label="${title}" title="${title}" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-container="body" data-bs-custom-class="credential-state-tooltip"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/>${shape}</svg></span>`;

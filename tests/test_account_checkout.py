@@ -39,6 +39,10 @@ def connect(admin,url='https://accessforge.example'):
     return response
 
 
+def setup_service():
+    return reply({'service':'AccessForge','checkout_api':1,'capabilities':{'account_setup':True}})
+
+
 def snapshot(email='one@example.edu'):
     return {'id':'remote-pool','name':'Networking','enabled':True,'verify_email':False,'secret_set':True,'accounts':{'student01@pve':{'email':email,'eligible':True,'assigned_at':12345,'releasing':False,'password_rotated':False}}}
 
@@ -53,7 +57,7 @@ def test_discovery_and_disabled_plugin_blocks_page_routes(checkout,monkeypatch):
     assert client.get('/static/js/accessforge_manager.js').status_code==404
     assert client.get('/api/projects/lab/accessforge/status').status_code==404
     assert client.patch('/api/projects/lab/accessforge/connection',json={'url':'https://example.edu','api_port':8443}).status_code==404
-    assert client.post('/api/projects/lab/accessforge/checkout-accounts',json={'usernames':['student01'],'enabled':True}).status_code==404
+    assert client.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True}).status_code==404
     assert client.get('/api/checkout-service/start').status_code==404
     assert client.get('/api/projects/lab/checkout').status_code==404
 
@@ -213,11 +217,12 @@ def test_checkout_audit_columns_survive_status_cache_and_project_mapping(checkou
 
 def test_selected_login_operations_use_saved_credentials_and_refresh_disabled_status(checkout):
     _,admin,_=checkout;connect(admin)
-    for operation,action in [('disable-logins','disable_logins'),('reset-passwords','reset_passwords'),('reenable-logins','reenable_logins')]:
+    for operation,action in [('disable-logins','disable_logins'),('reset-passwords','reset_passwords'),('reenable-logins','enable_accounts')]:
         data=snapshot();data['accounts']['student01@pve']['login_disabled']=operation!='reenable-logins'
         replies=[reply({'checkout':data,'results':[{'username':'student01@pve','success':True}]})]
         if operation=='reenable-logins':
             replies.insert(0,reply(snapshot(None)))
+            replies.insert(0,setup_service())
         with patch('app.account_checkout.requests.request',side_effect=replies) as remote:
             response=admin.post('/api/projects/lab/accessforge/'+operation,json={'usernames':['student01'],'password':'do-not-use-browser-password'})
         assert response.status_code==200 and response.get_json()['results'][0]['success']
@@ -226,7 +231,7 @@ def test_selected_login_operations_use_saved_credentials_and_refresh_disabled_st
         if operation=='disable-logins':
             assert payload['usernames']==['student01'] and 'accounts' not in payload
         else:
-            assert payload['accounts']==[{'username':'student01','password':'password-one'}]
+            assert payload['accounts']==[{'username':'student01','password':'password-one',**({'enable_checkout':True} if operation=='reenable-logins' else {})}]
         assert response.get_json()['checkout']['accounts']['student01']['login_disabled']==(operation!='reenable-logins')
         assert 'password-one' not in response.get_data(as_text=True)
 
@@ -271,6 +276,30 @@ def test_html_errors_are_not_misreported_as_unreachable_host(checkout,status,exp
         response=admin.post('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','username':'root@pam','password':'admin-password'})
     assert response.status_code==502 and expected in response.get_json()['error']
     assert 'private internal details' not in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize('reason,expected',[
+    ('Could not validate the administrator with Proxmox.','AccessForge is reachable'),
+    ("AccessForge could not verify the configured Proxmox API's TLS certificate. Check VERIFY_SSL and the Proxmox certificate trust on AccessForge.",'VERIFY_SSL'),
+    ('AccessForge could not connect to its configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, and container DNS/network access.','container DNS/network access'),
+    ('AccessForge timed out contacting its configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, and network access from the AccessForge container.','AccessForge container'),
+    ('The configured Proxmox API returned a server error while checking administrator permissions.','administrator permissions'),
+])
+def test_known_accessforge_backend_diagnostics_are_preserved_instead_of_generic_502(checkout,reason,expected):
+    _,admin,_=checkout
+    with patch('app.account_checkout.requests.request',return_value=reply({'error':reason},502)):
+        result=admin.post('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','username':'root','password':'admin-password'})
+    assert result.status_code==502 and expected in result.json['error']
+    assert 'Check its application and reverse-proxy logs' not in result.json['error']
+
+
+@pytest.mark.parametrize('reason',['private-password',{'details':'private-password'},['private-password'],None])
+def test_unknown_upstream_json_502_errors_do_not_expose_internal_details(checkout,reason):
+    _,admin,_=checkout
+    with patch('app.account_checkout.requests.request',return_value=reply({'error':reason},502)):
+        result=admin.post('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','username':'root','password':'admin-password'})
+    assert result.status_code==502 and 'AccessForge returned HTTP 502' in result.json['error']
+    assert 'private-password' not in result.get_data(as_text=True)
 
 
 def temporary_headers(password='temporary-admin-password'):
@@ -415,37 +444,74 @@ def test_configuration_api_port_validation(checkout,port):
     assert admin.patch('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','api_port':port}).status_code==400
 
 
-def test_enable_selected_checkout_accounts_publishes_saved_credentials_then_marks_eligibility(checkout):
-    _,admin,_=checkout;connect(admin)
-    published=snapshot(None);published['accounts']['student01@pve'].update(eligible=False,login_disabled=True)
-    enabled=snapshot(None);enabled['accounts']['student01@pve'].update(eligible=True,login_disabled=True)
-    with patch('app.account_checkout.requests.request',side_effect=[reply(published),reply({'checkout':enabled})]) as remote:
-        response=admin.post('/api/projects/lab/accessforge/checkout-accounts',json={'usernames':['student01'],'enabled':True,'password':'ignore-browser-password','secret':'do-not-change-policy'})
+def test_credential_types_are_saved_without_a_connection_or_remote_requests(checkout):
+    _,admin,_=checkout
+    with patch('app.account_checkout.requests.request',side_effect=AssertionError('Type changes are local')) as remote:
+        response=admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True,'password':'ignore-browser-password','secret':'do-not-change-policy'})
     assert response.status_code==200
-    assert [call.args[0] for call in remote.call_args_list]==['PUT','POST']
-    assert remote.call_args_list[0].kwargs['json']=={'name':'Networking','accounts':[{'username':'student01','password':'password-one'}]}
-    assert remote.call_args_list[1].kwargs['json']=={'action':'enable','usernames':['student01']}
+    remote.assert_not_called()
+    assert admin.get('/api/projects/lab/accessforge/accounts').json['checkout']==response.json['checkout']
+    assert admin.get('/api/projects').json['projects'][0]['checkout']==response.json['checkout']
     account=response.get_json()['checkout']['accounts']['student01']
-    assert account['eligible'] and account['login_disabled']
+    assert account['eligible'] and account['sync_status']=='unknown' and not account['remote_eligible']
     assert 'password-one' not in response.get_data(as_text=True)
 
 
-def test_disable_checkout_ignores_unpublished_accounts_without_releasing_assignments(checkout):
+def test_project_credential_type_save_ignores_an_unreachable_saved_accessforge_connection(checkout):
+    app,admin,_=checkout
+    with app.app_context():
+        ConnectionStore().save('instructor','lab','https://unreachable.invalid','root@pam','expired-password',True)
+    with patch('app.account_checkout.requests.request',side_effect=AssertionError('No AccessForge contact for local configuration')) as remote:
+        result=admin.post('/api/projects/lab/credential-types',json={'usernames':['student01'],'enabled':True},headers={'X-AccessForge-Connection':'invalid-unused-connection'})
+        assert result.status_code==200
+        state=result.json['checkout']['accounts']['student01']
+        assert state['eligible'] and state['sync_status']=='unknown'
+        assert admin.get('/api/projects/lab/accessforge/accounts').json['checkout']['accounts']['student01']==state
+        assert admin.post('/api/projects/lab/credential-types',json={'usernames':['student01'],'enabled':False}).status_code==200
+    remote.assert_not_called()
+    assert app.test_client().post('/api/projects/lab/credential-types',json={'usernames':['student01'],'enabled':True}).status_code==401
+
+
+def test_permanent_type_changes_are_local_and_preserve_cached_assignments(checkout):
     _,admin,_=checkout;connect(admin)
-    disabled=snapshot();disabled['accounts']['student01@pve']['eligible']=False
-    with patch('app.account_checkout.requests.request',side_effect=[reply(snapshot()),reply({'checkout':disabled})]) as remote:
-        response=admin.post('/api/projects/lab/accessforge/checkout-accounts',json={'usernames':['student01','student02'],'enabled':False})
+    with patch('app.account_checkout.requests.request',return_value=reply(snapshot())):
+        assert admin.get('/api/projects/lab/accessforge/status').status_code==200
+    with patch('app.account_checkout.requests.request') as remote:
+        response=admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01','student02'],'enabled':False})
     assert response.status_code==200
-    assert remote.call_args.kwargs['json']=={'action':'disable','usernames':['student01']}
+    remote.assert_not_called()
+    assert response.json['checkout']['accounts']['student01']['eligible'] is False
     assert response.get_json()['checkout']['accounts']['student01']['email']=='one@example.edu'
 
 
-def test_checkout_selection_rejects_unknown_names_and_requires_admin(checkout):
+@pytest.mark.parametrize('operation',['credential-types','checkout-accounts'])
+def test_checkout_selection_rejects_unknown_names_and_requires_admin(checkout,operation):
     app,admin,_=checkout;connect(admin)
     with patch('app.account_checkout.requests.request') as remote:
-        assert admin.post('/api/projects/lab/accessforge/checkout-accounts',json={'usernames':['unknown'],'enabled':True}).status_code==400
-        assert app.test_client().post('/api/projects/lab/accessforge/checkout-accounts',json={'usernames':['student01'],'enabled':True}).status_code==401
+        assert admin.post('/api/projects/lab/accessforge/'+operation,json={'usernames':['unknown'],'enabled':True}).status_code==400
+        assert app.test_client().post('/api/projects/lab/accessforge/'+operation,json={'usernames':['student01'],'enabled':True}).status_code==401
         remote.assert_not_called()
+
+
+def test_vm_manager_marking_still_publishes_and_syncs_eligibility_with_accessforge(checkout):
+    _,admin,_=checkout;connect(admin)
+    admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True})
+    published=snapshot(None);published['accounts']['student01@pve'].update(eligible=False,login_disabled=True)
+    enabled=snapshot(None);enabled['accounts']['student01@pve'].update(eligible=True,login_disabled=True)
+    with patch('app.account_checkout.requests.request',side_effect=[reply(published),reply({'checkout':enabled})]) as remote:
+        result=admin.post('/api/projects/lab/accessforge/checkout-accounts',json={'usernames':['student01'],'enabled':True})
+    assert result.status_code==200
+    assert [call.args[0] for call in remote.call_args_list]==['PUT','POST']
+    assert remote.call_args.kwargs['json']=={'action':'enable','usernames':['student01']}
+    assert result.json['checkout']['accounts']['student01']['sync_status']=='synced'
+    assert result.json['checkout']['accounts']['student01']['login_disabled']
+    disabled=snapshot(None);disabled['accounts']['student01@pve']['eligible']=False
+    with patch('app.account_checkout.requests.request',side_effect=[reply(enabled),reply({'checkout':disabled})]) as remote:
+        result=admin.post('/api/projects/lab/accessforge/checkout-accounts',json={'usernames':['student01','student02'],'enabled':False})
+    assert result.status_code==200
+    assert remote.call_args.kwargs['json']=={'action':'disable','usernames':['student01']}
+    assert result.json['checkout']['accounts']['student01']['eligible'] is False
+    assert result.json['checkout']['accounts']['student02']['eligible'] is False
 
 
 def test_checkout_name_survives_status_cache_and_project_mapping(checkout):
@@ -483,7 +549,7 @@ def test_blank_secret_preserves_existing_secret_and_missing_pool_requires_publis
     assert remote.call_args.kwargs['json']=={'enabled':False,'verify_email':True}
     with patch('app.account_checkout.requests.request',return_value=reply({'error':'Checkout pool not found.'},404)):
         result=admin.patch('/api/projects/lab/accessforge/settings',json={'secret':'new-secret'})
-    assert result.status_code==409 and 'On-demand (checkout)' in result.get_json()['error']
+    assert result.status_code==409 and 'Accounts → Enable' in result.get_json()['error']
 
 
 @pytest.mark.parametrize('data',[{'secret':'short'},{'secret':'x'*257},{'secret':None},{'enabled':'true'},{'verify_email':1}])
@@ -492,6 +558,37 @@ def test_invalid_checkout_settings_cannot_reach_accessforge(checkout,data):
     with patch('app.account_checkout.requests.request') as remote:
         assert admin.patch('/api/projects/lab/accessforge/settings',json=data).status_code==400
         remote.assert_not_called()
+
+
+def test_checkout_restrictions_are_normalized_forwarded_and_cached_without_unknown_fields(checkout):
+    app,admin,_=checkout;connect(admin)
+    policy={'allowed_email_patterns':[' *@UTEP.EDU '],'allowed_subnets':['192.0.2.10/24','2001:db8::/48'],
+            'subnet_checkout_limit':3,'ipv4_prefix':28,'ipv6_prefix':56,'global_delay_seconds':10,'subnet_delay_seconds':60}
+    normalized={**policy,'allowed_email_patterns':['*@utep.edu'],'allowed_subnets':['192.0.2.0/24','2001:db8::/48']}
+    data={**snapshot(),'policy':{**normalized,'secret':'must-not-cache'}}
+    with patch('app.account_checkout.requests.request',return_value=reply(data)) as remote:
+        result=admin.patch('/api/projects/lab/accessforge/settings',json={'policy':policy})
+    assert result.status_code==200
+    assert remote.call_args.kwargs['json']=={'policy':normalized}
+    assert result.json['checkout']['policy']==normalized
+    with app.app_context():
+        assert 'must-not-cache' not in ConnectionStore().get('instructor','lab')['summary']
+    with patch('app.account_checkout.requests.request',return_value=reply(data)) as remote:
+        assert admin.patch('/api/projects/lab/accessforge/settings',json={'policy':{'global_delay_seconds':0}}).status_code==200
+    assert remote.call_args.kwargs['json']=={'policy':{'global_delay_seconds':0}}
+
+
+@pytest.mark.parametrize('policy',[
+    None,[],{'secret':'must-not-forward'},{'subnet_checkout_limit':True},{'subnet_checkout_limit':-1},
+    {'ipv4_prefix':33},{'ipv6_prefix':129},{'global_delay_seconds':0.5},{'subnet_delay_seconds':604801},
+    {'allowed_subnets':['invalid']},{'allowed_email_patterns':'*@utep.edu'},
+    {'allowed_email_patterns':['@']},{'allowed_email_patterns':[None]},
+])
+def test_invalid_checkout_restrictions_cannot_reach_accessforge(checkout,policy):
+    _,admin,_=checkout;connect(admin)
+    with patch('app.account_checkout.requests.request') as remote:
+        assert admin.patch('/api/projects/lab/accessforge/settings',json={'policy':policy}).status_code==400
+    remote.assert_not_called()
 
 
 def test_admin_can_relinquish_selected_accounts_and_partial_failures_remain_visible(checkout):
@@ -526,13 +623,13 @@ def test_enabling_refreshes_only_selected_saved_credentials_before_enabling_with
     copied['accounts']['student01@pve'].update(login_disabled=True,eligible=False)
     enabled=snapshot(None)
     enabled['accounts']['student01@pve'].update(login_disabled=False,eligible=False)
-    with patch('app.account_checkout.requests.request',side_effect=[reply(copied),reply({'checkout':enabled,'results':[{'username':'student01@pve','success':True}]})]) as remote:
+    with patch('app.account_checkout.requests.request',side_effect=[setup_service(),reply(copied),reply({'checkout':enabled,'results':[{'username':'student01@pve','success':True}]})]) as remote:
         response=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01'],'password':'browser-password-must-not-be-used','enabled':True})
     assert response.status_code==200
-    assert [call.args[0] for call in remote.call_args_list]==['PUT','POST']
-    publish,enable=remote.call_args_list
+    assert [call.args[0] for call in remote.call_args_list]==['GET','PUT','POST']
+    _,publish,enable=remote.call_args_list
     assert publish.kwargs['json']=={'name':'Networking','accounts':[{'username':'student01','password':'updated-password'}]}
-    assert enable.kwargs['json']=={'action':'reenable_logins','accounts':[{'username':'student01','password':'updated-password'}]}
+    assert enable.kwargs['json']=={'action':'enable_accounts','accounts':[{'username':'student01','password':'updated-password','enable_checkout':False}]}
     assert publish.args[1]==enable.args[1]
     state=response.json['checkout']['accounts']['student01']
     assert state['eligible'] is False and state['login_disabled'] is False
@@ -541,13 +638,13 @@ def test_enabling_refreshes_only_selected_saved_credentials_before_enabling_with
 
 def test_enabling_stops_if_refreshing_saved_credentials_fails(checkout):
     _,admin,_=checkout;connect(admin)
-    with patch('app.account_checkout.requests.request',return_value=reply({'error':'Release student01@pve in AccessForge before replacing its published credentials.'},409)) as remote:
+    with patch('app.account_checkout.requests.request',side_effect=[setup_service(),reply({'error':'Release student01@pve in AccessForge before replacing its published credentials.'},409)]) as remote:
         response=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01']})
     assert response.status_code==409
-    assert remote.call_count==1 and remote.call_args.args[0]=='PUT'
+    assert remote.call_count==2 and remote.call_args.args[0]=='PUT'
 
 
-def test_refresh_replaces_checkout_ground_truth_instead_of_merging_stale_marks_and_assignments(checkout):
+def test_refresh_replaces_remote_assignments_but_keeps_missing_marked_accounts_as_not_enabled(checkout):
     _,admin,_=checkout;connect(admin)
     previous=snapshot('old@example.edu')
     previous['accounts']['student02@pve']={'eligible':True,'email':None}
@@ -559,7 +656,171 @@ def test_refresh_replaces_checkout_ground_truth_instead_of_merging_stale_marks_a
         state=result.json['checkout']
         assert state['accounts']['student01']['eligible'] is False
         assert state['accounts']['student01']['email'] is None
-        assert 'student02' not in state['accounts']
+        assert state['accounts']['student02']['eligible'] is True
+        assert state['accounts']['student02']['sync_status']=='not_synced'
         assert admin.get('/api/projects/lab/accessforge/accounts').json['checkout']==state
         assert admin.get('/api/projects').json['projects'][0]['checkout']==state
         assert remote.call_count==2
+
+
+def test_local_mark_stays_unknown_until_successful_refresh_and_survives_missing_remote_pool(checkout):
+    app,admin,_=checkout
+    assert admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True}).status_code==200
+    connect(admin)
+    with patch('app.account_checkout.requests.request',side_effect=requests.ConnectionError):
+        assert admin.get('/api/projects/lab/accessforge/status').status_code==502
+    assert admin.get('/api/projects/lab/accessforge/accounts').json['checkout']['accounts']['student01']['sync_status']=='unknown'
+    with patch('app.account_checkout.requests.request',return_value=reply({'error':'Checkout pool not found.'},404)) as remote:
+        state=admin.get('/api/projects/lab/accessforge/status').json['checkout']
+    remote.assert_called_once()
+    assert remote.call_args.args[0]=='GET'
+    assert state['accounts']['student01']=={'eligible':True,'remote_eligible':False,'sync_status':'not_synced'}
+    assert admin.get('/api/projects').json['projects'][0]['checkout']==state
+    assert admin.delete('/api/projects/lab/accessforge/connection').status_code==200
+    remaining=admin.get('/api/projects/lab/accessforge/accounts').json['checkout']['accounts']['student01']
+    assert remaining['eligible'] and remaining['sync_status']=='unknown'
+    with app.app_context():
+        assert ConnectionStore().credential_types('lab')['student01@pve']['on_demand']==1
+
+
+def test_refresh_cannot_overwrite_explicit_local_credential_types(checkout):
+    _,admin,_=checkout;connect(admin)
+    assert admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True}).status_code==200
+    assert admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student02'],'enabled':False}).status_code==200
+    opposite=snapshot(None);opposite['accounts']['student01@pve']['eligible']=False
+    opposite['accounts']['student02@pve']={'eligible':True,'login_disabled':False}
+    with patch('app.account_checkout.requests.request',return_value=reply(opposite)):
+        state=admin.get('/api/projects/lab/accessforge/status').json['checkout']['accounts']
+    assert state['student01']['eligible'] and not state['student01']['remote_eligible']
+    assert state['student01']['sync_status']=='not_enabled'
+    assert not state['student02']['eligible'] and state['student02']['remote_eligible']
+
+
+@pytest.mark.parametrize('login_success',[False,True])
+def test_enable_requests_remote_checkout_activation_and_uses_live_success_or_failure_status(checkout,login_success):
+    _,admin,_=checkout;connect(admin)
+    admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True})
+    copied=snapshot(None);copied['accounts']['student01@pve'].update(eligible=False,login_disabled=True)
+    login=snapshot(None);login['accounts']['student01@pve'].update(eligible=login_success,login_disabled=not login_success)
+    result={'username':'student01@pve','success':login_success}
+    replies=[setup_service(),reply(copied),reply({'checkout':login,'results':[result]})]
+    with patch('app.account_checkout.requests.request',side_effect=replies) as remote:
+        response=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01']})
+    assert response.status_code==200
+    assert remote.call_args_list[1].kwargs['json']=={'name':'Networking','accounts':[{'username':'student01','password':'password-one'}]}
+    assert remote.call_args_list[2].kwargs['json']['action']=='enable_accounts'
+    assert remote.call_args_list[2].kwargs['json']['accounts']==[{'username':'student01','password':'password-one','enable_checkout':True}]
+    assert remote.call_count==3
+    state=response.json['checkout']['accounts']['student01']
+    assert state['eligible']
+    assert state['sync_status']==('synced' if login_success else 'not_enabled')
+    assert response.json['results']==[result]
+
+
+def test_enable_requests_checkout_only_for_locally_on_demand_accounts(checkout):
+    _,admin,_=checkout;connect(admin)
+    admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True})
+    admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student02'],'enabled':False})
+    copied=snapshot(None);copied['accounts']['student01@pve']['eligible']=False
+    copied['accounts']['student02@pve']={'eligible':False,'login_disabled':True}
+    with patch('app.account_checkout.requests.request',side_effect=[setup_service(),reply(copied),reply({'checkout':copied,'results':[]})]) as remote:
+        result=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01','student02']})
+    assert result.status_code==200
+    assert remote.call_args.kwargs['json']['accounts']==[
+        {'username':'student01','password':'password-one','enable_checkout':True},
+        {'username':'student02','password':'password-two','enable_checkout':False},
+    ]
+
+
+@pytest.mark.parametrize('capabilities',[None,{}, {'account_setup':False}])
+def test_enable_uses_existing_api_when_setup_capability_is_missing_without_disabling_active_accounts(checkout,capabilities):
+    _,admin,_=checkout;connect(admin)
+    admin.post('/api/projects/lab/accessforge/credential-types',json={'usernames':['student01'],'enabled':True})
+    published=snapshot(None);published['accounts']['student01@pve'].update(eligible=False,login_disabled=False)
+    published['accounts']['student02@pve']={'eligible':True,'email':'existing@example.edu','login_disabled':False}
+    enabled=json.loads(json.dumps(published));enabled['accounts']['student01@pve']['eligible']=True
+    service={'service':'AccessForge','checkout_api':1,'capabilities':capabilities}
+    with patch('app.account_checkout.requests.request',side_effect=[reply(service),reply(published),reply({'checkout':enabled})]) as remote:
+        result=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01']})
+    assert result.status_code==200 and result.json['results']==[{'username':'student01@pve','success':True}]
+    assert [call.args[0] for call in remote.call_args_list]==['GET','PUT','POST']
+    assert remote.call_args.kwargs['json']=={'action':'enable','usernames':['student01']}
+    assert remote.call_args_list[1].kwargs['json']['accounts']==[{'username':'student01','password':'password-one'}]
+    state=result.json['checkout']['accounts']
+    assert state['student01']['remote_eligible'] and state['student01']['sync_status']=='synced'
+    assert state['student02']['email']=='existing@example.edu'
+
+
+def test_existing_api_reenables_only_disabled_logins_then_enables_checkout(checkout):
+    _,admin,_=checkout;connect(admin)
+    admin.post('/api/projects/lab/credential-types',json={'usernames':['student01'],'enabled':True})
+    published=snapshot(None);published['accounts']['student01@pve'].update(eligible=False,login_disabled=True)
+    login=json.loads(json.dumps(published));login['accounts']['student01@pve']['login_disabled']=False
+    enabled=json.loads(json.dumps(login));enabled['accounts']['student01@pve']['eligible']=True
+    with patch('app.account_checkout.requests.request',side_effect=[reply({'service':'AccessForge','checkout_api':1}),reply(published),reply({'checkout':login,'results':[{'username':'student01@pve','success':True}]}),reply({'checkout':enabled})]) as remote:
+        result=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01']})
+    assert result.status_code==200 and result.json['results'][0]['success']
+    assert [call.kwargs['json'].get('action') for call in remote.call_args_list if call.args[0]=='POST']==['reenable_logins','enable']
+    state=result.json['checkout']['accounts']['student01']
+    assert not state['login_disabled'] and state['remote_eligible']
+
+
+def test_existing_api_keeps_per_account_failures_and_does_not_activate_failed_or_assigned_accounts(checkout):
+    _,admin,_=checkout;connect(admin)
+    admin.post('/api/projects/lab/credential-types',json={'usernames':['student01','student02'],'enabled':True})
+    published=snapshot(None);published['accounts']['student01@pve'].update(eligible=False,login_disabled=False)
+    published['accounts']['student02@pve']={'eligible':False,'login_disabled':True,'email':None}
+    enabled=json.loads(json.dumps(published));enabled['accounts']['student01@pve']['eligible']=True
+    failed={'username':'student02@pve','success':False,'error':'Proxmox rejected login enable.'}
+    with patch('app.account_checkout.requests.request',side_effect=[reply({'checkout_api':1}),reply(published),reply({'checkout':published,'results':[failed]}),reply({'checkout':enabled})]) as remote:
+        result=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01','student02']})
+    assert result.status_code==200
+    assert result.json['results']==[{'username':'student01@pve','success':True},failed]
+    assert remote.call_args.kwargs['json']=={'action':'enable','usernames':['student01']}
+    published['accounts']['student01@pve']['email']='assigned@example.edu'
+    with patch('app.account_checkout.requests.request',side_effect=[reply({'checkout_api':1}),reply(published)]) as remote:
+        result=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01']})
+    assert result.status_code==200 and not result.json['results'][0]['success']
+    assert 'Relinquish' in result.json['results'][0]['error']
+    assert remote.call_count==2
+
+
+def test_existing_api_does_not_claim_success_when_checkout_activation_fails(checkout):
+    _,admin,_=checkout;connect(admin)
+    admin.post('/api/projects/lab/credential-types',json={'usernames':['student01'],'enabled':True})
+    published=snapshot(None);published['accounts']['student01@pve'].update(eligible=False,login_disabled=False)
+    with patch('app.account_checkout.requests.request',side_effect=[reply({'checkout_api':1}),reply(published),reply({'error':'Unknown failure'},500)]):
+        result=admin.post('/api/projects/lab/accessforge/reenable-logins',json={'usernames':['student01']})
+    assert result.status_code==200 and not result.json['results'][0]['success']
+    assert 'Could not confirm checkout enable' in result.json['results'][0]['error']
+    assert not result.json['checkout']['accounts']['student01']['remote_eligible']
+
+
+def test_existing_snapshots_migrate_marks_and_local_edits_survive_later_cache_updates(checkout):
+    app,admin,_=checkout;connect(admin)
+    with app.app_context():
+        store=ConnectionStore()
+        with store.connect() as db:
+            db.execute('UPDATE connections SET summary=?,checked_at=?',(json.dumps(snapshot(None)),123))
+            db.execute("DELETE FROM metadata WHERE key='credential_types_migrated'")
+            db.execute('DROP TABLE credential_types')
+        migrated=ConnectionStore()
+        assert migrated.credential_types('lab')['student01@pve']['on_demand']==1
+        migrated.mark_credentials('lab',['student01'],False)
+        migrated.cache('instructor','lab',snapshot(None))
+        assert migrated.credential_types('lab')['student01@pve']['on_demand']==0
+
+
+def test_remote_awaiting_checkout_state_is_preserved_and_synced(checkout):
+    _,admin,_=checkout
+    connect(admin)
+    remote=snapshot(None)
+    remote['accounts']['student01@pve'].update(login_disabled=True,awaiting_checkout=True)
+    with patch('app.account_checkout.requests.request',return_value=reply(remote)):
+        result=admin.get('/api/projects/lab/accessforge/status')
+    assert result.status_code==200
+    state=result.json['checkout']['accounts']['student01']
+    assert state['eligible'] and state['login_disabled'] and state['awaiting_checkout']
+    assert state['sync_status']=='synced'
+    cached=admin.get('/api/projects/lab/accessforge/accounts').json['checkout']['accounts']['student01']
+    assert cached['awaiting_checkout'] and cached['login_disabled']
