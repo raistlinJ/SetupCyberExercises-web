@@ -17,11 +17,20 @@ import requests
 from flask import Blueprint, current_app, g, jsonify, request, session
 
 from .routes import api
+from . import openai_responses
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 CONTEXT_OVERHEAD_TOKENS = 1600
 # Numeric transport safety, rather than a model-specific token ceiling.
 MAX_TOKEN_INTEGER = 2**53 - 1
+
+# /models lists IDs but omits token limits. Use the published specifications
+# only for these exact OpenAI model IDs, never for compatible local runtimes.
+# Verified 2026-11-04: https://developers.openai.com/api/docs/models/<model-id>
+OPENAI_MODEL_LIMITS = {
+    name: (1_050_000, 128_000)
+    for name in ('gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna')
+}
 
 
 def endpoint_url(value):
@@ -42,7 +51,7 @@ def endpoint_url(value):
     except ValueError:
         raise ValueError("Invalid endpoint port") from None
     path = parsed.path.rstrip("/")
-    for suffix in ("/chat/completions", "/models"):
+    for suffix in ("/chat/completions", "/responses", "/models"):
         if path.endswith(suffix):
             path = path[: -len(suffix)]
     if not path:
@@ -91,6 +100,10 @@ def configuration(raw, require_model=True, validate_budget=True):
 
 
 def llm_request(cfg, resource, payload=None, on_delta=None, cancelled=None):
+    responses_api = resource == '/chat/completions' and urlsplit(cfg['url']).hostname == 'api.openai.com'
+    if responses_api:
+        resource = '/responses'
+        payload = openai_responses.request_payload(payload)
     streaming = bool(payload and payload.get("stream"))
     headers = {"Accept": "text/event-stream" if streaming else "application/json"}
     if cfg["api_key"]:
@@ -109,10 +122,28 @@ def llm_request(cfg, resource, payload=None, on_delta=None, cancelled=None):
         )
         with response:
             if not 200 <= response.status_code < 300:
-                raise ValueError(f"LLM endpoint returned HTTP {response.status_code}")
+                detail = ''
+                try:
+                    error = response.json().get('error')
+                    if isinstance(error, dict):
+                        detail = error.get('message') or ''
+                        if isinstance(detail, str) and error.get('param'):
+                            detail += f" (parameter: {error['param']})"
+                    elif isinstance(error, str):
+                        detail = error
+                except (ValueError, AttributeError):
+                    pass
+                detail = redact(detail, [cfg['api_key']]) if isinstance(detail, str) else ''
+                raise ValueError(f"LLM endpoint returned HTTP {response.status_code}" + (f": {detail[:2000]}" if detail else ''))
             if streaming and "text/event-stream" in response.headers.get("Content-Type", ""):
+                if responses_api:
+                    def check_cancelled():
+                        if cancelled and cancelled():
+                            raise AgentCancelled('Agent cancelled')
+                    return openai_responses.read_stream(response, on_delta, check_cancelled)
                 return read_chat_stream(response, on_delta, cancelled)
-            return response.json()
+            result = response.json()
+            return openai_responses.chat_result(result) if responses_api else result
     except requests.RequestException:
         raise ValueError("LLM request failed; check endpoint, certificate, credentials and timeout") from None
     except (json.JSONDecodeError, requests.exceptions.JSONDecodeError):
@@ -178,6 +209,17 @@ def discover_models(cfg):
     catalog = {item["id"]: item for item in data["data"] if isinstance(item, dict) and isinstance(item.get("id"), str)}
     ids = sorted(catalog)
     limits = {name: catalog_limits(model) for name, model in catalog.items()}
+    if urlsplit(cfg['url']).hostname == 'api.openai.com':
+        for name in ids:
+            if name not in OPENAI_MODEL_LIMITS:
+                continue
+            context, output = OPENAI_MODEL_LIMITS[name]
+            entry = limits[name]
+            if not entry.get('context_window'):
+                entry.update(context_window=context, source='OpenAI model documentation', runtime=False)
+            entry.setdefault('max_output_tokens', output)
+        # Local runtime probes are not supported by the OpenAI API.
+        return ids, limits
     selected = cfg["model"].strip() or (ids[0] if ids else "")
     if not selected or limits.get(selected, {}).get("context_window"):
         return ids, limits
@@ -833,7 +875,7 @@ def run_guest(cfg, prompt, assignment, entry, uploads, tools, cancelled, progres
                     **({"tool_calls": calls} if calls else {}),
                     **{
                         key: message[key]
-                        for key in ("reasoning_content", "reasoning", "reasoning_details")
+                        for key in ("reasoning_content", "reasoning", "reasoning_details", "responses_output")
                         if key in message
                     },
                 }
@@ -988,7 +1030,8 @@ def run_collective(cfg, prompt, assignment, guests, uploads, guest_tools, cancel
                         value = message[key] if isinstance(message[key], str) else json.dumps(message[key], ensure_ascii=False)
                         publish("reasoning" if key.startswith("reasoning") else "response", value)
             messages.append({"role": "assistant", "content": message.get("content"),
-                             **({"tool_calls": calls} if calls else {})})
+                             **({"tool_calls": calls} if calls else {}),
+                             **({'responses_output': message['responses_output']} if 'responses_output' in message else {})})
             if not calls:
                 transcript.append({"turn": turn + 1, "message": message.get("content") or ""})
                 messages.append({"role": "user", "content": "Use tools as needed, then finish with submit_result."})

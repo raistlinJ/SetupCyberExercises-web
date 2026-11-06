@@ -1054,19 +1054,25 @@ class ProxmoxClient:
         s = self._ensure_session()
         url = f"{self.base_url.rstrip('/')}/api2/json/access/users/{requests.utils.quote(userid, safe='')}"
         data: Dict[str, Any] = {}
-        if password is not None:
-            data['password'] = password
         if enable is not None:
             data['enable'] = 1 if enable else 0
         if expire is not None:
             data['expire'] = int(expire)
         if comment is not None:
             data['comment'] = comment
-        r = s.put(url, data=data, timeout=30)
-        if r.status_code in (405, 501):
-            r = s.post(url, data=data, timeout=30)
-        if r.status_code >= 400:
-            raise RuntimeError(f"Proxmox update user error {r.status_code}: {r.text}")
+        if data:
+            r = s.put(url, data=data, timeout=30)
+            if r.status_code in (405, 501):
+                r = s.post(url, data=data, timeout=30)
+            if r.status_code >= 400:
+                raise RuntimeError(f"Proxmox update user error {r.status_code}: {r.text}")
+        if password is not None:
+            payload = {'userid': userid, 'password': password}
+            if self.password:
+                payload['confirmation-password'] = self.password
+            r = s.put(f"{self.base_url.rstrip('/')}/api2/json/access/password", data=payload, timeout=30)
+            if r.status_code >= 400:
+                raise RuntimeError(f"Proxmox password reset error {r.status_code}; use an administrator password login with user-management permission")
         return True
 
     def ensure_group(self, groupid: str, comment: str = ''):

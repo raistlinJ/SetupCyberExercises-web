@@ -7,7 +7,7 @@
   <title>DeployForge — VM Manager</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-  <link href="/static/css/shell.css?v=20261013-integrations" rel="stylesheet">
+  <link href="/static/css/shell.css?v=20261105-accessforge" rel="stylesheet">
   <link href="/static/css/row_tags.css?v=20261029-tag-icons" rel="stylesheet">
   <link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
@@ -103,7 +103,8 @@
             <li class="nav-item" data-plugin="ctfrpg">
               <a class="nav-link" data-shell-link href="/static/ctfrpg_manager.html">CTF-RPG Manager</a>
             </li>
-            <li class="nav-item">
+            <li class="nav-item" data-plugin="accessforge"><a class="nav-link" data-shell-link href="/static/accessforge_manager.html">Credential Checkouts</a></li>
+          <li class="nav-item">
               <a class="nav-link" data-shell-link href="/static/exports.html">Exports</a>
             </li>
             <li class="nav-item">
@@ -182,6 +183,7 @@
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-project"><input class="form-check-input m-0" type="checkbox" id="vm-col-project" checked><span>Project</span></label></li>
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-name"><input class="form-check-input m-0" type="checkbox" id="vm-col-name" checked><span>Generated VM Names</span></label></li>
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-cred"><input class="form-check-input m-0" type="checkbox" id="vm-col-cred" checked><span>Credentials</span></label></li>
+                    <li data-plugin="accessforge"><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-checkout"><input class="form-check-input m-0" type="checkbox" id="vm-col-checkout" checked><span>Checked out to</span></label></li>
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-status"><input class="form-check-input m-0" type="checkbox" id="vm-col-status" checked><span>Status</span></label></li>
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-state"><input class="form-check-input m-0" type="checkbox" id="vm-col-state" checked><span>State</span></label></li>
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-id"><input class="form-check-input m-0" type="checkbox" id="vm-col-id" checked><span>ID</span></label></li>
@@ -734,18 +736,18 @@
   <!-- Settings modal injected via creds.js -->
   <script src="/static/js/creds.js?v=20251116b"></script>
   <script src="/static/js/auth.js?v=20251116b"></script>
-  <script src="/static/js/shell.js?v=20261020-stable-queue"></script>
+  <script src="/static/js/shell.js?v=20261105-accessforge"></script>
   <script src="/static/js/server_queue.js?v=20261026-responsive-reads"></script>
   <script src="/static/js/server_workflows.js?v=20260907a"></script>
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
-  <script src="/static/js/app.js?v=20261026-http-status"></script>
+  <script src="/static/js/app.js?v=20261105-accessforge-plugin"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/static/js/orchestration_access.js?v=20261009-flags"></script>
   <script src="/static/js/guest_push_csv.js?v=20261028-csv-submit"></script>
   <script src="/static/js/login_time.js?v=20261029-login-source"></script>
   <script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
-<script src="/static/js/vm_manager.js?v=20261030-create-feedback"></script>
+<script src="/static/js/vm_manager.js?v=20261105-checkout"></script>
   <script src="/static/js/action_history.js?v=20261031-keep-push-selection"></script>
   <script src="/static/js/server_vm_actions.js?v=20261030-create-feedback"></script>
   <script src="/static/js/plugin_loader.js?v=20261015-agent-tabs"></script>

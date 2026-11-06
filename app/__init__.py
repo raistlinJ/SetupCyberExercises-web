@@ -607,10 +607,21 @@ def create_app():
     ctfrpg_enabled = plugin_enabled('CTFRPG_PLUGIN_ENABLE', '1')
     app.config['CTFD_PLUGIN_ENABLE'] = ctfd_enabled
     app.config['CTFRPG_PLUGIN_ENABLE'] = ctfrpg_enabled
+    accessforge_enabled = plugin_enabled('ACCESSFORGE_PLUGIN_ENABLE', '0')
+    app.config['ACCESSFORGE_PLUGIN_ENABLE'] = accessforge_enabled
+    if accessforge_enabled:
+        from .account_checkout import register_accessforge_plugin
+        register_accessforge_plugin(app)
 
     @app.before_request
     def block_disabled_integrations():
         path = request.path
+        if not accessforge_enabled and (
+            path.startswith('/api/accessforge/')
+            or (path.startswith('/api/projects/') and '/accessforge/' in path)
+            or path in ('/static/accessforge_manager.html', '/static/js/accessforge_manager.js')
+        ):
+            return jsonify({'error': 'AccessForge plugin is disabled'}), 404
         if not ctfd_enabled and (
             path.startswith('/api/ctfd/')
             or (path.startswith('/api/projects/') and '/ctfd/' in path)
@@ -641,11 +652,13 @@ def create_app():
     def plugins():
         enabled = []
         if agent_enabled:
-            enabled.append({'name': 'agent', 'script': '/static/js/agent_plugin.js?v=20261015-agent-tabs'})
+            enabled.append({'name': 'agent', 'script': '/static/js/agent_plugin.js?v=20261104-agent-model-picker'})
         if ctfd_enabled:
             enabled.append({'name': 'ctfd'})
         if ctfrpg_enabled:
             enabled.append({'name': 'ctfrpg'})
+        if accessforge_enabled:
+            enabled.append({'name': 'accessforge'})
         return {'plugins': enabled}
 
     @app.get('/api/features')

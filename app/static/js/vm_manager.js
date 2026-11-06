@@ -308,9 +308,9 @@ function vmEnsureScrollPersistence() {
 document.addEventListener('DOMContentLoaded', vmEnsureScrollPersistence);
 
 // Column visibility per project
-let VM_COLS = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false };
+let VM_COLS = { project: false, name: true, cred: true, checkout: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false };
 function vmColsKey(pid) { return `toolhub.vm.mgr.cols.${pid}`; }
-function readVmCols(pid) { try { const base = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false }; const raw = JSON.parse(sessionStorage.getItem(vmColsKey(pid)) || '{}') || {}; return { ...base, ...raw }; } catch { return { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false }; } }
+function readVmCols(pid) { try { const base = { project: false, name: true, cred: true, checkout: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false }; const raw = JSON.parse(sessionStorage.getItem(vmColsKey(pid)) || '{}') || {}; return { ...base, ...raw }; } catch { return { project: false, name: true, cred: true, checkout: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false }; } }
 function writeVmCols(pid, obj) { try { sessionStorage.setItem(vmColsKey(pid), JSON.stringify(obj || {})); } catch { } }
 
 // Lightweight HTTP helper (fallback if global http() not provided on this page)
@@ -924,7 +924,7 @@ function enforceRefreshDisabledOnConnChange() {
 // Wire up column toggles for VM table
 function wireVmCols() {
   try {
-    const ids = ['project', 'name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login'];
+    const ids = ['project', 'name', 'cred', 'checkout', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login'];
     ids.forEach(id => {
       const el = document.getElementById(`vm-col-${id}`);
       if (!el) return;
@@ -1003,10 +1003,17 @@ function renderVmStateBadges(detail) {
   return badges.join(' ');
 }
 
+function vmCheckoutColumnVisible() { return VM_COLS.checkout && document.documentElement?.dataset?.accessforgePlugin === 'on'; }
+
+function vmCheckoutEmail(pid, username, project) {
+  const source = project || (ALL_PROJECTS || []).find(p => String(p.id) === String(pid)) || (!pid || String(PROJ?.id) === String(pid) ? PROJ : null);
+  return source?.checkout?.accounts?.[username]?.email || '';
+}
+
 function vmBuildFilterParts(rowLike) {
   const row = rowLike || {};
   const d = row.detail || {};
-  const parts = [row.project, row.vmName, row.uname, String(row.status || ''), String(row.index || '')];
+  const parts = [row.project, row.vmName, row.uname, vmCheckoutEmail(row.pid, row.uname), String(row.status || ''), String(row.index || '')];
   if (d.state) parts.push(String(d.state));
   if (d.power_state) parts.push(String(d.power_state));
   if (d.qmp_state) parts.push(String(d.qmp_state));
@@ -1149,7 +1156,7 @@ async function vmLoadProjectById(pid) {
   try { await hydrateProxCredsFromPersisted(PROJ.id); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   try { Promise.resolve(vmRefreshServerResources(PROJ)).catch(() => { }); } catch { }
-  try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
+  try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'checkout', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   renderVmTable(proj);
   updateRefreshState();
@@ -1741,6 +1748,7 @@ function renderMergedVmTable(rows) {
       '</button>' +
       '</div>' +
       '</th>' : '') +
+    (vmCheckoutColumnVisible() ? '<th title="Last requested AccessForge status; refresh in Credential Checkouts for current assignments">Checked out to</th>' : '') +
     (VM_COLS.status ? '<th role="button" aria-sort="' + ariaSort('status') + '" onclick="vmSortBy(\'status\')">Status' + sortIcon('status') + '</th>' : '') +
     (VM_COLS.state ? '<th role="button" aria-sort="' + ariaSort('state') + '" onclick="vmSortBy(\'state\')">State' + sortIcon('state') + '</th>' : '') +
     (VM_COLS.id ? '<th role="button" aria-sort="' + ariaSort('id') + '" onclick="vmSortBy(\'id\')">ID' + sortIcon('id') + '</th>' : '') +
@@ -1883,6 +1891,7 @@ function renderMergedVmTable(rows) {
           `<div class="ms-2">${credExtras}</div>` +
           `</div>` +
           `</td>` : '') : '') +
+        (vmCheckoutColumnVisible() && first ? `<td rowspan="${rowspan}" style="overflow-wrap:anywhere">${escHtml(vmCheckoutEmail(r.pid, r.uname) || '—')}</td>` : '') +
         (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}<span class="d-inline-flex flex-nowrap align-items-center">${accessIcon}${vmTransferIcons(r, (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(r.pid)))}</span></td>` : '') +
         (VM_COLS.state ? `<td>${stateHtml}</td>` : '') +
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
@@ -2653,6 +2662,7 @@ function renderVmTable(proj) {
     '</button>' +
     '</div>' +
     '</th>';
+  if (vmCheckoutColumnVisible()) html += '<th title="Last requested AccessForge status; refresh in Credential Checkouts for current assignments">Checked out to</th>';
   if (VM_COLS.status) html += '<th role="button" aria-sort="' + ariaSort('status') + '" onclick="vmSortBy(\'status\')">Status' + sortIcon('status') + '</th>';
   if (VM_COLS.state) html += '<th role="button" aria-sort="' + ariaSort('state') + '" onclick="vmSortBy(\'state\')">State' + sortIcon('state') + '</th>';
   if (VM_COLS.id) html += '<th role="button" aria-sort="' + ariaSort('id') + '" onclick="vmSortBy(\'id\')">ID' + sortIcon('id') + '</th>';
@@ -2803,6 +2813,7 @@ function renderVmTable(proj) {
           `<div class=\"ms-2\">${credExtras}</div>` +
           `</div>` +
           `</td>` : '') : '') +
+        (vmCheckoutColumnVisible() && first ? `<td rowspan="${rowspan}" style="overflow-wrap:anywhere">${escHtml(vmCheckoutEmail(PROJ?.id, r.uname, PROJ) || '—')}</td>` : '') +
         (VM_COLS.status ? `<td>${badgeForStatus('vm', r.status)}<span class="d-inline-flex flex-nowrap align-items-center">${accessIcon}${vmTransferIcons(r, PROJ)}</span></td>` : '') +
         (VM_COLS.state ? `<td>${stateHtml}</td>` : '') +
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
@@ -3002,7 +3013,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // Wire column chooser
   wireVmCols();
   // Reflect saved columns on project select
-  document.addEventListener('project-selected', (e) => { try { const pid = e.detail || ''; if (!pid) return; VM_COLS = readVmCols(pid); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { } });
+  document.addEventListener('project-selected', (e) => { try { const pid = e.detail || ''; if (!pid) return; VM_COLS = readVmCols(pid); const ids = ['name', 'cred', 'checkout', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { } });
   (function () {
     let timer = null;
     function key() { try { return `toolhub.vm.mgr.auto.${PROJ ? PROJ.id : 'none'}`; } catch { return 'toolhub.vm.mgr.auto.none'; } }

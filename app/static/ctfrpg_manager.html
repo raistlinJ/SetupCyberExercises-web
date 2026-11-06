@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DeployForge — CTF-RPG Manager</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="/static/css/shell.css?v=20261013-integrations" rel="stylesheet">
+  <link href="/static/css/shell.css?v=20261105-accessforge" rel="stylesheet">
   <link href="/static/css/row_tags.css?v=20261029-tag-icons" rel="stylesheet">
   <link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
   <link rel="icon" href="/static/favicon.ico">
@@ -37,7 +37,8 @@
         <li class="nav-item"><a class="nav-link" data-shell-link href="/static/vm_manager.html">VM Manager</a></li>
         <li class="nav-item" data-plugin="ctfd"><a class="nav-link" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a></li>
         <li class="nav-item" data-plugin="ctfrpg"><a class="nav-link active" aria-current="page" data-shell-link href="/static/ctfrpg_manager.html">CTF-RPG Manager</a></li>
-        <li class="nav-item"><a class="nav-link" data-shell-link href="/static/exports.html">Exports</a></li>
+        <li class="nav-item" data-plugin="accessforge"><a class="nav-link" data-shell-link href="/static/accessforge_manager.html">Credential Checkouts</a></li>
+          <li class="nav-item"><a class="nav-link" data-shell-link href="/static/exports.html">Exports</a></li>
         <li class="nav-item"><a id="game-link" class="nav-link d-none fw-semibold border border-secondary rounded-pill px-2 py-1 text-nowrap" target="_blank" rel="noopener noreferrer" title="Open this project's CTF-RPG UI">Server: —</a></li>
       </ul>
       <div class="d-flex align-items-center gap-2"><div class="btn-group btn-group-sm" role="group" aria-label="Projects selection"><button id="choose-projects" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#projects-modal" type="button" title="Choose one or more projects">Projects <span id="projects-count" class="badge bg-secondary ms-1">0</span></button></div></div>
@@ -141,7 +142,7 @@
 <div class="modal fade" id="actionSummaryModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header"><h2 id="action-summary-title" class="modal-title h5">Action results</h2><button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div id="action-summary-body" class="modal-body"></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div></div></div></div>
 <div class="modal fade" id="actionProgressModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h2 id="action-progress-title" class="modal-title h5">Working…</h2><button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div id="action-progress-text" class="small mb-2" aria-live="polite"></div><div class="progress"><div id="action-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">Starting…</div></div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Hide</button></div></div></div></div>
 <script src="/static/js/auth.js"></script>
-<script src="/static/js/shell.js?v=20261020-stable-queue"></script>
+<script src="/static/js/shell.js?v=20261105-accessforge"></script>
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/ctfrpg_audio.js?v=20261019-notifications"></script>
 <script src="/static/js/ctfrpg_table.js?v=20261029-login-source"></script>

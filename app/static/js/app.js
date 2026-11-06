@@ -9869,8 +9869,8 @@ function renderCredentials(pid, creds) {
     const u = sanitizeSimple(c && c.username);
     const p = sanitizeSimple(c && c.password);
     return `<div class="row g-2 align-items-center mb-1" data-index="${idx}">
-      <div class="col-md-5"><input class="form-control form-control-sm" placeholder="username" title="Credential username" value="${escHtml(u)}" oninput="onCredentialChanged('${pid}')"></div>
-      <div class="col-md-5"><input class="form-control form-control-sm" placeholder="password" title="Credential password (8+ chars)" value="${escHtml(p)}" oninput="onCredentialChanged('${pid}')"></div>
+      <div class="col-md-5"><input title="Credential username" class="form-control form-control-sm" placeholder="username" value="${escHtml(u)}" oninput="onCredentialChanged('${pid}')"></div>
+      <div class="col-md-5"><input title="Credential password (8+ chars)" class="form-control form-control-sm" placeholder="password" value="${escHtml(p)}" oninput="onCredentialChanged('${pid}')"></div>
       <div class="col-md-2 d-flex justify-content-end"><button class="btn btn-sm btn-outline-danger" onclick="removeCredentialRow('${pid}', this)">Remove</button></div>
     </div>`;
   }).join('');
@@ -9894,15 +9894,8 @@ function addCredentialRow(pid) {
     const username = `user${pad(nextIdx)}`;
     const password = randPwd();
 
-    const wrapper = document.createElement('div');
-    wrapper.className = 'row g-2 align-items-center mb-1';
-    wrapper.innerHTML = `<div class="col-md-5"><input class="form-control form-control-sm" placeholder="username" title="Credential username" value="${username}"></div>
-      <div class="col-md-5"><input class="form-control form-control-sm" placeholder="password" title="Credential password (8+ chars)" value="${password}"></div>
-      <div class="col-md-2 d-flex justify-content-end"><button class="btn btn-sm btn-outline-danger">Remove</button></div>`;
-    wrapper.querySelector('button')?.addEventListener('click', () => { wrapper.remove(); onCredentialChanged(pid); });
-    host.appendChild(wrapper);
+    host.innerHTML = renderCredentials(pid, [...currentList, { username, password }]);
     updateCredControls(pid);
-    try { wrapper.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => onCredentialChanged(pid))); } catch { }
     onCredentialChanged(pid);
   } catch { }
 }
@@ -9914,7 +9907,7 @@ function collectCredentials(pid) {
   if (!host) return [];
   const rows = Array.from(host.querySelectorAll('.row'));
   return rows.map(r => {
-    const inputs = r.querySelectorAll('input');
+    const inputs = r.querySelectorAll('input:not([type="checkbox"])');
     return { username: (inputs[0]?.value || '').trim(), password: (inputs[1]?.value || '').trim() };
   }).filter(c => c.username);
 }
@@ -10182,7 +10175,7 @@ async function _saveCredentialsNow(pid, additionalProjectFields = undefined) {
   } catch (e) {
     const status = document.getElementById(`cred-status-${pid}`);
     if (status) { status.textContent = 'Error'; status.className = 'small text-danger'; }
-    try { showToast('Failed to auto-save credentials', 'danger'); } catch { }
+    try { showToast(e.message || 'Failed to auto-save credentials', 'danger'); } catch { }
     return false;
   }
 }

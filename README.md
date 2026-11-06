@@ -329,7 +329,7 @@ The resulting Proxmox Notes contain a single `AccessForge` object:
 
 Updating materials preserves existing live transfer flags, human notes, scenario metadata and credentials. Changing transfer flags preserves materials and categories. Removing all links publishes an empty `materials` list; clearing the category publishes `Material Category: Misc`. Materials survive save/reload, VM rename, and project export/import. Existing project-level uploaded files in SCE-web's Materials panel are separate and unchanged.
 
-AccessForge combines links from visible VMs/LXCs in the same Scenario and renders them in a dropdown for each material category above the VM cards in the project box. Scenario headings stay unchanged. Reload AccessForge after applying metadata. This editor configures links on VM/LXC templates; it does not introduce a separate project-level link store.
+AccessForge combines links from visible VMs/LXCs in the same Scenario and renders them in a scrollable table to the left of the VM cards, stacking above them on narrow screens. Files in the same category share a vertically centered category cell. Scenario headings stay unchanged. Reload AccessForge after applying metadata. This editor configures links on VM/LXC templates; it does not introduce a separate project-level link store.
 
 ## Per-VM console file transfer
 
@@ -394,8 +394,16 @@ AGENT_PLUGIN_ENABLE=1 docker compose up -d --build app
 Select existing QEMU VMs or LXC containers in VM Manager, then choose
 **Commands → Plugins → agent** (Plugins is a section in the dropdown). Configure the HTTP/HTTPS OpenAI-compatible base URL, API key
 (if needed), certificate verification, and model; **Fetch** discovers models via
-`/models`, or you can enter a model ID manually. The endpoint must support
-`/chat/completions` function tools. URLs without a path get `/v1`; explicit gateway
+`/models` and shows the returned IDs in an **Available models** selector. You can
+also enter a model ID manually. **Use provider max** uses reported limits, or the
+published OpenAI specifications for GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra, GPT-6
+Sol and GPT-6 Luna. Unknown model limits remain available for manual entry.
+For OpenAI API keys, use
+`https://api.openai.com/v1`; the agent uses `/responses` for tool calling, including
+GPT-6.1 Sol. Other OpenAI-compatible endpoints use `/chat/completions` function
+tools. OpenAI reasoning models use their default temperature. OpenAI errors
+include the provider message and rejected parameter, with the API key redacted.
+URLs without a path get `/v1`; explicit gateway
 paths are preserved. Endpoints are reached from the app server (in Docker, use
 `host.docker.internal` for a service on the host).
 
@@ -503,3 +511,24 @@ guests instead includes `summary.md`, `shared_transcript.json`, `shared_events.j
 completed item to view or download a retained run; **Transcript**, **View full log**
 and **Download log** retain the conversation and tool evidence. The raw
 result (including the ZIP) is available at `/api/queue/<id>/result` for the owner.
+
+
+## AccessForge credential checkout plugin
+
+Set `ACCESSFORGE_PLUGIN_ENABLE=1` in SCE-web's `.env` and recreate the app container to enable **Credential Checkouts** alongside CTFd and CTF-RPG. It defaults to `0`. Disabled plugins hide their navigation and reject their page, script, and API routes. The checkbox in VM Manager's Columns menu also hides when the plugin is off.
+
+The integration is one-way: SCE-web publishes account credentials, requests status, and sends explicit login-management operations to AccessForge. **AccessForge owns checkout policy, email verification, reservations, and persistence.** Released accounts have their logins disabled without automatic password changes. Student checkout and recovery continue when SCE-web is offline. AccessForge never calls SCE-web. There is no shared service token or SCE-web checkout service.
+
+1. On AccessForge, set `ENABLE_ACCOUNT_CHECKOUT=true` and a strong, stable `FLASK_SECRET_KEY`. Preserve its `data/` directory (or `CHECKOUT_DATA_DIR`). Restart/recreate AccessForge after changing environment variables.
+2. Provision and synchronize the project's student accounts in Proxmox. In SCE-web's **Credential Checkouts** tab, select the project and configure its AccessForge URL and administrator username/password. Use an account with `Sys.Modify` on `/` in AccessForge's configured Proxmox cluster. Administrator credentials are encrypted on the SCE-web server per administrator/project and are excluded from ordinary project payloads and exports. HTTPS certificate verification is on by default; plain HTTP is accepted only for loopback development URLs.
+3. Select saved accounts by checkbox and choose **Publish selected accounts**. This copies those credentials into a namespaced pool in AccessForge. It does not enable student checkout or change the remote lab secret/verification settings. Unselected accounts are not sent. Publish only accounts provisioned in the cluster configured by the destination AccessForge server.
+4. Choose **Manage in AccessForge**, sign in as an administrator, and configure the pool's lab secret, whether email verification is required, and which published accounts are available. Manual email assignment, release, and removal of unassigned accounts are managed there. Signed-in students can also use **Relinquish account** there, confirm the work-loss warning, and release their account and sign out without resetting VM contents. Release disables the Proxmox login and leaves its password unchanged. Students visit the destination AccessForge `/checkout` page.
+5. Use **Request status** in SCE-web to update assignment emails. VM Manager's **Checked out to** column uses this local snapshot; it does not make background requests to AccessForge. The checkout tab displays **Checked out**, **Checkout IP**, **Relinquished**, and **Relinquish IP**, along with when status was last requested. Checkout and relinquishment details remain after release; timestamps are displayed in the browser’s local time. The recorded IP is the peer/client address reported by the configured trusted ingress, not a guaranteed device identity. An unreachable AccessForge leaves the previous snapshot intact and reports the request failure.
+
+Released accounts display **Disabled** in both admin tables and cannot be signed into AccessForge or checked out until re-enabled. Failed releases remain reserved for retry. To prepare an account, save its desired password in Configuration, select it in **Credential Checkouts**, and choose **Reset selected passwords**. This applies the saved password to Proxmox and AccessForge while keeping the login disabled. Choose **Re-enable selected logins** separately when ready; the existing AccessForge checkout availability setting still applies. **Disable selected logins** handles unassigned published accounts. These operations reject assigned accounts, so release them first. Publishing alone does not re-enable logins. Existing Configuration password synchronization also preserves disabled Proxmox users; publish updated saved credentials before re-enabling if passwords were changed through that route.
+
+AccessForge stores published passwords encrypted at rest and hashes lab secrets. Publishing also saves its administrator credential encrypted in the AccessForge pool so students can relinquish accounts while SCE-web is offline. This administrator needs `User.Modify` on the managed Proxmox users in addition to `Sys.Modify` on `/`. Existing pools must be published again, or the administrator can save a login-management credential in AccessForge. A dedicated `CHECKOUT_PROXMOX_API_TOKEN` configured on AccessForge can provide automatic disabling instead; password resets still use the administrator password connection from SCE-web. Keep this credential current if the administrator password changes. Status requests never return passwords. Explicitly publishing changed source credentials replaces only unassigned accounts; assigned accounts must first be released in AccessForge. A Proxmox username can belong to only one published pool on an AccessForge server.
+
+Email delivery is configured on **AccessForge**, using `CHECKOUT_SMTP_HOST`, `CHECKOUT_SMTP_PORT`, `CHECKOUT_SMTP_FROM`, `CHECKOUT_SMTP_USER`, `CHECKOUT_SMTP_PASSWORD`, and `CHECKOUT_SMTP_SSL`. Default transport is STARTTLS on port 587; implicit TLS uses `CHECKOUT_SMTP_SSL=1` and port 465. SMTP is unnecessary when an AccessForge administrator turns off verification. Missing SMTP configuration fails closed when verification is required.
+
+SCE-web connection credentials and cached status live in `DATA_DIR/accessforge_connections.sqlite3`; preserve its source ID so publishing continues to target the same remote pools. If the previous SCE-web checkout database exists, first publication preserves selected accounts' existing email assignments, once per account. The old database is left intact; set a new lab secret and availability policy in AccessForge after publishing. Old `SCE_CHECKOUT_URL`, `SCE_CHECKOUT_TOKEN`, and `CHECKOUT_SERVICE_TOKEN` settings are no longer used. Connection details, remote status snapshots, and student assignments are not included in project exports.

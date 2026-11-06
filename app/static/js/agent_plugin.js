@@ -38,16 +38,16 @@
         <div class="tab-content" id="agent-tab-content">
         <div class="tab-pane active" id="agent-config-pane" role="tabpanel" aria-labelledby="agent-config-tab" tabindex="0"><div class="row g-3">
           <div class="col-12"><label for="agent-mode" class="form-label">Run mode</label><select id="agent-mode" class="form-select"><option value="per_guest">Per guest — separate conversation for each selected VM/LXC</option><option value="collective">Across selected guests — one shared conversation</option></select><div class="form-text">The shared mode can compare findings and reuse them across all selected guests, including guests in different projects. Each tool call still targets one selected guest.</div></div>
-          <div class="col-md-8"><label for="agent-url" class="form-label">LLM endpoint URL (OpenAI compatible)</label><input id="agent-url" type="url" inputmode="url" pattern="https?://.+" class="form-control" placeholder="http://localhost:8081/v1" required><div class="form-text">Enter an HTTP or HTTPS base URL. Requests are sent from the DeployForge server. Model must support Chat Completions function tools.</div></div>
+          <div class="col-md-8"><label for="agent-url" class="form-label">LLM endpoint URL (OpenAI compatible)</label><input id="agent-url" type="url" inputmode="url" pattern="https?://.+" class="form-control" placeholder="http://localhost:8081/v1" required><div class="form-text">For OpenAI, use https://api.openai.com/v1. Requests are sent from the DeployForge server. OpenAI uses the Responses API; compatible servers use Chat Completions function tools.</div></div>
           <div class="col-md-4"><label for="agent-api-key" class="form-label">API key</label><input id="agent-api-key" type="password" autocomplete="off" class="form-control"><div class="form-text">Remembered for this browser tab, including page reloads.</div></div>
           <div class="col-12"><div class="form-check"><input id="agent-ssl" type="checkbox" class="form-check-input" checked><label for="agent-ssl" class="form-check-label">Require SSL certificate verification</label></div></div>
-          <div class="col-md-8"><label for="agent-model" class="form-label">Model</label><div class="input-group"><input id="agent-model" class="form-control" list="agent-models" placeholder="Fetch or enter a model ID" required><button type="button" id="agent-fetch" class="btn btn-outline-secondary">Fetch</button></div><datalist id="agent-models"></datalist></div>
+          <div class="col-md-8"><label for="agent-model" class="form-label">Model</label><div class="input-group"><input id="agent-model" class="form-control" list="agent-models" placeholder="Fetch or enter a model ID" required><button type="button" id="agent-fetch" class="btn btn-outline-secondary">Fetch</button></div><datalist id="agent-models"></datalist><select id="agent-model-picker" class="form-select mt-2 d-none" aria-label="Available models" hidden disabled></select></div>
           <div class="col-md-4"><label for="agent-context" class="form-label">Context window (tokens)</label><input id="agent-context" type="number" min="1" step="1" value="16384" class="form-control" aria-describedby="agent-context-limit" required><button id="agent-context-max" type="button" class="btn btn-sm btn-outline-secondary mt-2" disabled>Use provider max</button><div id="agent-context-limit" class="form-text"></div></div>
           <div class="col-md-3"><label for="agent-turns" class="form-label">Max model turns</label><input id="agent-turns" type="number" min="1" max="100" value="20" class="form-control" required><div class="form-text">Per guest in separate mode; total in shared mode.</div></div>
           <div class="col-md-3"><label for="agent-tool-timeout" class="form-label">Command timeout (seconds)</label><input id="agent-tool-timeout" type="number" min="1" max="86400" value="60" class="form-control" required></div>
           <div class="col-md-3"><label for="agent-request-timeout" class="form-label">LLM timeout (seconds)</label><input id="agent-request-timeout" type="number" min="1" max="600" value="120" class="form-control" required></div>
           <div class="col-md-3"><label for="agent-tokens" class="form-label">Max response tokens</label><input id="agent-tokens" type="number" min="256" step="1" value="2048" class="form-control" aria-describedby="agent-token-limit" required><div id="agent-token-limit" class="form-text"></div></div>
-          <div class="col-md-3"><label for="agent-temperature" class="form-label">Temperature (optional)</label><input id="agent-temperature" type="number" min="0" max="2" step="0.1" placeholder="Endpoint default" class="form-control"></div>
+          <div class="col-md-3"><label for="agent-temperature" class="form-label">Temperature (optional)</label><input id="agent-temperature" type="number" min="0" max="2" step="0.1" placeholder="Endpoint default" class="form-control"><div class="form-text">OpenAI reasoning models use their default temperature.</div></div>
         </div></div>
         <div class="tab-pane" id="agent-task-pane" role="tabpanel" aria-labelledby="agent-task-tab" tabindex="0"><div class="row g-3">
           <div class="col-12"><label for="agent-prompt" class="form-label">Prompt</label><textarea id="agent-prompt" rows="4" class="form-control" required placeholder="Grade this assignment. Verify x.py, y.py and z.md are in /home/student/assignment. Run the required tests. If files are missing, search likely directories quickly, report their actual locations, and return a rubric with scores and evidence. Do not modify submissions."></textarea></div>
@@ -82,6 +82,7 @@
   function syncTokenLimit() {
     const limits = selectedLimits(), context = limits.context_window;
     el('context-max').disabled = !context;
+    el('context-max').title = context ? `Use ${context.toLocaleString()} tokens for ${el('model').value.trim()}` : 'Fetch models and choose a model with a known context limit. Otherwise enter the context manually.';
     if (context) el('context').max = String(context); else el('context').removeAttribute('max');
     if (context && contextAuto) el('context').value = String(context);
     const contextBudget = Number(el('context').value) - 1601;
@@ -92,13 +93,26 @@
     const advertised = limits.model_context_window ? ` Model advertised context: ${limits.model_context_window.toLocaleString()}.` : '';
     el('context-limit').textContent = context
       ? `${limits.source || 'Provider'}: ${context.toLocaleString()} tokens.${advertised} ${contextAuto ? 'Using provider max; refreshed when the run starts.' : 'Custom context; use the button above to select the maximum.'}`
-      : `${contextAuto ? 'Provider max will be refreshed when the run starts.' : 'Enter the context configured in your runtime, or Fetch to discover its limit. 16,384 is only the form default.'}${advertised} The usable runtime limit is not reported.`;
+      : `${contextAuto ? 'Provider max will be refreshed when the run starts.' : 'Enter the context configured in your runtime, or Fetch to discover its limit. 16,384 is only the form default.'}${advertised} No context limit is available for this model.`;
   }
   el('context').addEventListener('input', () => { contextAuto = false; initialContext = false; syncTokenLimit(); });
   el('context-max').addEventListener('click', () => { contextAuto = true; initialContext = false; syncTokenLimit(); saveSettings(); });
-  el('model').addEventListener('input', () => { syncTokenLimit(); });
+  el('model').addEventListener('input', () => { el('model-picker').value = el('model').value.trim(); syncTokenLimit(); });
+  el('model-picker').addEventListener('change', () => {
+    if (!el('model-picker').value) return;
+    el('model').value = el('model-picker').value;
+    syncTokenLimit();
+    saveSettings();
+  });
   for (const id of ['url', 'api-key', 'ssl']) {
-    el(id).addEventListener(id === 'ssl' ? 'change' : 'input', () => { modelLimits = {}; limitsConnection = ''; syncTokenLimit(); });
+    el(id).addEventListener(id === 'ssl' ? 'change' : 'input', () => {
+      modelLimits = {}; limitsConnection = '';
+      el('models').replaceChildren();
+      el('model-picker').replaceChildren();
+      el('model-picker').hidden = true; el('model-picker').disabled = true;
+      el('model-picker').classList.add('d-none');
+      syncTokenLimit();
+    });
   }
   syncTokenLimit();
   const filesReady = (async () => {
@@ -185,7 +199,15 @@
       if (!response.ok) throw new Error(data.error || 'Model discovery failed');
       if (connection !== connectionKey()) return;
       el('models').replaceChildren(...data.models.map(model => { const option = document.createElement('option'); option.value = model; return option; }));
+      const placeholder = document.createElement('option');
+      placeholder.value = ''; placeholder.textContent = data.models.length ? 'Choose an available model…' : 'No models returned';
+      el('model-picker').replaceChildren(placeholder, ...data.models.map(model => {
+        const option = document.createElement('option'); option.value = model; option.textContent = model; return option;
+      }));
+      el('model-picker').hidden = false; el('model-picker').disabled = !data.models.length;
+      el('model-picker').classList.remove('d-none');
       if (!el('model').value && data.models.length) el('model').value = data.models[0];
+      el('model-picker').value = el('model').value.trim();
       modelLimits = data.model_limits || {}; limitsConnection = connection;
       if (initialContext && selectedLimits().context_window) { contextAuto = true; initialContext = false; }
       syncTokenLimit();

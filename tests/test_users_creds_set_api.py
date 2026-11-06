@@ -118,5 +118,24 @@ class UsersCredsSetApiTests(unittest.TestCase):
             self.assertEqual(len(body.get('created_pools') or []), 1)
 
 
+    def test_credentials_sync_keeps_a_disabled_user_disabled(self):
+        with ExitStack() as stack:
+            for ctx in self._common_patches():
+                stack.enter_context(ctx)
+            mock_client_cls = stack.enter_context(patch('app.routes.api.ProxmoxClient'))
+            stack.enter_context(patch('app.routes.api._reconcile_vm_access_roles'))
+            client = mock_client_cls.return_value
+            client.get_user.return_value = {'userid': 'alice@pve', 'enable': 0}
+            client.get_pool.return_value = {'poolid': 'alice'}
+            client.list_nodes.return_value = []
+            response = self.client.post(
+                f'/api/projects/{self.project.id}/instances/actions/users_creds_set',
+                json={'targets': [{'index': 1, 'name': 'web-set-1'}],
+                      'username': 'root@pam', 'password': 'admin-secret',
+                      'baseUrl': 'https://proxmox.local', 'verifySSL': False})
+        self.assertEqual(response.status_code, 200)
+        client.update_user.assert_called_once_with('alice@pve', password='password1', enable=False)
+
+
 if __name__ == '__main__':
     unittest.main()

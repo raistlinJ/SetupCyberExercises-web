@@ -8152,7 +8152,8 @@ def instances_users_creds_set(pid: str):
                     continue
             else:
                 try:
-                    client.update_user(userid, password=upass or None, enable=True)
+                    keep_enabled = _coerce_enabled(existing_user.get('enable', True), True)
+                    client.update_user(userid, password=upass or None, enable=keep_enabled)
                     updated_users.append({ 'index': idx, 'userid': userid })
                 except Exception as e:
                     errors.append({ 'index': idx, 'reason': f'user update failed: {e}' })
@@ -14091,6 +14092,10 @@ def _validate_project_fields(data: dict) -> list:
 
 def _project_to_json(p: Project) -> dict:
     d = asdict(p)
+    from ..account_checkout import checkout_summary
+    summary = checkout_summary(p)
+    if summary is not None:
+        d['checkout'] = summary
     # Never expose encrypted secret blobs in standard project payloads
     for k in (
         'proxmox_username_enc',
@@ -14123,6 +14128,7 @@ def _project_to_json_filtered(p: Project, include_creds: bool = True, include_vm
     # Export records contain machine-local paths to prior ZIPs, not project
     # configuration, and should never be copied into another installation.
     d.pop('exports', None)
+    d.pop('checkout', None)
 
     if not include_creds:
         # Remove project-level credentials if present
@@ -16973,6 +16979,12 @@ def export_project_download(pid: str):
 @_secure_route()
 def delete_project(pid: str):
     ok = _store().delete(pid)
+    # Remove only this installation's saved connection; remote pools remain independent.
+    connection_path = os.path.join(current_app.config['DATA_DIR'], 'accessforge_connections.sqlite3')
+    if ok and os.path.exists(connection_path):
+        from ..account_checkout import ConnectionStore
+        with ConnectionStore().connect() as db:
+            db.execute('DELETE FROM connections WHERE pid=?', (pid,))
     return ("", 204) if ok else (jsonify({"error": "Not found"}), 404)
 
 

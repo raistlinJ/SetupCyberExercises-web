@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeployForge — Credential Checkouts</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="/static/css/shell.css?v=20261105-accessforge" rel="stylesheet">
+<link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
+<link rel="icon" href="/static/favicon.ico">
+<script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</head>
+<body class="shell-body manager-page">
+<header class="app-banner"><div class="container-fluid d-flex justify-content-between align-items-center py-2">
+<span class="banner-title">DeployForge</span><div class="d-flex align-items-center gap-3" id="banner-user-region"><span class="small text-white-50">User: <span id="banner-username">…</span></span><button id="banner-logout" type="button" class="btn btn-sm btn-outline-light">Logout</button></div>
+</div></header>
+<div class="container-fluid shell-container"><div class="row g-0">
+<aside class="col-12 col-md-3 col-lg-2 shell-sidebar bg-light d-flex flex-column"><div id="sidebar-projects" class="flex-grow-1"></div></aside>
+<main class="col-12 col-md-9 col-lg-10 shell-content p-3">
+<ul class="nav nav-pills mb-3 flex-wrap">
+<li class="nav-item"><a class="nav-link" data-shell-link href="/">Configuration</a></li>
+<li class="nav-item"><a class="nav-link" data-shell-link href="/static/vm_manager.html">VM Manager</a></li>
+<li class="nav-item" data-plugin="ctfd"><a class="nav-link" data-shell-link href="/static/ctfd_manager.html">CTFd Manager</a></li>
+<li class="nav-item" data-plugin="ctfrpg"><a class="nav-link" data-shell-link href="/static/ctfrpg_manager.html">CTF-RPG Manager</a></li>
+<li class="nav-item" data-plugin="accessforge"><a class="nav-link active" aria-current="page" data-shell-link href="/static/accessforge_manager.html">Credential Checkouts</a></li>
+<li class="nav-item"><a class="nav-link" data-shell-link href="/static/exports.html">Exports</a></li>
+</ul>
+<div class="card"><div class="card-body">
+<h1 class="h4">Credential checkouts</h1><p class="text-muted">Publish selected project accounts to AccessForge and request their status here. Configure lab secrets, verification, assignments, and releases in AccessForge.</p>
+<p id="af-project" class="fw-semibold">Select a project.</p>
+<details id="af-connection" class="border rounded p-3 mb-3" open>
+<summary class="fw-semibold">AccessForge administrator connection</summary>
+<form id="af-connection-form" class="mt-3">
+<div class="row g-3">
+<div class="col-12"><label class="form-label" for="af-url">AccessForge URL</label><input id="af-url" type="url" class="form-control" placeholder="https://accessforge.example.edu" required></div>
+<div class="col-md-6"><label class="form-label" for="af-username">Administrator username</label><input id="af-username" class="form-control" autocomplete="username" placeholder="root@pam" required></div>
+<div class="col-md-6"><label class="form-label" for="af-password">Administrator password</label><input id="af-password" type="password" class="form-control" autocomplete="current-password" placeholder="Enter password to connect"></div>
+<div class="col-12"><label><input id="af-verify" type="checkbox" class="form-check-input" checked> Verify TLS certificate</label></div>
+</div>
+<p class="small text-muted mt-2">Requires administrator permissions on AccessForge’s configured Proxmox cluster. Connection credentials are encrypted on this server and excluded from exports. Publishing also saves the administrator credential encrypted in AccessForge so it can disable relinquished logins; a dedicated Proxmox API token can be configured there instead.</p>
+<button type="submit" class="btn btn-primary" id="af-save-connection">Test and save connection</button>
+<button type="button" class="btn btn-outline-secondary d-none" id="af-disconnect">Disconnect</button>
+</form></details>
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+<button type="button" class="btn btn-primary" id="af-publish">Publish selected accounts</button>
+<button type="button" class="btn btn-outline-secondary" id="af-refresh">Request status</button>
+<button type="button" class="btn btn-outline-danger" id="af-disable-logins">Disable selected logins</button>
+<button type="button" class="btn btn-outline-primary" id="af-reset-passwords">Reset selected passwords</button>
+<button type="button" class="btn btn-success" id="af-reenable-logins">Re-enable selected logins</button>
+<a id="af-admin-link" class="btn btn-outline-primary d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
+<a id="af-student-link" class="btn btn-outline-secondary d-none" target="_blank" rel="noopener noreferrer">Student checkout page</a>
+</div>
+<div id="af-status" role="status" aria-live="polite" class="small mb-2"></div>
+<p id="af-snapshot" class="small text-muted">No status requested.</p>
+<label class="form-label" for="af-filter">Filter accounts</label><input id="af-filter" class="form-control mb-2" type="search" placeholder="Username or assigned email">
+<div class="table-responsive" style="max-height:28rem; overflow:auto"><table class="table table-sm align-middle"><thead><tr><th><input id="af-select-all" type="checkbox" class="form-check-input" aria-label="Select visible accounts"></th><th>Username</th><th>AccessForge status</th><th>Checked out to</th><th>Checked out</th><th>Checkout IP</th><th>Relinquished</th><th>Relinquish IP</th></tr></thead><tbody id="af-accounts"><tr><td colspan="8" class="text-muted">Select a project.</td></tr></tbody></table></div>
+<p class="small text-muted mb-0">Publishing copies the selected credentials; it does not enable student checkout or change AccessForge policy. Relinquished accounts stay disabled. Update their passwords in Configuration, use Reset selected passwords to apply the saved list, then Re-enable selected logins when ready. Password resets keep logins disabled. Provision accounts before publishing.</p>
+</div></div>
+</main></div></div>
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/shell.js?v=20261105-accessforge"></script>
+<script src="/static/js/creds.js"></script>
+<script src="/static/js/accessforge_manager.js?v=20261105-disabled-logins"></script>
+</body></html>

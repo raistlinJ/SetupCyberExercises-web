@@ -39,5 +39,18 @@ class ProxmoxUserTests(unittest.TestCase):
         self.assertEqual(session.get.call_args_list[1].kwargs.get('params'), {'full': 1})
 
 
+    def test_password_reset_uses_password_endpoint_and_preserves_disabled_state(self):
+        client = ProxmoxClient(base_url='https://proxmox.local:8006', username='root@pam', password='admin-secret')
+        session = MagicMock()
+        session.put.return_value = _Response(status_code=200)
+        with patch.object(client, '_ensure_session', return_value=session):
+            client.update_user('alice@pve', password='new-password', enable=False)
+        self.assertEqual(session.put.call_count, 2)
+        self.assertEqual(session.put.call_args_list[0].kwargs['data'], {'enable': 0})
+        self.assertTrue(session.put.call_args_list[1].args[0].endswith('/api2/json/access/password'))
+        self.assertEqual(session.put.call_args_list[1].kwargs['data'], {
+            'userid': 'alice@pve', 'password': 'new-password', 'confirmation-password': 'admin-secret'})
+
+
 if __name__ == '__main__':
     unittest.main()

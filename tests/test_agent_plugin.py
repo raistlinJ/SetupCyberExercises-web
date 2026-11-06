@@ -118,6 +118,7 @@ def test_disabled_plugin_has_no_routes(monkeypatch, tmp_path):
         ("http://localhost:1234", "http://localhost:1234/v1"),
         ("https://llm/gateway/v1/", "https://llm/gateway/v1"),
         ("http://[::1]:8080/v1/chat/completions", "http://[::1]:8080/v1"),
+        ("https://api.openai.com/v1/responses", "https://api.openai.com/v1"),
     ],
 )
 def test_endpoint_paths(url, expected):
@@ -1065,6 +1066,43 @@ def test_lm_studio_uses_loaded_context_and_conservative_alias_limit(monkeypatch)
     assert limits["model"]["model_context_window"] == 262144
     assert limits["instance-two"]["context_window"] == 65536
     assert limits["unloaded"] == {"model_context_window": 1048576}
+
+
+def test_openai_fetch_includes_documented_limits_and_never_probes_local_runtime_apis(app, monkeypatch):
+    calls = discovery_stub(monkeypatch, [{'id': name} for name in [
+        'gpt-6.1-sol', 'unknown-model', 'gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-terra', 'gpt-6-sol',
+    ]])
+    response = app.test_client().post('/api/plugins/agent/models', json={
+        'url': 'https://api.openai.com/v1', 'model': 'gpt-6.1-sol', 'api_key': 'test-key',
+    })
+    assert response.status_code == 200
+    data = response.json
+    assert data['models'] == sorted(data['models'])
+    assert data['model_limits']['gpt-6.1-sol'] == {
+        'context_window': 1050000, 'max_output_tokens': 128000,
+        'source': 'OpenAI model documentation', 'runtime': False,
+    }
+    assert data['model_limits']['unknown-model'] == {}
+    assert [resource for _, resource, _ in calls] == ['/models']
+
+
+def test_openai_documented_limits_do_not_override_provider_metadata_or_local_context(monkeypatch):
+    discovery_stub(monkeypatch, [{'id': 'gpt-6.1-sol', 'context_length': 32768, 'max_output_tokens': 4096}])
+    for url in ('https://api.openai.com/v1', 'http://localhost:1234/v1'):
+        _, limits = agent.discover_models(agent.configuration({'url': url, 'model': 'gpt-6.1-sol'}))
+        assert limits['gpt-6.1-sol']['context_window'] == 32768
+        assert limits['gpt-6.1-sol']['max_output_tokens'] == 4096
+
+
+def test_documented_openai_max_is_usable_at_run_time_and_enforces_output_limit(monkeypatch):
+    discovery_stub(monkeypatch, [{'id': 'gpt-6.1-sol'}])
+    cfg = agent.configuration({'url': 'https://api.openai.com/v1', 'model': 'gpt-6.1-sol',
+                               'context_auto': True, 'max_tokens': 120000}, validate_budget=False)
+    resolved = agent.resolve_model_limits(cfg)
+    assert resolved['context_window'] == 1050000
+    cfg['max_tokens'] = 128001
+    with pytest.raises(ValueError, match='Max response tokens exceeds'):
+        agent.resolve_model_limits(cfg)
 
 
 def test_native_probe_uses_same_gateway_auth_and_never_autoloads(app, monkeypatch):

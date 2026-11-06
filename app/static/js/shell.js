@@ -531,9 +531,11 @@ async function loadIntegrationPlugins() {
     const names = new Set((data.plugins || []).map(plugin => plugin.name));
     document.documentElement.dataset.ctfdPlugin = names.has('ctfd') ? 'on' : 'off';
     document.documentElement.dataset.ctfrpgPlugin = names.has('ctfrpg') ? 'on' : 'off';
+    document.documentElement.dataset.accessforgePlugin = names.has('accessforge') ? 'on' : 'off';
   } catch {
     document.documentElement.dataset.ctfdPlugin = 'off';
     document.documentElement.dataset.ctfrpgPlugin = 'off';
+    document.documentElement.dataset.accessforgePlugin = 'off';
   }
   document.documentElement.dataset.pluginsReady = 'true';
 }
