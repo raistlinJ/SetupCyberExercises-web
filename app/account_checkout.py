@@ -144,11 +144,26 @@ def remote(connection,method,path,data=None):
     try:
         response=requests.request(method,connection['url']+path,auth=(connection['username'],connection['password']),
                                   json=data,verify=connection['verify_ssl'],timeout=(5,45),allow_redirects=False)
-        result=response.json()
-    except (requests.RequestException,ValueError):
+    except requests.exceptions.SSLError:
+        message=('AccessForge TLS certificate verification failed. For a self-signed certificate, uncheck Verify SSL certificates in Connection, or install a trusted certificate.'
+                 if connection['verify_ssl'] else 'Could not establish TLS with AccessForge. Check its HTTPS URL, port, and TLS configuration.')
+        raise AccessForgeError(message,502) from None
+    except requests.Timeout:
+        raise AccessForgeError('AccessForge timed out. Check that its URL and port are reachable from the SCE-web server.',502) from None
+    except requests.ConnectionError:
+        raise AccessForgeError('Could not connect to AccessForge. Check the hostname, port, and network access from the SCE-web server.',502) from None
+    except requests.RequestException:
         raise AccessForgeError('Could not reach AccessForge. Check its URL and TLS configuration.',502) from None
     if response.status_code in (401,403):
         raise AccessForgeError('AccessForge requires a valid administrator account on its configured Proxmox cluster. Update the connection.',502)
+    if 300<=response.status_code<400:
+        raise AccessForgeError('AccessForge redirected the request. Enter its final HTTPS base URL in Connection.',502)
+    if response.status_code>=500:
+        raise AccessForgeError(f'AccessForge returned HTTP {response.status_code}. Check its application and reverse-proxy logs.',502)
+    try:
+        result=response.json()
+    except ValueError:
+        raise AccessForgeError('AccessForge did not return its checkout API response. Check the base URL and enable account checkout on that server.',502) from None
     if response.status_code != 200 or not isinstance(result,dict):
         message=result.get('error') if isinstance(result,dict) else None
         if response.status_code in (400,404,409,413) and isinstance(message,str) and len(message)<=512:

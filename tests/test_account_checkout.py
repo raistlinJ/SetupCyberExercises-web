@@ -230,3 +230,37 @@ def test_login_operations_reject_unsaved_unknown_accounts(checkout):
         for operation in ['disable-logins','reset-passwords','reenable-logins']:
             assert admin.post('/api/projects/lab/accessforge/'+operation,json={'usernames':['unknown']}).status_code==400
     remote.assert_not_called()
+
+
+@pytest.mark.parametrize('exception,expected',[
+    (requests.exceptions.SSLError('private-password'),'uncheck Verify SSL certificates'),
+    (requests.Timeout('private-password'),'timed out'),
+    (requests.ConnectionError('private-password'),'hostname, port, and network'),
+])
+def test_connection_errors_explain_tls_or_network_failure_without_leaking_details(checkout,exception,expected):
+    _,admin,_=checkout
+    with patch('app.account_checkout.requests.request',side_effect=exception):
+        response=admin.post('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','username':'root@pam','password':'admin-password'})
+    assert response.status_code==502 and expected in response.get_json()['error']
+    assert 'private-password' not in response.get_data(as_text=True)
+
+
+def test_self_signed_connection_uses_explicit_verification_choice(checkout):
+    _,admin,_=checkout
+    with patch('app.account_checkout.requests.request',return_value=reply({'service':'AccessForge','checkout_api':1,'administrator':'root@pam'})) as remote:
+        response=admin.post('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','username':'root@pam','password':'admin-password','verify_ssl':False})
+    assert response.status_code==200 and remote.call_args.kwargs['verify'] is False
+    with patch('app.account_checkout.requests.request',side_effect=requests.exceptions.SSLError('private-password')):
+        response=admin.post('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','username':'root@pam','password':'admin-password','verify_ssl':False})
+    assert 'Could not establish TLS' in response.get_json()['error']
+    assert 'uncheck' not in response.get_json()['error']
+
+
+@pytest.mark.parametrize('status,expected',[(302,'redirected'),(500,'returned HTTP 500'),(502,'returned HTTP 502'),(200,'did not return its checkout API')])
+def test_html_errors_are_not_misreported_as_unreachable_host(checkout,status,expected):
+    _,admin,_=checkout
+    html=requests.Response();html.status_code=status;html._content=b'<html>private internal details</html>'
+    with patch('app.account_checkout.requests.request',return_value=html):
+        response=admin.post('/api/projects/lab/accessforge/connection',json={'url':'https://accessforge.example','username':'root@pam','password':'admin-password'})
+    assert response.status_code==502 and expected in response.get_json()['error']
+    assert 'private internal details' not in response.get_data(as_text=True)

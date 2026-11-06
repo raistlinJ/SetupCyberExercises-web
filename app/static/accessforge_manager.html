@@ -11,7 +11,7 @@
 </head>
 <body class="shell-body manager-page">
 <header class="app-banner"><div class="container-fluid d-flex justify-content-between align-items-center py-2">
-<span class="banner-title">DeployForge</span><div class="d-flex align-items-center gap-3" id="banner-user-region"><span class="small text-white-50">User: <span id="banner-username">…</span></span><button id="banner-logout" type="button" class="btn btn-sm btn-outline-light">Logout</button></div>
+<span class="banner-title">DeployForge</span><div class="d-flex align-items-center gap-3" id="banner-user-region"><span class="small text-white-50">User: <span id="banner-username">…</span></span><div class="dropdown"><button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Menu</button><ul class="dropdown-menu dropdown-menu-end"><li><a class="dropdown-item" href="/" data-act="open-settings">Settings</a></li><li><a class="dropdown-item" href="/static/admin_users.html">Users</a></li><li><hr class="dropdown-divider"></li><li><button id="banner-logout" type="button" class="dropdown-item text-danger">Logout</button></li></ul></div></div>
 </div></header>
 <div class="container-fluid shell-container"><div class="row g-0">
 <aside class="col-12 col-md-3 col-lg-2 shell-sidebar bg-light d-flex flex-column"><div id="sidebar-projects" class="flex-grow-1"></div></aside>
@@ -25,39 +25,86 @@
 <li class="nav-item"><a class="nav-link" data-shell-link href="/static/exports.html">Exports</a></li>
 </ul>
 <div class="card"><div class="card-body">
-<h1 class="h4">Credential checkouts</h1><p class="text-muted">Publish selected project accounts to AccessForge and request their status here. Configure lab secrets, verification, assignments, and releases in AccessForge.</p>
-<p id="af-project" class="fw-semibold">Select a project.</p>
-<details id="af-connection" class="border rounded p-3 mb-3" open>
-<summary class="fw-semibold">AccessForge administrator connection</summary>
-<form id="af-connection-form" class="mt-3">
-<div class="row g-3">
-<div class="col-12"><label class="form-label" for="af-url">AccessForge URL</label><input id="af-url" type="url" class="form-control" placeholder="https://accessforge.example.edu" required></div>
-<div class="col-md-6"><label class="form-label" for="af-username">Administrator username</label><input id="af-username" class="form-control" autocomplete="username" placeholder="root@pam" required></div>
-<div class="col-md-6"><label class="form-label" for="af-password">Administrator password</label><input id="af-password" type="password" class="form-control" autocomplete="current-password" placeholder="Enter password to connect"></div>
-<div class="col-12"><label><input id="af-verify" type="checkbox" class="form-check-input" checked> Verify TLS certificate</label></div>
+<h1 class="visually-hidden">Credential checkouts</h1>
+<div class="manager-table-toolbar mb-2" role="group" aria-label="Table controls">
+  <div class="input-group input-group-sm manager-filter-group">
+    <input id="af-filter" aria-label="Filter rows" type="text" class="form-control" placeholder="Filter rows…" title="Filter rows by text; enable Regex for advanced matching">
+    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" title="Filter options">Options</button>
+    <div class="dropdown-menu p-3 manager-filter-options">
+      <div class="form-check mb-2"><input id="af-filter-selected" class="form-check-input" type="checkbox"><label for="af-filter-selected" class="form-check-label">Show only selected</label></div>
+      <div class="form-check"><input id="af-filter-regex" class="form-check-input" type="checkbox" title="Treat filter as a case-insensitive regular expression"><label for="af-filter-regex" class="form-check-label">Regex</label></div>
+    </div>
+    <button id="af-clear-filter" class="btn btn-outline-secondary" type="button" title="Clear all filters">Clear</button>
+  </div>
+  <div class="manager-table-tools">
+    <button id="af-connection-button" class="btn btn-sm btn-outline-primary" type="button" title="Update AccessForge URL and administrator credentials" data-bs-toggle="modal" data-bs-target="#af-connection">Connection</button>
+    <span id="af-refresh-wrapper" class="d-inline-block" tabindex="0" title="Please authenticate to AccessForge first."><button id="af-refresh" class="btn btn-sm btn-outline-secondary" type="button" disabled>Refresh</button></span>
+    <div class="manager-auto-refresh">
+      <div class="input-group input-group-sm manager-auto-control">
+        <label class="input-group-text" for="af-auto-interval">Auto</label>
+        <select id="af-auto-interval" class="form-select" title="Automatically refresh at an interval (requires a saved connection)">
+          <option value="0">Off</option><option value="15">15s</option><option value="30">30s</option><option value="60">60s</option><option value="300">5m</option>
+        </select>
+      </div>
+      <span id="af-auto-badge" class="badge bg-secondary align-self-center ms-1" title="Auto-refresh status">Off</span>
+    </div>
+    <div class="btn-group btn-group-sm">
+      <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">Columns</button>
+      <ul class="dropdown-menu dropdown-menu-end manager-columns-menu">
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="username" checked><span>Username</span></label></li>
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="status" checked><span>AccessForge status</span></label></li>
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="email" checked><span>Checked out to</span></label></li>
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="checked_out_at" checked><span>Checked out</span></label></li>
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="checkout_ip" checked><span>Checkout IP</span></label></li>
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="relinquished_at" checked><span>Relinquished</span></label></li>
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="relinquished_ip" checked><span>Relinquish IP</span></label></li>
+      </ul>
+    </div>
+  </div>
 </div>
-<p class="small text-muted mt-2">Requires administrator permissions on AccessForge’s configured Proxmox cluster. Connection credentials are encrypted on this server and excluded from exports. Publishing also saves the administrator credential encrypted in AccessForge so it can disable relinquished logins; a dedicated Proxmox API token can be configured there instead.</p>
-<button type="submit" class="btn btn-primary" id="af-save-connection">Test and save connection</button>
-<button type="button" class="btn btn-outline-secondary d-none" id="af-disconnect">Disconnect</button>
-</form></details>
-<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
-<button type="button" class="btn btn-primary" id="af-publish">Publish selected accounts</button>
-<button type="button" class="btn btn-outline-secondary" id="af-refresh">Request status</button>
-<button type="button" class="btn btn-outline-danger" id="af-disable-logins">Disable selected logins</button>
-<button type="button" class="btn btn-outline-primary" id="af-reset-passwords">Reset selected passwords</button>
-<button type="button" class="btn btn-success" id="af-reenable-logins">Re-enable selected logins</button>
-<a id="af-admin-link" class="btn btn-outline-primary d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
-<a id="af-student-link" class="btn btn-outline-secondary d-none" target="_blank" rel="noopener noreferrer">Student checkout page</a>
+<div id="af-filter-error" class="text-danger small d-none">Invalid regular expression</div>
+<div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3">
+  <div class="btn-group btn-group-sm"><button id="af-accounts-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" disabled>Accounts</button><ul class="dropdown-menu">
+    <li><button type="button" class="dropdown-item" id="af-publish" disabled>Publish selected accounts</button></li>
+    <li><hr class="dropdown-divider"></li>
+    <li><button type="button" class="dropdown-item text-danger" id="af-disable-logins" disabled>Disable selected logins</button></li>
+    <li><button type="button" class="dropdown-item" id="af-reset-passwords" disabled>Reset selected passwords</button></li>
+    <li><button type="button" class="dropdown-item" id="af-reenable-logins" disabled>Re-enable selected logins</button></li>
+  </ul></div>
+  <button id="af-select-visible" class="btn btn-sm btn-outline-secondary" type="button">Select visible</button>
+  <button id="af-clear-selection" class="btn btn-sm btn-outline-secondary" type="button">Clear selection</button>
+  <a id="af-admin-link" class="btn btn-sm btn-outline-primary ms-auto d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
+  <a id="af-student-link" class="btn btn-sm btn-outline-secondary d-none" target="_blank" rel="noopener noreferrer">Student checkout page</a>
 </div>
+<p id="af-project" class="fw-semibold mb-1">Select a project.</p>
 <div id="af-status" role="status" aria-live="polite" class="small mb-2"></div>
 <p id="af-snapshot" class="small text-muted">No status requested.</p>
-<label class="form-label" for="af-filter">Filter accounts</label><input id="af-filter" class="form-control mb-2" type="search" placeholder="Username or assigned email">
-<div class="table-responsive" style="max-height:28rem; overflow:auto"><table class="table table-sm align-middle"><thead><tr><th><input id="af-select-all" type="checkbox" class="form-check-input" aria-label="Select visible accounts"></th><th>Username</th><th>AccessForge status</th><th>Checked out to</th><th>Checked out</th><th>Checkout IP</th><th>Relinquished</th><th>Relinquish IP</th></tr></thead><tbody id="af-accounts"><tr><td colspan="8" class="text-muted">Select a project.</td></tr></tbody></table></div>
+<div class="table-responsive" style="max-height:28rem; overflow:auto"><table id="af-table" class="table table-sm align-middle"><thead><tr><th><input id="af-select-all" type="checkbox" class="form-check-input" aria-label="Select visible accounts"></th><th>Username</th><th>AccessForge status</th><th>Checked out to</th><th>Checked out</th><th>Checkout IP</th><th>Relinquished</th><th>Relinquish IP</th></tr></thead><tbody id="af-accounts"><tr><td colspan="8" class="text-muted">Select a project.</td></tr></tbody></table></div>
 <p class="small text-muted mb-0">Publishing copies the selected credentials; it does not enable student checkout or change AccessForge policy. Relinquished accounts stay disabled. Update their passwords in Configuration, use Reset selected passwords to apply the saved list, then Re-enable selected logins when ready. Password resets keep logins disabled. Provision accounts before publishing.</p>
 </div></div>
 </main></div></div>
+<div class="modal fade" id="af-connection" tabindex="-1" aria-labelledby="af-connection-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content">
+<form id="af-connection-form">
+  <div class="modal-header"><h5 id="af-connection-title" class="modal-title">AccessForge Access</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+  <div class="modal-body">
+    <div class="mb-3"><label class="form-label" for="af-url">AccessForge URL</label><input id="af-url" type="url" class="form-control" placeholder="https://accessforge.example.edu" required></div>
+    <div class="row g-2 mb-3">
+      <div class="col-md-6"><label class="form-label" for="af-username">Username</label><input id="af-username" class="form-control" autocomplete="username" placeholder="root@pam" required></div>
+      <div class="col-md-6"><label class="form-label" for="af-password">Password</label><div class="input-group"><input id="af-password" type="password" class="form-control" autocomplete="current-password"><button id="af-show-password" class="btn btn-outline-secondary" type="button" aria-label="Show password" title="Show password" aria-pressed="false">&#x1F576;&#xFE0E;</button></div></div>
+    </div>
+    <div class="form-check mb-3"><input id="af-verify" type="checkbox" class="form-check-input" checked><label for="af-verify" class="form-check-label">Verify SSL certificates</label></div>
+    <p class="small text-muted">Requires an administrator on AccessForge’s configured Proxmox cluster. Save tests the connection and stores credentials encrypted for your user and this project, excluded from exports.</p>
+    <p class="small text-muted mb-0">Publishing also saves the administrator credential encrypted in AccessForge so it can disable relinquished logins. A dedicated Proxmox API token can be configured there instead.</p>
+  </div>
+  <div class="modal-footer">
+    <div id="af-connection-feedback" class="me-auto small" role="status" aria-live="polite"></div>
+    <button type="button" class="btn btn-outline-danger d-none" id="af-disconnect">Disconnect</button>
+    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
+    <button type="submit" class="btn btn-primary" id="af-save-connection">Save</button>
+  </div>
+</form></div></div></div>
 <script src="/static/js/auth.js"></script>
 <script src="/static/js/shell.js?v=20261105-accessforge"></script>
 <script src="/static/js/creds.js"></script>
-<script src="/static/js/accessforge_manager.js?v=20261105-disabled-logins"></script>
+<script src="/static/js/accessforge_manager.js?v=20261105-manager-controls"></script>
 </body></html>
