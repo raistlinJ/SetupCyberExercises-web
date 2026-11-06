@@ -33,7 +33,7 @@
     } catch { /* Server persistence does not require browser storage. */ }
 
     function parts(key) {
-      if (scope === 'ctfrpg') {
+      if (scope === 'ctfrpg' || scope === 'accessforge') {
         const [pid, row] = JSON.parse(key);
         return {pid: String(pid), row};
       }
@@ -43,7 +43,7 @@
       return {pid: key.slice(0, index), row: key.slice(index + 1)};
     }
     function fullKey(pid, row) {
-      return scope === 'ctfrpg' ? JSON.stringify([pid, row]) : `${pid}${scope === 'vm' ? '|' : ':'}${row}`;
+      return (scope === 'ctfrpg' || scope === 'accessforge') ? JSON.stringify([pid, row]) : `${pid}${scope === 'vm' ? '|' : ':'}${row}`;
     }
     const get = key => assignments.get(String(key)) || [];
     function replaceProject(pid, rows) {

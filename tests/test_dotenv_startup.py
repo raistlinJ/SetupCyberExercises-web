@@ -18,6 +18,7 @@ def env_file(monkeypatch, tmp_path):
     monkeypatch.delenv("AGENT_PLUGIN_ENABLE", raising=False)
     monkeypatch.delenv("CTFD_PLUGIN_ENABLE", raising=False)
     monkeypatch.delenv("CTFRPG_PLUGIN_ENABLE", raising=False)
+    monkeypatch.delenv("ACCESSFORGE_PLUGIN_ENABLE", raising=False)
     monkeypatch.delenv("ORCHESTRATION_PERMISSIONS_ENABLE", raising=False)
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.delenv("PORT", raising=False)

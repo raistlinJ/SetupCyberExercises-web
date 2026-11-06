@@ -6,6 +6,7 @@
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="/static/css/shell.css?v=20261105-accessforge" rel="stylesheet">
 <link href="/static/css/manager_controls.css?v=20261030-unified" rel="stylesheet">
+<link href="/static/css/row_tags.css?v=20261029-tag-icons" rel="stylesheet">
 <link rel="icon" href="/static/favicon.ico">
 <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </head>
@@ -33,6 +34,7 @@
     <div class="dropdown-menu p-3 manager-filter-options">
       <div class="form-check mb-2"><input id="af-filter-selected" class="form-check-input" type="checkbox"><label for="af-filter-selected" class="form-check-label">Show only selected</label></div>
       <div class="form-check"><input id="af-filter-regex" class="form-check-input" type="checkbox" title="Treat filter as a case-insensitive regular expression"><label for="af-filter-regex" class="form-check-label">Regex</label></div>
+      <div id="af-tag-filters"></div>
     </div>
     <button id="af-clear-filter" class="btn btn-outline-secondary" type="button" title="Clear all filters">Clear</button>
   </div>
@@ -53,34 +55,34 @@
       <ul class="dropdown-menu dropdown-menu-end manager-columns-menu">
         <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="username" checked><span>Username</span></label></li>
         <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="status" checked><span>AccessForge status</span></label></li>
+        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="name" checked><span>Name</span></label></li>
         <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="email" checked><span>Checked out to</span></label></li>
         <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="checked_out_at" checked><span>Checked out</span></label></li>
         <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="checkout_ip" checked><span>Checkout IP</span></label></li>
         <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="relinquished_at" checked><span>Relinquished</span></label></li>
-        <li><label class="dropdown-item d-flex align-items-center gap-2"><input class="form-check-input m-0 af-column" type="checkbox" value="relinquished_ip" checked><span>Relinquish IP</span></label></li>
       </ul>
     </div>
   </div>
 </div>
 <div id="af-filter-error" class="text-danger small d-none">Invalid regular expression</div>
+<div id="af-tag-notice" class="row-tag-notice d-none mb-2" role="status"></div>
+<div id="af-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status" aria-live="polite" aria-atomic="true"></div>
 <div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3">
+  <div id="af-tag-assignment" class="dropdown"></div>
   <div class="btn-group btn-group-sm"><button id="af-accounts-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" disabled>Accounts</button><ul class="dropdown-menu">
-    <li><button type="button" class="dropdown-item" id="af-publish" disabled>Publish selected accounts</button></li>
-    <li><hr class="dropdown-divider"></li>
-    <li><button type="button" class="dropdown-item text-danger" id="af-disable-logins" disabled>Disable selected logins</button></li>
-    <li><button type="button" class="dropdown-item" id="af-reset-passwords" disabled>Reset selected passwords</button></li>
-    <li><button type="button" class="dropdown-item" id="af-reenable-logins" disabled>Re-enable selected logins</button></li>
+    <li><button type="button" class="dropdown-item" id="af-reenable-logins" title="Enable selected prepared logins after applying password changes in VM Manager" disabled>Enable</button></li>
+    <li><button type="button" class="dropdown-item text-danger" id="af-relinquish" title="Release selected student assignments and disable their logins" disabled>Relinquish</button></li>
+    <li><button type="button" class="dropdown-item text-danger" id="af-disable-logins" title="Disable selected unassigned logins" disabled>Disable</button></li>
   </ul></div>
-  <button id="af-select-visible" class="btn btn-sm btn-outline-secondary" type="button">Select visible</button>
-  <button id="af-clear-selection" class="btn btn-sm btn-outline-secondary" type="button">Clear selection</button>
-  <a id="af-admin-link" class="btn btn-sm btn-outline-primary ms-auto d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
+  <button id="af-checkout-settings" class="btn btn-sm btn-outline-primary ms-auto" type="button" disabled>Checkout settings</button>
+  <a id="af-admin-link" class="btn btn-sm btn-outline-primary d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
   <a id="af-student-link" class="btn btn-sm btn-outline-secondary d-none" target="_blank" rel="noopener noreferrer">Student checkout page</a>
 </div>
 <p id="af-project" class="fw-semibold mb-1">Select a project.</p>
 <div id="af-status" role="status" aria-live="polite" class="small mb-2"></div>
 <p id="af-snapshot" class="small text-muted">No status requested.</p>
-<div class="table-responsive" style="max-height:28rem; overflow:auto"><table id="af-table" class="table table-sm align-middle"><thead><tr><th><input id="af-select-all" type="checkbox" class="form-check-input" aria-label="Select visible accounts"></th><th>Username</th><th>AccessForge status</th><th>Checked out to</th><th>Checked out</th><th>Checkout IP</th><th>Relinquished</th><th>Relinquish IP</th></tr></thead><tbody id="af-accounts"><tr><td colspan="8" class="text-muted">Select a project.</td></tr></tbody></table></div>
-<p class="small text-muted mb-0">Publishing copies the selected credentials; it does not enable student checkout or change AccessForge policy. Relinquished accounts stay disabled. Update their passwords in Configuration, use Reset selected passwords to apply the saved list, then Re-enable selected logins when ready. Password resets keep logins disabled. Provision accounts before publishing.</p>
+<div class="table-responsive" style="max-height:28rem; overflow:auto"><table id="af-table" class="table table-sm align-middle"><thead><tr><th><input id="af-select-all" type="checkbox" class="form-check-input" aria-label="Select visible accounts"></th><th>Username</th><th>AccessForge status</th><th>Name</th><th>Checked out to</th><th>Checked out</th><th>Checkout IP</th><th>Relinquished</th></tr></thead><tbody id="af-accounts"><tr><td colspan="8" class="text-muted">Select a project.</td></tr></tbody></table></div>
+<p class="small text-muted mb-0">Use Configuration → Credentials → On-demand (checkout) to make accounts eligible. Use Checkout settings for the lab secret and email verification. Relinquish clears the student assignment and disables the login. To reuse an account, update its saved password in Configuration, apply it through VM Manager → Users &amp; Access → Set Credentials to Current List, then choose Enable here when ready. Disable applies to unassigned accounts.</p>
 </div></div>
 </main></div></div>
 <div class="modal fade" id="af-connection" tabindex="-1" aria-labelledby="af-connection-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content">
@@ -93,7 +95,9 @@
       <div class="col-md-6"><label class="form-label" for="af-password">Password</label><div class="input-group"><input id="af-password" type="password" class="form-control" autocomplete="current-password"><button id="af-show-password" class="btn btn-outline-secondary" type="button" aria-label="Show password" title="Show password" aria-pressed="false">&#x1F576;&#xFE0E;</button></div></div>
     </div>
     <div class="form-check mb-3"><input id="af-verify" type="checkbox" class="form-check-input" checked><label for="af-verify" class="form-check-label">Verify SSL certificates</label></div>
-    <p class="small text-muted">Requires an administrator on AccessForge’s configured Proxmox cluster. Save tests the connection and stores credentials encrypted for your user and this project, excluded from exports.</p>
+    <p class="form-text">Usernames without a realm use @pam. Include @realm to use a different Proxmox realm.</p>
+    <div class="form-check mb-2"><input id="af-save-creds" type="checkbox" class="form-check-input"><label for="af-save-creds" class="form-check-label" title="Save the connection credentials encrypted on the server for your user and this project.">Save credentials</label></div>
+    <p class="small text-muted">If checked, credentials are saved encrypted on the server for your user and this project, excluded from exports. If unchecked, credentials remain only in this browser tab’s session. Save tests the connection; an administrator on AccessForge’s configured Proxmox cluster is required.</p>
     <p class="small text-muted mb-0">Publishing also saves the administrator credential encrypted in AccessForge so it can disable relinquished logins. A dedicated Proxmox API token can be configured there instead.</p>
   </div>
   <div class="modal-footer">
@@ -103,8 +107,37 @@
     <button type="submit" class="btn btn-primary" id="af-save-connection">Save</button>
   </div>
 </form></div></div></div>
+<div class="modal fade" id="af-checkout-modal" tabindex="-1" aria-labelledby="af-checkout-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content">
+<form id="af-checkout-form">
+  <div class="modal-header"><h5 id="af-checkout-title" class="modal-title">Checkout settings</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+  <div class="modal-body">
+    <div class="form-check mb-3"><input id="af-checkout-enabled" class="form-check-input" type="checkbox"><label for="af-checkout-enabled" class="form-check-label">Enable student checkout</label></div>
+    <div class="form-check mb-3"><input id="af-checkout-verify" class="form-check-input" type="checkbox"><label for="af-checkout-verify" class="form-check-label">Require email verification</label></div>
+    <label for="af-checkout-secret" class="form-label">Lab secret</label>
+    <input id="af-checkout-secret" type="password" class="form-control" autocomplete="new-password" minlength="8" maxlength="256" placeholder="Set a lab secret (8+ characters)">
+    <p id="af-checkout-secret-state" class="form-text"></p>
+    <p id="af-checkout-policy-note" class="small text-muted mb-0"></p>
+  </div>
+  <div class="modal-footer">
+    <div id="af-checkout-feedback" class="me-auto small" role="status" aria-live="polite"></div>
+    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
+    <button id="af-checkout-save" type="submit" class="btn btn-primary">Save checkout settings</button>
+  </div>
+</form></div></div></div>
+<div class="modal fade" id="af-refresh-summary" tabindex="-1" aria-labelledby="af-refresh-summary-title" aria-hidden="true"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+  <div class="modal-header"><h5 id="af-refresh-summary-title" class="modal-title">AccessForge refresh summary</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+  <div class="modal-body">
+    <p id="af-refresh-project" class="fw-semibold mb-1"></p>
+    <p id="af-refresh-totals" class="small mb-3" role="status"></p>
+    <div class="alert alert-success small">Checkout marks, student assignments, login status, and checkout history were saved to SCE-web’s shared snapshot. Configuration, VM Manager, CTFd Manager, and CTF-RPG Manager were notified to update; returning tabs load the snapshot when shown.</div>
+    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th scope="col">Account</th><th scope="col">Sync result</th><th scope="col">Checkout mark</th><th scope="col">Student</th><th scope="col">Login</th><th scope="col">Changes</th></tr></thead><tbody id="af-refresh-results"></tbody></table></div>
+  </div>
+  <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div>
+</div></div></div>
 <script src="/static/js/auth.js"></script>
 <script src="/static/js/shell.js?v=20261105-accessforge"></script>
 <script src="/static/js/creds.js"></script>
-<script src="/static/js/accessforge_manager.js?v=20261105-manager-controls"></script>
+<script src="/static/js/row_tags.js?v=20261106-accessforge-tags"></script>
+<script src="/static/js/checkout_state.js?v=20261106-checkout-truth"></script>
+<script src="/static/js/accessforge_manager.js?v=20261106-checkout-label"></script>
 </body></html>

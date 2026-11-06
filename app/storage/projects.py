@@ -355,7 +355,7 @@ class VMConfig:
     vm_pass: Optional[str] = None
 
 
-ROW_TAG_SCOPES = {"vm", "ctfd", "ctfrpg"}
+ROW_TAG_SCOPES = {"vm", "ctfd", "ctfrpg", "accessforge"}
 
 
 def sanitize_row_tags(value: Any) -> Dict[str, Dict[str, List[int]]]:

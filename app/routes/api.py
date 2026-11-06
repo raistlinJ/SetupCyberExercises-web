@@ -42,6 +42,7 @@ from ..connectors.ctfd import CTFdClient, CTFdError
 from ..connectors.ctfrpg import CTFRPGClient, CTFRPGError
 from ..storage.projects import (
     ProjectStore,
+    ROW_TAG_SCOPES,
     Project,
     VMConfig,
     sanitize_start_command_steps,
@@ -14453,7 +14454,7 @@ def update_project(pid: str):
 @api_bp.route("/projects/<pid>/row-tags/<scope>", methods=["GET", "PATCH"])
 @_secure_route()
 def project_row_tags(pid: str, scope: str):
-    if scope not in {"vm", "ctfd", "ctfrpg"}:
+    if scope not in ROW_TAG_SCOPES:
         return jsonify({"error": "Unknown row tag scope"}), 400
     store = _store()
     project = store.get(pid)

@@ -50,6 +50,18 @@ function ctfdInitRowTags() {
     renderCtfdTable(PROJ);
   });
 }
+function ctfdCheckoutPids() {
+  return Array.isArray(CTFD_SELECTED_PIDS)&&CTFD_SELECTED_PIDS.length>1?CTFD_SELECTED_PIDS.map(String):(PROJ?[String(PROJ.id)]:[]);
+}
+function ctfdCheckoutIcon(pid,username,project) {
+  const source=project||(CTFD_ALL_PROJECTS||[]).find(item=>String(item.id)===String(pid))||(String(PROJ?.id)===String(pid)?PROJ:null);
+  const icon=window.CheckoutState?.markedIcon(source?.checkout,username)||'';
+  return icon?`<span class="ms-1">${icon}</span>`:'';
+}
+function ctfdApplyCheckoutSnapshot(pid,checkout) {
+  for(const project of new Set([PROJ,...(CTFD_ALL_PROJECTS||[])]))if(project&&String(project.id)===pid)project.checkout=checkout;
+  if(ctfdCheckoutPids().includes(pid))renderCtfdTable(PROJ);
+}
 let CTFD_SHOW_PASSWORDS = false;
 // Gate to ensure no data loads occur until the user explicitly acts
 let CTFD_ALLOW_LOAD = false;
@@ -4433,7 +4445,7 @@ function renderCtfdTable(proj) {
         `<div class=\"d-flex align-items-center\">` +
         `<div class=\"flex-grow-1\">` +
         `<input type=\"checkbox\" class=\"ctfd-cred-chk form-check-input me-2\" data-index=\"${idx}\" ${checked} />` +
-        `${credText}<span class="row-tag-badges">${ctfdRowTags().badges(ctfdTagKey(r))}</span>` +
+        `${credText}${ctfdCheckoutIcon(PROJ?.id,r.uname,PROJ)}<span class="row-tag-badges">${ctfdRowTags().badges(ctfdTagKey(r))}</span>` +
         `</div>` +
         `<div class=\"ms-2\">${existIcon}</div>` +
         `</div>` +
@@ -4447,8 +4459,10 @@ function renderCtfdTable(proj) {
     }
   }
   html += '</tbody></table>';
+  host.querySelectorAll?.('.credential-checkout-state').forEach(icon=>window.bootstrap?.Tooltip.getInstance(icon)?.dispose());
   host.innerHTML = html;
   ctfdEnsureScrollPersistence();
+  try { if(typeof initBootstrapTooltips==='function')initBootstrapTooltips(host); } catch {}
   // Snapshot latest single-project render
   try { ctfdCacheSnapshot('single'); } catch { }
 
@@ -4657,7 +4671,7 @@ function ctfdRenderTableMerged() {
       if (CTFD_COLS.project) html += `<td>${escHtml(r._proj?.name || '')}<div class=\"small text-muted\">${escHtml(r._proj?.tag || '')}</div></td>`;
       if (CTFD_COLS.cred) html += `<td><div class=\"d-flex align-items-center\"><div class=\"flex-grow-1\">` +
         `<input type=\"checkbox\" class=\"ctfd-cred-chk-multi form-check-input me-2\" data-key=\"${key}\" ${checked} />` +
-        `${credText}<span class="row-tag-badges">${ctfdRowTags().badges(ctfdTagKey(r))}</span></div><div class=\"ms-2\">${existIcon}</div></div></td>`;
+        `${credText}${ctfdCheckoutIcon(r.pid,r.uname,r._proj)}<span class="row-tag-badges">${ctfdRowTags().badges(ctfdTagKey(r))}</span></div><div class=\"ms-2\">${existIcon}</div></div></td>`;
       if (CTFD_COLS.team) html += `<td>${teamHtml}</td>`;
       if (CTFD_COLS.user_points) html += `<td>${userPts}</td>`;
       if (CTFD_COLS.team_points) html += `<td>${teamPts}</td>`;
@@ -4667,6 +4681,7 @@ function ctfdRenderTableMerged() {
     }
   }
   html += '</tbody></table>';
+  host.querySelectorAll?.('.credential-checkout-state').forEach(icon=>window.bootstrap?.Tooltip.getInstance(icon)?.dispose());
   host.innerHTML = html;
   ctfdEnsureScrollPersistence();
   // Initialize tooltips for any rendered elements
@@ -5462,6 +5477,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   try { await shell.initShell('vm'); } catch (e) {
     try { shell.logError(`CTFd: page initialization failed: ${e?.message || e}`); } catch { }
   } // reuse same sidebar population logic
+  window.CheckoutState?.subscribe(ctfdApplyCheckoutSnapshot,ctfdCheckoutPids);
   ctfdInitRowTags();
   // First try to restore previous in-session view so page switch won't blank the table
   let restoredSnapshot = false;
@@ -5472,6 +5488,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateCtfdControlsEnabled();
     }
   } catch { }
+  ctfdCheckoutPids().forEach(pid=>window.CheckoutState?.refresh(pid));
   try { ctfdUpdateServerNavLinkForCurrent(); } catch { }
   wireCtfdFilter();
   wireCtfdVerifySsl();

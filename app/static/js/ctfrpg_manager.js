@@ -122,6 +122,15 @@
     return CTFRPG_Table.sortRows(filtered.rows, state.sort, state.userSortMode, state.teamSortMode);
   }
 
+  function checkoutIcon(project,username) {
+    const icon=window.CheckoutState?.markedIcon(project.checkout,username)||'';
+    return icon?`<span class="ms-1">${icon}</span>`:'';
+  }
+  function applyCheckoutSnapshot(pid,checkout) {
+    const project=state.projects.find(item=>item.id===pid);
+    if(project)project.checkout=checkout;
+    if(state.selectedProjects.has(pid))render();
+  }
   function render() {
     const visible = credentialsRows();
     const tbody = $('users-body');
@@ -137,13 +146,14 @@
       const mode = button.dataset.mode === 'user' ? state.userSortMode : state.teamSortMode;
       button.title = `Toggle ${button.dataset.mode} sort (currently ${mode})`;
     });
+    tbody.querySelectorAll('.credential-checkout-state').forEach(icon=>window.bootstrap?.Tooltip.getInstance(icon)?.dispose());
     tbody.innerHTML = visible.length ? visible.map(({project, username, user, teamName, teamRank, teamPoints, userRank, userPoints, completed, state: userState}) => {
       const key = keyFor(project.id, username);
       const badge = user ? (user.exists ? (user.role === 'admin' ? 'warning' : 'success') : 'secondary') : 'light';
       const cell = (column, value) => `<td data-col="${column}" ${state.columns[column] ? '' : 'class="d-none"'}>${value}</td>`;
       const rankLabel = rank => rank !== null ? ` <span class="text-muted">(#${escapeHtml(rank)})</span>` : '';
       return `<tr>${cell('project', escapeHtml(project.name) + (project.tag ? `<div class="small text-muted">${escapeHtml(project.tag)}</div>` : ''))}`
-        + cell('user', `<input class="form-check-input user-check me-2" type="checkbox" data-key="${escapeHtml(key)}" aria-label="Select ${escapeHtml(username)}" ${state.selectedUsers.has(key) ? 'checked' : ''}><code>${escapeHtml(username)}</code>${rankLabel(userRank)}<span class="row-tag-badges">${rowTags.badges(key)}</span>`)
+        + cell('user', `<input class="form-check-input user-check me-2" type="checkbox" data-key="${escapeHtml(key)}" aria-label="Select ${escapeHtml(username)}" ${state.selectedUsers.has(key) ? 'checked' : ''}><code>${escapeHtml(username)}</code>${rankLabel(userRank)}${checkoutIcon(project,username)}<span class="row-tag-badges">${rowTags.badges(key)}</span>`)
         + cell('team', teamName ? `${escapeHtml(teamName)}${rankLabel(teamRank)}` : 'n/a')
         + cell('user_points', userPoints ?? 'n/a')
         + cell('team_points', teamPoints ?? 'n/a')
@@ -157,22 +167,20 @@
       else state.selectedUsers.delete(input.dataset.key);
       if (state.selectedOnly) render(); else updateSelection();
     }));
+    if(window.bootstrap?.Tooltip)tbody.querySelectorAll('.credential-checkout-state').forEach(icon=>window.bootstrap.Tooltip.getOrCreateInstance(icon));
     updateSelection();
   }
 
   function updateSelection() {
     rowTags.refreshControls();
     const visible = credentialsRows().map(({project, username}) => keyFor(project.id, username));
-    let total = 0;
     $('project-selection-count').innerHTML = state.projects.filter(project => state.selectedProjects.has(project.id)).map(project => {
       const count = (project.credentials || []).filter(credential => {
         const username = String(credential.username || '').trim();
         return username && state.selectedUsers.has(keyFor(project.id, username));
       }).length;
-      total += count;
       return `<span class="border rounded px-2 py-1">${escapeHtml(project.name || project.id)}: <strong>${count} selected</strong></span>`;
     }).join('');
-    $('selected-count').textContent = `${total} selected`;
     $('select-all').checked = !!visible.length && visible.every(key => state.selectedUsers.has(key));
     $('select-all').indeterminate = visible.some(key => state.selectedUsers.has(key)) && !$('select-all').checked;
   }
@@ -362,6 +370,7 @@
   }
 
   document.addEventListener('DOMContentLoaded', async () => {
+    window.CheckoutState?.subscribe(applyCheckoutSnapshot,()=>[...state.selectedProjects]);
     rowTags.mount({
       filterHost: $('ctfrpg-tag-filters'), assignmentHost: $('ctfrpg-tag-assignment'), notice: $('ctfrpg-tag-notice'),
       getProjectIds: () => [...state.selectedProjects],

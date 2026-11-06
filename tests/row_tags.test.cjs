@@ -252,3 +252,58 @@ test('an older server without the tag route explains that a backend restart is r
   assert.equal(await tags.loadProjects(['one']), false);
   assert.match(elements.get('[data-tag-storage]').textContent, /Restart DeployForge, then reload this page/);
 });
+
+for (const multi of [false,true]) {
+  test(`VM ${multi?'merged':'single'} checkout icons sync without changing selection or VM inventory`,async()=>{
+    const {context,run,elements}=harness();
+    context.document.documentElement={dataset:{accessforgePlugin:'on'}};
+    run(read('checkout_state'));run(read('vm_manager'));
+    run(`PROJ={id:'one',name:'First',instances:2,tag:'-',vms:[{name:'web'}],credentials:[{username:'alice'},{username:'bob'}],checkout:{accounts:{alice:{eligible:true},bob:{eligible:false}}}};
+      ALL_PROJECTS=[PROJ];SELECTED_PIDS=${multi?"['one','two']":"['one']"};
+      SELECTED_ROWS=new Set(['one|1|web-1']);
+      window.__MERGED_ROWS__=[{pid:'one',index:1,vmName:'web-1',uname:'alice',project:'First'},{pid:'one',index:2,vmName:'web-2',uname:'bob',project:'First'}];
+      ${multi?'renderMergedVmTable(window.__MERGED_ROWS__)':'renderVmTable(PROJ)'};`);
+    let html=elements.get('vm-table').innerHTML;
+    assert.match(html,/data-checkout-marked="true"/);assert.doesNotMatch(html,/data-checkout-marked="false"/);
+    assert.doesNotMatch(html,/<th[^>]*>Checked out to/);
+    run(`vmApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:false,login_disabled:true}}});`);
+    html=elements.get('vm-table').innerHTML;
+    assert.doesNotMatch(html,/credential-checkout-state/);
+    assert.equal(run('SELECTED_ROWS.size'),1);assert.match(html,/web-1/);assert.match(html,/web-2/);
+    run("vmApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:true,login_disabled:true}}});VM_COLS.cred=false;VM_COLS.name=false;vmRenderTaggedView()");
+    assert.match(elements.get('vm-table').innerHTML,/Marked for checkout · Login disabled/);
+  });
+}
+
+for(const multi of [false,true]){
+  test(`CTFd ${multi?'merged':'single'} checkout sync updates only matching project icons and preserves scores and selections`,()=>{
+    const {context,run,elements}=harness();context.document.documentElement={dataset:{accessforgePlugin:'on'}};
+    run(read('checkout_state'));run(read('ctfd_manager'));
+    run(`PROJ={id:'one',name:'First',instances:1,credentials:[{username:'alice'}],checkout:{accounts:{alice:{eligible:true}}}};
+      CTFD_ALL_PROJECTS=[PROJ,{id:'two',name:'Second',instances:1,credentials:[{username:'alice'}],checkout:{accounts:{alice:{eligible:false}}}}];
+      CTFD_SELECTED_PIDS=${multi?"['one','two']":"null"};CTFD_SELECTED_INDICES=new Set([1]);CTFD_SELECTED_KEYS=new Set(['one:1']);
+      sessionStorage.setItem('toolhub.ctfd.mgr.selectedKeys.v1','["one:1"]');
+      CTFD_USER_META[ctfdMetaKey('one','alice')]={exists:true,user_points:77};renderCtfdTable(PROJ);`);
+    assert.equal((elements.get('ctfd-table').innerHTML.match(/credential-checkout-state/g)||[]).length,1);
+    run("ctfdApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:false}}});");
+    assert.doesNotMatch(elements.get('ctfd-table').innerHTML,/credential-checkout-state/);
+    assert.equal(run("CTFD_USER_META[ctfdMetaKey('one','alice')].user_points"),77);
+    assert.equal(run(multi?'CTFD_SELECTED_KEYS.size':'CTFD_SELECTED_INDICES.size'),1);
+    run("ctfdApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:true,login_disabled:true}}});");
+    assert.match(elements.get('ctfd-table').innerHTML,/Marked for checkout · Login disabled/);
+  });
+}
+test('CTF-RPG checkout sync preserves selected users and scores and only marks the matching project account',()=>{
+  const {context,run,elements}=harness();context.document.documentElement={dataset:{accessforgePlugin:'on'}};
+  run(read('checkout_state'));run(read('ctfrpg_table'));
+  run(read('ctfrpg_manager').replace("  document.addEventListener('DOMContentLoaded', async () => {", "  window.checkoutTest={state,render,applyCheckoutSnapshot};\n  document.addEventListener('DOMContentLoaded', async () => {"));
+  run(`checkoutTest.state.projects=[{id:'one',name:'First',credentials:[{username:'alice'}],checkout:{accounts:{alice:{eligible:true}}}},{id:'two',name:'Second',credentials:[{username:'alice'}],checkout:{accounts:{alice:{eligible:false}}}}];
+    checkoutTest.state.selectedProjects=new Set(['one','two']);checkoutTest.state.selectedUsers=new Set(['["one","alice"]']);
+    checkoutTest.state.rows=[{id:'one',users:[{username:'alice',exists:true,score:77}]}];checkoutTest.render();`);
+  assert.equal((elements.get('users-body').innerHTML.match(/credential-checkout-state/g)||[]).length,1);
+  run("checkoutTest.applyCheckoutSnapshot('one',{accounts:{alice:{eligible:false}}});");
+  assert.doesNotMatch(elements.get('users-body').innerHTML,/credential-checkout-state/);
+  assert.equal(run('checkoutTest.state.selectedUsers.size'),1);assert.equal(run('checkoutTest.state.rows[0].users[0].score'),77);
+  run("checkoutTest.applyCheckoutSnapshot('two',{accounts:{alice:{eligible:true,email:'student@example.edu'}}});");
+  assert.match(elements.get('users-body').innerHTML,/student@example.edu/);
+});

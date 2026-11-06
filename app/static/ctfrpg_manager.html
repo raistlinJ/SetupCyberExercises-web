@@ -91,6 +91,7 @@
         </div>
       </div>
     <span id="filter-error" class="text-danger small d-none">Invalid regular expression</span>
+      <div id="project-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status" aria-live="polite" aria-atomic="true" aria-label="Selected users per project"></div>
       <div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3" id="ctfrpg-actions-bar">
         <div id="ctfrpg-tag-assignment" class="dropdown"></div>
         <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Users</button><ul class="dropdown-menu"><li><button id="create-users" class="dropdown-item" type="button">Create / update</button></li><li><hr class="dropdown-divider"></li>
@@ -98,7 +99,6 @@
 
         <button id="select-visible" class="btn btn-sm btn-outline-secondary" type="button">Select visible</button>
         <button id="clear-selection" class="btn btn-sm btn-outline-secondary" type="button">Clear selection</button>
-        <span id="selected-count" class="small text-muted">0 selected</span>
         <div class="d-flex align-items-center gap-2 flex-wrap ms-auto"><label class="small text-muted text-nowrap" for="hero">Character for new users</label><select id="hero" class="form-select form-select-sm" style="width:170px"><option value="">Game default</option></select></div>
       </div>
       <ul class="nav nav-tabs" role="tablist">
@@ -110,7 +110,6 @@
           <div id="status" class="small mb-3 text-muted" role="status" aria-live="polite">Select a project to get started.</div>
           <div id="ctfrpg-selected-filter-notice" class="small text-warning-emphasis d-none mb-2" role="status">Showing only selected users · Clear to show all</div>
           <div id="ctfrpg-tag-notice" class="row-tag-notice d-none mb-2" role="status"></div>
-          <div id="project-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status" aria-live="polite" aria-label="Selected users per project"></div>
       <div class="table-responsive data-scrollbox"><table class="table table-sm table-hover align-middle"><thead><tr>
         <th scope="col" data-col="project"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="project">Project<span class="sort-icon"></span></button></th>
         <th scope="col" data-col="user"><input id="select-all" class="form-check-input me-2" type="checkbox" aria-label="Select visible users"><button class="btn btn-sm btn-link text-body text-decoration-none fw-semibold p-0 table-sort" type="button" data-sort="user">User<span class="sort-icon"></span></button><button class="btn btn-sm btn-link p-0 ms-2 sort-mode" type="button" data-mode="user" title="Toggle User sort between name and rank" aria-label="Toggle User sort between name and rank">⇅</button></th>
@@ -147,6 +146,7 @@
 <script src="/static/js/ctfrpg_audio.js?v=20261019-notifications"></script>
 <script src="/static/js/ctfrpg_table.js?v=20261029-login-source"></script>
 <script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
-<script src="/static/js/ctfrpg_manager.js?v=20261029-login-source"></script>
+<script src="/static/js/checkout_state.js?v=20261106-checkout-truth"></script>
+<script src="/static/js/ctfrpg_manager.js?v=20261106-checkout-truth"></script>
 </body>
 </html>

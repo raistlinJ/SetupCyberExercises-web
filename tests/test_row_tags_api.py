@@ -20,7 +20,7 @@ def tag_client(monkeypatch, tmp_path):
     return app.test_client(), tmp_path
 
 
-@pytest.mark.parametrize('scope,row', [('vm', '1|web-set-1'), ('ctfd', '1'), ('ctfrpg', 'alice')])
+@pytest.mark.parametrize('scope,row', [('vm', '1|web-set-1'), ('ctfd', '1'), ('ctfrpg', 'alice'), ('accessforge', 'student@pve')])
 def test_multiple_tags_survive_app_and_store_restart(tag_client, scope, row):
     client, path = tag_client
     endpoint = f'/api/projects/one/row-tags/{scope}'

@@ -2793,6 +2793,7 @@ async function loadProjects() {
       const p = (data.projects || []).find(x => x.id === selected);
       if (p) {
         container.appendChild(renderProjectCard(p));
+        ConfigIntegrations.syncSelection(p.id);
       } else {
         container.innerHTML = '<div class="text-muted">Selected project not found. Choose a project from the left.</div>';
       }
@@ -5358,7 +5359,7 @@ async function autoSaveProjectField(pid) {
   const agentLimit = document.getElementById(`cfg-${pid}-agent_max_parallel_agents`);
   if (configAgentPluginEnabled && agentLimit && !agentLimit.disabled) payload.agent_max_parallel_agents = Number(agentLimit.value);
   // Optional future fields (skip if disabled)
-  const optIds = ['keycloak_url', 'keycloak_port', 'keycloak_nodename', 'challenge_url', 'challenge_port', 'ctfrpg_url'];
+  const optIds = ['keycloak_url', 'keycloak_port', 'keycloak_nodename', 'challenge_url', 'challenge_port'];
   optIds.forEach(id => {
     if (id.startsWith('challenge_') && document.documentElement.dataset.ctfdPlugin === 'off') return;
     if (id.startsWith('ctfrpg_') && document.documentElement.dataset.ctfrpgPlugin === 'off') return;
@@ -5369,8 +5370,10 @@ async function autoSaveProjectField(pid) {
       payload[id] = v;
     }
   });
-  const ctfrpgVerify = document.getElementById(`cfg-${pid}-ctfrpg_verify_ssl`);
-  if (ctfrpgVerify && !ctfrpgVerify.disabled && document.documentElement.dataset.ctfrpgPlugin !== 'off') payload.ctfrpg_verify_ssl = ctfrpgVerify.checked;
+  if(document.documentElement.dataset.ctfrpgPlugin!=='off'){
+    const rpgUrl=document.getElementById(`cfg-${pid}-ctfrpg_url`),rpgPort=document.getElementById(`cfg-${pid}-ctfrpg_api_port`);
+    if(rpgUrl&&rpgPort){try{payload.ctfrpg_url=ConfigIntegrations.readFields(rpgUrl,rpgPort);}catch(error){showToast(error.message,'danger');return;}}
+  }
   try {
     await http('PATCH', `/api/projects/${pid}`, payload);
     try {
@@ -6770,6 +6773,8 @@ function showStatusDot(pid, state) {
 }
 
 function renderProjectCard(p) {
+  const rpgConnection=ConfigIntegrations.parts(p.ctfrpg_url||'');
+  const accessforgeConnection=ConfigIntegrations.parts(p.checkout?.connection_url||'');
   const col = document.createElement('div');
   col.className = 'project-card';
   const vms = (p.vms || []).map((v, i) => `
@@ -6950,7 +6955,7 @@ function renderProjectCard(p) {
     <div class="collapse ${cfgShow ? 'show' : ''}" id="${cfgId}">
           <h6>Connection Parameters</h6>
           <div class="row g-2">
-            <div class="col-md-6">
+            <div class="col-md-3">
               <label class="form-label" title="Base URL to your Proxmox node or cluster (e.g., https://host)">Proxmox URL</label>
               <input id="cfg-${p.id}-proxmox_url" class="form-control form-control-sm" value="${p.proxmox_url || ''}" placeholder="https://proxmox.example.com" title="Base URL to your Proxmox host (https://…)" oninput="debounceProjectSave('${p.id}','proxmox_url')" />
             </div>
@@ -6972,21 +6977,30 @@ function renderProjectCard(p) {
               <input id="cfg-${p.id}-challenge_url" class="form-control form-control-sm" value="${p.challenge_url || ''}" placeholder="https://ctfd.example.com" title="CTFd platform URL" oninput="debounceProjectSave('${p.id}','challenge_url')" />
             </div>
             <div class="col-md-3" data-plugin="ctfd">
-              <label class="form-label" title="CTFd platform port">CTFd Port</label>
+              <label class="form-label" title="CTFd API port">API Port</label>
               <input id="cfg-${p.id}-challenge_port" type="number" class="form-control form-control-sm" value="${p.challenge_port ?? 443}" placeholder="443" title="CTFd port" oninput="debounceProjectSave('${p.id}','challenge_port')" />
             </div>
             <div class="col-12" data-plugin="ctfrpg"><hr class="my-3"/></div>
             <div class="col-md-9" data-plugin="ctfrpg">
               <label class="form-label" for="cfg-${p.id}-ctfrpg_url" title="Base URL to the CTF-RPG game">CTF-RPG URL</label>
-              <input id="cfg-${p.id}-ctfrpg_url" type="url" class="form-control form-control-sm" value="${escHtml(p.ctfrpg_url || '')}" placeholder="https://game.example.com:8443" title="CTF-RPG game URL; include the port when it is not the default" oninput="debounceProjectSave('${p.id}','ctfrpg_url')" />
+              <input id="cfg-${p.id}-ctfrpg_url" type="url" class="form-control form-control-sm" value="${escHtml(rpgConnection.url)}" placeholder="https://game.example.com" title="CTF-RPG game URL" oninput="debounceProjectSave('${p.id}','ctfrpg_url')" />
             </div>
-            <div class="col-md-3 d-flex align-items-end" data-plugin="ctfrpg">
-              <div class="form-check mb-2">
-                <input id="cfg-${p.id}-ctfrpg_verify_ssl" class="form-check-input" type="checkbox" ${p.ctfrpg_verify_ssl !== false ? 'checked' : ''} onchange="debounceProjectSave('${p.id}','ctfrpg_verify_ssl', 50)" />
-                <label class="form-check-label small" for="cfg-${p.id}-ctfrpg_verify_ssl">Verify TLS certificate</label>
-              </div>
+            <div class="col-md-3" data-plugin="ctfrpg">
+              <label class="form-label" for="cfg-${p.id}-ctfrpg_api_port">API Port</label>
+              <input id="cfg-${p.id}-ctfrpg_api_port" type="number" min="1" max="65535" step="1" required data-project-number class="form-control form-control-sm" value="${rpgConnection.port}" oninput="debounceProjectSave('${p.id}','ctfrpg_api_port')" />
             </div>
-            <div class="col-12 small text-muted" data-plugin="ctfrpg">Include a custom port in the URL. Set the admin username and password in <a href="/static/ctfrpg_manager.html?id=${encodeURIComponent(p.id)}">CTF-RPG Manager → Connection</a>.</div>
+            <div class="col-12 small text-muted" data-plugin="ctfrpg">Set credentials and certificate verification in <a href="/static/ctfrpg_manager.html?id=${encodeURIComponent(p.id)}">CTF-RPG Manager → Connection</a>.</div>
+            <div class="col-12" data-plugin="accessforge"><hr class="my-3"/></div>
+            <div class="col-md-9" data-plugin="accessforge">
+              <label class="form-label" for="cfg-${p.id}-accessforge_url">AccessForge URL</label>
+              <input id="cfg-${p.id}-accessforge_url" type="url" class="form-control form-control-sm" value="${escHtml(accessforgeConnection.url)}" placeholder="https://accessforge.example.edu" oninput="ConfigIntegrations.scheduleUrl('${p.id}')" />
+            </div>
+            <div class="col-md-3" data-plugin="accessforge">
+              <label class="form-label" for="cfg-${p.id}-accessforge_api_port">API Port</label>
+              <input id="cfg-${p.id}-accessforge_api_port" type="number" min="1" max="65535" step="1" required class="form-control form-control-sm" value="${accessforgeConnection.port}" oninput="ConfigIntegrations.scheduleUrl('${p.id}')" />
+            </div>
+            <div class="col-12 small text-muted" data-plugin="accessforge">Set administrator credentials in <a href="/static/accessforge_manager.html?id=${encodeURIComponent(p.id)}">Credential Checkouts → Connection</a>. Changing the URL requires saving credentials for the new destination.</div>
+            <div class="col-12" data-plugin="accessforge"><div id="cfg-${p.id}-accessforge_status" class="small" role="status" aria-live="polite"></div></div>
             <div class="col-12"><hr class="my-3"/></div>
             <div class="col-md-6">
               <label class="form-label" title="Number of student/participant instances">Number of VM Clones to Create</label>
@@ -7024,23 +7038,30 @@ function renderProjectCard(p) {
     <div class="collapse ${credShow ? 'show' : ''}" id="${credsId}">
           <div class="row g-2">
             <div class="col-12">
-              <div class="d-flex justify-content-between align-items-end mb-2">
+              <div class="d-flex flex-wrap gap-2 justify-content-between align-items-end mb-2">
                 <label class="form-label mb-0" title="One credential pair per instance">Credentials (username / password)</label>
-                <div class="d-flex align-items-center gap-2">
+                <div class="d-flex flex-wrap align-items-center gap-2">
                   <label class="form-label mb-0 small text-muted" style="white-space: nowrap;">Number of VM Clones/Users:</label>
                   <input type="number" id="cred-${p.id}-instances" min="1" class="form-control form-control-sm" style="width: 70px;" value="${p.instances ?? 10}" 
                     oninput="document.getElementById('cfg-${p.id}-instances').value = this.value; onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" 
                     onchange="document.getElementById('cfg-${p.id}-instances').value = this.value; onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" />
                 </div>
               </div>
-              <div class="d-flex flex-wrap gap-2 mb-2">
-                <label class="btn btn-outline-secondary btn-sm mb-0">
+              <div class="d-flex flex-nowrap align-items-center gap-2 mb-2 overflow-auto" role="group" aria-label="Credential controls">
+                <input id="cred-checkout-all-${p.id}" class="form-check-input m-0 flex-shrink-0" type="checkbox" data-plugin="accessforge" aria-label="Select all credentials" title="Select all credentials" onchange="ConfigIntegrations.selectAll('${p.id}',this.checked)">
+                <label class="btn btn-outline-secondary btn-sm mb-0 flex-shrink-0 text-nowrap">
                   Upload CSV <input type="file" id="cfg-${p.id}-cred-file" accept=".csv,.txt" hidden onchange="uploadCredentialsFile('${p.id}')" />
                 </label>
-                <button class="btn btn-sm btn-outline-primary" onclick="generateCredentials('${p.id}')">Auto-generate</button>
-                <button id="cred-add-${p.id}" class="btn btn-sm btn-outline-success" onclick="addCredentialRow('${p.id}')">Add Row</button>
-                <button id="cred-download-${p.id}" class="btn btn-sm btn-outline-dark" onclick="downloadCredentials('${p.id}')" disabled>Download Credentials (CSV)</button>
+                <button class="btn btn-sm btn-outline-primary flex-shrink-0 text-nowrap" onclick="generateCredentials('${p.id}')">Auto-generate</button>
+                <button id="cred-add-${p.id}" class="btn btn-sm btn-outline-success flex-shrink-0 text-nowrap" onclick="addCredentialRow('${p.id}')">Add Row</button>
+                <button id="cred-download-${p.id}" class="btn btn-sm btn-outline-dark flex-shrink-0 text-nowrap" onclick="downloadCredentials('${p.id}')" disabled>Download Credentials (CSV)</button>
+                <select id="cred-checkout-mode-${p.id}" class="form-select form-select-sm flex-shrink-0" style="width:250px" aria-label="Checkout mode" data-plugin="accessforge" data-checkout-action="${p.id}" onchange="ConfigIntegrations.setMode('${p.id}',this.value)" disabled>
+                  <option value="" hidden>Mark Credential Type</option>
+                  <option value="on-demand">On-demand (checkout)</option>
+                  <option value="permanent">Permanent</option>
+                </select>
               </div>
+              <div id="cred-checkout-status-${p.id}" class="small mt-1" role="status" aria-live="polite" data-plugin="accessforge"></div>
               <div id="cred-${p.id}-list">
                 ${renderCredentials(p.id, p.credentials)}
               </div>
@@ -9869,9 +9890,11 @@ function renderCredentials(pid, creds) {
     const u = sanitizeSimple(c && c.username);
     const p = sanitizeSimple(c && c.password);
     return `<div class="row g-2 align-items-center mb-1" data-index="${idx}">
-      <div class="col-md-5"><input title="Credential username" class="form-control form-control-sm" placeholder="username" value="${escHtml(u)}" oninput="onCredentialChanged('${pid}')"></div>
-      <div class="col-md-5"><input title="Credential password (8+ chars)" class="form-control form-control-sm" placeholder="password" value="${escHtml(p)}" oninput="onCredentialChanged('${pid}')"></div>
-      <div class="col-md-2 d-flex justify-content-end"><button class="btn btn-sm btn-outline-danger" onclick="removeCredentialRow('${pid}', this)">Remove</button></div>
+      <div class="col-auto d-flex align-items-center" data-plugin="accessforge">${ConfigIntegrations.icon(pid,u)}</div>
+      ${ConfigIntegrations.checkbox(pid,u)}
+      <div class="col" style="min-width:120px"><input title="Credential username" class="form-control form-control-sm" placeholder="username" value="${escHtml(u)}" oninput="onCredentialChanged('${pid}')"></div>
+      <div class="col" style="min-width:120px"><input title="Credential password (8+ chars)" class="form-control form-control-sm" placeholder="password" value="${escHtml(p)}" oninput="onCredentialChanged('${pid}')"></div>
+      <div class="col-auto d-flex justify-content-end"><button class="btn btn-sm btn-outline-danger" onclick="removeCredentialRow('${pid}', this)">Remove</button></div>
     </div>`;
   }).join('');
   return items;
@@ -9936,6 +9959,8 @@ function updateCredControls(pid) {
     const addBtn = document.getElementById(`cred-add-${pid}`);
     if (addBtn) addBtn.disabled = list.length >= inst && inst > 0;
     updateCredDownloadState(pid);
+    ConfigIntegrations.syncSelection(pid);
+    initBootstrapTooltips(document.getElementById(`cred-${pid}-list`));
   } catch { }
 }
 function updateCredDownloadState(pid) {
@@ -10132,6 +10157,7 @@ function downloadCredentials(pid) {
 const _credSaveTimers = {};
 function onCredentialChanged(pid) {
   updateCredDownloadState(pid);
+  ConfigIntegrations.syncSelection(pid);
   if (_credSaveTimers[pid]) clearTimeout(_credSaveTimers[pid]);
   let status = document.getElementById(`cred-status-${pid}`);
   if (!status) {
