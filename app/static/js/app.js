@@ -7004,7 +7004,7 @@ function renderProjectCard(p) {
             <div class="col-12" data-plugin="accessforge"><div id="cfg-${p.id}-accessforge_status" class="small" role="status" aria-live="polite"></div></div>
             <div class="col-12"><hr class="my-3"/></div>
             <div class="col-md-6">
-              <label class="form-label" title="Number of student/participant instances">Number of VM Clones to Create</label>
+              <label class="form-label" title="Number of instances">Number of VM Clones to Create</label>
               <input id="cfg-${p.id}-instances" type="number" min="1" class="form-control form-control-sm" value="${p.instances ?? 10}" oninput="onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" onchange="onInstancesChange('${p.id}'); debounceProjectSave('${p.id}','instances')" title="Total instances to provision" />
             </div>
             <div class="col-md-6">

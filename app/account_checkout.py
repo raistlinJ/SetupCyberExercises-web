@@ -474,7 +474,7 @@ def register_accessforge_plugin(app):
         legacy={name:state for name,state in legacy_assignments(pid).items() if name not in migrated}
         entries=[{**known[u],**legacy.get(u,{})} for u in dict.fromkeys(usernames)]
         result=remote(config,'PUT','/api/admin/checkouts/pools/'+store.pool_id(pid),{'name':selected.name,'accounts':entries})
-        # Migrate only once; publishing old snapshots must not reassign released students.
+        # Migrate only once; publishing old snapshots must not reassign released users.
         store.cache(_owner(),pid,result,migrated_names=set(legacy)&set(usernames))
         return selected,store,config
 
@@ -634,7 +634,7 @@ def register_accessforge_plugin(app):
         if 'secret' in submitted:
             secret=submitted['secret']
             if not isinstance(secret,str) or (secret and not 8<=len(secret)<=256):
-                raise AccessForgeError('Use a lab secret between 8 and 256 characters, or leave it blank to keep the current secret.')
+                raise AccessForgeError('Use a project secret between 8 and 256 characters, or leave it blank to keep the current secret.')
             if secret:
                 payload['secret']=secret
         if not payload:

@@ -213,8 +213,8 @@
     if(snapshot.published===false||!snapshot.id)throw new Error('Use Accounts → Enable to publish at least one account before configuring checkout settings.');
     el('af-checkout-enabled').checked=!!snapshot.enabled;el('af-checkout-verify').checked=snapshot.verify_email!==false;el('af-checkout-secret').value='';
     renderPolicy(snapshot.policy);
-    el('af-checkout-secret-state').textContent=snapshot.secret_set?'A lab secret is set. Leave this field blank to keep it.':'Set a lab secret of 8–256 characters before enabling student checkout.';
-    el('af-checkout-secret').placeholder=snapshot.secret_set?'Leave blank to keep the current secret':'Set a lab secret (8+ characters)';
+    el('af-checkout-secret-state').textContent=snapshot.secret_set?'A project secret is set. Leave this field blank to keep it.':'Set a project secret of 8–256 characters before enabling account checkout.';
+    el('af-checkout-secret').placeholder=snapshot.secret_set?'Leave blank to keep the current secret':'Set a project secret (8+ characters)';
     el('af-checkout-policy-note').textContent=snapshot.smtp_configured?'Email verification uses AccessForge’s configured mail server.':'Email verification requires SMTP configuration on AccessForge. Turn verification off if it is not needed.';
     checkoutMessage('');message('');window.bootstrap?.Modal.getOrCreateInstance(el('af-checkout-modal'))?.show();
   }));
@@ -228,8 +228,8 @@
     hideCheckoutSettings();message('Checkout settings saved.');
   },{settings:true});});
   for(const [id,operation,confirmation,progress,success] of [
-    ['af-reenable-logins','reenable-logins','Enable the selected accounts for checkout? Apply any password changes through VM Manager first. Existing lab policy still applies.','Enabling selected accounts…','Selected accounts enabled.'],
-    ['af-relinquish','relinquish-accounts','Relinquish the selected accounts? Students will be signed out and their AccessForge access will be disabled until enabled again.','Relinquishing selected accounts…','Selected accounts relinquished. Their AccessForge access remains disabled.'],
+    ['af-reenable-logins','reenable-logins','Enable the selected accounts for checkout? Apply any password changes through VM Manager first. Existing checkout policy still applies.','Enabling selected accounts…','Selected accounts enabled.'],
+    ['af-relinquish','relinquish-accounts','Relinquish the selected accounts? Users will be signed out and their AccessForge access will be disabled until enabled again.','Relinquishing selected accounts…','Selected accounts relinquished. Their AccessForge access remains disabled.'],
     ['af-disable-logins','disable-logins','Disable the selected unassigned accounts?','Disabling selected accounts…','Selected accounts disabled.']
   ])el(id).addEventListener('click',()=>run(async(project,revision)=>{
     if(!selected.size)throw new Error('Select at least one saved account.');

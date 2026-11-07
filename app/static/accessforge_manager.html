@@ -75,12 +75,12 @@
   <div id="af-tag-assignment" class="dropdown"></div>
   <div class="btn-group btn-group-sm"><button id="af-accounts-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" disabled>Accounts</button><ul class="dropdown-menu">
     <li><button type="button" class="dropdown-item" id="af-reenable-logins" title="Publish and enable selected On-Demand accounts after applying password changes in VM Manager" disabled>Enable</button></li>
-    <li><button type="button" class="dropdown-item text-danger" id="af-relinquish" title="Release selected student assignments and disable their AccessForge access" disabled>Relinquish</button></li>
+    <li><button type="button" class="dropdown-item text-danger" id="af-relinquish" title="Release selected account assignments and disable their AccessForge access" disabled>Relinquish</button></li>
     <li><button type="button" class="dropdown-item text-danger" id="af-disable-logins" title="Disable AccessForge access for selected unassigned accounts" disabled>Disable</button></li>
   </ul></div>
   <button id="af-checkout-settings" class="btn btn-sm btn-outline-primary ms-auto" type="button" disabled>Checkout settings</button>
   <a id="af-admin-link" class="btn btn-sm btn-outline-primary d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
-  <a id="af-student-link" class="btn btn-sm btn-outline-secondary d-none" target="_blank" rel="noopener noreferrer">Student checkout page</a>
+  <a id="af-student-link" class="btn btn-sm btn-outline-secondary d-none" target="_blank" rel="noopener noreferrer">Checkout page</a>
 </div>
 <p id="af-project" class="fw-semibold mb-1">Select a project.</p>
 <div id="af-status" role="status" aria-live="polite" class="small mb-2"></div>
@@ -101,7 +101,7 @@
     <p class="form-text">Usernames without a realm use @pam. Include @realm to use a different Proxmox realm.</p>
     <div class="form-check mb-2"><input id="af-save-creds" type="checkbox" class="form-check-input"><label for="af-save-creds" class="form-check-label" title="Save the connection credentials encrypted on the server for your user and this project.">Save credentials</label></div>
     <p class="small text-muted">If checked, credentials are saved encrypted on the server for your user and this project, excluded from exports. If unchecked, credentials remain only in this browser tab’s session. Save tests the connection; an administrator on AccessForge’s configured Proxmox cluster is required.</p>
-    <p class="small text-muted mb-0">Checkout login restrictions apply within AccessForge. Student checkout and relinquishment need no Proxmox management token. Keep Proxmox logins enabled and restrict direct Proxmox access with your firewall.</p>
+    <p class="small text-muted mb-0">Checkout login restrictions apply within AccessForge. Account checkout and relinquishment need no Proxmox management token. Keep Proxmox logins enabled and restrict direct Proxmox access with your firewall.</p>
   </div>
   <div class="modal-footer">
     <div id="af-connection-feedback" class="me-auto small" role="status" aria-live="polite"></div>
@@ -114,15 +114,15 @@
 <form id="af-checkout-form" class="d-flex flex-column overflow-hidden">
   <div class="modal-header"><h5 id="af-checkout-title" class="modal-title">Checkout settings</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
   <div class="modal-body">
-    <div class="form-check mb-3"><input id="af-checkout-enabled" class="form-check-input" type="checkbox"><label for="af-checkout-enabled" class="form-check-label">Enable student checkout</label></div>
+    <div class="form-check mb-3"><input id="af-checkout-enabled" class="form-check-input" type="checkbox"><label for="af-checkout-enabled" class="form-check-label">Enable account checkout</label></div>
     <div class="form-check mb-3"><input id="af-checkout-verify" class="form-check-input" type="checkbox"><label for="af-checkout-verify" class="form-check-label">Require email verification</label></div>
-    <label for="af-checkout-secret" class="form-label">Lab secret</label>
-    <input id="af-checkout-secret" type="password" class="form-control" autocomplete="new-password" minlength="8" maxlength="256" placeholder="Set a lab secret (8+ characters)">
+    <label for="af-checkout-secret" class="form-label">Project secret</label>
+    <input id="af-checkout-secret" type="password" class="form-control" autocomplete="new-password" minlength="8" maxlength="256" placeholder="Set a project secret (8+ characters)">
     <p id="af-checkout-secret-state" class="form-text"></p>
     <fieldset class="border rounded p-3 my-3">
       <legend class="float-none w-auto px-1 fs-6">Checkout restrictions</legend>
       <label for="af-policy-allowed_email_patterns" class="form-label">Allowed email formats</label>
-      <textarea id="af-policy-allowed_email_patterns" class="form-control" rows="2" placeholder="*@utep.edu&#10;student*@example.org"></textarea>
+      <textarea id="af-policy-allowed_email_patterns" class="form-control" rows="2" placeholder="*@utep.edu&#10;user*@example.org"></textarea>
       <p class="form-text">One pattern per line. * matches any text; ? matches one character. Leave blank to allow any valid email.</p>
       <label for="af-policy-allowed_subnets" class="form-label">Allowed checkout IP networks</label>
       <textarea id="af-policy-allowed_subnets" class="form-control" rows="2" placeholder="192.0.2.0/24&#10;2001:db8::/48"></textarea>
@@ -134,7 +134,7 @@
         <div class="col-sm-6"><label for="af-policy-global_delay_seconds" class="form-label">Global delay (seconds)</label><input id="af-policy-global_delay_seconds" class="form-control" type="number" min="0" max="604800" step="1" value="0" required></div>
         <div class="col-sm-6"><label for="af-policy-subnet_delay_seconds" class="form-label">Subnet delay (seconds)</label><input id="af-policy-subnet_delay_seconds" class="form-control" type="number" min="0" max="604800" step="1" value="0" required></div>
       </div>
-      <p class="form-text mb-0 mt-3">Limits and delays apply to new student checkouts in this project. 0 means no limit or delay. Global delay covers all networks in this project. Recovering an assignment does not use another slot or restart delays, but must meet the email and allowed-network rules. Administrator assignments bypass these restrictions.</p>
+      <p class="form-text mb-0 mt-3">Limits and delays apply to new account checkouts in this project. 0 means no limit or delay. Global delay covers all networks in this project. Recovering an assignment does not use another slot or restart delays, but must meet the email and allowed-network rules. Administrator assignments bypass these restrictions.</p>
     </fieldset>
     <p id="af-checkout-policy-note" class="small text-muted mb-0"></p>
   </div>
@@ -149,8 +149,8 @@
   <div class="modal-body">
     <p id="af-refresh-project" class="fw-semibold mb-1"></p>
     <p id="af-refresh-totals" class="small mb-3" role="status"></p>
-    <div class="alert alert-success small">Remote checkout status, student assignments, login status, and checkout history were saved to SCE-web’s shared snapshot. Local credential types were retained; accounts missing from AccessForge remain listed as Not synced. Configuration, VM Manager, CTFd Manager, and CTF-RPG Manager were notified to update; returning tabs load the snapshot when shown.</div>
-    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th scope="col">Account</th><th scope="col">Sync result</th><th scope="col">Checkout mark</th><th scope="col">Student</th><th scope="col">Login</th><th scope="col">Changes</th></tr></thead><tbody id="af-refresh-results"></tbody></table></div>
+    <div class="alert alert-success small">Remote checkout status, account assignments, login status, and checkout history were saved to SCE-web’s shared snapshot. Local credential types were retained; accounts missing from AccessForge remain listed as Not synced. Configuration, VM Manager, CTFd Manager, and CTF-RPG Manager were notified to update; returning tabs load the snapshot when shown.</div>
+    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th scope="col">Account</th><th scope="col">Sync result</th><th scope="col">Checkout mark</th><th scope="col">Assigned to</th><th scope="col">Login</th><th scope="col">Changes</th></tr></thead><tbody id="af-refresh-results"></tbody></table></div>
   </div>
   <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div>
 </div></div></div>
@@ -167,6 +167,6 @@
 <script src="/static/js/shell.js?v=20261105-accessforge"></script>
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/row_tags.js?v=20261106-accessforge-tags"></script>
-<script src="/static/js/checkout_state.js?v=20261106-accessforge-only"></script>
-<script src="/static/js/accessforge_manager.js?v=20261106-accessforge-only"></script>
+<script src="/static/js/checkout_state.js?v=20261107-neutral-wording"></script>
+<script src="/static/js/accessforge_manager.js?v=20261107-neutral-wording"></script>
 </body></html>

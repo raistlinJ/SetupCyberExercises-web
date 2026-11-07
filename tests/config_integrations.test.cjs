@@ -48,8 +48,8 @@ test('bulk checkout saves current credentials first and sends exactly the select
   assert.equal(h.calls.length,2);
   assert.equal(h.calls[1].url, '/api/projects/p/credential-types');
   assert.deepEqual(h.calls[1].body, {usernames: ['alice'], enabled: true});
-  assert.match(h.rows[0].badge.outerHTML, /aria-label="Marked for checkout · Available according to lab policy"/);
-  assert.match(h.rows[1].badge.outerHTML, /aria-label="Not marked for checkout · Login disabled"/);
+  assert.match(h.rows[0].badge.outerHTML, /aria-label="Marked for checkout · Available according to checkout policy"/);
+  assert.match(h.rows[1].badge.outerHTML, /aria-label="Not marked for checkout · AccessForge login disabled"/);
   assert.ok(h.buttons.every(button => !button.disabled));
 });
 

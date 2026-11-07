@@ -53,7 +53,7 @@
     apply(pid, checkout);
     const signal = {pid, id: `${Date.now()}-${Math.random()}`};
     remember(signal.id);
-    // Only an invalidation notice is persisted, never credentials or student details.
+    // Only an invalidation notice is persisted, never credentials or account details.
     try { localStorage.setItem(signalKey, JSON.stringify(signal)); } catch { /* BroadcastChannel may still work. */ }
     channel?.postMessage(signal);
   }
@@ -71,7 +71,7 @@
     const account = checkout?.accounts?.[username];
     const marked = account?.eligible ? 'Marked for checkout' : 'Not marked for checkout';
     const status = !account || account.sync_status==='unknown' ? 'Unknown' : account.sync_status==='not_synced' ? 'Not synced' : account.sync_status==='not_enabled' ? 'Not enabled' : account.releasing ? 'Release pending'
-      : account.awaiting_checkout ? 'Available · AccessForge login requires checkout' : account.login_disabled ? 'AccessForge login disabled' : account.email ? `Checked out to ${account.name ? `${account.name} (${account.email})` : account.email}` : account.remote_eligible===true&&!account.eligible ? 'Enabled in AccessForge' : account.eligible ? 'Available according to lab policy' : 'Checkout off';
+      : account.awaiting_checkout ? 'Available · AccessForge login requires checkout' : account.login_disabled ? 'AccessForge login disabled' : account.email ? `Checked out to ${account.name ? `${account.name} (${account.email})` : account.email}` : account.remote_eligible===true&&!account.eligible ? 'Enabled in AccessForge' : account.eligible ? 'Available according to checkout policy' : 'Checkout off';
     return `${marked} · ${status}`;
   }
   function icon(checkout, username) {
