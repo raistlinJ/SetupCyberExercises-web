@@ -61,7 +61,7 @@ test('icons distinguish eligibility while showing escaped student identity and d
   const states={accounts:{alice:{eligible:true,name:'A <script>',email:'a@example.edu'},bob:{eligible:false,login_disabled:true}}};
   assert.match(api.icon(states,'alice'),/data-checkout-marked="true"/);
   assert.match(api.icon(states,'alice'),/A &lt;script&gt;/);assert.doesNotMatch(api.icon(states,'alice'),/<script>/);
-  assert.match(api.icon(states,'bob'),/Not marked for checkout · Login disabled/);
+  assert.match(api.icon(states,'bob'),/Not marked for checkout · AccessForge login disabled/);
   assert.match(api.icon(states,'missing'),/data-checkout-marked="false"/);
 });
 test('VM Mark Permanent/On-Demand deduplicates accounts across selected VMs, ignores inactive projects, and reports partial failures',async()=>{
@@ -82,7 +82,7 @@ test('VM Mark Permanent/On-Demand deduplicates accounts across selected VMs, ign
 test('manager icons appear only for marked accounts, including disabled and checked-out accounts',()=>{
   const h=harness();const snapshot={accounts:{on:{eligible:true},off:{eligible:false,email:'old@example.edu'},disabled:{eligible:true,login_disabled:true},assigned:{eligible:true,email:'student@example.edu'}}};
   assert.match(h.api.markedIcon(snapshot,'on'),/data-checkout-marked="true"/);
-  assert.match(h.api.markedIcon(snapshot,'disabled'),/Login disabled/);
+  assert.match(h.api.markedIcon(snapshot,'disabled'),/AccessForge login disabled/);
   assert.match(h.api.markedIcon(snapshot,'assigned'),/student@example.edu/);
   assert.equal(h.api.markedIcon(snapshot,'off'),'');assert.equal(h.api.markedIcon(snapshot,'unknown'),'');
   h.context.document.documentElement.dataset.accessforgePlugin='off';assert.equal(h.api.markedIcon(snapshot,'on'),'');
@@ -92,8 +92,8 @@ test('awaiting checkout icons indicate availability and explain the disabled log
   const {api}=harness();
   const state={accounts:{alice:{eligible:true,login_disabled:true,awaiting_checkout:true}}};
   assert.match(api.icon(state,'alice'),/text-success/);
-  assert.match(api.icon(state,'alice'),/Login disabled until assigned/);
+  assert.match(api.icon(state,'alice'),/AccessForge login requires checkout/);
   state.accounts.alice.awaiting_checkout=false;
   assert.match(api.icon(state,'alice'),/text-danger/);
-  assert.match(api.icon(state,'alice'),/Login disabled/);
+  assert.match(api.icon(state,'alice'),/AccessForge login disabled/);
 });

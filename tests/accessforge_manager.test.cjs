@@ -490,7 +490,7 @@ test('manual refresh summary lists changed marks, assignments, login state and h
   const html=h.el('af-refresh-results').innerHTML;
   assert.match(html,/Synced/);assert.match(html,/Checkout mark: Marked → Unmarked/);
   assert.match(html,/Assigned email: a@example.edu → changed@example.edu/);
-  assert.match(html,/Login: Enabled → Disabled/);assert.match(html,/Checkout IP: — → 203.0.113.1/);
+  assert.match(html,/AccessForge login: Enabled → Disabled/);assert.match(html,/Checkout IP: — → 203.0.113.1/);
   assert.match(html,/Relinquished:/);assert.doesNotMatch(html,/Relinquish IP|203\.0\.113\.2/);
   assert.match(html,/Ava &lt;script&gt;/);assert.doesNotMatch(html,/<script>/);
   modal.close();await h.el('af-refresh').fire();
@@ -553,10 +553,10 @@ test('unchanged marked accounts remain explicit in the authoritative refresh sum
   assert.match(h.el('af-refresh-results').innerHTML,/No changes/);
 });
 
-test('awaiting checkout stays available while reporting a disabled Proxmox login',async()=>{
+test('awaiting checkout stays available while AccessForge login is gated',async()=>{
   const h=await harness();
   h.pushCheckout('a',{accounts:{'student-a':{eligible:true,sync_status:'synced',login_disabled:true,awaiting_checkout:true}}});
-  assert.match(h.el('af-accounts').innerHTML,/Available \(login disabled until assigned\)/);
+  assert.match(h.el('af-accounts').innerHTML,/Available \(awaiting checkout\)/);
   h.override(url=>url.endsWith('/status')?response({checkout:{accounts:{'student-a':{eligible:true,sync_status:'synced',login_disabled:true,awaiting_checkout:false}}}}):null);
   await h.el('af-refresh').fire();
   assert.match(h.el('af-accounts').innerHTML,/>Disabled<\/td>/);

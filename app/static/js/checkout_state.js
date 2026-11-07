@@ -70,8 +70,8 @@
   function label(checkout, username) {
     const account = checkout?.accounts?.[username];
     const marked = account?.eligible ? 'Marked for checkout' : 'Not marked for checkout';
-    const status = !account || account.sync_status==='unknown' ? 'Unknown' : account.sync_status==='not_synced' ? 'Not synced' : account.sync_status==='not_enabled' ? 'Not enabled' : account.releasing ? 'Disable pending'
-      : account.awaiting_checkout ? 'Available · Login disabled until assigned' : account.login_disabled ? 'Login disabled' : account.email ? `Checked out to ${account.name ? `${account.name} (${account.email})` : account.email}` : account.remote_eligible===true&&!account.eligible ? 'Enabled in AccessForge' : account.eligible ? 'Available according to lab policy' : 'Checkout off';
+    const status = !account || account.sync_status==='unknown' ? 'Unknown' : account.sync_status==='not_synced' ? 'Not synced' : account.sync_status==='not_enabled' ? 'Not enabled' : account.releasing ? 'Release pending'
+      : account.awaiting_checkout ? 'Available · AccessForge login requires checkout' : account.login_disabled ? 'AccessForge login disabled' : account.email ? `Checked out to ${account.name ? `${account.name} (${account.email})` : account.email}` : account.remote_eligible===true&&!account.eligible ? 'Enabled in AccessForge' : account.eligible ? 'Available according to lab policy' : 'Checkout off';
     return `${marked} · ${status}`;
   }
   function icon(checkout, username) {

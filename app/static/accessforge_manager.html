@@ -75,8 +75,8 @@
   <div id="af-tag-assignment" class="dropdown"></div>
   <div class="btn-group btn-group-sm"><button id="af-accounts-button" class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" disabled>Accounts</button><ul class="dropdown-menu">
     <li><button type="button" class="dropdown-item" id="af-reenable-logins" title="Publish and enable selected On-Demand accounts after applying password changes in VM Manager" disabled>Enable</button></li>
-    <li><button type="button" class="dropdown-item text-danger" id="af-relinquish" title="Release selected student assignments and disable their logins" disabled>Relinquish</button></li>
-    <li><button type="button" class="dropdown-item text-danger" id="af-disable-logins" title="Disable selected unassigned logins" disabled>Disable</button></li>
+    <li><button type="button" class="dropdown-item text-danger" id="af-relinquish" title="Release selected student assignments and disable their AccessForge access" disabled>Relinquish</button></li>
+    <li><button type="button" class="dropdown-item text-danger" id="af-disable-logins" title="Disable AccessForge access for selected unassigned accounts" disabled>Disable</button></li>
   </ul></div>
   <button id="af-checkout-settings" class="btn btn-sm btn-outline-primary ms-auto" type="button" disabled>Checkout settings</button>
   <a id="af-admin-link" class="btn btn-sm btn-outline-primary d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
@@ -101,7 +101,7 @@
     <p class="form-text">Usernames without a realm use @pam. Include @realm to use a different Proxmox realm.</p>
     <div class="form-check mb-2"><input id="af-save-creds" type="checkbox" class="form-check-input"><label for="af-save-creds" class="form-check-label" title="Save the connection credentials encrypted on the server for your user and this project.">Save credentials</label></div>
     <p class="small text-muted">If checked, credentials are saved encrypted on the server for your user and this project, excluded from exports. If unchecked, credentials remain only in this browser tab’s session. Save tests the connection; an administrator on AccessForge’s configured Proxmox cluster is required.</p>
-    <p class="small text-muted mb-0">Administrator account login changes use the Proxmox session authenticated by this connection, with User.Modify permission for the managed users. No additional password prompt is needed. AccessForge’s optional CHECKOUT_PROXMOX_API_TOKEN is used only for student self-service relinquishment. Publishing does not save your administrator password in AccessForge.</p>
+    <p class="small text-muted mb-0">Checkout login restrictions apply within AccessForge. Student checkout and relinquishment need no Proxmox management token. Keep Proxmox logins enabled and restrict direct Proxmox access with your firewall.</p>
   </div>
   <div class="modal-footer">
     <div id="af-connection-feedback" class="me-auto small" role="status" aria-live="polite"></div>
@@ -167,6 +167,6 @@
 <script src="/static/js/shell.js?v=20261105-accessforge"></script>
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/row_tags.js?v=20261106-accessforge-tags"></script>
-<script src="/static/js/checkout_state.js?v=20261106-assignment-login"></script>
-<script src="/static/js/accessforge_manager.js?v=20261106-assignment-login"></script>
+<script src="/static/js/checkout_state.js?v=20261106-accessforge-only"></script>
+<script src="/static/js/accessforge_manager.js?v=20261106-accessforge-only"></script>
 </body></html>

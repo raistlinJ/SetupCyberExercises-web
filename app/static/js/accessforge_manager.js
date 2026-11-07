@@ -72,7 +72,7 @@
     },seconds*1000);
     updateControls();
   }
-  function status(state){return !state||state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':state.releasing?'Disable pending':state.awaiting_checkout?'Available (login disabled until assigned)':state.login_disabled?'Disabled':state.email?'Checked out':state.eligible?'Available':'Checkout off';}
+  function status(state){return !state||state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':state.releasing?'Release pending':state.awaiting_checkout?'Available (awaiting checkout)':state.login_disabled?'Disabled':state.email?'Checked out':state.eligible?'Available':'Checkout off';}
   function syncLabel(state){return !state?'Removed':state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':'Synced';}
   function stamp(value){return value?new Date(value*1000).toLocaleString():'—';}
   function render(){
@@ -142,7 +142,7 @@
       ['email','Assigned email',value=>value||'Unassigned'],
       ['name','Name',value=>value||'—'],
       ['awaiting_checkout','Awaiting checkout',value=>value?'Yes':'No',value=>!!value],
-      ['login_disabled','Login',value=>value?'Disabled':'Enabled',value=>!!value],
+      ['login_disabled','AccessForge login',value=>value?'Disabled':'Enabled',value=>!!value],
       ['releasing','Release',value=>value?'Disable pending':'No pending release',value=>!!value],
       ['checked_out_at','Checked out',stamp,value=>Number(value)||0],
       ['checkout_ip','Checkout IP',value=>value||'—'],
@@ -163,7 +163,7 @@
     const changed=rows.filter(row=>row.changes.length).length;
     el('af-refresh-project').textContent=el('af-project').textContent;
     el('af-refresh-totals').textContent=`${rows.length} account(s) checked · ${changed} changed · ${rows.length-changed} unchanged`;
-    el('af-refresh-results').innerHTML=rows.map(({username,account,changes})=>`<tr><td>${esc(username)}</td><td><span class="badge ${syncLabel(account)==='Synced'?'bg-success':'bg-secondary'}">${syncLabel(account)}</span></td><td>${account?(account.eligible?'Marked':'Unmarked'):'—'}</td><td>${esc(account?.email?(account.name?`${account.name} (${account.email})`:account.email):'Unassigned')}</td><td>${account&&'login_disabled' in account?(account.releasing?'Disable pending':account.login_disabled?'Disabled':'Enabled'):'—'}</td><td>${changes.length?changes.map(change=>`<div>${esc(change)}</div>`).join(''):'<span class="text-muted">No changes</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="text-muted">No accounts marked for checkout. Use Configuration → Credentials → On-demand (checkout) to add accounts for checkout.</td></tr>';
+    el('af-refresh-results').innerHTML=rows.map(({username,account,changes})=>`<tr><td>${esc(username)}</td><td><span class="badge ${syncLabel(account)==='Synced'?'bg-success':'bg-secondary'}">${syncLabel(account)}</span></td><td>${account?(account.eligible?'Marked':'Unmarked'):'—'}</td><td>${esc(account?.email?(account.name?`${account.name} (${account.email})`:account.email):'Unassigned')}</td><td>${account&&'login_disabled' in account?(account.releasing?'Release pending':account.login_disabled?'Disabled':'Enabled'):'—'}</td><td>${changes.length?changes.map(change=>`<div>${esc(change)}</div>`).join(''):'<span class="text-muted">No changes</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="text-muted">No accounts marked for checkout. Use Configuration → Credentials → On-demand (checkout) to add accounts for checkout.</td></tr>';
     window.bootstrap?.Modal.getOrCreateInstance(el('af-refresh-summary'))?.show();
   }
   async function refresh(project,revision,{summary=false}={}){
@@ -229,7 +229,7 @@
   },{settings:true});});
   for(const [id,operation,confirmation,progress,success] of [
     ['af-reenable-logins','reenable-logins','Enable the selected accounts for checkout? Apply any password changes through VM Manager first. Existing lab policy still applies.','Enabling selected accounts…','Selected accounts enabled.'],
-    ['af-relinquish','relinquish-accounts','Relinquish the selected accounts? Students will lose access and their Proxmox logins will be disabled until enabled again.','Relinquishing selected accounts…','Selected accounts relinquished. Their logins remain disabled.'],
+    ['af-relinquish','relinquish-accounts','Relinquish the selected accounts? Students will be signed out and their AccessForge access will be disabled until enabled again.','Relinquishing selected accounts…','Selected accounts relinquished. Their AccessForge access remains disabled.'],
     ['af-disable-logins','disable-logins','Disable the selected unassigned accounts?','Disabling selected accounts…','Selected accounts disabled.']
   ])el(id).addEventListener('click',()=>run(async(project,revision)=>{
     if(!selected.size)throw new Error('Select at least one saved account.');

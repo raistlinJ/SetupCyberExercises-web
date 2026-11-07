@@ -159,7 +159,7 @@ def safe_summary(data):
     if not isinstance(accounts,dict) or len(accounts)>5000:
         raise AccessForgeError('Invalid AccessForge status response.',502)
     fields=('eligible','email','name','assigned_at','releasing','password_rotated','checked_out_at','checkout_ip','relinquished_at','relinquished_ip','login_disabled','awaiting_checkout')
-    clean={key:data[key] for key in ('id','name','enabled','verify_email','secret_set','smtp_configured','published','login_management_ready') if key in data}
+    clean={key:data[key] for key in ('id','name','enabled','verify_email','secret_set','smtp_configured','published','login_management_ready','login_scope') if key in data}
     if 'policy' in data:
         if not isinstance(data['policy'],dict):
             raise AccessForgeError('Invalid AccessForge checkout policy.',502)
@@ -588,7 +588,7 @@ def register_accessforge_plugin(app):
         store,row,config=connection(pid)
         submitted=body()
         if operation=='relinquish-accounts' and submitted.get('confirmed') is not True:
-            raise AccessForgeError('Confirm relinquishing the selected accounts and disabling their logins.')
+            raise AccessForgeError('Confirm relinquishing the selected accounts and disabling their AccessForge access.')
         usernames=submitted.get('usernames')
         if not isinstance(usernames,list) or not 1<=len(usernames)<=2000 or any(not isinstance(u,str) for u in usernames):
             raise AccessForgeError('Select at least one saved account.')
@@ -607,8 +607,7 @@ def register_accessforge_plugin(app):
             capabilities=service.get('capabilities')
             modern_setup=isinstance(capabilities,dict) and capabilities.get('account_setup') is True
             # Password updates happen in VM Manager; refresh AccessForge's copy
-            # before enabling. AccessForge also enables checkout for marked accounts
-            # only after their Proxmox login update succeeds.
+            # before enabling their AccessForge checkout access.
             selected,store,config=publish_accounts(pid,{'usernames':usernames})
         result=(enable_existing_api(pid,usernames,known,store,config,payload) if operation=='reenable-logins' and not modern_setup
                 else remote(config,'POST','/api/admin/checkouts/pools/'+store.pool_id(pid),payload))
