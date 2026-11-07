@@ -3,7 +3,6 @@ const fs=require('node:fs');
 const test=require('node:test');
 const vm=require('node:vm');
 const source=fs.readFileSync('app/static/js/checkout_state.js','utf8');
-const manager=fs.readFileSync('app/static/js/vm_manager.js','utf8');
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 function harness({bus=[],checkout={accounts:{}},storageBlocked=false,channel=true}={}){
   const calls=[],updates=[],stored=new Map(),events={},documentEvents={};let handler;
@@ -64,21 +63,6 @@ test('icons distinguish eligibility while showing escaped student identity and d
   assert.match(api.icon(states,'bob'),/Not marked for checkout · AccessForge login disabled/);
   assert.match(api.icon(states,'missing'),/data-checkout-marked="false"/);
 });
-test('VM Mark Permanent/On-Demand deduplicates accounts across selected VMs, ignores inactive projects, and reports partial failures',async()=>{
-  const calls=[],host={},projects={one:{id:'one',name:'First',credentials:[{username:'alice'}]},two:{id:'two',name:'Second',credentials:[{username:'bob'}]}};
-  const context={window:{ConfigIntegrations:{setMarked:async(pid,names,marked)=>{calls.push({pid,names:[...names],marked});if(pid==='two')throw Error('Connection required');}}},
-    document:{documentElement:{dataset:{accessforgePlugin:'on'}},getElementById:()=>host},
-    getActivePids:()=>['one','two'],canonicalPid:String,getActionableSelections:()=>[
-      {pid:'one',pidCanonical:'one',index:1},{pid:'one',pidCanonical:'one',index:1},{pid:'two',pidCanonical:'two',index:1},{pid:'hidden',pidCanonical:'hidden',index:1}],
-    getProjectSnapshot:pid=>projects[pid],updateRefreshState(){}};
-  vm.createContext(context);vm.runInContext(manager.slice(manager.indexOf('let VM_CHECKOUT_BUSY'),manager.indexOf('function vmBuildFilterParts')),context);
-  await context.vmMarkCheckout(true);
-  assert.deepEqual(calls,[{pid:'one',names:['alice'],marked:true},{pid:'two',names:['bob'],marked:true}]);
-  assert.match(host.textContent,/Marked 1 account.*On-Demand.*Second: Connection required/);
-  calls.length=0;await context.vmMarkCheckout(false);assert.equal(calls[0].marked,false);
-  context.document.documentElement.dataset.accessforgePlugin='off';calls.length=0;await context.vmMarkCheckout(true);assert.equal(calls.length,0);
-});
-
 test('manager icons appear only for marked accounts, including disabled and checked-out accounts',()=>{
   const h=harness();const snapshot={accounts:{on:{eligible:true},off:{eligible:false,email:'old@example.edu'},disabled:{eligible:true,login_disabled:true},assigned:{eligible:true,email:'student@example.edu'}}};
   assert.match(h.api.markedIcon(snapshot,'on'),/data-checkout-marked="true"/);

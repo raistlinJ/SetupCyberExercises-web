@@ -1017,36 +1017,8 @@ function vmApplyCheckoutSnapshot(pid, checkout) {
   const sources = new Set([PROJ, ...(ALL_PROJECTS || []), window.PROJ_CACHE?.[pid]]);
   for (const project of sources) if (project && canonicalPid(project.id) === canonicalPid(pid)) project.checkout = checkout;
   if (getActivePids().map(canonicalPid).includes(canonicalPid(pid))) {
-    if (!VM_CHECKOUT_BUSY) { const status = document.getElementById('vm-checkout-status'); if (status) status.textContent = ''; }
     vmRenderTaggedView();
   }
-}
-let VM_CHECKOUT_BUSY = false;
-async function vmMarkCheckout(marked) {
-  if (VM_CHECKOUT_BUSY || document.documentElement?.dataset?.accessforgePlugin !== 'on') return;
-  const byProject = new Map();
-  const active = new Set(getActivePids().map(canonicalPid));
-  for (const entry of getActionableSelections()) {
-    if (!active.has(entry.pidCanonical)) continue;
-    const project = getProjectSnapshot(entry.pid);
-    const username = project?.credentials?.[entry.index - 1]?.username;
-    if (!username) continue;
-    if (!byProject.has(String(project.id))) byProject.set(String(project.id), new Set());
-    byProject.get(String(project.id)).add(username);
-  }
-  const host = document.getElementById('vm-checkout-status');
-  if (!byProject.size) { host.textContent = 'Select at least one VM with a saved account.'; return; }
-  VM_CHECKOUT_BUSY = true; updateRefreshState();
-  host.className = 'small mb-2 text-muted'; host.textContent = marked ? 'Marking accounts as On-Demand…' : 'Marking accounts as Permanent…';
-  let count = 0; const errors = [];
-  try {
-    for (const [pid, names] of byProject) {
-      try { await window.ConfigIntegrations.setMarked(pid, [...names], marked); count += names.size; }
-      catch (error) { errors.push(`${getProjectSnapshot(pid)?.name || pid}: ${error.message}`); }
-    }
-    host.textContent = `Marked ${count} account(s) as ${marked ? 'On-Demand' : 'Permanent'}.${errors.length ? ' ' + errors.join(' ') : ''}`;
-    host.className = `small mb-2 ${errors.length ? 'text-danger' : 'text-success'}`;
-  } finally { VM_CHECKOUT_BUSY = false; updateRefreshState(); }
 }
 
 function vmBuildFilterParts(rowLike) {
@@ -3729,10 +3701,6 @@ function updateVmSelectionCount(projectIds = getActivePids()) {
 
 function updateRefreshState() {
   updateVmSelectionCount();
-  for (const id of ['vm-mark-permanent','vm-mark-on-demand']) {
-    const button = document.getElementById(id);
-    if (button) button.disabled = VM_CHECKOUT_BUSY || !getActionableSelections().length;
-  }
   const btn = document.getElementById('btn-refresh');
   const wrap = document.getElementById('refresh-wrapper');
   const colsBtn = document.getElementById('vm-cols-btn');

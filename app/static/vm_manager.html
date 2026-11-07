@@ -205,17 +205,12 @@
               <span id="vm-filter-error" class="text-danger d-none mb-2">Invalid regular expression</span>
             </div>
             <div id="vm-tag-notice" class="row-tag-notice d-none mb-2" role="status"></div>
-            <div id="vm-checkout-status" class="small mb-2" role="status" aria-live="polite" data-plugin="accessforge"></div>
             <div id="vm-action-status" class="d-none" role="status" aria-live="polite"></div>
             <div id="vm-selection-count" class="d-flex flex-wrap gap-2 small mb-2" role="status"
               aria-live="polite" aria-atomic="true"></div>
             <!-- Actions toolbar -->
             <div class="manager-actions d-flex flex-wrap align-items-center gap-2 mb-3" id="vm-actions-bar">
               <div id="vm-tag-assignment" class="dropdown"></div>
-              <div class="btn-group btn-group-sm" data-plugin="accessforge" role="group" aria-label="Account checkout mode">
-                <button id="vm-mark-permanent" type="button" class="btn btn-outline-secondary" onclick="vmMarkCheckout(false)" title="Mark selected accounts as permanent; keep existing assignments" disabled>Mark Permanent</button>
-                <button id="vm-mark-on-demand" type="button" class="btn btn-outline-secondary" onclick="vmMarkCheckout(true)" title="Mark selected accounts for on-demand student checkout" disabled>Mark On-Demand</button>
-              </div>
               <!-- Lifecycle & Setup group -->
               <div class="btn-group btn-group-sm">
                 <button id="act-lifecycle" type="button" class="btn btn-outline-secondary dropdown-toggle"
@@ -753,7 +748,7 @@
   <script src="/static/js/guest_push_csv.js?v=20261028-csv-submit"></script>
   <script src="/static/js/login_time.js?v=20261029-login-source"></script>
   <script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
-<script src="/static/js/vm_manager.js?v=20261106-mark-buttons"></script>
+<script src="/static/js/vm_manager.js?v=20261106-remove-checkout-mark-buttons"></script>
   <script src="/static/js/action_history.js?v=20261031-keep-push-selection"></script>
   <script src="/static/js/server_vm_actions.js?v=20261030-create-feedback"></script>
   <script src="/static/js/plugin_loader.js?v=20261015-agent-tabs"></script>

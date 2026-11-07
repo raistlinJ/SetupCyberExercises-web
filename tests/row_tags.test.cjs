@@ -271,7 +271,7 @@ for (const multi of [false,true]) {
     assert.doesNotMatch(html,/credential-checkout-state/);
     assert.equal(run('SELECTED_ROWS.size'),1);assert.match(html,/web-1/);assert.match(html,/web-2/);
     run("vmApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:true,login_disabled:true}}});VM_COLS.cred=false;VM_COLS.name=false;vmRenderTaggedView()");
-    assert.match(elements.get('vm-table').innerHTML,/Marked for checkout · Login disabled/);
+    assert.match(elements.get('vm-table').innerHTML,/Marked for checkout · AccessForge login disabled/);
   });
 }
 
@@ -290,7 +290,7 @@ for(const multi of [false,true]){
     assert.equal(run("CTFD_USER_META[ctfdMetaKey('one','alice')].user_points"),77);
     assert.equal(run(multi?'CTFD_SELECTED_KEYS.size':'CTFD_SELECTED_INDICES.size'),1);
     run("ctfdApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:true,login_disabled:true}}});");
-    assert.match(elements.get('ctfd-table').innerHTML,/Marked for checkout · Login disabled/);
+    assert.match(elements.get('ctfd-table').innerHTML,/Marked for checkout · AccessForge login disabled/);
   });
 }
 test('CTF-RPG checkout sync preserves selected users and scores and only marks the matching project account',()=>{
