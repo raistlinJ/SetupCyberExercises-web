@@ -416,6 +416,24 @@ def register_accessforge_plugin(app):
             raise AccessForgeError('Invalid browser-session connection credentials.')
         return validate_connection(data)
 
+    @bp.post('/api/projects/<pid>/accessforge/clipboard/usage')
+    @_secure_route(required_roles=['admin'])
+    def clipboard_usage(pid):
+        selected=project(pid)
+        data=body()
+        vmids=data.get('vmids')
+        if not isinstance(vmids,list) or not vmids or len(vmids)>500 or any(type(value) is not int or value<=0 for value in vmids):
+            raise AccessForgeError('Provide 1 to 500 VM IDs.')
+        _,_,config=connection(pid)
+        result=remote(config,'GET','/api/admin/clipboard/usage?vmids='+','.join(map(str,dict.fromkeys(vmids))))
+        cluster=result.get('cluster') or {}
+        expected=urlsplit(selected.proxmox_url or '')
+        host=str(cluster.get('host') or '').strip('[]').lower().rstrip('.')
+        port=int(getattr(selected,'proxmox_api_port',None) or expected.port or 8006)
+        if host!=(expected.hostname or '').lower().rstrip('.') or int(cluster.get('port') or 0)!=port:
+            raise AccessForgeError('AccessForge is configured for a different Proxmox address. Use the same cluster address in both connections.',409)
+        return jsonify(usage=result.get('usage') or {})
+
     @bp.route('/api/projects/<pid>/accessforge/connection',methods=['GET','POST','PATCH','DELETE'])
     @_secure_route(required_roles=['admin'])
     def configure_connection(pid):
@@ -447,8 +465,13 @@ def register_accessforge_plugin(app):
         if type(persist) is not bool:
             raise AccessForgeError('persist must be a boolean.')
         data=validate_connection(submitted,previous if persist else None)
-        status=remote(data,'GET','/api/admin/checkouts/status')
-        if status.get('service')!='AccessForge' or status.get('checkout_api')!=1:
+        try:
+            status=remote(data,'GET','/api/admin/checkouts/status')
+        except AccessForgeError as exc:
+            if exc.status != 404:
+                raise
+            status=remote(data,'GET','/api/admin/clipboard/status')
+        if status.get('service')!='AccessForge' or (status.get('checkout_api')!=1 and status.get('clipboard_api')!=1):
             raise AccessForgeError('That server does not support the AccessForge checkout administration API.',502)
         store.save(_owner(),pid,data['url'],data['username'],data['password'],data['verify_ssl'],persist=persist)
         return jsonify(connected=True,persist=persist,administrator=status.get('administrator'),cluster=status.get('cluster'),pool_id=store.pool_id(pid),checkout=checkout_summary(selected))

@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import math
 from flask import g, Blueprint, request, jsonify, current_app, send_from_directory, send_file
+from ..archive_progress import ArchiveEntries, ArchiveProgress, PROGRESS_FIELDS
+from ..backup_transfer import download_backup
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import re
 import mimetypes
@@ -54,7 +56,8 @@ from ..storage.secrets import encrypt_str as _enc_secret, decrypt_str as _dec_se
 from ..storage.user_secrets import UserSecretsStore
 from ..read_coalescing import coalesce_read, invalidate_reads_for_write
 
-from ..file_transfer import config_policy, write_policy, read_policy
+from ..file_transfer import config_policy, write_policy, read_policy, read_accessforge_metadata
+from ..clipboard_policy import parse_clipboard_policy, validate_clipboard_update
 from ..materials import config_materials, normalize_material_links
 
 api_bp = Blueprint("api", __name__)
@@ -1022,6 +1025,22 @@ def _write_project_materials_to_zip(zf: zipfile.ZipFile, proj: Project, material
         seen.add(basename)
         written += 1
     return written
+
+
+def _project_export_entries(proj, *, include_creds=True, include_vms=True,
+                            include_notify_audio=True, include_materials=True):
+    entries = ArchiveEntries()
+    project = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms,
+                                        include_materials=include_materials)
+    if not include_notify_audio:
+        project['audio'] = {key: value for key, value in (project.get('audio') or {}).items()
+                            if not str(key).startswith('media:')}
+    entries.writestr('project.json', json.dumps({'schemaVersion': 1, 'project': project}, indent=2))
+    if include_notify_audio:
+        _write_project_audio_to_zip(entries, proj)
+    if include_materials:
+        _write_project_materials_to_zip(entries, proj, os.path.join(current_app.config['DATA_DIR'], 'materials'))
+    return entries
 
 # VM refresh performance caching
 _VM_CONFIG_CACHE = {}  # {f"{node}:{vmid}": (timestamp, config_dict)}
@@ -2730,6 +2749,8 @@ def instances_refresh_vm(pid: str):
                     'qemu_agent_validation_state': 'unknown',
                     'lock': str(cfg.get('lock') or '').strip() if isinstance(cfg, dict) else '',
                     'description': str(cfg.get('description') or '').strip() if isinstance(cfg, dict) else '',
+                    'clipboard_policy': parse_clipboard_policy(read_accessforge_metadata(cfg.get('description'))) if isinstance(cfg, dict) and cfg else None,
+                    'file_transfer_policy': read_policy(cfg.get('description')) if isinstance(cfg, dict) and cfg else None,
                     'pool': pool_val,
                     # Effective access for the instance user (credential username)
                     'user_access': _effective_user_access(userid, int(vmid), poolid) if (userid and vmid is not None) else None,
@@ -14091,12 +14112,13 @@ def _validate_project_fields(data: dict) -> list:
     return errors
 
 
-def _project_to_json(p: Project) -> dict:
+def _project_to_json(p: Project, *, include_checkout: bool = True) -> dict:
     d = asdict(p)
-    from ..account_checkout import checkout_summary
-    summary = checkout_summary(p)
-    if summary is not None:
-        d['checkout'] = summary
+    if include_checkout:
+        from ..account_checkout import checkout_summary
+        summary = checkout_summary(p)
+        if summary is not None:
+            d['checkout'] = summary
     # Never expose encrypted secret blobs in standard project payloads
     for k in (
         'proxmox_username_enc',
@@ -14115,12 +14137,15 @@ def _project_to_json(p: Project) -> dict:
     return d
 
 
-def _project_to_json_filtered(p: Project, include_creds: bool = True, include_vms: bool = True) -> dict:
-    """Project to JSON with optional exclusion of credentials or VMs for export.
+def _project_to_json_filtered(p: Project, include_creds: bool = True, include_vms: bool = True,
+                              include_materials: bool = True) -> dict:
+    """Project to JSON with optional exclusion of credentials, VMs, or uploaded materials.
     When include_vms is False, we still include VM configurations (commands, adaptors, etc.)
     but drop node-specific VMIDs and disk images.
     """
-    d = _project_to_json(p)
+    # Checkout summaries depend on the requesting user's session. Exports run
+    # in background threads and exclude this installation-local UI data.
+    d = _project_to_json(p, include_checkout=False)
     # Always strip multi-project association metadata from export payloads
     try:
         d.pop('associated_projects', None)
@@ -14130,6 +14155,8 @@ def _project_to_json_filtered(p: Project, include_creds: bool = True, include_vm
     # configuration, and should never be copied into another installation.
     d.pop('exports', None)
     d.pop('checkout', None)
+    if not include_materials:
+        d['materials'] = []
 
     if not include_creds:
         # Remove project-level credentials if present
@@ -14866,10 +14893,12 @@ def export_project(pid: str):
     include_creds = request.args.get("includeCreds", "true").lower() != "false"
     include_vms = request.args.get("includeVms", "true").lower() != "false"
     include_notify_audio = request.args.get("includeNotifyAudio", "true").lower() != "false"
+    include_materials = request.args.get("includeMaterials", "true").lower() != "false"
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms)
+        project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms,
+                                                include_materials=include_materials)
         # Notifications are always exported; this flag only controls whether uploaded notification audio (media:*) is included.
         if not include_notify_audio:
             try:
@@ -14885,7 +14914,8 @@ def export_project(pid: str):
         zf.writestr("project.json", json.dumps(manifest, indent=2))
         if include_notify_audio:
             _write_project_audio_to_zip(zf, proj)
-        _write_project_materials_to_zip(zf, proj, mats_dir)
+        if include_materials:
+            _write_project_materials_to_zip(zf, proj, mats_dir)
     buf.seek(0)
     # Build friendly filename: <projectName>_YYYYMMDD_HHMMSS.zip
     try:
@@ -14915,8 +14945,9 @@ def import_project():
         include_creds = (request.form.get('includeCreds', 'true').lower() != 'false')
         include_vms = (request.form.get('includeVms', 'true').lower() != 'false')
         include_notify_audio = (request.form.get('includeNotifyAudio', 'true').lower() != 'false')
+        include_materials = (request.form.get('includeMaterials', 'true').lower() != 'false')
     except Exception:
-        include_creds, include_vms, include_notify_audio = True, True, True
+        include_creds, include_vms, include_notify_audio, include_materials = True, True, True, True
     try:
         allow_best_effort = (request.form.get('allowBestEffort', 'false').lower() == 'true')
     except Exception:
@@ -15055,7 +15086,7 @@ def import_project():
                     results.append(proj.__dict__)
 
                 # Import materials grouped by original id (materials/<orig_id>/filename)
-                for zname in _job_items('', zf.namelist(), 'import', 'Extracting archive entry', start=35, end=85, report=_queue_progress_reporter()):
+                for zname in _job_items('', zf.namelist() if include_materials else [], 'import', 'Extracting archive entry', start=35, end=85, report=_queue_progress_reporter()):
                     if not zname.startswith('materials/') or zname.endswith('/'):
                         continue
                     parts = zname.split('/')
@@ -15151,7 +15182,7 @@ def import_project():
 
                 # Import materials at materials/* or materials/<orig_id>/*
                 imported = []
-                for zname in _job_items('', zf.namelist(), 'import', 'Extracting archive entry', start=35, end=85, report=_queue_progress_reporter()):
+                for zname in _job_items('', zf.namelist() if include_materials else [], 'import', 'Extracting archive entry', start=35, end=85, report=_queue_progress_reporter()):
                     if not zname.startswith('materials/') or zname.endswith('/'):
                         continue
                     base = os.path.basename(zname)
@@ -15259,8 +15290,9 @@ def import_project_start():
         include_creds = (request.form.get('includeCreds', 'true').lower() != 'false')
         include_vms = (request.form.get('includeVms', 'true').lower() != 'false')
         include_notify_audio = (request.form.get('includeNotifyAudio', 'true').lower() != 'false')
+        include_materials = (request.form.get('includeMaterials', 'true').lower() != 'false')
     except Exception:
-        include_creds, include_vms, include_notify_audio = True, True, True
+        include_creds, include_vms, include_notify_audio, include_materials = True, True, True, True
     try:
         import_as_templates = (request.form.get('importAsTemplates', 'false').lower() == 'true')
     except Exception:
@@ -15312,6 +15344,7 @@ def import_project_start():
     # Create job record and spawn worker
     job_id = uuid.uuid4().hex
     rec = _import_job_record(job_id)
+    rec['archive_bytes'] = os.path.getsize(tmp_path)
     try:
         rec['local_zip'] = tmp_path
         _ACTIVE_JOBS[_import_job_key(job_id)] = rec
@@ -15319,17 +15352,18 @@ def import_project_start():
         pass
     app_obj = current_app._get_current_object()
 
-    def worker(job: str, path: str, include_creds: bool, include_vms: bool, include_notify_audio: bool, import_as_templates: bool, upload_name: str):
+    def worker(job: str, path: str, include_creds: bool, include_vms: bool, include_notify_audio: bool, include_materials: bool, import_as_templates: bool, upload_name: str):
         # Ensure app context in thread
         with app_obj.app_context():
             key = _import_job_key(job)
             local_work_dir = ''
+            progress = ArchiveProgress(_ACTIVE_JOBS[key], ['inspect', 'configuration', 'unzip', 'restore', 'save'])
             try:
                 if _ACTIVE_JOBS.get(key, {}).get('cancel'):
                     _ACTIVE_JOBS[key]['status'] = 'cancelled'
                     return
                 _ACTIVE_JOBS[key]['status'] = 'processing'
-                _ACTIVE_JOBS[key]['progress'] = 0
+                progress.stage(0, 'Inspecting uploaded ZIP archive')
                 _emit_import(job, f"[FILE] {os.path.basename(path)}")
 
                 # Stage all imported artifacts into a per-job work directory.
@@ -15360,6 +15394,7 @@ def import_project_start():
                     else:
                         _emit_import(job, "[PARSE] project.json loaded")
 
+                    progress.update(fraction=1)
                     s = _store()
                     mats_dir = os.path.join(app_obj.config["DATA_DIR"], "materials")
                     os.makedirs(mats_dir, exist_ok=True)
@@ -15380,24 +15415,18 @@ def import_project_start():
                         except Exception:
                             pass
                         return items
-                    mat_list = list_materials()
-                    total_steps = 0
-                    if 'projects' in manifest:
-                        total_steps = len(manifest.get('projects') or []) + len(mat_list)
-                    else:
-                        total_steps = 1 + len(mat_list)
+                    mat_list = list_materials() if include_materials else []
+                    configuration_count = len(manifest.get('projects') or []) if 'projects' in manifest else 1
+                    progress.stage(1, 'Reading project configurations and notification audio', items=configuration_count)
                     done_steps = 0
 
-                    def _tick(status_msg: str = None):
-                        nonlocal done_steps, total_steps
-                        if status_msg:
-                            _ACTIVE_JOBS[key]['status'] = status_msg
-                        try:
-                            pct = int((done_steps * 100) / max(total_steps or 1, 1))
-                            pct = max(0, min(99, pct))
-                            _ACTIVE_JOBS[key]['progress'] = pct
-                        except Exception:
-                            pass
+                    def _tick(status_msg=None):
+                        if _ACTIVE_JOBS[key].get('phase') == 'configuration':
+                            progress.update(item_completed=min(done_steps, configuration_count))
+
+                    def begin_extraction(names):
+                        progress.stage(2, 'Extracting Materials from ZIP', items=len(names),
+                                       size=sum(zf.getinfo(name).file_size for name in names))
 
                     results = []
                     errors = []
@@ -15477,6 +15506,9 @@ def import_project_start():
                                 pass
 
                         # Materials grouped by original id path
+                        mat_list = [name for name in mat_list if len(name.split('/')) >= 3
+                                    and name.split('/')[1] in id_map]
+                        begin_extraction(mat_list)
                         for zname in mat_list:
                             if _ACTIVE_JOBS.get(key, {}).get('cancel'):
                                 _ACTIVE_JOBS[key]['status'] = 'cancelled'
@@ -15492,7 +15524,7 @@ def import_project_start():
                                 new_name = f"{target}_{uuid.uuid4().hex}_{safe}"
                                 tmp_out = os.path.join(local_work_dir, new_name)
                                 with zf.open(zname) as src, open(tmp_out, 'wb') as dst:
-                                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                                    progress.copy(src, dst, zname, zf.getinfo(zname).file_size)
                                 staged_materials.append((tmp_out, os.path.join(mats_dir, new_name)))
                                 # Attach material name to the in-memory project for later persistence.
                                 try:
@@ -15564,7 +15596,9 @@ def import_project_start():
                                 project.proxmox_verify_ssl = bool(prox.get('verifySSL'))
                         except Exception:
                             pass
+                        progress.update(item_completed=1)
                         # Materials (both materials/* and materials/<orig_id>/*)
+                        begin_extraction(mat_list)
                         imported = []
                         for zname in mat_list:
                             if _ACTIVE_JOBS.get(key, {}).get('cancel'):
@@ -15575,7 +15609,7 @@ def import_project_start():
                             new_name = f"{new_id}_{uuid.uuid4().hex}_{safe}"
                             tmp_out = os.path.join(local_work_dir, new_name)
                             with zf.open(zname) as src, open(tmp_out, 'wb') as dst:
-                                shutil.copyfileobj(src, dst, length=1024 * 1024)
+                                progress.copy(src, dst, zname, zf.getinfo(zname).file_size)
                             staged_materials.append((tmp_out, os.path.join(mats_dir, new_name)))
                             imported.append(new_name)
                             _emit_import(job, f"[WRITE] {zname} -> {new_name}")
@@ -15588,6 +15622,7 @@ def import_project_start():
                         _emit_import(job, f"[STAGE] project: {project.name} ({new_id})")
                         done_steps += 1; _tick('processing')
 
+                        progress.stage(3, 'Preparing VM restore' if include_vms else 'VM restore not selected')
                         # Optional VM restore: look for backups/* in archive and restore to Proxmox when requested
                         if include_vms:
                             try:
@@ -15726,7 +15761,7 @@ def import_project_start():
                                                 parts = n.split('/')
                                                 if len(parts) >= 3:
                                                     by_vm.setdefault(parts[1], []).append(n)
-                                            for vm_name, files in by_vm.items():
+                                            for restore_index, (vm_name, files) in enumerate(by_vm.items()):
                                                 # Choose first file for restore
                                                 zname = sorted(files)[0]
                                                 base = os.path.basename(zname)
@@ -15744,6 +15779,10 @@ def import_project_start():
                                                         total = int(getattr(zi, 'compress_size', 0) or 0)
                                                 except Exception:
                                                     total = 0
+                                                progress.record.update(item_total=len(by_vm), item_completed=restore_index)
+                                                progress.update(current=zname, message=f'Extracting and uploading backup for {vm_name}',
+                                                    bytes_done=0, bytes_total=total, file_bytes_done=0, file_bytes_total=total,
+                                                    fraction=restore_index / max(len(by_vm), 1))
                                                 last_pct = -1
                                                 last_emit_t = time.time()
                                                 def _cb(bytes_sent, _total=total, _vm=vm_name, _fname=base):
@@ -15752,12 +15791,14 @@ def import_project_start():
                                                         pct = int((int(bytes_sent) * 100) / int(_total)) if _total else 0
                                                     except Exception:
                                                         pct = 0
+                                                    progress.update(bytes_done=int(bytes_sent), file_bytes_done=int(bytes_sent),
+                                                        fraction=(restore_index + 0.5 * min(1, int(bytes_sent) / total)) / len(by_vm) if total else None)
                                                     now = time.time()
                                                     if pct != last_pct or (now - last_emit_t) >= 0.5:
                                                         last_emit_t = now
                                                         last_pct = pct
                                                         try:
-                                                            _ACTIVE_JOBS[key]['status'] = f"Uploading {_vm} {pct}%"
+                                                            _ACTIVE_JOBS[key]['status'] = 'processing'
                                                         except Exception:
                                                             pass
                                                         _emit_import(job, f"[SFTP][UP] {_vm}/{_fname}: {int(bytes_sent)}/{_total} ({pct}%)")
@@ -15768,6 +15809,9 @@ def import_project_start():
                                                     except TypeError:
                                                         # Older paramiko signature may differ; try without file_size
                                                         sftp.putfo(src, remote_path, callback=_cb)
+                                                progress.update(bytes_done=None, bytes_total=None, file_bytes_done=None, file_bytes_total=None,
+                                                    current=vm_name, message=f'Restoring {vm_name}',
+                                                    fraction=(restore_index + 0.5) / len(by_vm))
                                                 # Determine new VMID
                                                 try:
                                                     vmid = int(client.cluster_nextid())
@@ -15789,7 +15833,8 @@ def import_project_start():
                                                         m = re.search(r"(\d{1,3})%", txt)
                                                         if m:
                                                             pct = max(0, min(100, int(m.group(1))))
-                                                            _ACTIVE_JOBS[key]['status'] = f"Restoring {vm} {pct}%"
+                                                            progress.update(fraction=(restore_index + 0.5 + 0.5 * pct / 100) / len(by_vm),
+                                                                            message=f'Restoring {vm} ({pct}%)')
                                                     except Exception:
                                                         pass
                                                 _ssh_run_stream(
@@ -15833,6 +15878,7 @@ def import_project_start():
                                                     except Exception as e:
                                                         _emit_import(job, f"[TEMPLATE][WARN] failed to convert {vm_name} ({vmid}) to template: {e}")
                                                 restored.append((vm_name, vmid))
+                                                progress.update(item_completed=restore_index + 1, fraction=(restore_index + 1) / len(by_vm))
                                             # Merge target-cluster VMIDs onto the imported configuration.
                                             project.vms = _merge_restored_vmids(project.vms, restored)
                                             # Defer persistence until commit (after cancellation check).
@@ -15844,6 +15890,8 @@ def import_project_start():
                             except Exception as e:
                                 _emit_import(job, f"[WARN] VM restore step failed: {e}")
 
+                    progress.stage(4, 'Saving imported Materials and project configurations',
+                                   items=len(staged_materials) + len(projects_to_commit))
                     _ACTIVE_JOBS[key]['errors'] = errors
                     if _ACTIVE_JOBS.get(key, {}).get('cancel'):
                         _ACTIVE_JOBS[key]['imported'] = []
@@ -15882,16 +15930,20 @@ def import_project_start():
                         except Exception as e:
                             raise RuntimeError(f"Failed to commit materials: {e}")
 
+                        progress.update(item_completed=len(staged_materials))
                         for proj in projects_to_commit:
                             try:
+                                progress.update(current=proj.name)
                                 s.upsert(proj)
+                                progress.update(item_completed=progress.record['item_completed'] + 1)
                             except Exception as e:
                                 raise RuntimeError(f"Failed to persist project {getattr(proj, 'id', '')}: {e}")
 
                         _ACTIVE_JOBS[key]['imported'] = results
-                        _ACTIVE_JOBS[key]['progress'] = 100
-                        _ACTIVE_JOBS[key]['status'] = 'completed'
+                        progress.finish('Import complete')
                         _emit_import(job, "[OK] import completed")
+            except InterruptedError:
+                _ACTIVE_JOBS[key]['status'] = 'cancelled'
             except Exception as e:
                 try:
                     _ACTIVE_JOBS[key]['status'] = 'error'
@@ -15909,7 +15961,6 @@ def import_project_start():
                 # Cleanup staged work dir (best-effort)
                 try:
                     if local_work_dir and os.path.isdir(local_work_dir):
-                        import shutil
                         shutil.rmtree(local_work_dir, ignore_errors=True)
                 except Exception:
                     pass
@@ -15940,7 +15991,7 @@ def import_project_start():
                 except Exception:
                     pass
 
-    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms, include_notify_audio, import_as_templates, upload_name), daemon=True)
+    t = threading.Thread(target=worker, args=(job_id, tmp_path, include_creds, include_vms, include_notify_audio, include_materials, import_as_templates, upload_name), daemon=True)
     t.start()
     return jsonify({"job": job_id})
 
@@ -15957,12 +16008,7 @@ def import_project_status():
     return jsonify({
         'id': rec.get('id'),
         'status': rec.get('status'),
-        'progress': rec.get('progress', 0),
-        'phase': rec.get('phase'),
-        'step': rec.get('step'),
-        'total_steps': rec.get('total_steps'),
-        'current': rec.get('current'),
-        'message': rec.get('message'),
+        **{field: rec.get(field) for field in PROGRESS_FIELDS},
         'eta': rec.get('eta'),
         'log': rec.get('log', []),
         'errors': rec.get('errors', []),
@@ -16046,7 +16092,8 @@ def export_projects():
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms)
+        project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=include_vms,
+                                                include_materials=include_materials)
         if not include_notify_audio:
             try:
                 audio_map = project_dict.get('audio')
@@ -16207,7 +16254,7 @@ def _ssh_run_stream(
 
 def _job_record(pid: str, job_id: str):
     key = _job_key(pid)
-    rec = _ACTIVE_JOBS.get(key) or {}
+    rec = {}
     rec.update({
         'id': job_id,
         'action': 'export',
@@ -16243,11 +16290,10 @@ def export_project_start(pid: str):
     include_creds = bool(data.get("includeCreds", True))
     include_vms = bool(data.get("includeVms", True))
     include_notify_audio = bool(data.get("includeNotifyAudio", True))
-    if not include_vms:
-        return jsonify({"error": "VM export not requested"}), 400
+    include_materials = bool(data.get("includeMaterials", True))
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
-    if not username or not password:
+    if include_vms and (not username or not password):
         return jsonify({"error": "Missing Proxmox credentials"}), 400
 
     base_url = (data.get('baseUrl') or getattr(proj, 'proxmox_url', '') or '').strip()
@@ -16427,6 +16473,52 @@ def export_project_start(pid: str):
                     app_obj.logger.debug(f"export[{pid}:{job_id}] {msg}")
                 except Exception:
                     pass
+            progress = ArchiveProgress(_ACTIVE_JOBS[key],
+                ['connect', 'backup', 'download', 'cleanup', 'zip', 'save'] if include_vms
+                else ['prepare', 'zip', 'save'])
+
+            def package(local_base=None):
+                zip_step = 4 if include_vms else 1
+                progress.stage(0 if not include_vms else zip_step, 'Preparing export archive')
+                entries = _project_export_entries(proj, include_creds=include_creds, include_vms=include_vms,
+                    include_notify_audio=include_notify_audio, include_materials=include_materials)
+                if local_base:
+                    for directory, _dirs, names in os.walk(os.path.join(local_base, 'backups')):
+                        for name in names:
+                            path = os.path.join(directory, name)
+                            entries.write(path, os.path.relpath(path, local_base))
+                local_zip = os.path.join(app_obj.config['DATA_DIR'], 'exports', f"export_{pid}_{job_id}.zip")
+                os.makedirs(os.path.dirname(local_zip), exist_ok=True)
+                _emit(f"[CMD] package -> {local_zip}")
+                _ACTIVE_JOBS[key]['status'] = 'packaging'
+                entries.pack(local_zip, progress, zip_step)
+                _ACTIVE_JOBS[key]['archive_bytes'] = os.path.getsize(local_zip)
+                _ACTIVE_JOBS[key]['status'] = 'finalizing'
+                progress.stage(zip_step + 1, 'Saving export record', items=1)
+                project = _store().get(pid)
+                if project:
+                    export = {
+                        'id': job_id,
+                        'timestamp': datetime_module.datetime.now(datetime_module.timezone.utc).isoformat().replace('+00:00', 'Z'),
+                        'include_creds': bool(include_creds), 'include_vms': bool(include_vms),
+                        'local_path': local_zip, 'filename': os.path.basename(local_zip),
+                        'size': os.path.getsize(local_zip),
+                    }
+                    project.exports = [export, *(getattr(project, 'exports', []) or [])]
+                    _store().upsert(project)
+                _ACTIVE_JOBS[key]['download_path'] = local_zip
+                progress.update(item_completed=1)
+                progress.finish('Export complete; ZIP ready to download')
+
+            if not include_vms:
+                try:
+                    package()
+                except InterruptedError:
+                    _ACTIVE_JOBS[key]['status'] = 'cancelled'
+                except Exception as exc:
+                    _ACTIVE_JOBS[key].update(status='error', error=str(exc))
+                    _emit(f"Error: {exc}")
+                return
             # Coerce bytes/str to text safely
             def _to_text(data) -> str:
                 try:
@@ -16494,6 +16586,7 @@ def export_project_start(pid: str):
                 return True
             try:
                 _ACTIVE_JOBS[key]['status'] = 'connecting'
+                progress.stage(0, 'Connecting to Proxmox')
                 host = _parse_host_from_url(getattr(proj, 'proxmox_url', '') or '')
                 port = int(getattr(proj, 'proxmox_ssh_port', 22) or 22)
                 ssh_user = username.split('@')[0] if '@' in username else username
@@ -16568,6 +16661,7 @@ def export_project_start(pid: str):
                 _ACTIVE_JOBS[key]['per_vm'] = pvms
                 _ACTIVE_JOBS[key]['status'] = 'running'
                 total = len(pvms)
+                progress.stage(1, 'Creating VM backups', items=total)
 
                 # For each VM, create folder and run vzdump
                 for idx, vmrec in enumerate(pvms):
@@ -16576,11 +16670,12 @@ def export_project_start(pid: str):
                         return
                     vm_name = vmrec['name'] or f"vm_{idx}"
                     vmid = vmrec.get('vmid')
+                    progress.update(current=vm_name, item_completed=idx, fraction=idx / max(total, 1))
                     if not vmid:
                         vmrec['status'] = 'skipped'
                         _emit(f"Skipping {vm_name}: missing VMID")
                         # Update overall progress
-                        _ACTIVE_JOBS[key]['progress'] = int(((idx + 1) / max(total, 1)) * 80)
+                        progress.update(item_completed=idx + 1, fraction=(idx + 1) / max(total, 1))
                         continue
                     vmrec['status'] = 'dumping'
                     _emit(f"[CMD] mkdir -p {base_remote}/{vm_name}")
@@ -16591,9 +16686,13 @@ def export_project_start(pid: str):
                     def _run_vzdump_operation():
                         def on_line(_txt):
                             try:
-                                vmrec['progress'] = min(95, vmrec.get('progress', 0) + 1)
+                                match = re.search(r'(\d+(?:\.\d+)?)\s*%', str(_txt))
+                                if not match:
+                                    return
+                                vmrec['progress'] = min(100, float(match.group(1)))
                                 _ACTIVE_JOBS[key]['per_vm'][idx] = vmrec
-                                _ACTIVE_JOBS[key]['progress'] = int(((idx + vmrec['progress']/100.0) / max(total, 1)) * 80)
+                                progress.update(fraction=(idx + vmrec['progress'] / 100) / max(total, 1),
+                                                message=f"Creating backup for {vm_name} ({vmrec['progress']:g}%)")
                             except Exception:
                                 pass
                         stdout_text, stderr_text = _ssh_run_stream(
@@ -16634,10 +16733,10 @@ def export_project_start(pid: str):
                         if last_error:
                             vmrec['error'] = last_error
                     _ACTIVE_JOBS[key]['per_vm'][idx] = vmrec
-                    _ACTIVE_JOBS[key]['progress'] = int(((idx + 1) / max(total, 1)) * 80)
+                    progress.update(item_completed=idx + 1, fraction=(idx + 1) / max(total, 1))
 
-                # Download results via SFTP
-                # Ensure exported files are readable by SSH user for SFTP download
+                # Discover results via SFTP, then stream large files over SSH.
+                # Ensure exported files are readable by the SSH user.
                 try:
                     _emit(f"[CMD] chown -R {ssh_user} {base_remote}")
                     _ssh_run_cmd(c, f"chown -R {ssh_user} {base_remote}", sudo=use_sudo, sudo_password=password)
@@ -16645,12 +16744,14 @@ def export_project_start(pid: str):
                     _emit(f"Chown failed (will attempt download anyway): {e}")
 
                 _ACTIVE_JOBS[key]['status'] = 'downloading'
+                progress.stage(2, 'Discovering backup files to download')
                 local_base = os.path.join(app_obj.config['DATA_DIR'], 'exports', f"{pid}_{job_id}")
                 os.makedirs(local_base, exist_ok=True)
                 try:
                     _ACTIVE_JOBS[key]['local_base'] = local_base
                 except Exception:
                     pass
+                sftp = None
                 try:
                     sftp = c.open_sftp()
                     # First, discover files and sizes to compute total bytes for progress
@@ -16669,26 +16770,25 @@ def export_project_start(pid: str):
                             names = []
                         for f in names:
                             rpath = f"{remote_dir}/{f}"
-                            fsize = 0
-                            try:
-                                st = sftp.stat(rpath)
-                                fsize = int(getattr(st, 'st_size', 0) or 0)
-                            except Exception:
-                                fsize = 0
+                            st = sftp.stat(rpath)
+                            fsize = int(st.st_size)
                             to_download.append((vm_name, f, rpath, local_dir, fsize))
                             try:
                                 total_bytes += max(0, int(fsize))
                             except Exception:
                                 pass
 
+                    progress.stage(2, 'Downloading backups from Proxmox', items=len(to_download), size=total_bytes)
                     _ACTIVE_JOBS[key]['download_total'] = int(total_bytes)
                     _ACTIVE_JOBS[key]['download_bytes'] = 0
 
-                    # Download with callback progress, mapping overall to 80..90%
+                    # Download with byte progress and a bounded SSH receive window.
                     downloaded_so_far = 0
                     last_emit_pct = -1
                     last_emit_t = time.time()
-                    for vm_name, fname, rpath, local_dir, fsize in to_download:
+                    for file_index, (vm_name, fname, rpath, local_dir, fsize) in enumerate(to_download):
+                        progress.update(current=f'{vm_name}/{fname}', item_completed=file_index,
+                                        file_bytes_done=0, file_bytes_total=fsize)
                         lpath = os.path.join(local_dir, fname)
                         file_prev = 0
 
@@ -16701,15 +16801,7 @@ def export_project_start(pid: str):
                             file_prev = int(bytes_so_far)
                             downloaded_so_far += delta
                             _ACTIVE_JOBS[key]['download_bytes'] = int(downloaded_so_far)
-                            # Update coarse-grained overall progress within 80..89 to leave room for packaging 90+
-                            try:
-                                if total_bytes > 0:
-                                    pct = 80 + int((downloaded_so_far * 10) / total_bytes)
-                                    pct = max(80, min(89, pct))
-                                    if pct > int(_ACTIVE_JOBS[key].get('progress', 80)):
-                                        _ACTIVE_JOBS[key]['progress'] = pct
-                            except Exception:
-                                pass
+                            progress.update(bytes_done=downloaded_so_far, file_bytes_done=int(bytes_so_far))
                             # Throttle log emissions
                             now = time.time()
                             if (now - last_emit_t) >= 0.5 or int(_ACTIVE_JOBS[key].get('progress', 80)) != last_emit_pct:
@@ -16722,30 +16814,39 @@ def export_project_start(pid: str):
                                 try:
                                     if total_bytes > 0:
                                         tot_pct = (downloaded_so_far * 100.0) / total_bytes
-                                        _emit(f"[SFTP] {vm_name}/{fname}: {bytes_so_far}/{_size} ({file_pct}%) — total {tot_pct:.1f}%")
+                                        _emit(f"[SSH] {vm_name}/{fname}: {bytes_so_far}/{_size} ({file_pct}%) — total {tot_pct:.1f}%")
                                     else:
-                                        _emit(f"[SFTP] {vm_name}/{fname}: {bytes_so_far}/{_size} ({file_pct}%)")
+                                        _emit(f"[SSH] {vm_name}/{fname}: {bytes_so_far}/{_size} ({file_pct}%)")
                                 except Exception:
                                     pass
 
                         try:
-                            sftp.get(rpath, lpath, callback=_cb)
-                            _emit(f"Downloaded {vm_name}/{fname}")
+                            started = time.monotonic()
+                            download_backup(c, rpath, lpath, fsize, callback=_cb,
+                                            cancelled=lambda: bool(_ACTIVE_JOBS.get(key, {}).get('cancel')))
+                            progress.update(item_completed=file_index + 1)
+                            elapsed = max(time.monotonic() - started, 0.001)
+                            _emit(f"Downloaded {vm_name}/{fname} ({fsize / elapsed / (1024 * 1024):.1f} MiB/s)")
+                        except InterruptedError:
+                            raise
                         except Exception as e:
                             _emit(f"Failed to download {vm_name}/{fname}: {e}")
-                    try:
-                        sftp.close()
-                    except Exception:
-                        pass
+                            raise
                     # Cleanup remote temporary export directory
                     try:
                         _ACTIVE_JOBS[key]['status'] = 'cleanup'
+                        progress.stage(3, 'Removing temporary files from Proxmox')
                         _emit(f"[CMD] rm -rf {base_remote}")
                         _ssh_run_cmd(c, f"rm -rf {base_remote}", sudo=use_sudo, sudo_password=password)
                         _emit('Remote temporary folders removed')
                     except Exception as e:
                         _emit(f"Remote cleanup failed: {e}")
                 finally:
+                    if sftp is not None:
+                        try:
+                            sftp.close()
+                        except Exception:
+                            pass
                     try:
                         c.close()
                     except Exception:
@@ -16759,129 +16860,11 @@ def export_project_start(pid: str):
                 except Exception:
                     pass
 
-                _ACTIVE_JOBS[key]['progress'] = 90
-                _ACTIVE_JOBS[key]['status'] = 'packaging'
-                # Build final ZIP locally and expose for download
-                local_zip = os.path.join(app_obj.config['DATA_DIR'], 'exports', f"export_{pid}_{job_id}.zip")
-                os.makedirs(os.path.dirname(local_zip), exist_ok=True)
-                _emit(f"[CMD] package -> {local_zip}")
-
-                # Collect files to package and compute total size for progress
-                backups_root = os.path.join(local_base, 'backups')
-                files_to_add = []  # list of (abs_path, arcname, size)
-                total_pack_bytes = 0
-                total_pack_files = 0
-                for root, _dirs, files in os.walk(backups_root):
-                    for name in files:
-                        fpath = os.path.join(root, name)
-                        arc = os.path.relpath(fpath, start=local_base)
-                        try:
-                            fsize = int(os.path.getsize(fpath))
-                        except Exception:
-                            fsize = 0
-                        files_to_add.append((fpath, arc, fsize))
-                        total_pack_files += 1
-                        try:
-                            total_pack_bytes += max(0, fsize)
-                        except Exception:
-                            pass
-                _ACTIVE_JOBS[key]['pack_total'] = int(total_pack_bytes)
-                _ACTIVE_JOBS[key]['pack_bytes'] = 0
-                _emit(f"[PKG] discovered {total_pack_files} file(s), {total_pack_bytes} bytes to add")
-
-                with zipfile.ZipFile(local_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    # Write manifest first
-                    project_dict = _project_to_json_filtered(proj, include_creds=include_creds, include_vms=True)
-                    if not include_notify_audio:
-                        try:
-                            audio_map = project_dict.get('audio')
-                            if isinstance(audio_map, dict):
-                                project_dict['audio'] = {k: v for k, v in audio_map.items() if not str(k).startswith('media:')}
-                        except Exception:
-                            pass
-                    manifest = {
-                        "schemaVersion": 1,
-                        "project": project_dict,
-                    }
-                    manifest_bytes = json.dumps(manifest, indent=2).encode('utf-8')
-                    zf.writestr("project.json", manifest_bytes)
-                    _emit(f"[PKG] wrote project.json ({len(manifest_bytes)} bytes)")
-                    if include_notify_audio:
-                        audio_written = _write_project_audio_to_zip(zf, proj)
-                        if audio_written:
-                            _emit(f"[PKG] added {audio_written} audio clip(s)")
-                    materials_written = _write_project_materials_to_zip(
-                        zf,
-                        proj,
-                        os.path.join(app_obj.config['DATA_DIR'], 'materials'),
-                    )
-                    if materials_written:
-                        _emit(f"[PKG] added {materials_written} material file(s)")
-
-                    # Add backup files with progress updates mapped to 90..99%
-                    packed = 0
-                    last_pct = -1
-                    last_log_t = time.time()
-                    for fpath, arc, fsize in files_to_add:
-                        try:
-                            _emit(f"[PKG] add {arc} ({fsize} bytes)")
-                        except Exception:
-                            pass
-                        try:
-                            zf.write(fpath, arcname=arc)
-                        except Exception as e:
-                            _emit(f"[PKG] failed to add {arc}: {e}")
-                            continue
-                        try:
-                            packed += max(0, int(fsize))
-                            _ACTIVE_JOBS[key]['pack_bytes'] = int(packed)
-                            if total_pack_bytes > 0:
-                                pct = 90 + int((packed * 9) / total_pack_bytes)  # up to 99%
-                                pct = max(90, min(99, pct))
-                                if pct != last_pct:
-                                    _ACTIVE_JOBS[key]['progress'] = pct
-                                    last_pct = pct
-                            # Throttle aggregate progress logs
-                            now = time.time()
-                            if (now - last_log_t) >= 0.7 or pct == 99:
-                                last_log_t = now
-                                try:
-                                    tot_pct = (packed * 100.0 / total_pack_bytes) if total_pack_bytes else 0
-                                    _emit(f"[PKG] progress: {packed}/{total_pack_bytes} bytes ({tot_pct:.1f}%)")
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                # Persist export record on project
-                try:
-                    s = _store()
-                    proj2 = s.get(pid)
-                    if proj2:
-                        size = 0
-                        try:
-                            size = os.path.getsize(local_zip)
-                        except Exception:
-                            size = 0
-                        rec = {
-                            'id': job_id,
-                            'timestamp': datetime_module.datetime.now(datetime_module.timezone.utc).isoformat().replace('+00:00', 'Z'),
-                            'include_creds': bool(include_creds),
-                            'include_vms': True,
-                            'local_path': local_zip,
-                            'filename': os.path.basename(local_zip),
-                            'size': size,
-                        }
-                        exports = list(getattr(proj2, 'exports', []) or [])
-                        exports.insert(0, rec)
-                        proj2.exports = exports
-                        s.upsert(proj2)
-                except Exception as e:
-                    _emit(f"Failed to persist export record: {e}")
-                _ACTIVE_JOBS[key]['download_path'] = local_zip
-                _ACTIVE_JOBS[key]['progress'] = 100
-                _ACTIVE_JOBS[key]['status'] = 'completed'
+                package(local_base)
+            except InterruptedError:
+                _ACTIVE_JOBS[key]['status'] = 'cancelled'
             except Exception as e:
-                _ACTIVE_JOBS[key]['status'] = 'error'
+                _ACTIVE_JOBS[key].update(status='error', error=str(e))
                 _ACTIVE_JOBS[key]['log'] = _ACTIVE_JOBS.get(key, {}).get('log', []) + [f"Error: {e}"]
                 try:
                     app_obj.logger.debug(f"export[{pid}:{job_id}] Error: {e}")
@@ -16902,12 +16885,8 @@ def export_project_status(pid: str):
     return jsonify({
         'id': rec.get('id'),
         'status': rec.get('status'),
-        'progress': rec.get('progress', 0),
-        'phase': rec.get('phase'),
-        'step': rec.get('step'),
-        'total_steps': rec.get('total_steps'),
-        'current': rec.get('current'),
-        'message': rec.get('message'),
+        'error': rec.get('error'),
+        **{field: rec.get(field) for field in PROGRESS_FIELDS},
         'eta': rec.get('eta'),
         'per_vm': rec.get('per_vm', []),
         'log': rec.get('log', []),
@@ -18461,7 +18440,13 @@ def instances_materials(pid):
     return _sync_accessforge_metadata(pid, materials_only=True)
 
 
-def _sync_accessforge_metadata(pid, materials_only=False):
+@api_bp.route("/projects/<pid>/instances/actions/clipboard", methods=["POST"])
+@_secure_route(required_roles=['admin'])
+def instances_clipboard(pid):
+    return _sync_accessforge_metadata(pid, clipboard_only=True)
+
+
+def _sync_accessforge_metadata(pid, materials_only=False, clipboard_only=False):
     proj = _store().get(pid)
     if not proj:
         return jsonify(error="Project not found"), 404
@@ -18469,8 +18454,18 @@ def _sync_accessforge_metadata(pid, materials_only=False):
     if not isinstance(body, dict):
         return jsonify(error="Invalid transfer request"), 400
     requested = {} if materials_only else {key: body[key] for key in ("file_upload", "file_download") if key in body}
+    clipboard_settings_changed = False
+    if clipboard_only:
+        try:
+            requested = validate_clipboard_update(body)
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        clipboard_settings_changed = bool(requested)
+        if body.get('reset_counts'):
+            import uuid
+            requested.update({f'clipboard_{direction}_reset': uuid.uuid4().hex for direction in ('to_vm', 'from_vm')})
     for key, value in requested.items():
-        if not isinstance(value, bool):
+        if not clipboard_only and not isinstance(value, bool):
             return jsonify(error=key + " must be a boolean"), 400
     templates = body.get('templates')
     targets = body.get('targets')
@@ -18508,14 +18503,14 @@ def _sync_accessforge_metadata(pid, materials_only=False):
     mapped, skipped, errors = _resolve_targets_to_vm_info(proj, client, targets)
     result = {'infos': [], 'skipped': skipped, 'errors': errors}
     access_for = _user_access_checker(client) if requested else None
-    for target in _job_items(pid, mapped, 'materials' if materials_only else 'file_transfer',
-                             'Updating VM materials' if materials_only else 'Updating VM transfer policy',
+    for target in _job_items(pid, mapped, 'materials' if materials_only else 'clipboard' if clipboard_only else 'file_transfer',
+                             'Updating VM materials' if materials_only else 'Updating VM clipboard access' if clipboard_only else 'Updating VM transfer policy',
                              report=_queue_progress_reporter(),
                              summary=lambda: f"{len(result['infos'])} updated, {len(result['errors'])} errors"):
         try:
             is_lxc = target.get('type') == 'lxc'
             if target.get('type') != 'qemu' and not (materials_only and is_lxc):
-                result['skipped'].append({'name': target['name'], 'reason': 'SPICE file transfer requires a QEMU VM'})
+                result['skipped'].append({'name': target['name'], 'reason': 'Clipboard access requires a QEMU VM' if clipboard_only else 'SPICE file transfer requires a QEMU VM'})
                 continue
             normalized = _normalize_project_target(proj, target)
             vm = next(v for v in proj.vms if v.name == normalized['base_name'])
@@ -18524,7 +18519,15 @@ def _sync_accessforge_metadata(pid, materials_only=False):
                 policy = config_materials(vm)
             elif requested:
                 # Preserve the other direction from this VM's current policy, not template defaults.
-                policy = read_policy(config.get('description'))
+                if clipboard_only:
+                    policy = read_accessforge_metadata(config.get('description'))
+                    if policy is None:
+                        policy = {'clipboard_to_vm': False, 'clipboard_from_vm': False}
+                else:
+                    policy = read_policy(config.get('description'))
+                if clipboard_only and not policy.get('clipboard_id'):
+                    import uuid
+                    policy['clipboard_id'] = uuid.uuid4().hex
                 # Match the VM list: live access overrides the template when known.
                 index = int(target['index'])
                 credentials = list(proj.credentials or [])
@@ -18536,23 +18539,32 @@ def _sync_accessforge_metadata(pid, materials_only=False):
                     poolid = re.sub(r'[^A-Za-z0-9_-]+', '', user.split('@', 1)[0])
                     live_access = access_for(userid, int(target['vmid']), poolid)
                 accessible = vm.viewable_to_user if live_access is None else live_access
-                if not accessible and any(requested.values()):
+                if not accessible and any(value is True for key, value in requested.items() if not key.endswith(('_limit', '_reset'))):
                     raise ValueError('Enable User-Accessible first')
                 policy.update(requested)
-                if not accessible:
-                    policy = {'file_upload': False, 'file_download': False}
+                if not accessible and not clipboard_only:
+                    policy.update({'file_upload': False, 'file_download': False})
             else:
                 policy = config_policy(vm)
             options = {'description': write_policy(config.get('description'), policy)}
             if config.get('digest'):
                 options['digest'] = config['digest']
             (client.set_lxc_options if is_lxc else client.set_qemu_options)(node=target['node'], vmid=int(target['vmid']), options=options)
-            details = 'Materials updated' if materials_only else '; '.join(
-                f"{direction.capitalize()} {'enabled' if policy['file_' + direction] else 'disabled'}"
-                for direction in ('upload', 'download'))
+            if clipboard_only:
+                changes = []
+                if clipboard_settings_changed:
+                    changes.append('Clipboard access updated')
+                if body.get('reset_counts'):
+                    changes.append('Clipboard counts reset')
+                details = '; '.join(changes)
+            elif materials_only:
+                details = 'Materials updated'
+            else:
+                details = '; '.join(f"{direction.capitalize()} {'enabled' if policy['file_' + direction] else 'disabled'}"
+                                    for direction in ('upload', 'download'))
             result['infos'].append({'name': target['name'], 'vmid': target['vmid'], 'reason': details})
         except Exception as exc:
             result['errors'].append({'name': target['name'], 'reason': str(exc)})
     _VM_CONFIG_CACHE.clear()
-    result['message'] = f"Updated {'materials' if materials_only else 'file transfer policy'} on {len(result['infos'])} VM(s)."
+    result['message'] = f"Updated {'clipboard access' if clipboard_only else 'materials' if materials_only else 'file transfer policy'} on {len(result['infos'])} VM(s)."
     return jsonify(result)

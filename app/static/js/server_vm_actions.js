@@ -29,9 +29,13 @@ function buildServerVmSteps(action, options, projects) {
       const opts = normalizeVmDeleteOptions(options.deleteOptions);
       if (opts.disableUserAccessibility) accessibility(false);
       add('delete', { deleteUsersAndPools: opts.deleteUsersAndPools, verifyCleanup: opts.verifyCleanup }, baseTargets);
+    } else if (action === 'file_transfer_update') {
+      add('file_transfer', options.fileTransferPolicy);
     } else if (/^file_(upload|download)_(enable|disable)$/.test(action)) {
       const [, direction, operation] = /^file_(upload|download)_(enable|disable)$/.exec(action);
       add('file_transfer', { ['file_' + direction]: operation === 'enable' });
+    } else if (action === 'clipboard_update' || action === 'clipboard_reset') {
+      add('clipboard', action === 'clipboard_reset' ? {reset_counts: true} : options.clipboardPolicy);
     } else if (action === 'users_access_enable' || action === 'users_access_disable') {
       accessibility(action === 'users_access_enable');
     } else if (action === 'users_orchestration_enable' || action === 'users_orchestration_disable') {

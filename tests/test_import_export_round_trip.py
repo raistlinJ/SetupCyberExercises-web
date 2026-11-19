@@ -206,6 +206,27 @@ class ImportExportRoundTripTests(unittest.TestCase):
         downloaded = self.client.get(f'/api/projects/{imported_pid}/materials/{materials[0]}')
         self.assertEqual(downloaded.data, b'material-bytes')
 
+    def test_configuration_exports_respect_materials_selection(self):
+        pid = self._seed_project()
+        for route in [f'/api/projects/{pid}/export?', f'/api/projects/export?ids={pid}&']:
+            for selection in [None, 'true', 'false']:
+                with self.subTest(route=route, selection=selection):
+                    query = '' if selection is None else f'includeMaterials={selection}'
+                    response = self.client.get(route + query)
+                    self.assertEqual(response.status_code, 200)
+                    with zipfile.ZipFile(io.BytesIO(response.data)) as exported:
+                        paths = [name for name in exported.namelist() if name.startswith('materials/')]
+                        manifest = json.loads(exported.read('project.json'))
+                        project = manifest.get('project') or manifest['projects'][0]
+                        if selection == 'false':
+                            self.assertEqual(paths, [])
+                            self.assertEqual(project['materials'], [])
+                        else:
+                            self.assertEqual(len(paths), 1)
+                            self.assertEqual(exported.read(paths[0]), b'material-bytes')
+                            self.assertEqual(len(project['materials']), 1)
+        self.assertEqual(len(ProjectStore(self.tmp.name).get(pid).materials), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

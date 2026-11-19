@@ -311,14 +311,15 @@ class ActionQueue:
             for key in ('message', 'phase', 'current', 'transferDirection'):
                 if key in fields:
                     patch[key] = str(fields[key] or '')[:1000]
-            for key in ('progress', 'transferProgress'):
+            for key in ('progress', 'transferProgress', 'phase_progress'):
                 if key in fields:
                     try:
                         value = float(fields[key])
                         patch[key] = max(0, min(100, value)) if math.isfinite(value) else None
                     except (TypeError, ValueError):
                         patch[key] = None
-            for key in ('item_total', 'item_completed'):
+            for key in ('item_total', 'item_completed', 'operation_step', 'operation_total_steps',
+                        'bytes_done', 'bytes_total', 'file_bytes_done', 'file_bytes_total', 'archive_bytes'):
                 if key in fields:
                     try:
                         patch[key] = max(0, int(fields[key])) if fields[key] is not None else None
@@ -353,12 +354,17 @@ class ActionQueue:
             rec = api._ACTIVE_JOBS.get(key)
             if not rec or rec.get('id') != result['job']:
                 raise ValueError('Background operation is no longer available')
-            report({key: rec.get(key) for key in ('progress', 'message', 'current', 'item_total', 'item_completed')}
-                   | {'phase': rec.get('phase') or rec.get('status')})
+            report({key: rec.get(key) for key in ('progress', 'message', 'current', 'item_total', 'item_completed',
+                                                 'phase_progress', 'bytes_done', 'bytes_total',
+                                                 'file_bytes_done', 'file_bytes_total', 'archive_bytes')}
+                   | {'phase': rec.get('phase') or rec.get('status'),
+                      'operation_step': rec.get('step'), 'operation_total_steps': rec.get('total_steps')})
             state = rec.get('status')
             if state in {'completed', 'error', 'cancelled'}:
                 if state == 'error':
-                    raise ValueError('Background operation failed; see import/export logs')
+                    detail = rec.get('error') or next((str(error) for error in reversed(rec.get('errors') or []) if error), '')
+                    raise ValueError(f'Background operation failed: {detail}' if detail
+                                     else 'Background operation failed; see import/export logs')
                 if state == 'cancelled':
                     with self.connect() as db:
                         db.execute('UPDATE actions SET cancel=1 WHERE id=?', (job_id,))
@@ -739,6 +745,12 @@ def public_record(row):
             'itemCompleted': detail.get('item_completed'),
             'transferProgress': detail.get('transferProgress'),
             'transferDirection': detail.get('transferDirection', ''),
+            'operationStep': detail.get('operation_step'),
+            'operationTotalSteps': detail.get('operation_total_steps'),
+            'phaseProgress': detail.get('phase_progress'),
+            'bytesDone': detail.get('bytes_done'), 'bytesTotal': detail.get('bytes_total'),
+            'fileBytesDone': detail.get('file_bytes_done'), 'fileBytesTotal': detail.get('file_bytes_total'),
+            'archiveBytes': detail.get('archive_bytes'),
             'exclusive': True, 'lockProject': True, 'server': True}
 
 

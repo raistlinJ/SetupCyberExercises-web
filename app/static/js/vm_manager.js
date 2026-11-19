@@ -308,9 +308,9 @@ function vmEnsureScrollPersistence() {
 document.addEventListener('DOMContentLoaded', vmEnsureScrollPersistence);
 
 // Column visibility per project
-let VM_COLS = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false };
+let VM_COLS = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false, clipboard: true };
 function vmColsKey(pid) { return `toolhub.vm.mgr.cols.${pid}`; }
-function readVmCols(pid) { try { const base = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false }; const raw = JSON.parse(sessionStorage.getItem(vmColsKey(pid)) || '{}') || {}; return { ...base, ...raw }; } catch { return { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false }; } }
+function readVmCols(pid) { try { const base = { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false, clipboard: true }; const raw = JSON.parse(sessionStorage.getItem(vmColsKey(pid)) || '{}') || {}; return { ...base, ...raw }; } catch { return { project: false, name: true, cred: true, status: true, state: true, id: true, node: true, template: true, nets: true, screenshot: true, last_login: false, clipboard: true }; } }
 function writeVmCols(pid, obj) { try { sessionStorage.setItem(vmColsKey(pid), JSON.stringify(obj || {})); } catch { } }
 
 // Lightweight HTTP helper (fallback if global http() not provided on this page)
@@ -924,7 +924,7 @@ function enforceRefreshDisabledOnConnChange() {
 // Wire up column toggles for VM table
 function wireVmCols() {
   try {
-    const ids = ['project', 'name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login'];
+    const ids = ['project', 'name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login', 'clipboard'];
     ids.forEach(id => {
       const el = document.getElementById(`vm-col-${id}`);
       if (!el) return;
@@ -1167,7 +1167,7 @@ async function vmLoadProjectById(pid) {
   try { await hydrateProxCredsFromPersisted(PROJ.id); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   try { Promise.resolve(vmRefreshServerResources(PROJ)).catch(() => { }); } catch { }
-  try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
+  try { VM_COLS = readVmCols(PROJ.id); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login', 'clipboard']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { }
   if (requestToken !== VM_LOAD_REQUEST_TOKEN || selectionChanged()) return;
   renderVmTable(proj);
   updateRefreshState();
@@ -1556,6 +1556,7 @@ async function refreshVmView(opts) {
         if (typeof stopStatusPoll === 'function') stopStatusPoll();
       }
       const statuses = resp.instance_statuses || [];
+      if (typeof vmLoadClipboardUsage === 'function' && VM_COLS.clipboard) await vmLoadClipboardUsage(project, statuses);
       const statusMap = new Map(statuses.map(s => [Number(s.index || 0), s]));
       const hasAnyStatus = statuses.length > 0;
       const inst = Number(project.instances || 0);
@@ -1764,6 +1765,7 @@ function renderMergedVmTable(rows) {
     (VM_COLS.id ? '<th role="button" aria-sort="' + ariaSort('id') + '" onclick="vmSortBy(\'id\')">ID' + sortIcon('id') + '</th>' : '') +
     (VM_COLS.node ? '<th role="button" aria-sort="' + ariaSort('node') + '" onclick="vmSortBy(\'node\')">Node Name' + sortIcon('node') + '</th>' : '') +
     (VM_COLS.template ? '<th role="button" aria-sort="' + ariaSort('template') + '" onclick="vmSortBy(\'template\')">TemplateName/ID' + sortIcon('template') + '</th>' : '') +
+    (VM_COLS.clipboard ? '<th>Clipboard</th>' : '') +
     (VM_COLS.last_login ? '<th title="Latest successful Proxmox authentication in the retained cluster log; includes ticket and console verification, not guest OS logins">Last login</th>' : '') +
     (VM_COLS.screenshot ? '<th>Screenshot</th>' : '') +
     (VM_COLS.nets ? '<th>Adaptors</th>' : '') +
@@ -1906,6 +1908,7 @@ function renderMergedVmTable(rows) {
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
         (VM_COLS.template ? `<td>${templateHtml}</td>` : '') +
+        (VM_COLS.clipboard ? `<td>${vmClipboardCell(r, typeof PROJ === 'object' ? PROJ : null)}</td>` : '') +
         (VM_COLS.last_login ? `<td>${vmLastLoginCell(r)}</td>` : '') +
         (VM_COLS.screenshot ? `<td>${vmScreenshotCell(d)}</td>` : '') +
         (VM_COLS.nets ? `<td>${adaptorsCell}</td>` : '') +
@@ -1944,67 +1947,12 @@ function renderMergedVmTable(rows) {
 
 // Sidebar: create a new project from VM Manager page
 async function createProjectSidebar() {
-  try {
-    const input = document.getElementById('proj-name');
-    const name = (input && input.value ? input.value.trim() : '');
-    if (!name) { alert('Enter a project name.'); return; }
-    try { (window.shell && shell.logInfo) ? shell.logInfo(`VM: creating project "${name}"…`) : console.log('VM: creating project', name); } catch { }
-    const res = await http('POST', '/api/projects', { name });
-    if (input) input.value = '';
-    const pid = (res && (res.id || res.pid)) ? (res.id || res.pid) : '';
-    if (pid && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid);
-    // Redirect to configuration page so it loads the new project
-    try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
-    try { if (pid) location.href = '/'; else location.href = '/'; } catch { }
-    try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM: project created') : console.log('VM: project created'); } catch { }
-  } catch (e) {
-    alert('Failed to create project: ' + (e && e.message ? e.message : 'Unknown error'));
-    try { (window.shell && shell.logError) ? shell.logError('VM: create project failed: ' + (e && e.message ? e.message : e)) : console.error('VM: create project failed:', e); } catch { }
-  }
+  shell.startProjectCreation();
 }
 
 // Sidebar: import a project ZIP from VM Manager page
 async function importProjectSidebar() {
-  const input = document.getElementById('import-file');
-  if (!input || !input.files || !input.files[0]) return;
-  const toggleBusy = (flag) => {
-    try {
-      if (window.shell && typeof shell.setSidebarImportBusy === 'function') {
-        shell.setSidebarImportBusy(flag);
-        return;
-      }
-    } catch { }
-    try {
-      input.disabled = !!flag;
-      const label = input.closest('label');
-      if (label) {
-        label.classList.toggle('disabled', !!flag);
-        if (flag) label.setAttribute('aria-disabled', 'true'); else label.removeAttribute('aria-disabled');
-        label.style.pointerEvents = flag ? 'none' : '';
-        label.style.opacity = flag ? '0.65' : '';
-      }
-    } catch { }
-  };
-  toggleBusy(true);
-  const fd = new FormData();
-  fd.append('file', input.files[0]);
-  try {
-    await runQueued(`Import project: ${input.files[0].name}`, async () => {
-      try { (window.shell && shell.logInfo) ? shell.logInfo(`VM: importing project from ${input.files[0].name}`) : console.log('VM: importing project from', input.files[0].name); } catch { }
-      const resp = await http('POST', '/api/projects/import', fd);
-      input.value = '';
-      const importedId = (resp && resp.id) || (resp && resp.imported && resp.imported[0] && resp.imported[0].id) || '';
-      if (importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
-      try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('vm'); } catch { }
-      try { if (importedId) await vmLoadProjectById(importedId); } catch { }
-      try { (window.shell && shell.logSuccess) ? shell.logSuccess('VM: project imported') : console.log('VM: project imported'); } catch { }
-    }, { projectId: getCurrentPid() });
-  } catch (e) {
-    alert('Error importing project: ' + (e && e.message ? e.message : 'Unknown error'));
-    try { (window.shell && shell.logError) ? shell.logError('VM: import project failed: ' + (e && e.message ? e.message : e)) : console.error('VM: import project failed:', e); } catch { }
-  } finally {
-    toggleBusy(false);
-  }
+  return importProjectSidebarWithFlags({ includeCreds: true, includeVms: true, includeMaterials: true });
 }
 
 // VM Manager: open import options modal before importing
@@ -2016,9 +1964,11 @@ function openImportOptionsVM() {
   try {
     const c = document.getElementById('impvm-creds');
     const v = document.getElementById('impvm-vms');
+    const materials = document.getElementById('impvm-materials');
     const warn = document.getElementById('impvm-vms-warning');
     if (c) c.checked = true;
     if (v) v.checked = true;
+    if (materials) materials.checked = true;
     if (warn) warn.style.display = v && v.checked ? 'block' : 'none';
   } catch { }
   const m = new bootstrap.Modal(modalEl);
@@ -2028,13 +1978,14 @@ function openImportOptionsVM() {
     btn.onclick = async () => {
       const includeCreds = !!document.getElementById('impvm-creds')?.checked;
       const includeVms = !!document.getElementById('impvm-vms')?.checked;
+      const includeMaterials = document.getElementById('impvm-materials')?.checked !== false;
       if (includeVms) {
         const proceed = confirm('Importing VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
         if (!proceed) return;
       }
       try { m.hide(); } catch { }
       // Pass flags via global FormData appending in importProjectSidebar
-      await importProjectSidebarWithFlags({ includeCreds, includeVms });
+      await importProjectSidebarWithFlags({ includeCreds, includeVms, includeMaterials });
     };
   }
 }
@@ -2042,10 +1993,7 @@ function openImportOptionsVM() {
 async function importProjectSidebarWithFlags(opts) {
   const input = document.getElementById('import-file');
   document.addEventListener('project-selected', () => { try { const sel = document.getElementById('vm-auto-interval'); if (sel) sel.value = String(readAuto() || 0); apply(); } catch { } });
-  const fd = new FormData();
-  fd.append('file', input.files[0]);
-  if (opts && typeof opts.includeCreds === 'boolean') fd.append('includeCreds', String(opts.includeCreds));
-  if (opts && typeof opts.includeVms === 'boolean') fd.append('includeVms', String(opts.includeVms));
+  if (!input?.files?.[0]) return;
   const toggleBusy = (flag) => {
     try {
       if (window.shell && typeof shell.setSidebarImportBusy === 'function') {
@@ -2068,7 +2016,8 @@ async function importProjectSidebarWithFlags(opts) {
   try {
     await runQueued(`Import project: ${input.files[0].name}`, async () => {
       try { (window.shell && shell.logInfo) ? shell.logInfo(`VM: importing project from ${input.files[0].name}`) : console.log('VM: importing project from', input.files[0].name); } catch { }
-      const resp = await http('POST', '/api/projects/import', fd);
+      const resp = await _runAsyncImportWithProx({ file: input.files[0], ...opts });
+      if (resp?.status === 'cancelled') return;
       input.value = '';
       const importedId = (resp && resp.id) || (resp && resp.imported && resp.imported[0] && resp.imported[0].id) || '';
       if (importedId && window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(importedId);
@@ -2142,6 +2091,13 @@ function vmApplyQueuedInventory(pid, resp) {
   }
   vmApplyServerResources(id, resp.server_resources);
   vmMarkLiveRefreshed(id);
+  if (typeof vmLoadClipboardUsage === 'function' && VM_COLS.clipboard) {
+    const project = projects.find(item => item && canonicalPid(item.id) === id);
+    if (project) vmLoadClipboardUsage(project, statuses).then(() => {
+      if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []);
+      else if (canonicalPid(PROJ?.id) === id) renderVmTable(PROJ);
+    }).catch(() => {});
+  }
   if (Array.isArray(SELECTED_PIDS) && SELECTED_PIDS.length > 1) {
     const rows = window.__MERGED_ROWS__ || [];
     const byIndex = new Map(statuses.map(status => [Number(status.index), status]));
@@ -2232,6 +2188,7 @@ async function vmRefresh(opts) {
       if (!opts?.targets) vmMarkLiveRefreshed(refreshPid);
       // Keep the original project's cached inventory current even after navigation.
       const statuses = resp.instance_statuses || [];
+      if (typeof vmLoadClipboardUsage === 'function' && VM_COLS.clipboard) await vmLoadClipboardUsage(project, statuses);
       project.instance_statuses = statuses;
       for (const cached of (ALL_PROJECTS || [])) {
         if (canonicalPid(cached.id) === canonicalPid(refreshPid)) cached.instance_statuses = statuses;
@@ -2678,6 +2635,7 @@ function renderVmTable(proj) {
   if (VM_COLS.id) html += '<th role="button" aria-sort="' + ariaSort('id') + '" onclick="vmSortBy(\'id\')">ID' + sortIcon('id') + '</th>';
   if (VM_COLS.node) html += '<th role="button" aria-sort="' + ariaSort('node') + '" onclick="vmSortBy(\'node\')">Node Name' + sortIcon('node') + '</th>';
   if (VM_COLS.template) html += '<th role="button" aria-sort="' + ariaSort('template') + '" onclick="vmSortBy(\'template\')">TemplateName/ID' + sortIcon('template') + '</th>';
+  if (VM_COLS.clipboard) html += '<th>Clipboard</th>';
   if (VM_COLS.last_login) html += '<th title="Latest successful Proxmox authentication in the retained cluster log; includes ticket and console verification, not guest OS logins">Last login</th>';
   if (VM_COLS.screenshot) html += '<th>Screenshot</th>';
   if (VM_COLS.nets) html += '<th>Adaptors</th>';
@@ -2828,6 +2786,7 @@ function renderVmTable(proj) {
         (VM_COLS.id ? `<td>${idHtml}</td>` : '') +
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
         (VM_COLS.template ? `<td>${templateHtml}</td>` : '') +
+        (VM_COLS.clipboard ? `<td>${vmClipboardCell(r, typeof PROJ === 'object' ? PROJ : null)}</td>` : '') +
         (VM_COLS.last_login ? `<td>${vmLastLoginCell(r)}</td>` : '') +
         (VM_COLS.screenshot ? `<td>${vmScreenshotCell(d)}</td>` : '') +
         (VM_COLS.nets ? `<td>${adaptorsCell}</td>` : '') +
@@ -3025,7 +2984,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // Wire column chooser
   wireVmCols();
   // Reflect saved columns on project select
-  document.addEventListener('project-selected', (e) => { try { const pid = e.detail || ''; if (!pid) return; VM_COLS = readVmCols(pid); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { } });
+  document.addEventListener('project-selected', (e) => { try { const pid = e.detail || ''; if (!pid) return; VM_COLS = readVmCols(pid); const ids = ['name', 'cred', 'status', 'state', 'id', 'node', 'template', 'nets', 'screenshot', 'last_login', 'clipboard']; ids.forEach(id => { const el = document.getElementById(`vm-col-${id}`); if (el) el.checked = !!VM_COLS[id]; }); } catch { } });
   (function () {
     let timer = null;
     function key() { try { return `toolhub.vm.mgr.auto.${PROJ ? PROJ.id : 'none'}`; } catch { return 'toolhub.vm.mgr.auto.none'; } }
@@ -3729,7 +3688,7 @@ function updateRefreshState() {
     const scopedSelections = multiMode ? listSelectedEntries() : (PROJ ? listSelectedEntriesForPid(PROJ.id) : []);
     const anySelected = scopedSelections.length > 0;
     const disable = !(loggedIn && anySelected);
-    ['act-power', 'act-lifecycle', 'act-state-net', 'act-control'].forEach(id => {
+    ['act-power', 'act-lifecycle', 'act-state-net', 'act-control', 'act-clipboard'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = disable;
     });
@@ -5084,6 +5043,9 @@ function friendlyActionName(action) {
     users_creds_set: 'Set Credentials to Current List',
     users_orchestration_enable: 'Enable orchestration access (dangerous)',
     users_orchestration_disable: 'Disable orchestration access',
+    clipboard_update: 'Configure Text Copy',
+    clipboard_reset: 'Reset Clipboard Character Counts',
+    file_transfer_update: 'Configure File Transfer',
     file_upload_enable: 'Enable VM Upload',
     file_upload_disable: 'Disable VM Upload',
     file_download_enable: 'Enable VM Download',
@@ -6770,6 +6732,14 @@ async function vmAction(action, opts) {
   }
   const liveStateDecision = await vmEnsureLiveStateBeforeAction(options);
   if (liveStateDecision !== 'continue') return;
+  if (action === 'clipboard_update' && !options.clipboardPolicy) {
+    options.clipboardPolicy = await promptVmAccessPolicy(options, true);
+    if (!options.clipboardPolicy) return;
+  }
+  if (action === 'file_transfer_update' && !options.fileTransferPolicy) {
+    options.fileTransferPolicy = await promptVmAccessPolicy(options, false);
+    if (!options.fileTransferPolicy) return;
+  }
   if (action === 'users_orchestration_enable' || action === 'users_orchestration_disable') {
     try {
       const projects = multi
@@ -6874,13 +6844,13 @@ async function vmActionExecForProject(action, opts = {}, PROJ = null) {
     : listSelectedEntriesForPid(PROJ.id);
   if (!selected.length) { alert('Select at least one VM row in this project.'); return; }
 
-  if (/^file_(upload|download)_(enable|disable)$/.test(action)) {
+  if (/^file_(upload|download)_(enable|disable)$/.test(action) || ['file_transfer_update', 'clipboard_update', 'clipboard_reset'].includes(action)) {
     if (!hasAuthForProject(PROJ)) { alert('Please log in to Proxmox first.'); return; }
     try {
-      const result = await vmTransferAction(PROJ, action, selected);
+      const result = action.startsWith('clipboard_') ? await vmClipboardAction(PROJ, action, selected, opts) : await vmTransferAction(PROJ, action, selected, opts);
       showActionSummary(friendlyActionName(action), result);
       await vmRefresh({project: PROJ, forceRefresh: true, showProgressDialog: false});
-    } catch (error) { alert('File transfer action failed: ' + error.message); }
+    } catch (error) { alert(`${friendlyActionName(action)} failed: ${error.message}`); }
     return;
   }
   // Configuration-only actions: toggle whether VM templates are user-accessible.
@@ -7648,13 +7618,13 @@ async function vmActionMultiExec(action, opts = {}) {
     byPid.get(entry.pid).push({ index: Number(entry.index), name: entry.name });
   }
   if (byPid.size === 0) { alert('No valid selections.'); return; }
-  if (/^file_(upload|download)_(enable|disable)$/.test(action)) {
+  if (/^file_(upload|download)_(enable|disable)$/.test(action) || ['file_transfer_update', 'clipboard_update', 'clipboard_reset'].includes(action)) {
     const result = {infos: [], errors: [], skipped: []};
     for (const [pid, targets] of byPid) {
       const project = (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(pid));
       try {
         if (!project || !hasAuthForPid(pid)) throw new Error('Missing project or Proxmox credentials');
-        const response = await vmTransferAction(project, action, targets);
+        const response = action.startsWith('clipboard_') ? await vmClipboardAction(project, action, targets, opts) : await vmTransferAction(project, action, targets, opts);
         for (const key of ['infos', 'errors', 'skipped']) result[key].push(...(response[key] || []));
       } catch (error) { result.errors.push({project: pid, reason: error.message}); }
     }
@@ -8850,7 +8820,9 @@ function showActionSummary(actionName, resp) {
 function vmTransferPolicy(row, project) {
   const config = project?.vms?.find(vm => vm.name === row.baseName) || {};
   let policy = {file_upload: config.file_upload === true, file_download: config.file_download === true};
-  if (row.detail) {
+  if (row.detail?.file_transfer_policy) {
+    policy = row.detail.file_transfer_policy;
+  } else if (row.detail) {
     policy = {file_upload: false, file_download: false};
     // AccessForge writes a separate, namespaced JSON object in VM notes.
     const matches = typeof row.detail.description === 'string' ? (row.detail.description.match(/\{\s*"AccessForge"\s*:\s*\{[^{}]*\}\s*\}/g) || []) : [];
@@ -8878,12 +8850,15 @@ function vmTransferIcons(row, project) {
   return `<span class="vm-transfer-icons d-inline-flex flex-nowrap align-items-center ms-1" style="font-size: .85em; gap: 1px; line-height: 1; vertical-align: middle;" role="group" aria-label="VM upload and download policies">${arrows}</span>`;
 }
 
-async function vmTransferAction(project, action, targets) {
-  const match = /^file_(upload|download)_(enable|disable)$/.exec(action);
-  const direction = match[1], enable = match[2] === 'enable';
+async function vmTransferAction(project, action, targets, options = {}) {
+  let policy = options.fileTransferPolicy;
+  if (action !== 'file_transfer_update') {
+    const [, direction, operation] = /^file_(upload|download)_(enable|disable)$/.exec(action);
+    policy = {['file_' + direction]: operation === 'enable'};
+  }
   const sess = readProxCreds(project.id) || {};
   const response = await http('POST', `/api/projects/${encodeURIComponent(project.id)}/instances/actions/file_transfer`, {
-    targets, ['file_' + direction]: enable,
+    targets, ...policy,
     username: sess.username || undefined, password: sess.password || undefined,
     baseUrl: project.proxmox_url, apiPort: project.proxmox_api_port,
     verifySSL: project.proxmox_verify_ssl !== false,

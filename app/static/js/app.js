@@ -4867,15 +4867,26 @@ async function createProject() {
   const name = (input && input.value ? input.value.trim() : '');
   if (!name) { try { showToast('Enter a project/scenario name first.', 'warning'); } catch { } return; }
   
-  resetWizard();
   const modalEl = document.getElementById('projectWizardModal');
-  if (modalEl) {
-    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-    modal.show();
-  } else {
-    // Fallback if UI not loaded
-    submitProjectCreation('manual');
+  if (!modalEl) {
+    shell.startProjectCreation();
+    return;
   }
+  resetWizard();
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  modal.show();
+}
+
+function openRequestedProjectCreation() {
+  const url = new URL(window.location.href);
+  const name = url.searchParams.get('newProject');
+  if (name === null) return;
+  url.searchParams.delete('newProject');
+  window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+  const input = document.getElementById('proj-name');
+  if (!input) return;
+  input.value = name;
+  createProject();
 }
 
 window.submitProjectCreation = async function(mode) {
@@ -5198,6 +5209,7 @@ window.submitProjectCreation = async function(mode) {
 
 // Allow pressing Enter in the project name input to create
 window.addEventListener('DOMContentLoaded', () => {
+  openRequestedProjectCreation();
   const input = document.getElementById('proj-name');
   if (input) {
     input.addEventListener('keydown', (ev) => {
@@ -8741,15 +8753,17 @@ function openExportOptions(pid) {
   try { (window.shell && shell.logInfo) ? shell.logInfo(`Config: open export options for ${pid}`) : console.log('Open export options', pid); } catch { }
   const modalEl = document.getElementById('exportOptionsModal');
   if (!modalEl || !window.bootstrap) { window.location.href = `/api/projects/${encodeURIComponent(pid)}/export`; return; }
-  // Default to include both
+  // Default to include all optional content
   try {
     const c = document.getElementById('exp-creds');
     const v = document.getElementById('exp-vms');
     const a = document.getElementById('exp-notify-audio');
+    const materials = document.getElementById('exp-materials');
     const warn = document.getElementById('exp-vms-warning');
     if (c) c.checked = true;
     if (v) v.checked = true;
     if (a) a.checked = true;
+    if (materials) materials.checked = true;
     if (warn && v) warn.style.display = v.checked ? 'block' : 'none';
     if (v && warn) v.onchange = () => { warn.style.display = v.checked ? 'block' : 'none'; };
   } catch { }
@@ -8768,6 +8782,7 @@ function openExportOptions(pid) {
       const includeCreds = !!document.getElementById('exp-creds')?.checked;
       const includeVms = !!document.getElementById('exp-vms')?.checked;
       const includeNotifyAudio = !!document.getElementById('exp-notify-audio')?.checked;
+      const includeMaterials = document.getElementById('exp-materials')?.checked !== false;
       setBusy(true);
       let proceed = true;
       try {
@@ -8776,25 +8791,11 @@ function openExportOptions(pid) {
           if (!proceed) { return; }
         }
         if (includeVms) {
-          try { m.hide(); } catch { }
-          await gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms, includeNotifyAudio });
+          await _hideArchiveOptions(m, modalEl);
+          await gateExportThroughProxLogin(EXPORT_CONTEXT.pid, { includeCreds, includeVms, includeNotifyAudio, includeMaterials });
         } else {
-          try {
-            if (typeof window.showActionProgress === 'function') {
-              window.showActionProgress('Export', 'Preparing download…');
-              if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
-            }
-          } catch { }
-          const a = document.createElement('a');
-          a.href = `/api/projects/${encodeURIComponent(EXPORT_CONTEXT.pid)}/export?includeCreds=${includeCreds}&includeVms=${includeVms}&includeNotifyAudio=${includeNotifyAudio}`;
-          // Give the modal a moment to render before starting the download
-          setTimeout(() => { try { a.click(); } catch { } }, 50);
-          try { (window.shell && shell.logSuccess) ? shell.logSuccess('Config: export started') : console.log('Export started'); } catch { }
-          try { m.hide(); } catch { }
-          // Best-effort: hide progress shortly after initiating download
-          setTimeout(() => {
-            try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
-          }, 1200);
+          await _hideArchiveOptions(m, modalEl);
+          await startExportJob(EXPORT_CONTEXT.pid, { includeCreds, includeVms, includeNotifyAudio, includeMaterials });
         }
       } finally {
         if (!includeVms || proceed) {
@@ -8806,6 +8807,14 @@ function openExportOptions(pid) {
       }
     };
   }
+}
+
+async function _hideArchiveOptions(modal, element) {
+  if (!element?.classList?.contains('show')) { modal.hide(); return; }
+  await new Promise(resolve => {
+    element.addEventListener('hidden.bs.modal', resolve, { once: true });
+    modal.hide();
+  });
 }
 
 function _isMissingManifestError(err) {
@@ -8832,162 +8841,24 @@ function _makeImportCancelledError() {
 }
 
 async function performProjectImport(options = {}) {
-  try {
-    if (window.shell && shell.isRemote && shell.isRemote()) {
-      try { showToast('Import is disabled in remote mode.', 'warning'); } catch { alert('Import is disabled in remote mode.'); }
-      return false;
-    }
-  } catch { }
+  if (window.shell?.isRemote?.()) { showToast('Import is disabled in remote mode.', 'warning'); return false; }
   const input = document.getElementById('import-file');
-  if (!input || !input.files || !input.files[0]) return false;
-  const file = input.files[0];
-  const buildFormData = (allowBestEffort = false) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (options.includeCreds !== undefined) fd.append('includeCreds', options.includeCreds ? 'true' : 'false');
-    if (options.includeVms !== undefined) fd.append('includeVms', options.includeVms ? 'true' : 'false');
-    if (options.includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', options.includeNotifyAudio ? 'true' : 'false');
-    if (options.importAsTemplates !== undefined) fd.append('importAsTemplates', options.importAsTemplates ? 'true' : 'false');
-    if (allowBestEffort) fd.append('allowBestEffort', 'true');
-    return fd;
-  };
-  const label = `Import project: ${file.name}`;
-
-  // Publish progress into the global queue/progress system so the user can hide/show
-  // via the Queue dock, just like other tasks.
-  try { if (typeof window.showActionProgress === 'function') window.showActionProgress('Import', 'Uploading…'); } catch { }
-
-  // Prefer the dedicated Import Progress modal (scrolling log) when available.
-  const modalEl = document.getElementById('importProgressModal');
-  const hasImportModal = !!(modalEl && window.bootstrap);
-  const bar = document.getElementById('imp-prog-bar');
-  const stat = document.getElementById('imp-status');
-  const log = document.getElementById('imp-log');
-  let modalInst = null;
-  if (hasImportModal) {
-    try {
-      modalInst = new window.bootstrap.Modal(modalEl);
-      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; bar.setAttribute('aria-valuenow', '0'); }
-      if (stat) stat.textContent = 'Uploading…';
-      if (log) log.textContent = 'Preparing upload…';
-      modalInst.show();
-    } catch { }
-  } else {
-    // Fallback to action progress (only if import modal isn't available).
-    try {
-      if (typeof window.showActionProgress === 'function') {
-        window.showActionProgress('Import', 'Uploading…');
-        if (typeof window.openActionProgressModal === 'function') window.openActionProgressModal();
-      }
-    } catch { }
-  }
+  const file = input?.files?.[0];
+  if (!file) return false;
   try {
-    if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(true);
-  } catch { }
-  let resp = null;
-  try {
-    await runQueued(label, async () => {
-      // Use XHR for legacy import so we can show byte upload progress.
-      const attemptUpload = async (allowBestEffort) => {
-        return await _xhrPostFormData('/api/projects/import', buildFormData(allowBestEffort), {
-          onProgress: (pct, loaded, total) => {
-            const mapped = Math.max(0, Math.min(35, Math.round((pct * 35) / 100)));
-            const bytes = _fmtByteProgress(loaded, total);
-            const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
-            try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch { }
-            if (hasImportModal) {
-              try {
-                if (bar) { bar.style.width = `${mapped}%`; bar.textContent = `${mapped}%`; bar.setAttribute('aria-valuenow', String(mapped)); }
-                if (stat) stat.textContent = line;
-                if (log) log.textContent = line;
-              } catch { }
-            } else {
-              try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, line); } catch { }
-            }
-          }
-        });
-      };
-      try {
-        resp = await attemptUpload(false);
-      } catch (err) {
-        if (_isMissingManifestError(err)) {
-          const ok = _confirmBestEffortImport(file);
-          if (!ok) throw _makeImportCancelledError();
-          resp = await attemptUpload(true);
-        } else {
-          throw err;
-        }
-      }
-      if (hasImportModal) {
-        try {
-          if (bar) { bar.style.width = '90%'; bar.textContent = '90%'; bar.setAttribute('aria-valuenow', '90'); }
-          if (stat) stat.textContent = 'Finalizing…';
-          if (log) log.textContent = 'Applying imported configuration…';
-        } catch { }
-      } else {
-        try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch { }
-      }
-      try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(90, 'Finalizing…', 'Applying imported configuration…'); } catch { }
-    }, { projectId: options.queueKey || 'import' });
-  } catch (err) {
-    if (err && err.code === 'import_cancelled') {
-      if (hasImportModal) {
-        try {
-          if (bar) { bar.style.width = '100%'; bar.textContent = 'Cancelled'; bar.setAttribute('aria-valuenow', '100'); bar.classList.remove('progress-bar-animated'); }
-          if (stat) stat.textContent = 'cancelled';
-          if (log) log.textContent = 'Import cancelled.';
-        } catch { }
-      }
-      try { showToast('Import cancelled.', 'warning'); } catch { }
-      return false;
-    }
-    if (hasImportModal) {
-      try {
-        if (bar) { bar.style.width = '100%'; bar.textContent = 'Error'; bar.setAttribute('aria-valuenow', '100'); bar.classList.remove('progress-bar-animated'); }
-        if (stat) stat.textContent = 'error';
-        if (log) log.textContent = 'Failed to import project: ' + (err?.message || err);
-      } catch { }
-    }
-    try { showToast('Failed to import project: ' + (err?.message || err), 'danger'); } catch { }
-    try {
-      (window.shell && shell.logError)
-        ? shell.logError('Config: import project failed: ' + (err?.message || err))
-        : console.error('Import project failed:', err);
-    } catch { }
+    const result = await _runAsyncImportWithProx({ file, includeCreds: true, includeVms: true, ...options });
+    if (result?.status === 'cancelled') { showToast('Import cancelled.', 'warning'); return false; }
+    const importedId = result?.imported?.[0]?.id || '';
+    input.value = '';
+    if (importedId) window.shell?.setCurrentProjectId?.(importedId);
+    await loadProjects();
+    await window.shell?.refreshSidebar?.('config');
+    showToast('Project imported.', 'success');
+    return true;
+  } catch (error) {
+    showToast('Failed to import project: ' + error.message, 'danger');
     return false;
-  } finally {
-    try {
-      if (window.shell && typeof shell.setSidebarImportBusy === 'function') shell.setSidebarImportBusy(false);
-    } catch { }
-    if (!hasImportModal) {
-      try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
-    }
   }
-  if (!resp) return false;
-  try { input.value = ''; } catch { }
-  const importedId = resp?.id || (Array.isArray(resp?.imported) && resp.imported[0]?.id) || '';
-  if (importedId && window.shell && typeof shell.setCurrentProjectId === 'function') {
-    try { shell.setCurrentProjectId(importedId); } catch { }
-  }
-  try { await loadProjects(); } catch { }
-  try {
-    if (window.shell && typeof shell.refreshSidebar === 'function') await shell.refreshSidebar('config');
-  } catch { }
-  try { showToast('Project imported.', 'success'); } catch { }
-  if (hasImportModal) {
-    try {
-      if (bar) { bar.style.width = '100%'; bar.textContent = '100%'; bar.setAttribute('aria-valuenow', '100'); bar.classList.remove('progress-bar-animated'); }
-      if (stat) stat.textContent = 'completed';
-      if (log) log.textContent = 'Import completed.';
-    } catch { }
-  }
-  try { if (typeof window.hideActionProgress === 'function') window.hideActionProgress(); } catch { }
-  try {
-    (window.shell && shell.logSuccess)
-      ? shell.logSuccess('Config: project imported')
-      : console.log('Project imported');
-  } catch { }
-  return true;
 }
 
 // --- Proxmox gating + async import (for VM restores) ---
@@ -9007,18 +8878,31 @@ function _ensureHttpsUrl(raw) {
   } catch { return ''; }
 }
 
-function _xhrPostFormData(url, formData, { onProgress } = {}) {
+function _xhrPostFormData(url, formData, { onProgress, onOperation, onAccepted } = {}) {
   if (window.ServerQueue) {
-    return ServerQueue.fetch(url, { method: 'POST', body: formData }, () => onProgress?.(100))
-      .then(async response => {
-        const text = await response.text();
-        let body;
-        try { body = JSON.parse(text); } catch { body = text; }
-        if (!response.ok) {
-          throw Object.assign(new Error(body?.error || text || `HTTP ${response.status}`), { status: response.status, body });
-        }
-        return body;
-      });
+    return (async () => {
+      const files = [];
+      const step = ServerQueue.requestStep(url, { method: 'POST', body: formData }, files);
+      const job = await ServerQueue.submit('Import project', [step], { projectId: 'import',
+        onUploadProgress: event => {
+          if (event.loaded != null) onProgress?.(event.total ? Math.round(event.loaded * 100 / event.total) : null,
+                                                event.loaded, event.total);
+        },
+      }, files);
+      onAccepted?.(job);
+      const state = await ServerQueue.wait(job, onOperation);
+      if (state?.status === 'cancelled') {
+        throw Object.assign(new Error('Import cancelled'), { code: 'import_cancelled' });
+      }
+      const response = await ServerQueue.result(job);
+      const text = await response.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = text; }
+      if (!response.ok) {
+        throw Object.assign(new Error(body?.error || text || `HTTP ${response.status}`), { status: response.status, body });
+      }
+      return body;
+    })();
   }
   return new Promise((resolve, reject) => {
     try {
@@ -9027,9 +8911,9 @@ function _xhrPostFormData(url, formData, { onProgress } = {}) {
       xhr.responseType = 'text';
       xhr.upload.onprogress = (ev) => {
         try {
-          if (!onProgress || !ev || !ev.lengthComputable) return;
-          const pct = Math.max(0, Math.min(100, Math.round((ev.loaded * 100) / Math.max(ev.total, 1))));
-          onProgress(pct, ev.loaded, ev.total);
+          if (!onProgress || !ev) return;
+          const pct = ev.lengthComputable ? Math.max(0, Math.min(100, Math.round((ev.loaded * 100) / Math.max(ev.total, 1)))) : null;
+          onProgress(pct, ev.loaded, ev.lengthComputable ? ev.total : null);
         } catch { }
       };
       xhr.onload = () => {
@@ -9077,6 +8961,48 @@ function _fmtByteProgress(loaded, total) {
   } catch { return ''; }
 }
 
+function _renderArchiveProgress(prefix, state, { upload = false, uploading = false } = {}) {
+  const step = state.operationStep ?? state.step;
+  const total = state.operationTotalSteps ?? state.total_steps;
+  const phasePercent = state.phaseProgress ?? state.phase_progress;
+  const bytes = state.bytesDone ?? state.bytes_done;
+  const byteTotal = state.bytesTotal ?? state.bytes_total;
+  const fileBytes = state.fileBytesDone ?? state.file_bytes_done;
+  const fileTotal = state.fileBytesTotal ?? state.file_bytes_total;
+  const completed = state.itemCompleted ?? state.item_completed;
+  const items = state.itemTotal ?? state.item_total;
+  const archiveSize = state.archiveBytes ?? state.archive_bytes;
+  const hasProgress = state.progress != null && Number.isFinite(Number(state.progress));
+  const raw = hasProgress ? Math.max(0, Math.min(100, Number(state.progress))) : null;
+  const percent = raw == null ? null : Math.round(upload && !uploading ? 10 + raw * 0.9 : raw);
+  const parts = [];
+  if (uploading) parts.push('Step 1 of 6');
+  else if (step && total) parts.push(`Step ${Number(step) + (upload ? 1 : 0)} of ${Number(total) + (upload ? 1 : 0)}`);
+  if (percent != null) parts.push(`${percent}% overall`);
+  if (phasePercent != null) parts.push(`${Math.round(phasePercent)}% of this step`);
+  if (items != null && items > 0) parts.push(`${completed || 0} of ${items} items complete`);
+  if (bytes != null) parts.push(`Bytes processed: ${_fmtByteProgress(bytes, byteTotal)}`);
+  if (fileBytes != null && (fileBytes !== bytes || fileTotal !== byteTotal)) {
+    parts.push(`Current file: ${_fmtByteProgress(fileBytes, fileTotal)}`);
+  }
+  if (state.current) parts.push(state.current);
+  if (archiveSize != null) parts.push(`ZIP size: ${_fmtBytes(archiveSize)}`);
+  const bar = document.getElementById(`${prefix}-prog-bar`);
+  if (bar) {
+    const failed = ['error', 'cancelled'].includes(state.status);
+    if (percent != null || !failed) bar.style.width = `${percent ?? 100}%`;
+    bar.textContent = percent == null ? (failed ? state.status : 'Working…') : `${percent}%`;
+    bar.classList.toggle('progress-bar-animated', !['completed', 'error', 'cancelled'].includes(state.status));
+    if (percent == null) bar.removeAttribute('aria-valuenow'); else bar.setAttribute('aria-valuenow', String(percent));
+    bar.setAttribute('aria-valuetext', parts.join(' · ') || 'Waiting to start');
+  }
+  const status = document.getElementById(`${prefix}-status`);
+  if (status) status.textContent = state.message || state.status || 'Working…';
+  const detail = document.getElementById(`${prefix}-detail`);
+  if (detail) detail.textContent = parts.join(' · ');
+  return parts.join(' · ');
+}
+
 function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onCancel, onTaskCreated } = {}) {
   return new Promise((resolve, reject) => {
     try {
@@ -9118,13 +9044,14 @@ function _queueLongAction(label, fn, { projectId, dedupeKey, allowDuplicate, onC
   });
 }
 
-async function _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox }) {
+async function _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, includeMaterials, importAsTemplates, prox }) {
   const buildFormData = (allowBestEffort = false) => {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('includeCreds', includeCreds ? 'true' : 'false');
     fd.append('includeVms', includeVms ? 'true' : 'false');
     if (includeNotifyAudio !== undefined) fd.append('includeNotifyAudio', includeNotifyAudio ? 'true' : 'false');
+    if (includeMaterials !== undefined) fd.append('includeMaterials', includeMaterials ? 'true' : 'false');
     if (importAsTemplates !== undefined) fd.append('importAsTemplates', importAsTemplates ? 'true' : 'false');
     if (allowBestEffort) fd.append('allowBestEffort', 'true');
     if (prox) {
@@ -9170,7 +9097,7 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
     } catch { }
   }
 
-  const state = { jobId: '', taskId: null, cancelRequested: false };
+  const state = { jobId: '', taskId: null, queueId: null, cancelRequested: false };
   try { window.__ACTIVE_IMPORT_STATE__ = state; } catch { }
 
   const cancelBtn = document.getElementById('imp-cancel-btn');
@@ -9207,7 +9134,9 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
     if (cancelBtn) {
       cancelBtn.onclick = async () => {
         if (state.cancelRequested) return;
-        if (state.taskId && typeof window.cancelRemoteAction === 'function') {
+        if (state.queueId && window.ServerQueue) {
+          ServerQueue.cancel(state.queueId); markCancelling();
+        } else if (state.taskId && typeof window.cancelRemoteAction === 'function') {
           try { window.cancelRemoteAction(state.taskId); } catch { }
         } else {
           await requestCancel();
@@ -9227,26 +9156,29 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
       let resp;
       const attemptUpload = async (allowBestEffort) => {
         return await _xhrPostFormData('/api/projects/import/start', buildFormData(allowBestEffort), {
+          onAccepted: job => {
+            state.queueId = job.id;
+            if (state.cancelRequested) ServerQueue.cancel(job.id);
+          },
+          onOperation: operation => {
+            const detail = _renderArchiveProgress('imp', operation, { upload: true });
+            window.updateActionProgress?.(operation.progress, operation.message || operation.status, detail);
+            if (log && operation.message) log.textContent = operation.message;
+          },
           onProgress: (pct, loaded, total) => {
-            const mapped = Math.max(0, Math.min(30, Math.round((pct * 30) / 100)));
-            const bytes = _fmtByteProgress(loaded, total);
-            const line = bytes ? `Uploading… ${pct}% (${bytes})` : `Uploading… ${pct}%`;
-            try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, line, `Uploading ${file?.name || 'archive'}…`); } catch { }
-            try {
-              if (bar) {
-                bar.style.width = `${mapped}%`;
-                bar.textContent = `${mapped}%`;
-                bar.setAttribute('aria-valuenow', String(mapped));
-              }
-              if (stat) stat.textContent = line;
-              if (log) log.textContent = line;
-            } catch { }
+            const mapped = pct == null ? null : Math.round(pct / 10);
+            const detail = _renderArchiveProgress('imp', { progress: mapped, phase_progress: pct,
+              bytes_done: loaded, bytes_total: total, current: file?.name, message: 'Uploading ZIP archive' },
+              { upload: true, uploading: true });
+            window.updateActionProgress?.(mapped, 'Uploading ZIP archive', detail);
+            if (log) log.textContent = detail;
           }
         });
       };
       try {
         resp = await attemptUpload(false);
       } catch (e) {
+        if (e?.code === 'import_cancelled') return { status: 'cancelled' };
         if (_isMissingManifestError(e)) {
           const ok = _confirmBestEffortImport(file);
           if (!ok) return { status: 'cancelled' };
@@ -9274,9 +9206,7 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
         const s = await http('GET', `/api/projects/import/status?id=${encodeURIComponent(state.jobId)}`);
         const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
         const statusText = String(s.status || 'processing');
-        const mapped = (statusText === 'completed')
-          ? 100
-          : Math.max(30, Math.min(99, 30 + Math.round((p * 70) / 100)));
+        const mapped = statusText === 'completed' ? 100 : Math.round(10 + p * 0.9);
         let detail = '';
         try {
           if (Array.isArray(s.log) && s.log.length) {
@@ -9291,7 +9221,8 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
             } catch { }
           }
         } catch { }
-        try { if (typeof window.updateActionProgress === 'function') window.updateActionProgress(mapped, statusText, detail || 'Importing…'); } catch { }
+        const measuredDetail = _renderArchiveProgress('imp', s, { upload: true });
+        try { window.updateActionProgress?.(mapped, s.message || statusText, measuredDetail); } catch { }
 
         try {
           if (bar) {
@@ -9302,7 +9233,7 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
               bar.classList.remove('progress-bar-animated');
             }
           }
-          if (stat) stat.textContent = statusText;
+          if (stat) stat.textContent = s.message || statusText;
           if (log) {
             if (Array.isArray(s.log) && s.log.length) {
               log.textContent = s.log.join('\n');
@@ -9338,7 +9269,6 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
     // Update modal to show error
     try {
       if (bar) {
-        bar.style.width = '100%';
         bar.textContent = 'Error';
         bar.classList.remove('progress-bar-animated');
         bar.classList.add('bg-danger');
@@ -9360,7 +9290,7 @@ async function _runAsyncImportWithProx({ file, includeCreds, includeVms, include
   try { if (cancelBtn) cancelBtn.textContent = 'Cancel Import'; } catch { }
   try {
     if (finalStatus && typeof finalStatus === 'object' && String(finalStatus.status || '') === 'cancelled') {
-      if (stat) stat.textContent = 'cancelled';
+      _renderArchiveProgress('imp', { status: 'cancelled', message: 'Import cancelled' });
       if (log && (!Array.isArray(finalStatus.log) || !finalStatus.log.length)) log.textContent = 'Import cancelled.';
     }
   } catch { }
@@ -9385,7 +9315,7 @@ try {
   };
 } catch { }
 
-async function gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates }) {
+async function gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, includeMaterials, importAsTemplates }) {
   // If no modal, fall back to prompts.
   if (!document.getElementById('proxLoginModal') || !window.bootstrap) {
     const baseUrl = _ensureHttpsUrl(window.prompt('Proxmox URL (https://host or host):', '') || '');
@@ -9399,7 +9329,7 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms, incl
     const verifySSL = true;
     const prox = { baseUrl, apiPort, sshPort, username, password, verifySSL };
     _writeImportProxCreds({ baseUrl, apiPort, sshPort, username, password, verifySSL });
-    const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates, prox });
+    const st = await _runAsyncImportWithProx({ file, includeCreds, includeVms, includeNotifyAudio, includeMaterials, importAsTemplates, prox });
     if (st && typeof st === 'object' && String(st.status || '') === 'cancelled') {
       try { showToast('Import cancelled.', 'warning'); } catch { }
       return false;
@@ -9432,7 +9362,7 @@ async function gateImportThroughProxLogin({ file, includeCreds, includeVms, incl
   if (passEl) passEl.value = sess.password || '';
   if (vsslEl) vsslEl.checked = (sess.verifySSL !== false);
 
-  window.__IMPORT_NEXT__ = { file, includeCreds, includeVms, includeNotifyAudio: includeNotifyAudio !== false, importAsTemplates: !!importAsTemplates };
+  window.__IMPORT_NEXT__ = { file, includeCreds, includeVms, includeNotifyAudio: includeNotifyAudio !== false, includeMaterials: includeMaterials !== false, importAsTemplates: !!importAsTemplates };
   const modalEl = document.getElementById('proxLoginModal');
   const m = new window.bootstrap.Modal(modalEl);
   m.show();
@@ -9456,11 +9386,13 @@ function importProject() {
   const credsEl = document.getElementById('imp-creds');
   const vmsEl = document.getElementById('imp-vms');
   const notifyAudioEl = document.getElementById('imp-notify-audio');
+  const materialsEl = document.getElementById('imp-materials');
   const templatesEl = document.getElementById('imp-as-templates');
   const warnEl = document.getElementById('imp-vms-warning');
   if (credsEl) credsEl.checked = true;
   if (vmsEl) vmsEl.checked = true;
   if (notifyAudioEl) notifyAudioEl.checked = true;
+  if (materialsEl) materialsEl.checked = true;
   if (templatesEl) { templatesEl.checked = false; templatesEl.disabled = !(vmsEl && vmsEl.checked); }
   if (warnEl) warnEl.style.display = vmsEl && vmsEl.checked ? 'block' : 'none';
   if (vmsEl) {
@@ -9487,6 +9419,7 @@ function importProject() {
       const includeCreds = !!document.getElementById('imp-creds')?.checked;
       const includeVms = !!document.getElementById('imp-vms')?.checked;
       const includeNotifyAudio = !!document.getElementById('imp-notify-audio')?.checked;
+      const includeMaterials = document.getElementById('imp-materials')?.checked !== false;
       const importAsTemplates = includeVms && !!document.getElementById('imp-as-templates')?.checked;
       if (includeVms) {
         const proceed = confirm('Importing VMs can be very time-consuming. This will run on the remote machine, download disk files, and compress them. Continue?');
@@ -9496,17 +9429,15 @@ function importProject() {
       try {
         // If importing VMs, prompt for Proxmox target and run async import job.
         if (includeVms) {
-          try { modal.hide(); } catch { }
+          await _hideArchiveOptions(modal, modalEl);
           const input = document.getElementById('import-file');
           const file = input && input.files && input.files[0] ? input.files[0] : null;
           if (!file) return;
-          const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, importAsTemplates });
+          const ok = await gateImportThroughProxLogin({ file, includeCreds, includeVms, includeNotifyAudio, includeMaterials, importAsTemplates });
           if (ok) { try { input.value = ''; } catch { } }
         } else {
-          const ok = await performProjectImport({ includeCreds, includeVms, includeNotifyAudio, importAsTemplates, queueKey: 'import' });
-          if (ok) {
-            try { modal.hide(); } catch { }
-          }
+          await _hideArchiveOptions(modal, modalEl);
+          const ok = await performProjectImport({ includeCreds, includeVms, includeNotifyAudio, includeMaterials, importAsTemplates, queueKey: 'import' });
         }
       } finally {
         setBusy(false);
@@ -9525,17 +9456,17 @@ async function startExportJob(pid, opts) {
   } catch { }
   // Read Proxmox session creds from sessionStorage
   const creds = readBestProxCreds(pid) || {};
-  const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, includeNotifyAudio: opts.includeNotifyAudio !== false, username: creds.username || '', password: creds.password || '' };
-  if (!body.username || !body.password) { alert('Please log into Proxmox (Authenticate to Proxmox) before exporting VMs.'); return; }
+  const body = { includeCreds: !!opts.includeCreds, includeVms: !!opts.includeVms, includeNotifyAudio: opts.includeNotifyAudio !== false, includeMaterials: opts.includeMaterials !== false, username: creds.username || '', password: creds.password || '' };
+  if (body.includeVms && (!body.username || !body.password)) { alert('Please log into Proxmox (Authenticate to Proxmox) before exporting VMs.'); return; }
   // Ensure console dock shows debug-level messages
   try { if (window.shell && shell.enableConsoleDebug) shell.enableConsoleDebug(true); } catch { }
   try { (window.shell && shell.logInfo) ? shell.logInfo('Config: starting export job…') : console.log('Starting export job…'); } catch { }
   try {
-    // Make the HTTP request directly and await it - runQueued doesn't propagate return values
-    const resp = await http('POST', `/api/projects/${encodeURIComponent(pid)}/export/start`, body);
-    if (!resp || !resp.job) throw new Error('No job id returned');
     const modalEl = document.getElementById('exportProgressModal');
-    if (!modalEl || !window.bootstrap) { alert('Export submitted. You can track it in the Queue.'); return; }
+    if (!modalEl || !window.bootstrap) {
+      await http('POST', `/api/projects/${encodeURIComponent(pid)}/export/start`, body);
+      alert('Export submitted. You can track it in the Queue.'); return;
+    }
     const bar = document.getElementById('exp-prog-bar');
     const stat = document.getElementById('exp-status');
     const log = document.getElementById('exp-log');
@@ -9550,6 +9481,28 @@ async function startExportJob(pid, opts) {
     if (pathNote) { pathNote.textContent = ''; }
     const m = new bootstrap.Modal(modalEl);
     m.show();
+    const closeButton = document.getElementById('exp-close-btn');
+    if (closeButton) closeButton.onclick = () => m.hide();
+    _renderArchiveProgress('exp', { progress: 0, message: 'Queued; waiting to start' });
+    const exportUrl = `/api/projects/${encodeURIComponent(pid)}/export/start`;
+    let resp;
+    if (window.ServerQueue) {
+      const job = await ServerQueue.submit('Export project', [{ method: 'POST', url: exportUrl, body }], { projectId: pid });
+      const finalState = await ServerQueue.wait(job, state => {
+        _renderArchiveProgress('exp', state);
+        if (log && state.message) log.textContent = state.message;
+      });
+      if (finalState?.status === 'cancelled') {
+        _renderArchiveProgress('exp', { status: 'cancelled', message: 'Export cancelled' });
+        return;
+      }
+      const response = await ServerQueue.result(job);
+      resp = await response.json();
+      if (!response.ok) throw new Error(resp.error || 'Export failed');
+    } else {
+      resp = await http('POST', exportUrl, body);
+    }
+    if (!resp?.job) throw new Error('No job id returned');
     // Poll
     let lastLogCount = 0;
     let completed = false;
@@ -9570,10 +9523,18 @@ async function startExportJob(pid, opts) {
     } catch { }
     const poll = async () => {
       try {
-        const s = await http('GET', `/api/projects/${encodeURIComponent(pid)}/export/status`);
-        const p = Math.max(0, Math.min(100, Number(s.progress || 0)));
-        if (bar) { bar.style.width = p + '%'; bar.textContent = p + '%'; bar.setAttribute('aria-valuenow', String(p)); }
-        if (stat) stat.textContent = String(s.status || '');
+        let s;
+        try { s = await http('GET', `/api/projects/${encodeURIComponent(pid)}/export/status`); } catch { s = {}; }
+        if (s.id !== resp.job) {
+          const saved = await http('GET', `/api/projects/${encodeURIComponent(pid)}/exports`);
+          const record = saved.exports?.find(item => item.id === resp.job);
+          if (!record) throw new Error('Waiting for this export’s result');
+          const count = body.includeVms ? 6 : 3;
+          s = { status: 'completed', progress: 100, step: count, total_steps: count, phase_progress: 100,
+            downloadReady: record.exists !== false, downloadPath: record.local_path,
+            archive_bytes: record.size, message: 'Export complete; ZIP ready to download', log: [] };
+        }
+        _renderArchiveProgress('exp', s);
         if (Array.isArray(s.log)) {
           // Update modal log area
           if (log) {
@@ -9609,8 +9570,8 @@ async function startExportJob(pid, opts) {
         if (s.status === 'completed') {
           completed = true;
           const hasDl = !!s.downloadReady;
-          const href = hasDl ? `/api/projects/${encodeURIComponent(pid)}/export/download` : '#';
-          if (stat) stat.textContent = 'completed';
+          const href = hasDl ? `/api/projects/${encodeURIComponent(pid)}/exports/${encodeURIComponent(resp.job)}/download` : '#';
+          _renderArchiveProgress('exp', s);
           if (dl) {
             dl.href = href;
             dl.classList.toggle('disabled', !hasDl);
@@ -9661,6 +9622,7 @@ async function startExportJob(pid, opts) {
         displayMsg = raw || displayMsg;
       }
     } catch { displayMsg = e && e.message ? e.message : 'Unknown error'; }
+    _renderArchiveProgress('exp', { status: 'error', message: 'Export failed: ' + displayMsg });
     alert('Failed to start export:\n\n' + displayMsg);
     try { (window.shell && shell.logError) ? shell.logError('Config: export start failed: ' + (e && e.message ? e.message : e)) : console.error('Export start failed:', e); } catch { }
   }
@@ -9788,6 +9750,8 @@ async function exportProxLoginSave() {
         file,
         includeCreds: !!importNext.includeCreds,
         includeVms: !!importNext.includeVms,
+        includeNotifyAudio: importNext.includeNotifyAudio !== false,
+        includeMaterials: importNext.includeMaterials !== false,
         importAsTemplates: !!importNext.importAsTemplates,
         prox,
       });

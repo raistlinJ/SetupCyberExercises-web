@@ -41,7 +41,7 @@
           <div class="col-md-8"><label for="agent-url" class="form-label">LLM endpoint URL (OpenAI compatible)</label><input id="agent-url" type="url" inputmode="url" pattern="https?://.+" class="form-control" placeholder="http://localhost:8081/v1" required><div class="form-text">For OpenAI, use https://api.openai.com/v1. Requests are sent from the DeployForge server. OpenAI uses the Responses API; compatible servers use Chat Completions function tools.</div></div>
           <div class="col-md-4"><label for="agent-api-key" class="form-label">API key</label><input id="agent-api-key" type="password" autocomplete="off" class="form-control"><div class="form-text">Remembered for this browser tab, including page reloads.</div></div>
           <div class="col-12"><div class="form-check"><input id="agent-ssl" type="checkbox" class="form-check-input" checked><label for="agent-ssl" class="form-check-label">Require SSL certificate verification</label></div></div>
-          <div class="col-md-8"><label for="agent-model" class="form-label">Model</label><div class="input-group"><input id="agent-model" class="form-control" list="agent-models" placeholder="Fetch or enter a model ID" required><button type="button" id="agent-fetch" class="btn btn-outline-secondary">Fetch</button></div><datalist id="agent-models"></datalist><select id="agent-model-picker" class="form-select mt-2 d-none" aria-label="Available models" hidden disabled></select></div>
+          <div class="col-md-8"><label for="agent-model" class="form-label">Model</label><div id="agent-model-combobox" class="position-relative"><div class="input-group"><input id="agent-model" class="form-control" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="agent-models" autocomplete="off" placeholder="Fetch or enter a model ID" required><button type="button" id="agent-model-toggle" class="btn btn-outline-secondary dropdown-toggle dropdown-toggle-split" aria-label="Show available models" aria-controls="agent-models" aria-expanded="false" tabindex="-1" disabled></button><button type="button" id="agent-fetch" class="btn btn-outline-secondary">Fetch</button></div><div id="agent-models" class="dropdown-menu w-100 overflow-auto shadow" style="top:100%;max-height:16rem" role="listbox" aria-label="Available models" hidden></div></div></div>
           <div class="col-md-4"><label for="agent-context" class="form-label">Context window (tokens)</label><input id="agent-context" type="number" min="1" step="1" value="16384" class="form-control" aria-describedby="agent-context-limit" required><button id="agent-context-max" type="button" class="btn btn-sm btn-outline-secondary mt-2" disabled>Use provider max</button><div id="agent-context-limit" class="form-text"></div></div>
           <div class="col-md-3"><label for="agent-turns" class="form-label">Max model turns</label><input id="agent-turns" type="number" min="1" max="100" value="20" class="form-control" required><div class="form-text">Per guest in separate mode; total in shared mode.</div></div>
           <div class="col-md-3"><label for="agent-tool-timeout" class="form-label">Command timeout (seconds)</label><input id="agent-tool-timeout" type="number" min="1" max="86400" value="60" class="form-control" required></div>
@@ -97,20 +97,86 @@
   }
   el('context').addEventListener('input', () => { contextAuto = false; initialContext = false; syncTokenLimit(); });
   el('context-max').addEventListener('click', () => { contextAuto = true; initialContext = false; syncTokenLimit(); saveSettings(); });
-  el('model').addEventListener('input', () => { el('model-picker').value = el('model').value.trim(); syncTokenLimit(); });
-  el('model-picker').addEventListener('change', () => {
-    if (!el('model-picker').value) return;
-    el('model').value = el('model-picker').value;
-    syncTokenLimit();
-    saveSettings();
+  let fetchedModels = [], activeModelIndex = -1;
+  function closeModels() {
+    el('models').hidden = true;
+    el('models').classList.remove('show');
+    el('model').setAttribute('aria-expanded', 'false');
+    el('model-toggle').setAttribute('aria-expanded', 'false');
+    el('model').removeAttribute('aria-activedescendant');
+    activeModelIndex = -1;
+  }
+  function activateModel(index) {
+    const options = Array.from(el('models').children);
+    activeModelIndex = index;
+    options.forEach((option, i) => {
+      option.classList.toggle('active', i === index);
+      option.setAttribute('aria-selected', String(i === index));
+    });
+    el('model').setAttribute('aria-activedescendant', options[index].id);
+    options[index].scrollIntoView({ block: 'nearest' });
+  }
+  function openModels(filter = '') {
+    const models = fetchedModels.filter(model => model.toLowerCase().includes(filter.toLowerCase()));
+    closeModels();
+    el('models').replaceChildren(...models.map((model, index) => {
+      const option = document.createElement('div');
+      option.id = `agent-model-option-${index}`;
+      option.className = 'dropdown-item text-wrap';
+      option.style.cursor = 'pointer';
+      option.style.overflowWrap = 'anywhere';
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', 'false');
+      option.textContent = model;
+      option.addEventListener('mousedown', event => event.preventDefault());
+      option.addEventListener('click', () => {
+        el('model').value = model;
+        el('model').focus();
+        closeModels();
+        syncTokenLimit();
+        saveSettings();
+      });
+      return option;
+    }));
+    if (!models.length) return;
+    el('models').hidden = false;
+    el('models').classList.add('show');
+    el('model').setAttribute('aria-expanded', 'true');
+    el('model-toggle').setAttribute('aria-expanded', 'true');
+  }
+  el('model').addEventListener('input', () => { openModels(el('model').value.trim()); syncTokenLimit(); });
+  el('model').addEventListener('click', () => openModels());
+  el('model').addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (el('models').hidden) openModels();
+      const count = el('models').children.length;
+      if (count) activateModel(activeModelIndex < 0 ? (event.key === 'ArrowDown' ? 0 : count - 1)
+        : (activeModelIndex + (event.key === 'ArrowDown' ? 1 : -1) + count) % count);
+    } else if (event.key === 'Enter' && !el('models').hidden && activeModelIndex >= 0) {
+      event.preventDefault();
+      el('models').children[activeModelIndex].click();
+    } else if (event.key === 'Escape' && !el('models').hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeModels();
+    } else if (event.key === 'Tab') closeModels();
+  });
+  el('model-toggle').addEventListener('click', () => {
+    const wasOpen = !el('models').hidden;
+    el('model').focus();
+    if (wasOpen) closeModels(); else openModels();
+  });
+  el('model-combobox').addEventListener('focusout', event => {
+    if (!el('model-combobox').contains(event.relatedTarget)) closeModels();
   });
   for (const id of ['url', 'api-key', 'ssl']) {
     el(id).addEventListener(id === 'ssl' ? 'change' : 'input', () => {
       modelLimits = {}; limitsConnection = '';
+      fetchedModels = [];
+      closeModels();
       el('models').replaceChildren();
-      el('model-picker').replaceChildren();
-      el('model-picker').hidden = true; el('model-picker').disabled = true;
-      el('model-picker').classList.add('d-none');
+      el('model-toggle').disabled = true;
       syncTokenLimit();
     });
   }
@@ -137,6 +203,7 @@
     await window.PersistentQueuePayloads?.put(filesStorage, values);
   }
   root.addEventListener('hide.bs.modal', () => {
+    closeModels();
     saveSettings(); saveFiles().catch(err => window.shell?.logWarn?.(err.message));
   });
   function validEndpoint(report = true) {
@@ -198,16 +265,11 @@
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Model discovery failed');
       if (connection !== connectionKey()) return;
-      el('models').replaceChildren(...data.models.map(model => { const option = document.createElement('option'); option.value = model; return option; }));
-      const placeholder = document.createElement('option');
-      placeholder.value = ''; placeholder.textContent = data.models.length ? 'Choose an available model…' : 'No models returned';
-      el('model-picker').replaceChildren(placeholder, ...data.models.map(model => {
-        const option = document.createElement('option'); option.value = model; option.textContent = model; return option;
-      }));
-      el('model-picker').hidden = false; el('model-picker').disabled = !data.models.length;
-      el('model-picker').classList.remove('d-none');
+      fetchedModels = data.models;
+      closeModels();
+      el('models').replaceChildren();
+      el('model-toggle').disabled = !fetchedModels.length;
       if (!el('model').value && data.models.length) el('model').value = data.models[0];
-      el('model-picker').value = el('model').value.trim();
       modelLimits = data.model_limits || {}; limitsConnection = connection;
       if (initialContext && selectedLimits().context_window) { contextAuto = true; initialContext = false; }
       syncTokenLimit();

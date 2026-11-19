@@ -91,7 +91,7 @@
   </div>
 </div>
 <script src="/static/js/auth.js"></script>
-<script src="/static/js/shell.js?v=20261105-accessforge"></script>
+<script src="/static/js/shell.js?v=20261111-project-chooser"></script>
 <script src="/static/js/server_queue.js?v=20261026-responsive-reads"></script>
   <script src="/static/js/server_workflows.js?v=20260907a"></script>
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
@@ -114,7 +114,7 @@
     } catch {}
     return bodyText;
   }
-  function createProjectSidebar(){ const input=document.getElementById('proj-name'); const name=(input?.value||'').trim(); if(!name) return; fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}).then(r=>{if(!r.ok) throw new Error(); return r.json();}).then(d=>{ input.value=''; if(window.shell&&shell.setCurrentProjectId && d?.id) shell.setCurrentProjectId(d.id); if(window.shell&&shell.refreshSidebar) shell.refreshSidebar('exports'); renderExportsPage(); }).catch(()=>alert('Create failed')); }
+  function createProjectSidebar(){ shell.startProjectCreation(); }
   function importProjectExports(){}
   async function fetchExports(pid){
     const res=await fetch(`/api/projects/${encodeURIComponent(pid)}/exports`);

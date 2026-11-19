@@ -332,6 +332,40 @@ class ExportNotifyAudioOptionTests(unittest.TestCase):
     @patch('app.routes.api._ssh_connect', autospec=True, return_value=_FakeSSHConn())
     @patch('app.routes.api._ssh_run_stream', autospec=True, return_value=('', ''))
     @patch('app.routes.api._ssh_run_cmd', autospec=True, return_value=(_FakeFile(b''), _FakeFile(b'')))
+    def test_vm_export_materials_selection(self, *_mocks):
+        pid = self._create_project()
+        upload = self.client.post(f'/api/projects/{pid}/materials', data={
+            'file': (io.BytesIO(b'material content'), 'guide.txt'),
+        }, content_type='multipart/form-data')
+        self.assertEqual(upload.status_code, 201)
+        for selection in [None, True, False]:
+            with self.subTest(selection=selection):
+                payload = {
+                    'includeVms': True, 'baseUrl': 'https://example.com:8006',
+                    'username': 'root@pam', 'password': 'x',
+                }
+                if selection is not None:
+                    payload['includeMaterials'] = selection
+                response = self.client.post(f'/api/projects/{pid}/export/start', json=payload)
+                self.assertEqual(response.status_code, 200)
+                self._wait_for_export_complete(pid)
+                response = self.client.get(f'/api/projects/{pid}/export/download')
+                self.assertEqual(response.status_code, 200)
+                with self._read_export_zip(response.data) as archive:
+                    paths = [name for name in archive.namelist() if name.startswith('materials/')]
+                    project = json.loads(archive.read('project.json'))['project']
+                    if selection is False:
+                        self.assertEqual(paths, [])
+                        self.assertEqual(project['materials'], [])
+                    else:
+                        self.assertEqual(len(paths), 1)
+                        self.assertEqual(archive.read(paths[0]), b'material content')
+                        self.assertEqual(len(project['materials']), 1)
+
+    @patch('app.routes.api.ProxmoxClient', new=_FakeProxmoxClient)
+    @patch('app.routes.api._ssh_connect', autospec=True, return_value=_FakeSSHConn())
+    @patch('app.routes.api._ssh_run_stream', autospec=True, return_value=('', ''))
+    @patch('app.routes.api._ssh_run_cmd', autospec=True, return_value=(_FakeFile(b''), _FakeFile(b'')))
     def test_vm_export_excludes_notify_audio_files_when_flag_false(self, *_mocks):
         pid = self._create_project()
         self._seed_project_audio(pid)

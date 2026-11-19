@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import base64
 import os
 import requests
 import time
@@ -178,6 +179,7 @@ class ProxmoxClient:
     password: Optional[str] = None
     _session: Optional[requests.Session] = None
     _logger: logging.Logger = field(default_factory=lambda: logging.getLogger(__name__), init=False, repr=False)
+    _guest_windows: Dict[tuple, bool] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self):
         if self.username and '@' not in self.username:
@@ -756,6 +758,42 @@ class ProxmoxClient:
         return self.list_snapshots_lxc(node, vmid)
 
     # --- QEMU Guest Agent helpers ---
+    def get_guest_osinfo(self, node: str, vmid: int) -> Dict[str, Any]:
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/agent/get-osinfo"
+        response = s.get(url, timeout=10)
+        if response.status_code >= 400:
+            raise RuntimeError(f'Proxmox guest OS lookup error {response.status_code}: {response.text}')
+        data = response.json().get('data') or {}
+        info = data.get('result', data) if isinstance(data, dict) else {}
+        if not isinstance(info, dict) or not any(info.get(key) for key in ('id', 'name', 'kernel-name')):
+            raise RuntimeError('Guest agent returned no OS identification')
+        return info
+
+    def _guest_uses_windows(self, node: str, vmid: int) -> bool:
+        key = (node, int(vmid))
+        if key not in self._guest_windows:
+            try:
+                info = self.get_guest_osinfo(node, vmid)
+            except (RuntimeError, requests.RequestException, ValueError) as exc:
+                # Older/restricted agents may not expose get-osinfo. Retain the
+                # configured OS type as a fallback, rather than requiring it to
+                # match the OS actually installed in a cloned VM.
+                self._logger.warning('Guest OS lookup failed node=%s vmid=%s; using configured OS type: %s', node, vmid, exc)
+            else:
+                identity = ' '.join(str(info.get(k) or '') for k in ('id', 'name', 'kernel-name')).lower()
+                self._guest_windows[key] = 'windows' in identity
+                return self._guest_windows[key]
+            try:
+                config = self.get_qemu_config(node, vmid)
+            except Exception as exc:
+                raise RuntimeError(f'Cannot determine guest OS for command execution: {exc}') from exc
+            ostype = str(config.get('ostype') or '').strip().lower()
+            self._guest_windows[key] = ostype.startswith('win') or ostype in {
+                'w2k', 'w2k3', 'w2k8', 'wxp', 'wvista',
+            }
+        return self._guest_windows[key]
+
     def agent_exec(
         self,
         node: str,
@@ -767,6 +805,9 @@ class ProxmoxClient:
         return_partial_on_timeout: bool = False,
     ) -> Dict[str, Any]:
         """Execute a command inside the guest via QEMU Guest Agent and wait for completion.
+        Shell commands use PowerShell on Windows and /bin/sh elsewhere, based on
+        the guest's reported OS (falling back to Proxmox OS type).
+        shell=False preserves explicit executable argv.
         Returns dict with keys: exitcode, stdout, stderr.
         """
         s = self._ensure_session()
@@ -775,7 +816,17 @@ class ProxmoxClient:
         logger = self._logger
         if shell:
             cmd_text = '' if command is None else str(command)
-            command_list = ['/bin/sh', '-lc', cmd_text]
+            if self._guest_uses_windows(node, vmid):
+                # Encoding avoids Windows argv quoting changing paths, quotes,
+                # Unicode or multiline scripts before PowerShell parses them.
+                encoded = base64.b64encode(cmd_text.encode('utf-16le')).decode('ascii')
+                command_list = [
+                    r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+                    '-NoLogo', '-NoProfile', '-NonInteractive',
+                    '-OutputFormat', 'Text', '-EncodedCommand', encoded,
+                ]
+            else:
+                command_list = ['/bin/sh', '-lc', cmd_text]
         else:
             if isinstance(command, (list, tuple)):
                 command_list = [str(item) for item in command]
@@ -791,10 +842,22 @@ class ProxmoxClient:
         cmd_preview = preview_src.replace('\n', ' ').strip()
         if len(cmd_preview) > 240:
             cmd_preview = f"{cmd_preview[:236]} ..."
-        logger.info("guest agent exec start node=%s vmid=%s shell=%s cmd=%s", node, vmid, shell, cmd_preview)
+        logger.info("guest agent exec start node=%s vmid=%s shell=%s executable=%s cmd=%s", node, vmid, shell, command_list[0], cmd_preview)
         r = s.post(exec_url, json=payload, timeout=10)
+        if (shell and command_list[0].lower().endswith('\\powershell.exe')
+                and r.status_code == 500
+                and 'failed to execute child process' in r.text.lower()
+                and 'no such file or directory' in r.text.lower()):
+            # The absolute path handles agents with a minimal service PATH.
+            # Search PATH only if Windows is installed somewhere else. Retry
+            # solely after an explicit spawn failure, never after execution or
+            # an ambiguous transport failure that could duplicate the command.
+            command_list = ['powershell.exe', *command_list[1:]]
+            payload = {**payload, 'command': command_list}
+            logger.info('guest agent shell not found at default path node=%s vmid=%s; trying powershell.exe', node, vmid)
+            r = s.post(exec_url, json=payload, timeout=10)
         if r.status_code >= 400:
-            raise RuntimeError(f"Proxmox guest agent exec error {r.status_code}: {r.text}")
+            raise RuntimeError(f"Proxmox guest agent exec error {r.status_code} (executable: {command_list[0]}): {r.text}")
         pid = (r.json().get('data') or {}).get('pid')
         if pid is None:
             raise RuntimeError("agent exec: no pid returned (is guest agent running?)")
@@ -962,38 +1025,16 @@ class ProxmoxClient:
         and RuntimeError for other HTTP or transport failures.
         """
         logger = self._logger
-        logger.info("guest agent readiness exec start node=%s vmid=%s", node, vmid)
-        try:
-            result = self.agent_exec(
-                node=node,
-                vmid=vmid,
-                command=['ping', '-c', '1', '127.0.0.1'],
-                shell=False,
-                timeout=max(5, timeout)
-            )
-        except RuntimeError as exc:
-            message = str(exc)
-            lowered = message.lower()
-            if any(token in lowered for token in ('guest agent', 'not running', 'not available', 'not implemented', '501')):
-                logger.warning("guest agent exec readiness failed node=%s vmid=%s message=%s", node, vmid, message)
-                raise GuestAgentUnavailableError(message or "Guest agent is not available") from exc
-            logger.error("guest agent exec readiness error node=%s vmid=%s error=%s", node, vmid, exc)
-            raise
-
-        exitcode = result.get('exitcode')
-        if exitcode not in (0, None):
-            stderr_txt = (result.get('stderr') or '').strip()
-            logger.warning(
-                "guest agent exec readiness ping exitcode=%s node=%s vmid=%s stderr=%s",
-                exitcode,
-                node,
-                vmid,
-                stderr_txt,
-            )
-            raise GuestAgentUnavailableError(
-                f"Guest agent ping command exited with {exitcode}: {stderr_txt or 'no output'}"
-            )
-        logger.info("guest agent readiness exec success node=%s vmid=%s", node, vmid)
+        logger.info("guest agent readiness ping start node=%s vmid=%s", node, vmid)
+        s = self._ensure_session()
+        url = f"{self.base_url.rstrip('/')}/api2/json/nodes/{node}/qemu/{vmid}/agent/ping"
+        response = s.post(url, timeout=max(5, timeout))
+        if response.status_code >= 400:
+            message = f'Proxmox guest agent ping error {response.status_code}: {response.text}'
+            if response.status_code in (400, 500, 501):
+                raise GuestAgentUnavailableError(message)
+            raise RuntimeError(message)
+        logger.info("guest agent readiness ping success node=%s vmid=%s", node, vmid)
 
     # --- Users and Pools ---
     def get_user(self, userid: str) -> Optional[Dict[str, Any]]:

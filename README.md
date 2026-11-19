@@ -11,6 +11,19 @@ DeployForge is a Dockerized web UI for configuring CTF/scenario “Projects” a
 
 Startup, stored, validation, and custom guest commands support [per-instance template variables](docs/command-variables.md), with an optional rendering switch, a command preview, and variable help.
 
+QEMU guest commands use Windows PowerShell on Windows VMs and `/bin/sh -lc` on
+Linux VMs. Command execution reads the OS reported by the guest agent, falling
+back to the VM's **OS Type** in Proxmox when that lookup is unavailable. Keep
+that setting correct for older or restricted agents. Windows commands accept PowerShell syntax,
+such as `Get-Service` or `Get-Content 'C:\Lab\status.txt'`. For Command Prompt
+syntax, use `cmd.exe /c 'echo %COMPUTERNAME%'`. Linux commands such as `systemctl`
+need Windows equivalents in Windows templates. The readiness check uses the
+guest agent's own ping and does not require a guest shell or network utility.
+Windows execution tries PowerShell's full path under `C:\Windows\System32`
+and searches the agent's PATH if that executable is missing. Launch errors name
+the executable that failed. After updating the source in a Docker deployment,
+rebuild the running app with `docker compose up --build -d app`.
+
 Queued actions run on the server in submission order. Once an upload or action
 has been accepted, switching pages, refreshing, closing the tab, or signing out
 does not stop it. The Queue dock reconnects to your running, waiting, and recent
@@ -22,6 +35,12 @@ polls do not move rows. Persisted revisions reject stale responses, and cached
 responses are disabled. Unchanged polls do not redraw the dock; progress updates
 preserve its scroll position and expanded results. Refreshing the page only
 reconnects to existing work and does not resubmit it.
+
+Export and import progress shows the current step, overall and step percentages,
+file counts, and bytes processed in the progress dialog and Queue. Uploads and
+VM backup transfers report measured bytes; ZIP creation and extraction count
+uncompressed data as it is processed. Configuration-only exports and imports
+use the same background progress flow as jobs that include VM backups.
 
 Validation waits for all selected guest checks, including slower checks and
 timeouts. When the run finishes, its returned results update the VM table and
@@ -348,7 +367,7 @@ docker compose up --build -d proxclient
 
 In **Configuration**, QEMU VM templates marked **User-Accessible** show **Upload** and **Download** checkboxes. Administrators can save these defaults and synchronize them to all existing instance VMs of that template using the active Proxmox credentials or project API token. Failed synchronization is reported; verify live policy in VM Manager after resolving it. New clones receive explicit defaults, and applying scenario notes reapplies them. Unchecking User-Accessible clears both defaults and revokes transfer policy when access is synchronized.
 
-In **VM Manager**, ↑ and ↓ next to the glasses indicate upload/download policy (green enabled, gray disabled). Before live inventory is refreshed, these reflect template configuration; after refresh they reflect each VM's Notes. The operations dropdown provides separate enable/disable actions for each direction, including multi-project selections. These actions modify only selected VM instances, preserve the other direction and template defaults, and refresh the inventory.
+In **VM Manager**, ↑ and ↓ next to the glasses indicate upload/download policy (green enabled, gray disabled). Before live inventory is refreshed, these reflect template configuration; after refresh they reflect each VM's Notes. Use **Clipboard Access → Configure file transfer** to manage both directions for the selected VMs, including multi-project selections.
 
 Policies are stored as a separate JSON object in Proxmox VM Notes:
 
@@ -359,6 +378,39 @@ Policies are stored as a separate JSON object in Proxmox VM Notes:
 Human notes, scenario metadata and credentials are preserved. Updates use the Proxmox configuration digest when available so concurrent edits are rejected instead of overwritten. Only authorized administrators should edit these policies or have Proxmox VM-note write access.
 
 `cit_vm_accessor` enforces the policy on the server: downloads check it before each chunk; SPICE uploads are inspected by the bridge and checked at transfer start and during transfer. Missing or unreadable policy denies transfers. Existing VMs without policy remain disabled until configured. Reconnect an already-open console after enabling a previously disabled upload policy. SPICE and QEMU guest agents are still required for their respective directions, and download users still need the Proxmox guest-agent file-read privilege. This does not grant new Proxmox privileges or govern clipboard text and external clients.
+
+### Clipboard access and character allowances
+
+In **VM Manager → Clipboard Access → Configure text copy**, manage clipboard
+access and optional character limits for **client → VM** and **VM → client**.
+Each VM and direction has its own allowance, shared across logins and console sessions.
+Changing an allowance or disabling/re-enabling access preserves its usage.
+**Reset clipboard character counts** starts fresh counts in both directions for
+the selected VMs, preserving their access settings and allowances. Multi-project
+selections use the same queued workflow as other VM actions.
+
+The **Clipboard** column shows characters used and the allowance for both directions. Refresh loads usage
+through the project's AccessForge administrator connection; configure this in
+the AccessForge plugin's **Connection** dialog. The connection must point to the
+same Proxmox address as the project. Missing or unavailable usage is shown as
+`n/a`, never as zero. Account checkout itself can remain disabled.
+
+Policies and reset identifiers live in the VM's existing `AccessForge` Notes
+object. AccessForge enforces them in its SPICE bridge and stores counts in
+`clipboard_usage.sqlite3` under its persistent data directory. Keep that directory
+across container restarts and share it between workers serving the same console
+deployment. Clipboard text is not stored in the usage database. Unicode code
+points are counted; an over-limit selection is rejected in full without spending
+characters. A transfer counts when text crosses the VM boundary, not when the
+same received text is copied again within the browser.
+
+AccessForge shows the remaining allowance in its clipboard panel. If either
+direction has a limit, both automatic-sharing switches are turned off and
+disabled. With a VM → client limit, use **Receive from VM** before **Copy from VM**;
+guest clipboard changes alone do not spend characters. New settings and resets
+are picked up by open consoles. Upgrade both SCE-web and `CIT_vm_accessor` for
+these controls. They govern AccessForge SPICE traffic; direct Proxmox and native
+console connections use their own controls.
 
 ## CTF platform plugins
 

@@ -12,6 +12,14 @@ DeployForge supports exporting Projects to a ZIP bundle and importing them back 
   backward compatibility and as files under `audio/` with `audio/manifest.json`.
 - Proxmox VM backup exports include the same configuration, materials, and audio
   content in addition to files under `backups/`.
+- Backup downloads stream over the existing authenticated SSH connection with a
+  16 MiB receive window and bounded buffers. SFTP is used only to discover files
+  and sizes. Each completed file logs its average transfer rate in MiB/s.
+- Already compressed Proxmox backups (`.zst`, `.gz`, `.lzo`) are stored in the ZIP
+  without another compression pass; configuration and logs are compressed normally.
+- Downloads verify the remote command's exit status and the expected byte count
+  before accepting a file. Failed or cancelled transfers remove partial local
+  files; transfer failures stop the export and preserve the remote backups.
 
 See also: `docs/api.md`.
 

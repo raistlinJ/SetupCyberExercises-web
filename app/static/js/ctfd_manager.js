@@ -5417,12 +5417,7 @@ function openImportOptionsCTFd() { // reuse VM modal logic simplified
 
 // Sidebar create/import reuse from vm_manager.js if loaded; otherwise provide minimal fallbacks
 async function createProjectSidebar() {
-  const input = document.getElementById('proj-name'); const name = (input && input.value || '').trim(); if (!name) return alert('Enter a project name.');
-  const res = await http('POST', '/api/projects', { name }); if (input) input.value = ''; const pid = res && (res.id || res.pid);
-  if (window.shell && shell.setCurrentProjectId) shell.setCurrentProjectId(pid);
-  try { if (window.shell && shell.refreshSidebar) await shell.refreshSidebar('config'); } catch { }
-  // Redirect to configuration page to display new project
-  try { location.href = '/'; } catch { }
+  shell.startProjectCreation();
 }
 async function importProjectSidebar() {
   const input = document.getElementById('import-file'); if (!input || !input.files || !input.files[0]) return;

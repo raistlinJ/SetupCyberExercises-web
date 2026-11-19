@@ -10,6 +10,7 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 from app import create_app
+from app.connectors.proxmox import ProxmoxClient
 from app.storage.projects import Project, StartCommand, StartCommandStep, VMConfig
 
 
@@ -131,6 +132,57 @@ class RunCommandsApiTests(unittest.TestCase):
             command_list = summary.get('commands') or []
             self.assertEqual(len(command_list), 2)
             self.assertCountEqual([c.get('command') for c in command_list], ['echo start', 'hostname'])
+
+    def test_windows_commands_use_powershell_through_all_action_paths(self):
+        cases = [
+            ('run_startup_cmds', {}, ['echo start', 'hostname']),
+            ('run_stored_cmds', {}, ['echo ready', 'uptime']),
+            ('run_stored_cmds', {'customCommand': 'dir'}, ['dir']),
+            ('run_stored_cmds', {'validateOnly': True}, ['Get-Service']),
+        ]
+        for action, options, expected in cases:
+            with self.subTest(action=action, options=options), ExitStack() as stack:
+                self.project.vms[0].validation_commands = (
+                    [{'command': 'Get-Service', 'match': 'Running', 'is_regex': False}]
+                    if options.get('validateOnly') else [])
+                for ctx in self._common_patches():
+                    stack.enter_context(ctx)
+                stack.enter_context(patch('app.routes.api._runtime_store', return_value=_RuntimeStoreStub()))
+                connector = ProxmoxClient(base_url='https://proxmox.local', token='test')
+                session = MagicMock()
+                connector._session = session
+                config = MagicMock(status_code=200)
+                config.json.return_value = {'data': {'ostype': 'l26'}}
+                osinfo = MagicMock(status_code=200)
+                osinfo.json.return_value = {'data': {'result': {'id': 'mswindows', 'name': 'Microsoft Windows 11'}}}
+                completed = MagicMock(status_code=200, content=b'{}')
+                completed.json.return_value = {'data': {'exited': 1, 'exitcode': 0, 'out-data': 'Running'}}
+                def get(url, **kwargs):
+                    if url.endswith('/agent/get-osinfo'):
+                        return osinfo
+                    return config if url.endswith('/config') else completed
+                session.get.side_effect = get
+                started = MagicMock(status_code=200)
+                started.json.return_value = {'data': {'pid': 44}}
+                session.post.return_value = started
+                stack.enter_context(patch('app.routes.api.ProxmoxClient', return_value=connector))
+                response = self.client.post(
+                    f'/api/projects/{self.project.id}/instances/actions/{action}',
+                    json={'username': 'root@pam', 'password': 'secret',
+                          'targets': [{'index': 1, 'name': self.target_name}], **options})
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload.get('errors'), [])
+                calls = [call for call in session.post.call_args_list if call.args[0].endswith('/agent/exec')]
+                self.assertEqual(len(calls), len(expected))
+                scripts = []
+                for call in calls:
+                    argv = call.kwargs['json']['command']
+                    self.assertEqual(argv[0], r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
+                    scripts.append(base64.b64decode(argv[-1]).decode('utf-16le'))
+                self.assertCountEqual(scripts, expected)
+                if options.get('validateOnly'):
+                    self.assertTrue(payload['ran'][0]['validation']['all_passed'])
 
     def test_startup_and_stored_commands_render_resolved_instance_variables(self):
         template = 'configure {{instance_index}} {{vmid}} {{vm_name}}'

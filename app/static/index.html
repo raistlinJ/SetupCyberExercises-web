@@ -647,6 +647,11 @@
             <label class="form-check-label" for="exp-vms">VMs</label>
           </div>
           <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="exp-materials" checked>
+            <label class="form-check-label" for="exp-materials">Materials</label>
+            <div class="small text-muted">Includes files uploaded under Materials on the Configuration page.</div>
+          </div>
+          <div class="form-check">
             <input class="form-check-input" type="checkbox" id="exp-notify-audio" checked>
             <label class="form-check-label" for="exp-notify-audio">Notification audio files</label>
             <div class="small text-muted">Includes uploaded audio (Settings → Media Manager). Notifications are always
@@ -702,6 +707,7 @@
             </div>
           </div>
           <div id="exp-status" class="small text-muted mb-2">Starting…</div>
+          <div id="exp-detail" class="small text-muted mb-2" role="status" aria-live="polite"></div>
           <div class="border rounded p-2" style="max-height: 260px; overflow:auto; background: #fafafa;">
             <pre id="exp-log" class="mb-0 small" style="white-space: pre-wrap; word-break: break-word;">Waiting…</pre>
           </div>
@@ -738,6 +744,7 @@
             </div>
           </div>
           <div id="imp-status" class="small text-muted mb-2">Starting…</div>
+          <div id="imp-detail" class="small text-muted mb-2" role="status" aria-live="polite"></div>
           <div class="border rounded p-2" style="max-height: 260px; overflow:auto; background: #fafafa;">
             <pre id="imp-log" class="mb-0 small" style="white-space: pre-wrap; word-break: break-word;">Waiting…</pre>
           </div>
@@ -773,6 +780,11 @@
           <div class="form-check">
             <input class="form-check-input" type="checkbox" id="imp-vms" checked>
             <label class="form-check-label" for="imp-vms">VMs</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="imp-materials" checked>
+            <label class="form-check-label" for="imp-materials">Materials</label>
+            <div class="small text-muted">Restores uploaded Materials files from the archive.</div>
           </div>
           <div class="form-check">
             <input class="form-check-input" type="checkbox" id="imp-notify-audio" checked>
@@ -1037,13 +1049,13 @@
   <!-- Settings modal injected via creds.js -->
   <script src="/static/js/creds.js"></script>
   <script src="/static/js/auth.js"></script>
-  <script src="/static/js/shell.js?v=20261105-accessforge"></script>
+  <script src="/static/js/shell.js?v=20261111-project-chooser"></script>
   <script src="/static/js/server_queue.js?v=20261026-responsive-reads"></script>
   <script src="/static/js/server_workflows.js?v=20261019-rpg-session"></script>
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
   <script src="/static/js/checkout_state.js?v=20261107-neutral-wording"></script>
   <script src="/static/js/config_integrations.js?v=20261106-direct-local-types"></script>
-  <script src="/static/js/app.js?v=20261107-neutral-wording"></script>
+  <script src="/static/js/app.js?v=20261111-project-chooser"></script>
   <script src="/static/js/vm_materials.js?v=20261104-material-categories"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
@@ -1066,9 +1078,10 @@
         const c = document.getElementById('exp-creds');
         const v = document.getElementById('exp-vms');
         const a = document.getElementById('exp-notify-audio');
+        const materials = document.getElementById('exp-materials');
         if (allBtn && noneBtn && c && v) {
-          allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (a) a.checked = true; });
-          noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (a) a.checked = false; });
+          allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (a) a.checked = true; if (materials) materials.checked = true; });
+          noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (a) a.checked = false; if (materials) materials.checked = false; });
         }
       } catch { }
       // Wire import modal controls
@@ -1078,6 +1091,7 @@
         const c = document.getElementById('imp-creds');
         const v = document.getElementById('imp-vms');
         const a = document.getElementById('imp-notify-audio');
+        const materials = document.getElementById('imp-materials');
         const t = document.getElementById('imp-as-templates');
         const warn = document.getElementById('imp-vms-warning');
         if (allBtn && noneBtn && c && v) {
@@ -1085,6 +1099,7 @@
             c.checked = true;
             v.checked = true;
             if (a) a.checked = true;
+            if (materials) materials.checked = true;
             if (warn) warn.style.display = 'block';
             if (t) { t.disabled = false; }
           });
@@ -1092,6 +1107,7 @@
             c.checked = false;
             v.checked = false;
             if (a) a.checked = false;
+            if (materials) materials.checked = false;
             if (warn) warn.style.display = 'none';
             if (t) { t.checked = false; t.disabled = true; }
           });

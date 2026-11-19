@@ -1326,10 +1326,24 @@ function renderRemoteQueueProgress(entry){
     ? `<div class="queue-meta queue-progress-remaining">Remaining: ${Math.max(0, itemTotal - itemCompleted)} of ${itemTotal}</div>` : '';
   const current = entry.current
     ? `<div class="queue-meta queue-progress-current">Current: ${escapeHtml(entry.current)}</div>` : '';
-  const step = Number(entry.step);
-  const total = Number(entry.totalSteps);
+  const step = Number(entry.operationStep ?? entry.step);
+  const total = Number(entry.operationTotalSteps ?? entry.totalSteps);
   const steps = Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0
     ? `<div class="queue-meta">Step ${step} of ${total}</div>` : '';
+  const formatBytes = value => {
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let size = Math.max(0, Number(value) || 0), unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+    return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+  };
+  const bytes = entry.bytesDone != null
+    ? `<div class="queue-meta">Bytes: ${formatBytes(entry.bytesDone)} / ${entry.bytesTotal != null ? formatBytes(entry.bytesTotal) : '?'}</div>` : '';
+  const fileBytes = entry.fileBytesDone != null && entry.fileBytesTotal !== entry.bytesTotal
+    ? `<div class="queue-meta">Current file: ${formatBytes(entry.fileBytesDone)} / ${entry.fileBytesTotal != null ? formatBytes(entry.fileBytesTotal) : '?'}</div>` : '';
+  const phasePercent = entry.phaseProgress != null
+    ? `<div class="queue-meta">Current step: ${Math.round(Math.max(0, Math.min(100, Number(entry.phaseProgress) || 0)))}%</div>` : '';
+  const archiveSize = entry.archiveBytes != null
+    ? `<div class="queue-meta">ZIP size: ${formatBytes(entry.archiveBytes)}</div>` : '';
   const ariaValue = hasPercent ? ` aria-valuenow="${percent}"` : '';
   const animated = hasPercent ? '' : ' progress-bar-striped progress-bar-animated';
   return `<div class="queue-progress">`
@@ -1338,7 +1352,7 @@ function renderRemoteQueueProgress(entry){
     + `<div class="progress-bar${animated}" style="width:${hasPercent ? percent : 100}%"></div></div>`
     + counts + current
     + (detail ? `<div class="queue-meta queue-progress-detail" role="status">${escapeHtml(detail)}</div>` : '')
-    + steps + `</div>`;
+    + steps + phasePercent + bytes + fileBytes + archiveSize + `</div>`;
 }
 
 function clearCompletedRemoteActions(){
@@ -2400,7 +2414,14 @@ function showQueuePanel(){
   try { ConsoleDock.setOpen(true); } catch {}
 }
 
+function startProjectCreation() {
+  const name = (document.getElementById('proj-name')?.value || '').trim();
+  if (!name) { alert('Enter a project name.'); return; }
+  window.location.href = `/?newProject=${encodeURIComponent(name)}`;
+}
+
 window.shell = {
+  startProjectCreation,
   initShell,
   refreshSidebar,
   getCurrentProjectId,

@@ -194,6 +194,7 @@
                         <span>Last login</span>
                       </label>
                     </li>
+                    <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-clipboard"><input class="form-check-input m-0" type="checkbox" id="vm-col-clipboard" checked><span>Clipboard</span></label></li>
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-screenshot"><input class="form-check-input m-0" type="checkbox" id="vm-col-screenshot" checked><span>Screenshot</span></label></li>
                     <li><label class="dropdown-item d-flex align-items-center gap-2" for="vm-col-nets"><input class="form-check-input m-0" type="checkbox" id="vm-col-nets" checked><span>Adaptors</span></label></li>
                   </ul>
@@ -296,6 +297,15 @@
                       title="Permanently delete a file or folder from each selected guest">Delete</button></li>
                 </ul>
               </div>
+              <div class="btn-group btn-group-sm">
+                <button id="act-clipboard" type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" disabled>Clipboard Access</button>
+                <ul class="dropdown-menu">
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('file_transfer_update')">Configure file transfer…</button></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('clipboard_update')">Configure text copy…</button></li>
+                  <li><hr class="dropdown-divider"></li>
+                  <li><button class="dropdown-item" type="button" onclick="vmAction('clipboard_reset')">Reset clipboard character counts</button></li>
+                </ul>
+              </div>
               <!-- Users & Access group -->
               <div class="btn-group btn-group-sm" id="users-group" data-bs-toggle="tooltip" data-bs-placement="top"
                 title="Manage users, pools, credentials and materials metadata, and VM access.">
@@ -318,10 +328,7 @@
                   <li>
                     <hr class="dropdown-divider" />
                   </li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('file_upload_enable')">Enable VM Upload ↑</button></li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('file_upload_disable')">Disable VM Upload ↑</button></li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('file_download_enable')">Enable VM Download ↓</button></li>
-                  <li><button class="dropdown-item" type="button" onclick="vmAction('file_download_disable')">Disable VM Download ↓</button></li>
+
                   <li><hr class="dropdown-divider" /></li>
                   <li><button class="dropdown-item" type="button" onclick="vmAction('users_access_enable')"
                       title="Enable user access to the selected VMs">Enable User
@@ -720,6 +727,11 @@
             <input class="form-check-input" type="checkbox" id="impvm-vms" checked>
             <label class="form-check-label" for="impvm-vms">VMs</label>
           </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="impvm-materials" checked>
+            <label class="form-check-label" for="impvm-materials">Materials</label>
+            <div class="small text-muted">Restores uploaded Materials files from the archive.</div>
+          </div>
           <div id="impvm-vms-warning" class="alert alert-warning py-2 px-3 mt-2" role="alert" style="display:none;">
             Importing VMs can be very time-consuming. This runs on the remote host, downloads disk files, and compresses
             them.
@@ -735,22 +747,112 @@
   <!-- Settings modal injected via creds.js -->
   <script src="/static/js/creds.js?v=20251116b"></script>
   <script src="/static/js/auth.js?v=20251116b"></script>
-  <script src="/static/js/shell.js?v=20261105-accessforge"></script>
+  <script src="/static/js/shell.js?v=20261111-project-chooser"></script>
   <script src="/static/js/server_queue.js?v=20261026-responsive-reads"></script>
   <script src="/static/js/server_workflows.js?v=20260907a"></script>
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
   <script src="/static/js/checkout_state.js?v=20261107-neutral-wording"></script>
   <script src="/static/js/config_integrations.js?v=20261106-direct-local-types"></script>
-  <script src="/static/js/app.js?v=20261107-neutral-wording"></script>
+  <script src="/static/js/app.js?v=20261111-project-chooser"></script>
   <script src="/static/js/stored_command_core.js?v=20251116b"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/static/js/orchestration_access.js?v=20261107-neutral-wording"></script>
   <script src="/static/js/guest_push_csv.js?v=20261028-csv-submit"></script>
   <script src="/static/js/login_time.js?v=20261029-login-source"></script>
   <script src="/static/js/row_tags.js?v=20261029-tag-route-error"></script>
-<script src="/static/js/vm_manager.js?v=20261106-remove-checkout-mark-buttons"></script>
+  <div class="modal fade" id="vmFileTransferModal" tabindex="-1" aria-labelledby="vmFileTransferTitle" aria-hidden="true">
+    <div class="modal-dialog"><form class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="vmFileTransferTitle">Configure file transfer</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-body-secondary" data-policy-targets></p>
+        <div class="row g-3">
+          <div class="col-sm-6">
+            <label for="vmFileUpload" class="form-label fw-semibold">Upload to VM</label>
+            <select id="vmFileUpload" class="form-select" data-policy-access="file_upload">
+              <option value="">Keep current</option><option value="true">Enabled</option><option value="false">Disabled</option>
+            </select>
+          </div>
+          <div class="col-sm-6">
+            <label for="vmFileDownload" class="form-label fw-semibold">Download from VM</label>
+            <select id="vmFileDownload" class="form-select" data-policy-access="file_download">
+              <option value="">Keep current</option><option value="true">Enabled</option><option value="false">Disabled</option>
+            </select>
+          </div>
+        </div>
+        <p class="small text-body-secondary mt-3 mb-0">Each direction must also be enabled on the AccessForge server.</p>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary">Save changes</button></div>
+    </form></div>
+  </div>
+  <div class="modal fade" id="vmClipboardModal" tabindex="-1" aria-labelledby="vmClipboardTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable"><form class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="vmClipboardTitle">Configure text copy</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-body-secondary" data-policy-targets></p>
+        <div class="row g-3">
+          <div class="col-sm-6">
+            <fieldset class="border rounded p-3 h-100" data-policy-limit="clipboard_to_vm">
+              <legend class="float-none w-auto px-1 mb-1 fs-6 fw-semibold">Client → VM</legend>
+              <label for="vmClipboardToAccess" class="form-label">Text copy access</label>
+              <select id="vmClipboardToAccess" class="form-select mb-3" data-policy-access="clipboard_to_vm">
+                <option value="">Keep current</option><option value="true">Enabled</option><option value="false">Disabled</option>
+              </select>
+              <label class="form-check">
+                <input type="checkbox" class="form-check-input" aria-controls="vmClipboardToAllowance" data-limit-toggle>
+                <span class="form-check-label">Limit number of characters</span>
+              </label>
+              <div class="small text-body-secondary mt-1" data-mixed-limits hidden>
+                Current limits vary or are unavailable.
+                <button type="button" class="btn btn-link btn-sm p-0" data-clear-limits>Remove limits</button>
+              </div>
+              <div id="vmClipboardToAllowance" class="mt-2" data-limit-allowance hidden>
+                <label for="vmClipboardToLimit" class="form-label">Character allowance</label>
+                <input id="vmClipboardToLimit" type="number" min="0" max="1000000000" step="1" class="form-control" value="2000" disabled required>
+              </div>
+            </fieldset>
+          </div>
+          <div class="col-sm-6">
+            <fieldset class="border rounded p-3 h-100" data-policy-limit="clipboard_from_vm">
+              <legend class="float-none w-auto px-1 mb-1 fs-6 fw-semibold">VM → client</legend>
+              <label for="vmClipboardFromAccess" class="form-label">Text copy access</label>
+              <select id="vmClipboardFromAccess" class="form-select mb-3" data-policy-access="clipboard_from_vm">
+                <option value="">Keep current</option><option value="true">Enabled</option><option value="false">Disabled</option>
+              </select>
+              <label class="form-check">
+                <input type="checkbox" class="form-check-input" aria-controls="vmClipboardFromAllowance" data-limit-toggle>
+                <span class="form-check-label">Limit number of characters</span>
+              </label>
+              <div class="small text-body-secondary mt-1" data-mixed-limits hidden>
+                Current limits vary or are unavailable.
+                <button type="button" class="btn btn-link btn-sm p-0" data-clear-limits>Remove limits</button>
+              </div>
+              <div id="vmClipboardFromAllowance" class="mt-2" data-limit-allowance hidden>
+                <label for="vmClipboardFromLimit" class="form-label">Character allowance</label>
+                <input id="vmClipboardFromLimit" type="number" min="0" max="1000000000" step="1" class="form-control" value="2000" disabled required>
+              </div>
+            </fieldset>
+          </div>
+        </div>
+        <p class="small text-body-secondary mt-3">Each VM’s allowances are shared across logins. A limit in either direction disables automatic text copy in both directions.</p>
+        <hr>
+        <label class="form-check mb-0">
+          <input type="checkbox" class="form-check-input" data-reset-counts>
+          <span class="form-check-label">Reset counts in both directions when saving</span>
+        </label>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary">Save changes</button></div>
+    </form></div>
+  </div>
+<script src="/static/js/vm_clipboard.js?v=20261118-clipboard-usage-icon"></script>
+<script src="/static/js/vm_manager.js?v=20261118-clipboard-column"></script>
   <script src="/static/js/action_history.js?v=20261031-keep-push-selection"></script>
-  <script src="/static/js/server_vm_actions.js?v=20261030-create-feedback"></script>
+  <script src="/static/js/server_vm_actions.js?v=20261118-clipboard-settings"></script>
   <script src="/static/js/plugin_loader.js?v=20261107-neutral-wording"></script>
   <!-- Proxmox Login Modal (session-only, top-level) -->
   <div class="modal fade" id="proxLoginModal" tabindex="-1" aria-hidden="true">
@@ -1008,10 +1110,11 @@
         const noneBtn = document.getElementById('impvm-sel-none');
         const c = document.getElementById('impvm-creds');
         const v = document.getElementById('impvm-vms');
+        const materials = document.getElementById('impvm-materials');
         const warn = document.getElementById('impvm-vms-warning');
         if (allBtn && noneBtn && c && v) {
-          allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (warn) warn.style.display = 'block'; });
-          noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (warn) warn.style.display = 'none'; });
+          allBtn.addEventListener('click', () => { c.checked = true; v.checked = true; if (materials) materials.checked = true; if (warn) warn.style.display = 'block'; });
+          noneBtn.addEventListener('click', () => { c.checked = false; v.checked = false; if (materials) materials.checked = false; if (warn) warn.style.display = 'none'; });
           v.addEventListener('change', () => { if (warn) warn.style.display = v.checked ? 'block' : 'none'; });
         }
       } catch { }

@@ -562,7 +562,9 @@ def test_async_child_progress_is_published_without_browser_polling(harness):
     job = enqueue(client, 'import-progress', steps=[{'method': 'POST', 'url': '/api/projects/import/start'}]).get_json()['id']
     assert started.wait(2)
     rec = api._ACTIVE_JOBS[api._import_job_key('child')]
-    rec.update(progress=63, phase='uploading', message='Uploading archive')
+    rec.update(progress=63, phase='uploading', message='Uploading archive', step=4, total_steps=5,
+               phase_progress=25, bytes_done=1024, bytes_total=4096,
+               file_bytes_done=512, file_bytes_total=2048)
     try:
         deadline = time.monotonic() + 2
         state = {}
@@ -576,9 +578,29 @@ def test_async_child_progress_is_published_without_browser_polling(harness):
         assert state['progress'] == 63
         assert state['message'] == 'Uploading archive'
         assert state['phase'] == 'uploading'
+        assert (state['operationStep'], state['operationTotalSteps']) == (4, 5)
+        assert state['phaseProgress'] == 25
+        assert (state['bytesDone'], state['bytesTotal']) == (1024, 4096)
+        assert (state['fileBytesDone'], state['fileBytesTotal']) == (512, 2048)
     finally:
         rec['status'] = 'completed'
     assert wait_terminal(client, job)['progress'] == 100
+
+
+@pytest.mark.parametrize('details, expected', [
+    ({'error': 'No space left on device'}, 'Background operation failed: No space left on device'),
+    ({'errors': ['Restore command failed']}, 'Background operation failed: Restore command failed'),
+    ({}, 'Background operation failed; see import/export logs'),
+])
+def test_async_child_failure_keeps_underlying_error_in_queue(harness, details, expected):
+    _, client, started, *_ = harness
+    job = enqueue(client, 'child-error', steps=[{'method': 'POST', 'url': '/api/projects/import/start'}]).get_json()['id']
+    assert started.wait(2)
+    rec = api._ACTIVE_JOBS[api._import_job_key('child')]
+    rec.update(details, status='error')
+    state = wait_terminal(client, job)
+    assert state['status'] == 'error'
+    assert state['errorMessage'] == expected
 
 
 def test_progress_schema_migration_preserves_existing_work(tmp_path):

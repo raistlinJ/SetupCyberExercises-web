@@ -1,5 +1,9 @@
 import json
 import sqlite3
+import io
+import time
+import zipfile
+from types import SimpleNamespace
 from urllib.parse import quote
 from unittest.mock import patch
 
@@ -124,6 +128,35 @@ def test_status_is_explicit_and_cached_project_reads_do_not_connect(checkout):
         assert data['checkout']['checked_at']
         assert admin.get('/api/projects/lab/accessforge/accounts').status_code==200
     assert 'checkout' not in app.test_client().get('/api/projects').get_json()['projects'][0]
+
+
+@pytest.mark.parametrize('include_vms', [False, True])
+def test_authenticated_background_exports_do_not_read_checkout_session(checkout, monkeypatch, include_vms):
+    app, admin, _ = checkout
+    monkeypatch.setattr('app.routes.api.ProxmoxClient', lambda **kwargs: SimpleNamespace(list_nodes=lambda: []))
+    monkeypatch.setattr('app.routes.api._ssh_connect', lambda *args: SimpleNamespace(
+        open_sftp=lambda: SimpleNamespace(close=lambda: None), close=lambda: None))
+    monkeypatch.setattr('app.routes.api._ssh_run_cmd', lambda *args, **kwargs: (io.BytesIO(), io.BytesIO()))
+    # Account snapshots are user-specific UI data and must never be consulted
+    # by a background export, even when authentication and AccessForge are on.
+    with patch('app.account_checkout.checkout_summary', side_effect=AssertionError('Export requested checkout session')):
+        response = admin.post('/api/projects/lab/export/start', json={
+            'includeVms': include_vms, 'username': 'root@pam', 'password': 'test',
+        })
+        assert response.status_code == 200
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            state = admin.get('/api/projects/lab/export/status').get_json()
+            if state['status'] in {'completed', 'error'}:
+                break
+            time.sleep(0.01)
+        assert state['status'] == 'completed', state
+    response = admin.get('/api/projects/lab/export/download')
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        manifest = json.loads(archive.read('project.json'))['project']
+    assert 'checkout' not in manifest
+    assert 'proxmox_password_enc' not in manifest
+    assert manifest['credentials'][0]['username'] == 'student01'
 
 
 def test_status_failure_preserves_last_snapshot(checkout):

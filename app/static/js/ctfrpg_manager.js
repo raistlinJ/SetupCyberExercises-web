@@ -13,6 +13,15 @@
     selectedOnly: false, sort: {key: 'user', dir: 'asc'}, userSortMode: 'name', teamSortMode: 'name', columns: defaultColumns() };
 
   async function api(path, options = {}) {
+    const match = path.match(/^\/api\/projects\/([^/]+)\/ctfrpg\//);
+    if (match) {
+      const project = state.projects.find(p => p.id === decodeURIComponent(match[1]));
+      const credentials = readSessionCredentials(project);
+      const body = JSON.parse(options.body || '{}');
+      if (credentials && !('username' in body) && !('password' in body)) {
+        options = {...options, body: JSON.stringify({...body, ...credentials})};
+      }
+    }
     const response = await fetch(path, { credentials: 'same-origin', ...options });
     let body = {};
     try { body = await response.json(); } catch { /* Non-JSON errors are handled below. */ }
@@ -21,6 +30,31 @@
   }
 
   const jsonOptions = (method, body) => ({ method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const sessionCredentials = new Map();
+  let connectionProjectId = '';
+  let connectionSequence = 0;
+  function credentialsKey(pid) {
+    return `toolhub.ctfrpg.session.${JSON.stringify([window.AUTH?.getUser?.()?.username || 'anonymous', pid])}`;
+  }
+  function readSessionCredentials(project) {
+    if (!project) return null;
+    const key = credentialsKey(project.id);
+    let saved = sessionCredentials.get(key);
+    try { saved = JSON.parse(sessionStorage.getItem(key) || 'null') || saved; } catch { /* Use memory if storage is unavailable. */ }
+    if (!saved || saved.baseUrl !== project.ctfrpg_url) return null;
+    return {username: saved.username, password: saved.password};
+  }
+  function writeSessionCredentials(project, input, persist) {
+    const key = credentialsKey(project.id);
+    if (persist) {
+      sessionCredentials.delete(key);
+      try { sessionStorage.removeItem(key); } catch { /* Storage is optional. */ }
+      return;
+    }
+    const saved = {baseUrl: input.baseUrl, username: input.username, password: input.password};
+    sessionCredentials.set(key, saved);
+    try { sessionStorage.setItem(key, JSON.stringify(saved)); } catch { /* Keep the connection usable in memory. */ }
+  }
   function currentProject() { return state.projects.find(p => p.id === shell.getCurrentProjectId()); }
   function showStatus(message, kind = 'muted') {
     const host = $('status');
@@ -257,36 +291,52 @@
   async function openConnection() {
     const project = currentProject();
     if (!project) { showStatus('Select a project first.', 'warning'); return; }
+    const sequence = ++connectionSequence;
+    connectionProjectId = project.id;
     $('connection-project').textContent = `Project: ${project.name}`;
     $('game-url').value = project.ctfrpg_url || '';
     $('verify-ssl').checked = project.ctfrpg_verify_ssl !== false;
-    $('game-username').value = '';
-    $('game-password').value = '';
+    const session = readSessionCredentials(project);
+    $('game-username').value = session?.username || '';
+    $('game-password').value = session?.password || '';
+    $('save-credentials').checked = false;
     $('connection-status').textContent = 'Loading saved credentials…';
+    $('save-connection').disabled = true;
+    $('test-connection').disabled = true;
+    bootstrap.Modal.getOrCreateInstance($('connection-modal')).show();
     try {
       const secrets = await api(projectPath(project.id) + '/secrets');
-      $('game-username').value = secrets.ctfrpg?.username || '';
-      $('game-password').value = secrets.ctfrpg?.password || '';
+      if (sequence !== connectionSequence || currentProject()?.id !== project.id) return;
+      const credentials = readSessionCredentials(project) || secrets.ctfrpg;
+      if (!$('game-username').value) $('game-username').value = credentials?.username || '';
+      if (!$('game-password').value) $('game-password').value = credentials?.password || '';
+      $('save-credentials').checked = !!secrets.ctfrpg?.saved;
       $('connection-status').textContent = secrets.ctfrpg?.saved ? 'Saved credentials loaded.' : 'Enter an admin username and password to connect.';
-    } catch (error) { $('connection-status').textContent = error.message; }
-    bootstrap.Modal.getOrCreateInstance($('connection-modal')).show();
+    } catch (error) {
+      if (sequence === connectionSequence) $('connection-status').textContent = error.message;
+    } finally {
+      if (sequence === connectionSequence && currentProject()?.id === project.id) {
+        $('save-connection').disabled = state.busy;
+        $('test-connection').disabled = state.busy;
+      }
+    }
   }
 
   function connectionInput() {
     return { baseUrl: $('game-url').value.trim(), username: $('game-username').value.trim(), password: $('game-password').value, verifySSL: $('verify-ssl').checked };
   }
 
-  async function testConnection() {
-    const project = currentProject();
-    if (!project) return;
-    if (!connectionInput().username || !connectionInput().password) { $('connection-status').textContent = 'Enter an admin username and password.'; throw new Error('Admin username and password are required'); }
+  async function testConnection(project = currentProject(), input = connectionInput()) {
+    if (!project || project.id !== connectionProjectId) throw new Error('Reopen the connection dialog for the selected project.');
+    if (!input.username || !input.password) { $('connection-status').textContent = 'Enter an admin username and password.'; throw new Error('Admin username and password are required'); }
     setBusy(true);
     $('connection-status').textContent = 'Connecting…';
     try {
-      const me = await api(projectPath(project.id) + '/ctfrpg/login', jsonOptions('POST', connectionInput()));
+      const me = await api(projectPath(project.id) + '/ctfrpg/login', jsonOptions('POST', input));
+      if (currentProject()?.id !== project.id) throw new Error('Project changed. Reopen the connection dialog.');
       state.characters = me.characters || [];
       renderCharacters();
-      $('connection-status').textContent = `Connected as ${me.user?.username || me.username || connectionInput().username}.`;
+      $('connection-status').textContent = `Connected as ${me.user?.username || me.username || input.username}.`;
       return me;
     } catch (error) { $('connection-status').textContent = error.message; throw error; }
     finally { setBusy(false); }
@@ -296,16 +346,18 @@
     const project = currentProject();
     if (!project) return;
     const input = connectionInput();
+    const persist = $('save-credentials').checked;
     let saved = false;
     try {
-      await testConnection();
+      await testConnection(project, input);
       setBusy(true);
       const updated = await api(projectPath(project.id), jsonOptions('PATCH', {ctfrpg_url: input.baseUrl, ctfrpg_verify_ssl: input.verifySSL}));
-      await api(projectPath(project.id) + '/secrets', jsonOptions('PATCH', {ctfrpg: {username: input.username, password: input.password}}));
+      await api(projectPath(project.id) + '/secrets', jsonOptions('PATCH', {ctfrpg: persist ? {username: input.username, password: input.password} : {username: '', password: ''}}));
       Object.assign(project, updated);
+      writeSessionCredentials(project, input, persist);
       updateGameLink();
-      $('connection-status').textContent = 'Connection saved.';
-      showStatus(`${project.name}: connection saved.`, 'success');
+      $('connection-status').textContent = persist ? 'Credentials saved.' : 'Connected for this session.';
+      showStatus(`${project.name}: ${persist ? 'credentials saved' : 'connected for this session'}.`, 'success');
       bootstrap.Modal.getOrCreateInstance($('connection-modal')).hide();
       saved = true;
     } catch (error) { $('connection-status').textContent = error.message; }
@@ -413,13 +465,12 @@
       if (!columnIds.some(id => state.columns[id])) { state.columns[input.value] = true; input.checked = true; return; }
       saveTablePrefs(); render();
     }));
-    $('select-visible').addEventListener('click', () => { credentialsRows().forEach(({project, username}) => state.selectedUsers.add(keyFor(project.id, username))); render(); });
-    $('clear-selection').addEventListener('click', () => { state.selectedUsers.clear(); render(); });
     $('select-all').addEventListener('change', event => { credentialsRows().forEach(({project, username}) => { const key = keyFor(project.id, username); if (event.target.checked) state.selectedUsers.add(key); else state.selectedUsers.delete(key); }); render(); });
     $('auto-interval').addEventListener('change', updateAutoRefresh);
     updateAutoRefresh();
-    $('create-project').addEventListener('click', async () => { const input = $('proj-name'); const name = input.value.trim(); if (!name) return; try { const p = await api('/api/projects', jsonOptions('POST', {name})); input.value = ''; shell.setCurrentProjectId(p.id); await shell.refreshSidebar('ctfrpg'); await loadProjects(); render(); } catch (error) { showStatus(error.message, 'danger'); } });
-    try { await shell.initShell('ctfrpg'); await loadProjects(); render(); await Promise.all([refresh(), loadCharacters(), CTFRPG_Audio.load(state.projects.filter(project => state.selectedProjects.has(project.id)))]); }
+    $('create-project').addEventListener('click', () => shell.startProjectCreation());
+    $('proj-name').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); shell.startProjectCreation(); } });
+    try { await shell.initShell('ctfrpg'); await AUTH.me(); await loadProjects(); render(); await Promise.all([refresh(), loadCharacters(), CTFRPG_Audio.load(state.projects.filter(project => state.selectedProjects.has(project.id)))]); }
     catch (error) { showStatus(error.message, 'danger'); }
     document.addEventListener('project-selected', async () => { const pid = shell.getCurrentProjectId(); if (pid) state.selectedProjects.add(pid); await loadProjects(); render(); refresh(); loadCharacters(); CTFRPG_Audio.load(state.projects.filter(project => state.selectedProjects.has(project.id))); });
     try { const me = await AUTH.me(); $('banner-username').textContent = me?.user?.username || 'anonymous'; } catch { /* Login UI handles auth. */ }

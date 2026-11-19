@@ -70,6 +70,7 @@ class ImportSelectionApiTests(unittest.TestCase):
         include_notify_audio: bool = True,
         file_name: str = 'proj.zip',
         allow_best_effort: bool = False,
+        include_materials: bool = True,
     ) -> str:
         resp = self.client.post(
             '/api/projects/import/start',
@@ -78,6 +79,7 @@ class ImportSelectionApiTests(unittest.TestCase):
                 'includeCreds': 'true' if include_creds else 'false',
                 'includeVms': 'true' if include_vms else 'false',
                 'includeNotifyAudio': 'true' if include_notify_audio else 'false',
+                'includeMaterials': 'true' if include_materials else 'false',
                 'allowBestEffort': 'true' if allow_best_effort else 'false',
             },
             content_type='multipart/form-data',
@@ -171,6 +173,42 @@ class ImportSelectionApiTests(unittest.TestCase):
         self.assertTrue(('vmid' not in vms[0]) or (vms[0].get('vmid') in (None, '', 0)))
         # adaptor names should be preserved (and invalid ones filtered)
         self.assertEqual(vms[0].get('internal_network_adaptors') or [], ['LAN', 'LAN1', 'DMZ'])
+
+    def test_import_materials_selection_for_both_manifest_formats_and_import_paths(self):
+        for manifest_key in ['project', 'projects']:
+            for route in ['/api/projects/import', '/api/projects/import/start']:
+                for selection in [None, 'true', 'false']:
+                    with self.subTest(manifest_key=manifest_key, route=route, selection=selection):
+                        project = {'id': 'source', 'name': 'Materials selection', 'materials': ['guide.txt']}
+                        manifest = {manifest_key: project if manifest_key == 'project' else [project]}
+                        buf = io.BytesIO()
+                        with zipfile.ZipFile(buf, 'w') as archive:
+                            archive.writestr('project.json', json.dumps(manifest))
+                            archive.writestr('materials/source/guide.txt', b'guide content')
+                        buf.seek(0)
+                        data = {'file': (buf, 'materials.zip'), 'includeVms': 'false'}
+                        if selection is not None:
+                            data['includeMaterials'] = selection
+                        mats_dir = os.path.join(self._tmpdir.name, 'materials')
+                        before = set(os.listdir(mats_dir)) if os.path.isdir(mats_dir) else set()
+                        response = self.client.post(route, data=data, content_type='multipart/form-data')
+                        self.assertIn(response.status_code, (200, 201))
+                        result = response.get_json()
+                        if route.endswith('/start'):
+                            result = self._wait_job_completed(result['job'])
+                            self.assertEqual(result['status'], 'completed', result)
+                        imported = result['imported'][0] if 'imported' in result else result
+                        pid = imported['id']
+                        materials = self.client.get(f'/api/projects/{pid}/materials').get_json()['materials']
+                        after = set(os.listdir(mats_dir)) if os.path.isdir(mats_dir) else set()
+                        if selection == 'false':
+                            self.assertEqual(materials, [])
+                            self.assertEqual(after, before, 'Excluded materials must not be written to disk')
+                        else:
+                            self.assertEqual(len(materials), 1)
+                            downloaded = self.client.get(f'/api/projects/{pid}/materials/{materials[0]}')
+                            self.assertEqual(downloaded.data, b'guide content')
+                            self.assertEqual(len(after - before), 1)
 
     def test_import_includes_checked_items(self):
         project = {

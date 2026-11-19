@@ -6,12 +6,18 @@ const source = fs.readFileSync('app/static/js/agent_plugin.js', 'utf8');
 
 function element(value = '') {
   const classes = new Set();
-  return {value, checked: true, disabled: false, hidden: false, children: [], listeners: {},
+  return {value, checked: true, disabled: false, hidden: false, children: [], listeners: {}, style: {},
     classList: {add: name => classes.add(name), remove: name => classes.delete(name),
       toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name)},
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); },
-    async fire(type) { for (const callback of this.listeners[type] || []) await callback({target: this}); },
+    async fire(type, details = {}) {
+      const event = {target: this, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...details};
+      for (const callback of this.listeners[type] || []) await callback(event);
+      return event;
+    },
+    click() { return this.fire('click'); }, focus() {}, scrollIntoView() {},
     replaceChildren(...children) { this.children = children; },
+    setAttribute(name, value) { this[name] = value; },
     removeAttribute(name) { delete this[name]; }, setCustomValidity() {}, reportValidity: () => true,
     checkValidity: () => true,
   };
@@ -25,7 +31,7 @@ function dialog(data, saved = {model: 'gpt-6.1-sol', context: '156000'}) {
   };
   node('url').value = 'https://api.openai.com/v1';
   node('context').value = '16384'; node('tokens').value = '2048';
-  node('model-picker').hidden = true; node('model-picker').disabled = true;
+  node('models').hidden = true; node('model-toggle').disabled = true;
   const storage = new Map([['deployforge.agent.config.v1', JSON.stringify(saved)]]);
   const calls = [];
   const sandbox = {URL,
@@ -50,15 +56,16 @@ const catalog = {models: ['gpt-6-astra', 'gpt-6.1-sol', 'local-test'], model_lim
   'local-test': {context_window: 32768, source: 'Loaded runtime'},
 }};
 
-test('Fetch shows a visible model picker, preserves the current model, and enables provider max', async () => {
+test('Fetch populates the model combobox, preserves the current model, and enables provider max', async () => {
   const d = dialog(catalog);
   assert.equal(d.node('context-max').disabled, true);
   await d.node('fetch').fire('click');
-  const picker = d.node('model-picker');
+  await d.node('model-toggle').fire('click');
+  const picker = d.node('models');
   assert.equal(picker.hidden, false);
-  assert.equal(picker.disabled, false);
-  assert.deepEqual(picker.children.slice(1).map(option => option.textContent), catalog.models);
-  assert.equal(picker.value, 'gpt-6.1-sol');
+  assert.equal(d.node('model-toggle').disabled, false);
+  assert.deepEqual(picker.children.map(option => option.textContent), catalog.models);
+  assert.equal(d.node('model')['aria-expanded'], 'true');
   assert.equal(d.node('model').value, 'gpt-6.1-sol');
   assert.equal(d.node('context').value, '156000', 'Fetching does not replace a custom context');
   assert.equal(d.node('context-max').disabled, false);
@@ -73,9 +80,11 @@ test('Fetch shows a visible model picker, preserves the current model, and enabl
 test('choosing a fetched model updates the input and uses that model’s own context limit', async () => {
   const d = dialog(catalog);
   await d.node('fetch').fire('click');
-  d.node('model-picker').value = 'local-test';
-  await d.node('model-picker').fire('change');
+  await d.node('model-toggle').fire('click');
+  await d.node('models').children[2].click();
   assert.equal(d.node('model').value, 'local-test');
+  assert.equal(d.node('models').hidden, true);
+  assert.equal(d.node('model')['aria-expanded'], 'false');
   await d.node('context-max').fire('click');
   assert.equal(d.node('context').value, '32768');
   assert.equal(JSON.parse(d.storage.get('deployforge.agent.config.v1')).model, 'local-test');
@@ -92,25 +101,27 @@ test('unknown limits allow manual entry and explain why provider max is unavaila
   assert.equal(d.node('context').value, '65536');
 });
 
-test('changing endpoint or API key clears stale model choices and limits', async () => {
-  for (const field of ['url', 'api-key']) {
+test('changing connection settings clears stale model choices and limits', async () => {
+  for (const field of ['url', 'api-key', 'ssl']) {
     const d = dialog(catalog);
     await d.node('fetch').fire('click');
     d.node(field).value += '-changed';
-    await d.node(field).fire('input');
-    assert.equal(d.node('model-picker').hidden, true);
-    assert.equal(d.node('model-picker').disabled, true);
-    assert.equal(d.node('model-picker').children.length, 0);
+    await d.node(field).fire(field === 'ssl' ? 'change' : 'input');
+    assert.equal(d.node('models').hidden, true);
+    assert.equal(d.node('model-toggle').disabled, true);
+    assert.equal(d.node('models').children.length, 0);
     assert.equal(d.node('context-max').disabled, true);
   }
 });
 
-test('empty catalogs show an empty selector without enabling maximum-context controls', async () => {
+test('empty catalogs keep manual model entry available without enabling the dropdown', async () => {
   const d = dialog({models: [], model_limits: {}});
   await d.node('fetch').fire('click');
-  assert.equal(d.node('model-picker').hidden, false);
-  assert.equal(d.node('model-picker').disabled, true);
-  assert.equal(d.node('model-picker').children[0].textContent, 'No models returned');
+  assert.equal(d.node('models').hidden, true);
+  assert.equal(d.node('model-toggle').disabled, true);
+  assert.equal(d.node('model').disabled, false);
+  assert.equal(d.node('model').value, 'gpt-6.1-sol');
+  assert.equal(d.node('status').textContent, 'Fetched 0 models.');
   assert.equal(d.node('context-max').disabled, true);
   assert.equal(d.node('fetch').disabled, false);
 });
@@ -124,7 +135,40 @@ test('a late Fetch result cannot repopulate choices after the connection changes
   await d.node('url').fire('input');
   resolve(catalog);
   await pending;
-  assert.equal(d.node('model-picker').hidden, true);
-  assert.equal(d.node('model-picker').children.length, 0);
+  assert.equal(d.node('models').hidden, true);
+  assert.equal(d.node('models').children.length, 0);
   assert.equal(d.node('context-max').disabled, true);
+});
+
+test('typing filters fetched models while allowing a custom model ID', async () => {
+  const d = dialog(catalog);
+  await d.node('fetch').fire('click');
+  d.node('model').value = 'LOCAL';
+  await d.node('model').fire('input');
+  assert.deepEqual(d.node('models').children.map(option => option.textContent), ['local-test']);
+  d.node('model').value = 'my-custom-model';
+  await d.node('model').fire('input');
+  assert.equal(d.node('models').hidden, true);
+  assert.equal(d.node('model').value, 'my-custom-model');
+  assert.equal(d.node('context-max').disabled, true);
+  await d.node('model-toggle').fire('click');
+  assert.deepEqual(d.node('models').children.map(option => option.textContent), catalog.models);
+});
+
+test('keyboard navigation selects a fetched model and Escape closes the list', async () => {
+  const d = dialog(catalog);
+  await d.node('fetch').fire('click');
+  await d.node('model').fire('keydown', {key: 'ArrowUp'});
+  const option = d.node('models').children[2];
+  assert.equal(d.node('model')['aria-activedescendant'], option.id);
+  assert.equal(option['aria-selected'], 'true');
+  const enter = await d.node('model').fire('keydown', {key: 'Enter'});
+  assert.equal(enter.defaultPrevented, true, 'Selecting a model must not submit the form');
+  assert.equal(d.node('model').value, 'local-test');
+  assert.equal(d.node('models').hidden, true);
+  assert.equal(JSON.parse(d.storage.get('deployforge.agent.config.v1')).model, 'local-test');
+  await d.node('model').fire('keydown', {key: 'ArrowDown'});
+  await d.node('model').fire('keydown', {key: 'Escape'});
+  assert.equal(d.node('models').hidden, true);
+  assert.equal(d.node('model')['aria-activedescendant'], undefined);
 });
