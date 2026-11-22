@@ -10,6 +10,15 @@
   <link rel="icon" href="/static/favicon.ico">
   <style>
     .credential-state-tooltip { pointer-events: none; }
+    .vm-network-list { counter-reset: vm-net -1; }
+    .vm-network-list > li { counter-increment: vm-net; }
+    .vm-network-slot, .vm-network-grip { display: none; }
+    .vm-network-list:has(> [data-proxy-uplink]) > li > :is(.vm-network-slot, .vm-network-grip) { display: inline-block; }
+    .vm-network-slot::before { content: "net" counter(vm-net); }
+    .vm-network-grip { cursor: grab; }
+    .vm-network-list:has(> [data-network-dragging]) > li > * { pointer-events: none; }
+    .vm-network-list > [data-network-drop="before"] { box-shadow: inset 0 2px var(--bs-primary); }
+    .vm-network-list > [data-network-drop="after"] { box-shadow: inset 0 -2px var(--bs-primary); }
     /* Make each project section fill the viewport height only when expanded */
     .project-card.expanded {
       min-height: 100vh;
@@ -1061,7 +1070,7 @@
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
   <script src="/static/js/checkout_state.js?v=20261107-neutral-wording"></script>
   <script src="/static/js/config_integrations.js?v=20261106-direct-local-types"></script>
-  <script src="/static/js/app.js?v=20261121-fixed-proxy-ports"></script>
+  <script src="/static/js/app.js?v=20261121-reorder-core-interfaces"></script>
   <script src="/static/js/vm_materials.js?v=20261104-material-categories"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>

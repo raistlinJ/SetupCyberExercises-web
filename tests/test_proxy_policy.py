@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -106,18 +107,45 @@ def test_proxy_policy_api_persists_and_protects_uplink():
                 "internet_connected_adaptors": ["vmbr0"],
             })
             assert bad_nics.status_code == 400
-            assert "net0" in bad_nics.get_json()["error"]
+            assert "internal interface" in bad_nics.get_json()["error"]
 
+            bad_uplink = client.patch(f"/api/projects/{pid}/vms/proxy", json={
+                "proxy_config": {**stored["proxy_config"], "uplink_bridge": "vmbr1"},
+            })
+            assert bad_uplink.status_code == 400
+            assert "sole Internet uplink" in bad_uplink.get_json()["error"]
+
+            moved_policy = {**stored["proxy_config"], "uplink_bridge": "vmbr1"}
             moved_uplink = client.patch(f"/api/projects/{pid}/vms/proxy", json={
                 "internal_network_adaptors": ["lab", "vmbr1"],
                 "internet_connected_adaptors": ["vmbr1"],
-                "proxy_config": _policy(uplink_bridge="vmbr1"),
+                "proxy_config": moved_policy,
             })
-            assert moved_uplink.status_code == 400
-            assert "Disable" in moved_uplink.get_json()["error"]
+            assert moved_uplink.status_code == 200, moved_uplink.get_json()
+            moved_vm = moved_uplink.get_json()["vms"][0]
+            assert moved_vm["internal_network_adaptors"] == ["lab", "vmbr1"]
+            assert moved_vm["internet_connected_adaptors"] == ["vmbr1"]
+            assert moved_vm["proxy_config"] == moved_policy
+
+            reorder_data = {
+                "internal_network_adaptors": ["vmbr1", "lab"],
+                "internet_connected_adaptors": ["vmbr1"],
+            }
+            with patch.dict(app.config, {"AUTH_ENABLE": True}), patch.object(
+                app, "current_user", return_value={"username": "member", "roles": ["user"]}
+            ):
+                forbidden = client.patch(f"/api/projects/{pid}/vms/proxy", json=reorder_data)
+                assert forbidden.status_code == 403
+                assert "move the CORE gateway uplink" in forbidden.get_json()["error"]
+
+            reordered = client.patch(f"/api/projects/{pid}/vms/proxy", json=reorder_data)
+            assert reordered.status_code == 200, reordered.get_json()
+            reordered_vm = reordered.get_json()["vms"][0]
+            assert reordered_vm["internal_network_adaptors"] == ["vmbr1", "lab"]
+            assert reordered_vm["proxy_config"] == moved_policy
 
             full = client.patch(f"/api/projects/{pid}/vms/proxy", json={
-                "proxy_config": _policy(mode="full", external_addresses=[],
+                "proxy_config": _policy(uplink_bridge="vmbr1", mode="full", external_addresses=[],
                                         internal_sources=["13.0.0.0/24", "10.0.3.0/24"]),
             })
             assert full.status_code == 200, full.get_json()

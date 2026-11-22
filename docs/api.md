@@ -31,6 +31,44 @@ Base path: `/api`. The table below keeps the long-form reference out of the READ
 
 VM configuration accepts `material_category` (optional category string; blank uses `Misc`) and `materials` (an array of `{title, url}` HTTP/HTTPS links). The materials action accepts `templates: [name, ...]` to publish configured links and categories to every existing instance of those VM/LXC templates, or `targets` for selected instances. It uses the same Proxmox connection fields as other instance actions and requires an administrator. Results include `infos`, `skipped`, and `errors`; live transfer flags and unrelated Notes are preserved. Notes use `Material Category`. These links are separate from the project-level uploaded-file endpoints above.
 
+## Guest file transfers
+
+| Purpose | Method & Path |
+| --- | --- |
+| Push files or folders to selected guests | `POST /api/projects/{pid}/instances/actions/guest_push` |
+| Pull paths from selected guests | `POST /api/projects/{pid}/instances/actions/guest_pull` |
+| Update AccessForge console upload and download policy | `POST /api/projects/{pid}/instances/actions/file_transfer` |
+
+VM Manager queues admin provisioning and retrieval through `/api/queue`.
+These transfers use the project's Proxmox connection. The `file_transfer`
+action requires a DeployForge administrator and publishes `file_upload` and
+`file_download` policy in the VM Notes. Student uploads use the AccessForge
+SPICE bridge with that policy and the global upload switch.
+[Guest transfer workflows](../README.md#guest-file-transfers)
+
+## CORE gateway policy
+
+| Purpose | Method & Path |
+| --- | --- |
+| Save a gateway bridge and its interface assignments | `PATCH /api/projects/{pid}/vms/{name}` |
+| Load or validate policies for selected gateways | `POST /api/projects/{pid}/proxy-restart/preview` |
+| Apply reviewed policies and restart CORE | `POST /api/projects/{pid}/instances/actions/configure_restart_proxy` |
+
+Send the gateway's `proxy_config` with the updated `uplink_bridge` and matching
+`internal_network_adaptors` and `internet_connected_adaptors` in the same PATCH.
+The order of `internal_network_adaptors` determines the Proxmox NIC slots,
+starting at `net0`. The list must include the sole Internet bridge exactly once
+and at least one internal interface.
+
+Preview and restart accept `targets` identified by instance `index` and VM `name`. The preview
+returns each VM's defaults, effective editable policy, and up to ten history
+entries with `policy` and `appliedAt` (Unix milliseconds, or `null` for the
+migrated entry). An optional target `policy` validates edits in the preview.
+Every restart target requires its reviewed `policy` with `mode`,
+`internal_sources`, `external_addresses`, and `translations`. Each new
+translation uses one client TCP port and one backend TCP port. Only successful
+restarts update history. [CORE proxy guide](../scenarioforge-ctfd-grain-config/README.md)
+
 ## Connectors
 
 - Proxmox nodes lookup: `POST /api/proxmox/nodes` with `{ baseUrl, token, verifySSL }`.

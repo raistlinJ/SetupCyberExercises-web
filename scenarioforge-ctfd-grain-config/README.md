@@ -8,7 +8,10 @@ on the PROXY hosts. Test the translated student endpoints from the student VMs.
 
 SCE-web can now store this as a **CORE Gateway** VM policy. Select the QEMU
 template in the wizard, enter the CORE router node name, and connect its
-internal `net0`; SCE-web reserves Internet-connected `net1` for the gateway.
+internal `net0`. The wizard starts with the Internet uplink on `net1`. Drag any
+row in **Configuration → Network Interfaces** to match the gateway VM's NIC
+order. Apply the saved order to existing VMs through
+**VM Manager → State & Network → Set Network Interfaces**.
 Edit the policy in Configuration to allow direct destinations, translate student
 endpoints, or grant full IPv4 access for specified internal source IPs/CIDRs.
 Then select the gateway VM rows and choose **VM Manager → State & Network →
@@ -18,10 +21,11 @@ Configuration defaults. **Select previous run config** recalls one of the ten
 most recent unique successful policies for that VM. Enter translations as
 `CLIENT_IP:CLIENT_PORT:BACKEND_IP_OR_HOST:BACKEND_PORT`,
 with one client port and one backend port. Existing four-field ranges are
-resolved in the dialog using the original instance-based rotation. VM Manager
-sends the bundled setup script with the action. Each
-proxy guest needs the configured XML, Python 3, and `core-cli`. The manual
-wrapper below remains available for the original fixed endpoint list.
+resolved in the dialog using the original instance-based rotation. Select
+**Apply and Restart** to send the bundled setup script to the selected VMs. Each
+proxy guest needs the configured XML, Python 3, and `core-cli`. Use **View
+results** in VM Manager to inspect the guest output. The manual wrapper below
+supports the original fixed endpoint list.
 
 Before restarting CORE, the action saves the configured router uplink as
 `11.0.0.<instance index>` in the XML and uses that same address for source NAT.
@@ -32,7 +36,7 @@ or if multiple sessions match. When no sessions exist, it starts the configured
 XML. A matching session is stopped and replaced; connected scenario nodes are
 interrupted while it restarts.
 
-## Deployment sequence
+## Manual deployment sequence
 
 ### 1. Stop the running CORE scenarios
 

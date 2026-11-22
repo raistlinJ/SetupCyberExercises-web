@@ -28,6 +28,13 @@ DeployForge focuses on fast project setup with an opinionated UI. The sections b
 - Single row per VM with grouped credentials and state badges mapped from Proxmox power states.
 - Shows VM ID, node, template name/id, and adaptor summary with sortable columns and regex-capable filtering.
 - Refreshes display a smooth progress bar so operators know work is happening.
+- Administrators can use **Guest Files → Push** to provision files across
+  selected Linux QEMU VMs and LXC containers. Students upload to their assigned
+  VMs in the AccessForge SPICE console when enabled by the console policy.
+  See [guest file transfers](../README.md#guest-file-transfers).
+- **State & Network → Configure and Restart Proxy** reviews each selected CORE
+  gateway policy before applying it. Each gateway can recall its last ten unique
+  successful policies. See the [CORE proxy guide](../scenarioforge-ctfd-grain-config/README.md).
 
 ## Using the UI
 

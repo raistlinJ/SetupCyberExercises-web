@@ -109,11 +109,11 @@ class NetsSetRemoveApiTests(unittest.TestCase):
         prox.set_qemu_options.assert_not_called()
 
     def test_nets_set_keeps_internet_connected_bridge_literal(self):
-        self.project.vms[0].internal_network_adaptors = ['lab', 'vmbr0']
+        self.project.vms[0].internal_network_adaptors = ['vmbr0', 'lab']
         self.project.vms[0].internet_connected_adaptors = ['vmbr0']
         existing_cfg = {
-            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=wrong',
-            'net1': 'e1000=11:22:33:44:55:66,bridge=wrong',
+            'net0': 'e1000=AA:BB:CC:DD:EE:FF,bridge=lab1',
+            'net1': 'e1000=11:22:33:44:55:66,bridge=vmbr0',
         }
 
         with ExitStack() as stack:
@@ -140,8 +140,8 @@ class NetsSetRemoveApiTests(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             prox.create_bridge.assert_called_once_with(node='node1', iface='lab1', autostart=True, ports=None, comments='SCE-BRIDGE pid=proj-nets idx=1 adaptor=lab source=nets_set')
             options = prox.set_qemu_options.call_args.kwargs.get('options') or {}
-            self.assertIn('bridge=lab1', options.get('net0') or '')
-            self.assertIn('bridge=vmbr0', options.get('net1') or '')
+            self.assertEqual(options.get('net0'), 'e1000=AA:BB:CC:DD:EE:FF,bridge=vmbr0')
+            self.assertEqual(options.get('net1'), 'e1000=11:22:33:44:55:66,bridge=lab1')
 
     def test_nets_remove_deletes_all_net_keys(self):
         existing_cfg = {

@@ -91,6 +91,19 @@ automatically replayed. Submitted request credentials and uploaded queue payload
 are cleared after completion. Direct API clients retain the existing synchronous
 endpoints; the web UI submits work through `/api/queue`.
 
+## Guest file transfers
+
+Administrators use **VM Manager → Guest Files → Push** to provision files or
+folders on selected Linux QEMU VMs and LXC containers. The action uses the
+project's Proxmox connection and the guest or host permissions required for the
+chosen transfer. Use it for deployment, bulk copies, and CSV mappings to VMIDs.
+
+Students upload files to their assigned VMs through **AccessForge → SPICE
+console → Console controls → File Transfer**. Administrators can enable that
+path using the [per-VM console policy](#per-vm-console-file-transfer). AccessForge
+batches its SPICE traffic while keeping the existing upload permission checks.
+[AccessForge file transfer guide](https://github.com/raistlinJ/CIT_vm_accessor#vm-file-transfer)
+
 A push batch uploads each selected file to the app once, including selections
 across projects. With Proxmox SSH credentials, the app stages one archive per
 host and reuses it for that host's selected LXC containers and Linux QEMU VMs.
@@ -351,24 +364,39 @@ AccessForge combines links from visible VMs/LXCs in the same Scenario and render
 
 ## CORE gateway VMs
 
-In the new scenario wizard, select a QEMU template and mark it **CORE Gateway** in the Fetch step. Choose its Proxmox uplink bridge (default `vmbr0`) there. In the connection graph, link the gateway to an internal VM. SCE reserves `net0` for the internal connection and `net1` for the Internet uplink; the uplink connection and bridge cannot be edited while the gateway role is enabled. A client linked to the gateway cannot also be linked directly to the Internet node.
+In the new scenario wizard, select a QEMU template and mark it **CORE Gateway** in the Fetch step. Choose its Proxmox uplink bridge (default `vmbr0`) there. In the connection graph, link the gateway to an internal VM. The wizard starts with the internal connection on `net0` and the Internet uplink on `net1`. A client linked to the gateway cannot also be linked directly to the Internet node.
+
+In **Configuration**, edit **Fixed Proxmox uplink** to change the bridge. In **Network Interfaces**, use the handle beside any row to drag it into the Proxmox NIC slot you need. You can also focus a handle and press the up or down arrow key. The list order determines `net0`, `net1`, and subsequent slots. To apply the saved assignments to existing gateway VMs, select them in **VM Manager → State & Network → Set Network Interfaces**.
 
 Enter the CORE router node name or numeric ID in the gateway settings (`n3` in the included example). The gateway policy also stores the CORE XML path, external router interface, uplink gateway, internal source IPs/CIDRs, allowed destinations, and translations. **Selected addresses** permits listed destination IPs and ports. **Full IPv4 access** adds a default route and source NAT for only the listed internal sources, allowing their outbound IPv4 traffic to any destination and established replies. Choosing it disables and clears the allowed-destination list. Translated endpoints remain optional in either mode so a stable student-facing address can still reach an instance-specific backend port. See [the CORE proxy guide](scenarioforge-ctfd-grain-config/README.md) for entry formats. IPv6 remains blocked on the uplink. Client VMs still need a route toward the CORE router and usable DNS if they access hostnames.
 
-The same policy is editable in **Configuration** on the gateway VM. **Stage on proxy VMs** runs the generated per-instance command on its existing clones using the uploaded `/home/corevm/setup_llm_proxy-v2.sh`; **Copy command** provides the equivalent rendered Custom Command. Staging updates the XML on each guest and reports errors or skipped VMs. Stop and reload the updated XML in CORE, then start the scenario to activate the new routes, firewall and NAT rules. The gateway role requires a QEMU VM with an internal `net0` and a single fixed Internet-connected `net1`; disable the role before changing its uplink bridge.
+Edit the defaults in **Configuration**. In VM Manager, select only rows marked
+**Proxy** and choose **State & Network → Configure and Restart Proxy**. The
+editor shows each VM's last successfully applied policy or its Configuration
+defaults. Use **Select previous run config** to recall any of the VM's last ten
+unique successful policies or **Use Configuration defaults** to reset the
+editor. Each new translation maps one client TCP port to one backend TCP port.
+
+Choose **Apply and Restart** to send the bundled script to each selected VM.
+The script backs up the XML, saves the router's instance-specific uplink IP and
+policy, and restarts the matching CORE session. Open **View results** for guest
+output. Each proxy VM needs the configured XML, Python 3, and `core-cli`.
 
 ## Per-VM console file transfer
 
-SCE-web manages upload/download policy through the project's existing Proxmox connection. It does not contact `cit_vm_accessor` or need a console URL or certificate configuration. Policies can be enabled or disabled while the console is unavailable or its global transfer switches are off.
+SCE-web uses the project's Proxmox connection to manage the VM Notes policy for
+AccessForge console transfers. Administrators can update this policy while
+AccessForge is unavailable or its global transfer switches are off.
 
 `cit_vm_accessor` still requires `ENABLE_VM_FILE_UPLOAD=true` and/or `ENABLE_VM_FILE_DOWNLOAD=true` in its Compose environment to permit actual transfers. Both default to `false`. A direction is allowed only when both its global switch and the VM's Notes policy permit it. SCE-web's controls and arrows indicate VM policy, not the console deployment's global state.
 
-Rebuild/recreate SCE-web after upgrading; recreate the console after changing its global switches:
+Run the applicable command after updating either app or changing AccessForge's
+global transfer switches. Reopen the SPICE console after updating AccessForge.
 
 ```bash
 # In SCE-web:
 docker compose up --build -d app
-# In cit_vm_accessor, after changing global transfer switches:
+# In cit_vm_accessor, after updating AccessForge or its global transfer switches:
 docker compose up --build -d proxclient
 ```
 

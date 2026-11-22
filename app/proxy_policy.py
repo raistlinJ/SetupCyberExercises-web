@@ -172,10 +172,10 @@ def validate_proxy_vm(vm: Any) -> dict:
     if not isinstance(adaptors, list) or not isinstance(internet, list):
         raise ValueError("Proxy network interfaces must be lists")
     bridge = config["uplink_bridge"]
-    if len(adaptors) < 2 or adaptors[1] != bridge:
-        raise ValueError(f"CORE gateway needs an internal NIC at net0 and its fixed {bridge} uplink at net1")
+    if len(adaptors) < 2:
+        raise ValueError("CORE gateway needs at least one internal interface and an Internet uplink")
     if internet != [bridge] or adaptors.count(bridge) != 1:
-        raise ValueError("CORE gateway must have exactly one internet-connected uplink")
+        raise ValueError(f"CORE gateway must use {bridge} as its sole Internet uplink")
     return config
 
 

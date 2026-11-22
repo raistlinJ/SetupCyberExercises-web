@@ -14567,11 +14567,6 @@ def update_project(pid: str):
             for vm in data["vms"]:
                 if isinstance(vm, dict) and vm.get("proxy_config"):
                     prior = next((item for item in proj.vms if item.name == vm.get("name")), None)
-                    if prior and getattr(prior, "proxy_config", None):
-                        old_bridge = normalize_proxy_config(prior.proxy_config)["uplink_bridge"]
-                        new_bridge = normalize_proxy_config(vm["proxy_config"])["uplink_bridge"]
-                        if old_bridge != new_bridge:
-                            raise ValueError("Disable the CORE gateway role before changing its fixed uplink bridge")
                     previous = normalize_proxy_config(prior.proxy_config) if prior else {}
                     vm["proxy_config"] = validate_default_proxy_translations(validate_proxy_vm(vm), previous)
         except ValueError as exc:
@@ -17266,13 +17261,18 @@ def update_vm(pid: str, name: str):
         prospective = asdict(current_vm)
         prospective.update(data)
         try:
-            old_proxy = normalize_proxy_config(getattr(current_vm, "proxy_config", {}))
-            new_proxy = normalize_proxy_config(prospective.get("proxy_config"))
-            if old_proxy and new_proxy and old_proxy["uplink_bridge"] != new_proxy["uplink_bridge"]:
-                raise ValueError("Disable the CORE gateway role before changing its fixed uplink bridge")
-            validate_proxy_vm(prospective)
+            new_proxy = validate_proxy_vm(prospective)
             if "proxy_config" in data:
+                old_proxy = normalize_proxy_config(getattr(current_vm, "proxy_config", {}))
                 data["proxy_config"] = validate_default_proxy_translations(new_proxy, old_proxy)
+            elif new_proxy and "internal_network_adaptors" in data and current_app.config.get("AUTH_ENABLE"):
+                bridge = new_proxy["uplink_bridge"]
+                current_adaptors = current_vm.internal_network_adaptors or []
+                new_slot = prospective["internal_network_adaptors"].index(bridge)
+                if bridge not in current_adaptors or current_adaptors.index(bridge) != new_slot:
+                    user = getattr(current_app, "current_user", lambda: None)() or {}
+                    if "admin" not in {str(role).lower() for role in user.get("roles", [])}:
+                        return jsonify(error="Only administrators can move the CORE gateway uplink."), 403
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
     try:

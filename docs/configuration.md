@@ -73,6 +73,16 @@ python -m app
 
 - Internal adapters use letters with optional trailing numbers, up to 8 characters. During clone creation, the instance index is appended to create per-clone bridges.
 - Internet-connected adapters use literal Linux bridge/interface names up to 15 characters, such as `vmbr0`. During clone creation, the name is assigned unchanged for every clone and the app does not create, age, or delete that bridge.
+- For a CORE gateway, edit **Fixed Proxmox uplink** in the gateway policy to change the bridge. Drag any row in **Network Interfaces** to the NIC slot you need. The first row maps to `net0`. Use **VM Manager → State & Network → Set Network Interfaces** to apply the saved order to selected existing VMs.
+
+## AccessForge console uploads
+
+Set `ENABLE_VM_FILE_UPLOAD=true` in the AccessForge Compose environment. Then
+enable Upload for the applicable QEMU VMs in DeployForge under **VM Manager →
+Clipboard Access → Configure file transfer**. Students need the embedded SPICE
+console and a running SPICE guest agent in the VM. DeployForge's provisioning
+workflow uses its own Proxmox connection through **Guest Files → Push**.
+[Per-VM console file transfer](../README.md#per-vm-console-file-transfer)
 
 ## Tips
 

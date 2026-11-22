@@ -4190,7 +4190,7 @@ window.wizardNext = async function() {
                      <th class="text-center" style="width:120px;" title="Whether QEMU Guest Agent is enabled on the template">QEMU Agent</th>
                      <th class="text-center" style="width:120px;">Creds</th>
                      <th class="text-center" style="width:150px; cursor:help;" title="These VMs will be directly accessible by participants">Make User Accessible</th>
-                     <th class="text-center" style="width:120px;" title="Use this template as the CORE gateway VM">CORE Gateway</th>
+                     <th class="text-center" style="width:140px;" title="Use this template as the CORE gateway VM">CORE Gateway</th>
                    </tr>
                  </thead>
                  <tbody id="wiz-tpl-tbody"></tbody>
@@ -4228,32 +4228,41 @@ window.wizardNext = async function() {
                       style="visibility:hidden;">
                   </td>
                   <td class="text-center align-middle">
-                    <input class="form-check-input" type="radio" name="wiz-proxy-template" value="${t.vmid}"
-                      id="wiz-tpl-proxy-${t.vmid}" title="Reserve net1 as this VM’s fixed Internet uplink" style="visibility:hidden;" ${t.type === 'lxc' ? 'disabled' : ''}>
-                    <input class="form-control form-control-sm mt-1" type="text" id="wiz-tpl-proxy-bridge-${t.vmid}"
-                      value="vmbr0" title="Proxmox bridge for the fixed net1 uplink" aria-label="CORE gateway uplink bridge" disabled>
+                    <div class="d-inline-flex align-items-center gap-2" data-wiz-proxy-controls style="visibility:hidden;">
+                      <input class="form-check-input flex-shrink-0 m-0" type="checkbox" name="wiz-proxy-template" value="${t.vmid}"
+                        id="wiz-tpl-proxy-${t.vmid}" title="Reserve net1 as this VM’s fixed Internet uplink"
+                        aria-label="Use ${escHtml(t.name)} as the CORE gateway" disabled>
+                      <input class="form-control form-control-sm" type="text" id="wiz-tpl-proxy-bridge-${t.vmid}"
+                        style="width:6.5rem;" value="vmbr0" title="Proxmox bridge for the fixed net1 uplink" aria-label="CORE gateway uplink bridge" disabled>
+                    </div>
                   </td>
                 `;
-                // Wire selection checkbox to show/hide the user-accessible checkbox
+                // Show row options when its template is selected.
                 const selChk = row.querySelector(`#wiz-tpl-chk-${t.vmid}`);
                 const accChk = row.querySelector(`#wiz-tpl-acc-${t.vmid}`);
-                const proxyRadio = row.querySelector(`#wiz-tpl-proxy-${t.vmid}`);
+                const proxyControls = row.querySelector('[data-wiz-proxy-controls]');
+                const proxyChk = row.querySelector(`#wiz-tpl-proxy-${t.vmid}`);
                 const proxyBridge = row.querySelector(`#wiz-tpl-proxy-bridge-${t.vmid}`);
                 const credsBtn = row.querySelector('[data-wiz-template-creds]');
                 selChk.addEventListener('change', () => {
-                  accChk.style.visibility = selChk.checked ? '' : 'hidden';
-                  if (proxyRadio) {
-                    proxyRadio.style.visibility = selChk.checked && !proxyRadio.disabled ? '' : 'hidden';
-                    if (!selChk.checked) proxyRadio.checked = false;
-                    if (proxyBridge) proxyBridge.disabled = !proxyRadio.checked;
-                  }
+                  const visibility = selChk.checked ? '' : 'hidden';
+                  accChk.style.visibility = visibility;
+                  proxyControls.style.visibility = visibility;
+                  proxyChk.disabled = !selChk.checked || t.type === 'lxc';
+                  if (proxyChk.disabled) proxyChk.checked = false;
+                  proxyBridge.disabled = !proxyChk.checked;
                   if (credsBtn) credsBtn.classList.toggle('d-none', !selChk.checked);
                 });
-                if (proxyRadio) proxyRadio.addEventListener('change', () => {
-                  document.querySelectorAll('input[id^="wiz-tpl-proxy-bridge-"]').forEach(input => {
-                    const vmid = input.id.replace('wiz-tpl-proxy-bridge-', '');
-                    input.disabled = !document.getElementById(`wiz-tpl-proxy-${vmid}`)?.checked;
-                  });
+                proxyChk.addEventListener('change', () => {
+                  if (proxyChk.checked) {
+                    // This scenario can have one gateway, or none.
+                    for (const other of tbody.querySelectorAll('input[name="wiz-proxy-template"]:checked')) {
+                      if (other === proxyChk) continue;
+                      other.checked = false;
+                      document.getElementById(`wiz-tpl-proxy-bridge-${other.value}`).disabled = true;
+                    }
+                  }
+                  proxyBridge.disabled = !proxyChk.checked;
                 });
                 if (credsBtn) {
                   credsBtn.addEventListener('click', () => {
@@ -4290,7 +4299,7 @@ window.wizardNext = async function() {
        const accEl = document.getElementById('wiz-tpl-acc-' + vmid);
        const proxyEl = document.getElementById('wiz-tpl-proxy-' + vmid);
        const proxyBridge = document.getElementById('wiz-tpl-proxy-bridge-' + vmid);
-       const proxyConfig = proxyEl && proxyEl.checked ? defaultCoreProxyConfig() : null;
+       const proxyConfig = proxyEl?.checked && !proxyEl.disabled ? defaultCoreProxyConfig() : null;
        if (proxyConfig) proxyConfig.uplink_bridge = proxyBridge?.value?.trim() || 'vmbr0';
        const creds = wizardGetTemplateCreds(vmid);
        wizSelectedTemplates.push({
@@ -4321,11 +4330,11 @@ window.wizardNext = async function() {
 
      wizardGotoStep(4);
      if (window.wizNetGraph) {
-       // Only fully re-init if the template selection changed
+       // Rebuild if the selected templates, gateway role, or bridge changed.
        const prevIds = (window._wizNetGraphTemplateIds || []).join(',');
-       const newIds  = wizSelectedTemplates.map(t => `${t.vmid}:${!!t.proxy_config}`).join(',');
-       if (prevIds !== newIds) {
-         window._wizNetGraphTemplateIds = wizSelectedTemplates.map(t => `${t.vmid}:${!!t.proxy_config}`);
+       const newIds = wizSelectedTemplates.map(t => `${t.vmid}:${t.proxy_config?.uplink_bridge || ''}`);
+       if (prevIds !== newIds.join(',')) {
+         window._wizNetGraphTemplateIds = newIds;
          window.wizNetGraph.init(wizSelectedTemplates);
        } else {
          window.wizNetGraph.restore();
@@ -5459,17 +5468,104 @@ function collectVmNetworkRows(pid, idx) {
   return { adaptors, internetConnectedAdaptors };
 }
 
+function getVmProxyUplinkInput(pid, idx) {
+  return document.querySelector(`#vm-${pid}-${idx}-nets-list [data-proxy-uplink] input.form-control`);
+}
+
 function collectVmProxyConfig(pid, idx) {
   const prefix = `vm-${pid}-${idx}-proxy`;
   if (!document.getElementById(`${prefix}-enabled`)?.checked) return {};
   const value = key => document.getElementById(`${prefix}-${key}`)?.value?.trim() || '';
+  // Use the accepted bridge while the editable field may contain an unfinished edit.
+  const uplink = getVmProxyUplinkInput(pid, idx)?.value || value('bridge');
   return {
     router_node: value('router'), scenario_xml: value('xml'), external_interface: value('interface'),
-    uplink_bridge: value('bridge'), uplink_gateway: value('gateway'), mode: value('mode'),
+    uplink_bridge: uplink, uplink_gateway: value('gateway'), mode: value('mode'),
     internal_sources: value('sources').split('\n').map(item => item.trim()).filter(Boolean),
     external_addresses: value('mode') === 'full' ? [] : value('addresses').split('\n').map(item => item.trim()).filter(Boolean),
     translations: value('translations').split('\n').map(item => item.trim()).filter(Boolean)
   };
+}
+
+function onVmProxyUplinkChange(pid, idx, input) {
+  const uplink = getVmProxyUplinkInput(pid, idx);
+  if (!uplink) return;
+  const bridge = input.value.trim();
+  if (!isValidNetworkAdaptorName(bridge, true)) {
+    input.value = uplink.value;
+    showToast('Enter a bridge name with 1–15 letters, numbers, underscores, or dashes.', 'warning');
+    return;
+  }
+  const interfaces = document.querySelectorAll(`#vm-${pid}-${idx}-nets-list li input.form-control`);
+  if (Array.from(interfaces).some(other => other !== uplink && other.value.trim().toLowerCase() === bridge.toLowerCase())) {
+    input.value = uplink.value;
+    showToast('Another interface on this VM already uses that bridge name.', 'warning');
+    return;
+  }
+  input.value = uplink.value = bridge;
+  saveVmImmediately(pid, idx);
+}
+
+function moveVmProxyNetworkRow(row, target, after) {
+  const list = row.parentElement;
+  const match = list?.id.match(/^vm-(.+)-(\d+)-nets-list$/);
+  if (!match || target?.parentElement !== list || row === target) return;
+  const before = after ? target.nextElementSibling : target;
+  if (before === row || before === row.nextElementSibling) return;
+  list.insertBefore(row, before);
+  const [, pid, idx] = match;
+  if (document.getElementById(`vm-${pid}-${idx}-proxy-router`)?.value.trim()) saveVmImmediately(pid, Number(idx));
+}
+
+function onVmProxyNetworkOrderKey(event) {
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+  const grip = event.currentTarget;
+  const row = grip.closest('li');
+  if (!row?.parentElement.querySelector('[data-proxy-uplink]')) return;
+  event.preventDefault();
+  const down = event.key === 'ArrowDown';
+  moveVmProxyNetworkRow(row, down ? row.nextElementSibling : row.previousElementSibling, down);
+  grip.focus();
+}
+
+function onVmProxyNetworkDragStart(event) {
+  const row = event.currentTarget.closest('li');
+  if (!row?.parentElement.querySelector('[data-proxy-uplink]')) return;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-sce-network-row', row.parentElement.id);
+  row.dataset.networkDragging = 'true';
+}
+
+function clearVmProxyNetworkDropTarget(list, relatedTarget) {
+  if (!list.contains(relatedTarget)) list.querySelector('[data-network-drop]')?.removeAttribute('data-network-drop');
+}
+
+function endVmProxyNetworkDrag(list) {
+  clearVmProxyNetworkDropTarget(list, null);
+  list.querySelector('[data-network-dragging]')?.removeAttribute('data-network-dragging');
+}
+
+function onVmProxyNetworkDragOver(list, event) {
+  const source = list.querySelector('[data-network-dragging]');
+  if (!source) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  const row = event.target.closest('li');
+  const previous = list.querySelector('[data-network-drop]');
+  if (previous !== row) previous?.removeAttribute('data-network-drop');
+  if (row?.parentElement !== list || row === source) return;
+  const rect = row.getBoundingClientRect();
+  row.dataset.networkDrop = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+}
+
+function onVmProxyNetworkDrop(list, event) {
+  const row = list.querySelector('[data-network-dragging]');
+  if (!row) return;
+  event.preventDefault();
+  const target = list.querySelector('[data-network-drop]');
+  const after = target?.dataset.networkDrop === 'after';
+  endVmProxyNetworkDrag(list);
+  moveVmProxyNetworkRow(row, target, after);
 }
 
 function onVmProxyModeChange(pid, idx) {
@@ -5507,26 +5603,34 @@ function toggleVmProxy(pid, idx) {
   if (!toggle || !list) return;
   if (toggle.checked) {
     const rows = Array.from(list.querySelectorAll('li'));
-    if (!rows.length || rows[0].querySelector('[data-net-internet]')?.checked) {
+    const internetRows = rows.filter(row => row.querySelector('[data-net-internet]')?.checked);
+    if (rows.length === internetRows.length) {
       toggle.checked = false;
-      showToast('Add an internal interface as net0 before enabling the CORE gateway.', 'warning');
+      showToast('Add an internal interface before enabling the CORE gateway.', 'warning');
+      return;
+    }
+    if (internetRows.length > 1) {
+      toggle.checked = false;
+      showToast('The CORE gateway supports one Internet interface.', 'warning');
       return;
     }
     const bridgeInput = document.getElementById(`${prefix}-bridge`);
-    const existingUplink = rows[1]?.querySelector('[data-net-internet]')?.checked
-      ? rows[1].querySelector('input.form-control')?.value?.trim() : '';
-    const bridge = existingUplink || bridgeInput?.value || 'vmbr0';
-    if (bridgeInput) bridgeInput.value = bridge;
-    if (rows.length > 1 && (rows[1].querySelector('input.form-control')?.value !== bridge || !rows[1].querySelector('[data-net-internet]')?.checked)) {
+    const uplink = internetRows[0];
+    const uplinkInput = uplink?.querySelector('input.form-control');
+    const bridge = uplinkInput ? uplinkInput.value.trim() : bridgeInput?.value || 'vmbr0';
+    if (!isValidNetworkAdaptorName(bridge, true) || rows.some(row => row !== uplink &&
+      row.querySelector('input.form-control')?.value.trim().toLowerCase() === bridge.toLowerCase())) {
       toggle.checked = false;
-      showToast(`Set net1 to the Internet bridge ${bridge} before enabling the CORE gateway.`, 'warning');
+      showToast('Set a valid bridge name for the Internet interface that differs from the internal interface names.', 'warning');
       return;
     }
-    if (rows.length === 1) {
-      list.insertAdjacentHTML('beforeend', listItemTemplate(list.id, bridge, 1, { internetConnected: true, locked: true }));
+    if (bridgeInput) bridgeInput.value = bridge;
+    if (uplink) {
+      uplinkInput.value = bridge;
+      uplink.dataset.proxyUplink = 'true';
+      uplink.querySelectorAll('input, button:not(.vm-network-grip)').forEach(control => { control.disabled = true; });
     } else {
-      rows[1].dataset.proxyUplink = 'true';
-      rows[1].querySelectorAll('input, button').forEach(control => { control.disabled = true; });
+      rows[0].insertAdjacentHTML('afterend', listItemTemplate(list.id, bridge, 1, { internetConnected: true, locked: true }));
     }
   } else {
     const locked = list.querySelector('[data-proxy-uplink]');
@@ -7049,7 +7153,7 @@ function renderProjectCard(p) {
             <label class="form-check"><input class="form-check-input" type="checkbox" ${v.file_upload ? 'checked' : ''} onchange="saveVM('${p.id}','${escHtml(v.name)}', {file_upload: this.checked})"> Upload</label>
             <label class="form-check"><input class="form-check-input" type="checkbox" ${v.file_download ? 'checked' : ''} onchange="saveVM('${p.id}','${escHtml(v.name)}', {file_download: this.checked})"> Download</label>
           </div>` : ''}
-          <label class="form-check small mb-0" title="Configure this QEMU VM as a CORE gateway with a fixed Internet uplink on net1">
+          <label class="form-check small mb-0" title="Configure this QEMU VM as a CORE gateway with a required Internet uplink">
             <input class="form-check-input" type="checkbox" id="vm-${p.id}-${i}-proxy-enabled" ${isCoreProxyVm(v) ? 'checked' : ''}
               onchange="toggleVmProxy('${p.id}',${i})" ${v.vm_type === 'lxc' ? 'disabled' : ''}> CORE Gateway
           </label>
@@ -7144,8 +7248,8 @@ function renderProjectCard(p) {
             <input id="vm-${p.id}-${i}-proxy-interface" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.external_interface || 'eth1')}" onchange="saveVmImmediately('${p.id}',${i})"></div>
           <div class="col-md-2"><label class="form-label small">Uplink gateway</label>
             <input id="vm-${p.id}-${i}-proxy-gateway" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.uplink_gateway || '11.0.0.254')}" onchange="saveVmImmediately('${p.id}',${i})"></div>
-          <div class="col-md-2"><label class="form-label small">Fixed Proxmox uplink</label>
-            <input id="vm-${p.id}-${i}-proxy-bridge" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.uplink_bridge || 'vmbr0')}" readonly></div>
+          <div class="col-md-2"><label class="form-label small" for="vm-${p.id}-${i}-proxy-bridge">Fixed Proxmox uplink</label>
+            <input id="vm-${p.id}-${i}-proxy-bridge" class="form-control form-control-sm" value="${escHtml(getCoreProxyUplinkBridge(v) || 'vmbr0')}" onchange="onVmProxyUplinkChange('${p.id}',${i},this)"></div>
           <div class="col-md-6 col-xl-3"><label class="form-label small">Access mode</label>
             <select id="vm-${p.id}-${i}-proxy-mode" class="form-select form-select-sm" onchange="onVmProxyModeChange('${p.id}',${i})">
               <option value="restricted" ${v.proxy_config?.mode !== 'full' ? 'selected' : ''}>Selected addresses</option>
@@ -7173,14 +7277,10 @@ function renderProjectCard(p) {
             </div>
             <button id="btn-add-net-${p.id}-${i}" class="btn btn-sm btn-outline-primary" onclick="addListItem('vm-${p.id}-${i}-nets-list','vm-${p.id}-${i}-nets-input')" disabled>Add</button>
           </div>
-          <ul class="list-group list-group-sm" id="vm-${p.id}-${i}-nets-list">
-            ${(function () {
-      const internetSet = getInternetConnectedAdaptors(v);
-      return (v.internal_network_adaptors || v.internal_network_adapters || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx, {
-        internetConnected: internetSet.has(String(c || '').trim()),
-        locked: isCoreProxyVm(v) && idx === 1 && c === v.proxy_config?.uplink_bridge
-      })).join('');
-    })()}
+          <ul class="list-group list-group-sm vm-network-list" id="vm-${p.id}-${i}-nets-list"
+              ondragover="onVmProxyNetworkDragOver(this, event)" ondragleave="clearVmProxyNetworkDropTarget(this, event.relatedTarget)"
+              ondrop="onVmProxyNetworkDrop(this, event)">
+            ${renderVmNetworkRows(`vm-${p.id}-${i}-nets-list`, v)}
           </ul>
         </div>
   <div class="col-12"><div class="small text-muted" id="vm-save-status-${p.id}-${i}"></div></div>
@@ -8179,6 +8279,33 @@ function isCoreProxyVm(vm) {
   return !!(vm && vm.proxy_config && typeof vm.proxy_config === 'object' && Object.keys(vm.proxy_config).length);
 }
 
+function getCoreProxyUplinkBridge(vm) {
+  return isCoreProxyVm(vm) ? vm.proxy_config.uplink_bridge || 'vmbr0' : '';
+}
+
+function renderVmNetworkRows(listId, vm) {
+  const internetSet = getInternetConnectedAdaptors(vm);
+  const adaptors = [...(vm.internal_network_adaptors || vm.internal_network_adapters || [])];
+  const uplink = getCoreProxyUplinkBridge(vm);
+  let uplinkIndex = uplink ? adaptors.indexOf(uplink) : -1;
+  if (uplink && uplinkIndex === -1 && adaptors.length) {
+    uplinkIndex = adaptors.findIndex(adaptor => internetSet.has(String(adaptor || '').trim()));
+    if (uplinkIndex === -1) {
+      uplinkIndex = 1;
+      adaptors.splice(uplinkIndex, 0, uplink);
+    } else {
+      adaptors[uplinkIndex] = uplink;
+    }
+  }
+  return adaptors.map((adaptor, idx) => {
+    const locked = idx === uplinkIndex;
+    return listItemTemplate(listId, adaptor, idx, {
+      internetConnected: locked || internetSet.has(String(adaptor || '').trim()),
+      locked
+    });
+  }).join('');
+}
+
 function formatPreviewAdaptor(vm, adaptor, suffix) {
   const value = String(adaptor || '').trim();
   if (!value) return '';
@@ -8223,7 +8350,14 @@ function listItemTemplate(listId, value, idx, options = {}) {
       <input class="form-check-input" type="checkbox" role="switch" data-net-internet${internetChecked}${disabled} onchange="onListItemEdit('${listId}', this)">
       <label class="form-check-label small">Internet</label>
     </div>` : '';
+  const networkOrder = isNetList ? `
+    <button type="button" class="btn btn-sm btn-outline-secondary vm-network-grip flex-shrink-0 me-2" draggable="true"
+            aria-label="Move network interface" title="Drag or use the up and down arrow keys"
+            ondragstart="onVmProxyNetworkDragStart(event)" ondragend="endVmProxyNetworkDrag(this.closest('ul'))"
+            onkeydown="onVmProxyNetworkOrderKey(event)"><span aria-hidden="true">⠿</span></button>
+    <span class="vm-network-slot small text-muted flex-shrink-0 me-2"></span>` : '';
   return `<li class="list-group-item d-flex align-items-center justify-content-between" data-index="${idx}" ${locked ? 'data-proxy-uplink="true"' : ''}>
+    ${networkOrder}
     <input class="form-control form-control-sm me-2" value="${safe}" ${disabled} oninput="onListItemEdit('${listId}', this)"/>
     ${internetControl}
     <button class="btn btn-sm btn-outline-danger" ${disabled} onclick="removeListItem('${listId}', this)">Remove</button>
@@ -8270,9 +8404,13 @@ function removeListItem(listId, btnEl) {
     if (li && String(listId).includes('-nets-list')) {
       const m = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/);
       const enabled = m && document.getElementById(`vm-${m[1]}-${m[2]}-proxy-enabled`)?.checked;
-      if (enabled && li === li.parentElement?.firstElementChild) {
-        showToast('The CORE gateway needs its internal net0 interface.', 'warning');
-        return;
+      if (enabled && !li.querySelector('[data-net-internet]')?.checked) {
+        const otherInternal = Array.from(li.parentElement.children).some(row => row !== li &&
+          !row.querySelector('[data-net-internet]')?.checked && row.querySelector('input.form-control')?.value.trim());
+        if (!otherInternal) {
+          showToast('The CORE gateway needs at least one internal interface.', 'warning');
+          return;
+        }
       }
     }
     if (li) li.remove();

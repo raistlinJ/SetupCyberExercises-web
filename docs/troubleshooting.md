@@ -6,6 +6,20 @@
 - **DATA_DIR permissions:** ensure the directory exists and is writable (Docker compose mounts `/data`).
 - **Invalid credential uploads:** CSV must contain two columns (`username,password`). Passwords must be 8+ characters if provided.
 
+## Guest file transfers
+
+- **Student upload is missing or disabled.** Confirm the VM is open in the
+  AccessForge SPICE console and its SPICE guest agent is connected. Check
+  `ENABLE_VM_FILE_UPLOAD` in AccessForge and the VM's Upload policy in DeployForge.
+  After enabling Upload, reconnect the console.
+- **SPICE uploads are slower than Guest Files → Push.** SPICE shares the
+  student's console connection and uses the guest agent's flow control.
+  AccessForge batches packets to reduce overhead. Use **Guest Files → Push**
+  for admin provisioning and bulk uploads. See the [transfer workflows](../README.md#guest-file-transfers).
+- **Admin transfer shows compatible mode.** The Proxmox host could not use the
+  streaming guest-agent file commands at preflight. Check host SSH access and
+  the QEMU guest agent. The Queue gives the transfer mode and result.
+
 ## CTFd-Specific Tips
 
 - Admin or Teacher tokens are required to include hidden challenges in listings. Use the "Include Hidden" toggle in the popup.

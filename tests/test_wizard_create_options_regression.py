@@ -602,6 +602,103 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
         self._run_node_regression(harness)
 
     @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
+    def test_wizard_can_clear_core_gateway_or_switch_to_another_template(self):
+        harness = textwrap.dedent(
+            r"""
+            (async () => {
+              const assert = (condition, message) => { if (!condition) throw new Error(message); };
+              const ids = [900, 901, 902];
+              const byId = id => document.getElementById(id);
+              const selected = id => byId(`wiz-tpl-chk-${id}`);
+              const gateway = id => byId(`wiz-tpl-proxy-${id}`);
+              const bridge = id => byId(`wiz-tpl-proxy-bridge-${id}`);
+              const rows = [];
+              const tbody = {
+                appendChild(row) { rows.push(row); },
+                querySelectorAll() { return ids.map(gateway).filter(input => input.checked); },
+              };
+              const container = byId('wiz-templates-list');
+              container.insertAdjacentHTML = () => {};
+              container.querySelector = () => tbody;
+              const createElement = document.createElement;
+              document.createElement = tag => {
+                const row = createElement(tag);
+                if (tag !== 'tr') return row;
+                const proxyControls = {style: {}};
+                row.querySelector = selector => {
+                  if (selector === '[data-wiz-proxy-controls]') {
+                    const group = row.innerHTML.match(/<div[^>]+data-wiz-proxy-controls[^>]*>/)[0];
+                    proxyControls.style.visibility = /visibility:\s*hidden/.test(group) ? 'hidden' : '';
+                    row.proxyControls = proxyControls;
+                    return proxyControls;
+                  }
+                  if (!selector.startsWith('#')) return null;
+                  const id = selector.slice(1);
+                  const input = row.innerHTML.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`))[0];
+                  const element = byId(id);
+                  element.type = input.match(/type="([^"]+)"/)[1];
+                  element.value = input.match(/value="([^"]*)"/)?.[1] || '';
+                  element.disabled = /\sdisabled(?=\s|>)/.test(input);
+                  element.addEventListener = (event, listener) => { element[event] = listener; };
+                  return element;
+                };
+                return row;
+              };
+              document.querySelectorAll = () => ids.map(selected).filter(input => input.checked);
+              globalThis.wizardFilterTable = () => {};
+              globalThis.wizardGotoStep = step => { currentWizardStep = step; };
+              const built = [];
+              window.wizNetGraph = {init: templates => built.push(templates), saveState() {}};
+              http = async (_method, url) => url.endsWith('/templates') ? {templates: ids.map(vmid => ({
+                vmid, name: `vm-${vmid}`, node: 'pve', type: vmid === 902 ? 'lxc' : 'qemu',
+              }))} : {ok: true};
+              showToast = message => { throw new Error(message); };
+              byId('wiz-feat-vm').checked = true;
+              byId('wiz-proxmox-url').value = 'https://pve.example';
+              byId('wiz-proxmox-user').value = 'operator';
+              byId('wiz-proxmox-pass').value = 'fixture';
+              currentWizardStep = 2;
+              await window.wizardNext();
+
+              assert(rows.length === 3 && currentWizardStep === 3, 'Wizard should render fetched templates');
+              assert(rows.every(row => row.proxyControls.style.visibility === 'hidden'),
+                'Gateway controls are hidden before row selection');
+              assert(ids.every(id => gateway(id).disabled && bridge(id).disabled),
+                'Gateway controls are disabled before row selection');
+              for (const id of ids) { selected(id).checked = true; selected(id).change(); }
+              assert(rows.every(row => row.proxyControls.style.visibility === ''),
+                'Selecting a row shows both gateway controls');
+              assert(gateway(900).type === 'checkbox' && !gateway(900).disabled && bridge(900).disabled,
+                'Selecting a QEMU row enables its toggle before its bridge');
+              assert(gateway(902).disabled && bridge(902).disabled, 'Selecting LXC keeps both controls disabled');
+              gateway(900).checked = true; gateway(900).change();
+              assert(!bridge(900).disabled, 'Gateway selection enables its bridge');
+              selected(900).checked = false; selected(900).change();
+              assert(rows[0].proxyControls.style.visibility === 'hidden' && rows[1].proxyControls.style.visibility === '',
+                'Deselecting hides the controls for only that row');
+              assert(!gateway(900).checked && gateway(900).disabled && bridge(900).disabled,
+                'Deselecting a gateway row clears the role and disables both controls');
+              selected(900).checked = true; selected(900).change();
+              gateway(900).checked = true; gateway(900).change();
+              gateway(901).checked = true; gateway(901).change();
+              assert(!gateway(900).checked && bridge(900).disabled && !bridge(901).disabled,
+                'Changing gateways leaves one checked template');
+
+              bridge(901).value = 'vmbr2';
+              await window.wizardNext();
+              assert(built.at(-1)[1].proxy_config.uplink_bridge === 'vmbr2', 'Pass the selected bridge to the topology');
+              window.wizardBack();
+              gateway(901).checked = false; gateway(901).change();
+              assert(bridge(901).disabled && selected(901).checked, 'Clearing the gateway keeps the VM selected');
+              await window.wizardNext();
+              assert(built.length === 2 && built.at(-1).every(vm => !vm.proxy_config),
+                'Rebuild the topology with no reserved gateway uplink');
+            })();
+            """
+        )
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
     def test_core_gateway_reserves_net1_and_requires_internal_connection(self):
         harness = textwrap.dedent(
             """
@@ -647,7 +744,7 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               wizSelectedTemplates = [
                 { _wizId: 'proxy', vmid: 900, name: 'proxy', finalName: 'proxy',
                   user_accessible: false, nets: [], internet_connected_adaptors: [],
-                  proxy_config: { ...defaultCoreProxyConfig(), router_node: 'n3',
+                  proxy_config: { ...defaultCoreProxyConfig(), router_node: 'n3', uplink_bridge: 'vmbr2',
                     external_addresses: ['129.108.4.46:443'],
                     translations: ['100.100.100.100:8080:129.108.156.63:11434-11436'] } },
                 { _wizId: 'client', vmid: 901, name: 'client', finalName: 'client',
@@ -671,15 +768,146 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
               svg.listeners.mouseup({ clientX: Number(proxyCoords[1]), clientY: Number(proxyCoords[2]) });
               assert(window.wizNetGraph.validateProxyTopology() === true, 'Internal net0 plus uplink net1 is valid');
               window.wizNetGraph.saveState();
-              assert(JSON.stringify(wizSelectedTemplates[0].nets) === JSON.stringify(['netA', 'vmbr0']),
-                'CORE gateway must keep internal net0 and fixed vmbr0 net1');
-              assert(JSON.stringify(wizSelectedTemplates[0].internet_connected_adaptors) === JSON.stringify(['vmbr0']),
-                'Only net1 should be Internet-connected');
+              assert(JSON.stringify(wizSelectedTemplates[0].nets) === JSON.stringify(['netA', 'vmbr2']),
+                'CORE gateway must keep internal net0 and use the chosen bridge on net1');
+              assert(JSON.stringify(wizSelectedTemplates[0].internet_connected_adaptors) === JSON.stringify(['vmbr2']),
+                'The chosen bridge should be the only Internet-connected interface');
               client.listeners.mousedown({ preventDefault() {}, button: 0 });
               svg.listeners.mouseup({ clientX: Number(internetCoords[1]), clientY: Number(internetCoords[2]) });
               window.wizNetGraph.saveState();
               assert(wizSelectedTemplates[1].internet_connected_adaptors.length === 0,
                 'Client linked to gateway must not gain a direct Internet NIC');
+            })();
+            """
+        )
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
+    def test_configuration_keeps_the_fixed_uplink_in_its_configured_slot(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => { if (!condition) throw new Error(message); };
+              const vm = {
+                proxy_config: { uplink_bridge: 'vmbr2' },
+                internal_network_adaptors: ['lab', 'vmbr0', 'extra'],
+                internet_connected_adaptors: ['vmbr0'],
+              };
+              const listId = 'vm-proj-0-nets-list';
+              const html = renderVmNetworkRows(listId, vm);
+              const [, net0, net1, net2] = html.split('<li');
+              assert(net1.includes('data-proxy-uplink="true"') && /value="vmbr2"\\s+disabled/.test(net1),
+                'The locked second row should show the fixed uplink');
+              assert(net1.includes('data-net-internet checked disabled'), 'The uplink should be locked to Internet');
+              assert(net0.includes('value="lab"') && net2.includes('value="extra"') && !html.includes('value="vmbr0"'),
+                'The fixed uplink should replace only the stale net1 row');
+              assert([net0, net1, net2].every(row => row.includes('draggable="true"')),
+                'Every gateway interface row should have a drag handle');
+              const ordinaryVm = renderVmNetworkRows(listId, { ...vm, proxy_config: {} });
+              assert(ordinaryVm.includes('value="vmbr0"') && !ordinaryVm.includes('data-proxy-uplink'),
+                'An ordinary VM should keep its configured bridge and editable interfaces');
+              const [, uplinkFirst, internalSecond] = renderVmNetworkRows(listId, {
+                ...vm,
+                internal_network_adaptors: ['vmbr2', 'lab'],
+                internet_connected_adaptors: ['vmbr2'],
+              }).split('<li');
+              assert(uplinkFirst.includes('data-proxy-uplink="true"') && uplinkFirst.includes('draggable="true"') &&
+                internalSecond.includes('value="lab"') && !internalSecond.includes('data-proxy-uplink'),
+                'The moved uplink should stay locked and draggable in the first slot after reloading');
+
+              const prefix = 'vm-proj-0-proxy';
+              const editor = document.getElementById(prefix + '-bridge');
+              const uplink = { value: 'vmbr2', disabled: true };
+              const internal = { value: 'lab' };
+              const extra = { value: 'extra' };
+              const networkRow = (input, checked) => ({
+                querySelector: selector => selector === 'input.form-control' ? input : { checked },
+              });
+              const rows = [networkRow(internal, false), networkRow(uplink, true), networkRow(extra, false)];
+              document.getElementById(prefix + '-enabled').checked = true;
+              document.getElementById(prefix + '-router').value = 'n3';
+              document.querySelector = () => uplink;
+              document.querySelectorAll = selector => selector.endsWith('input.form-control')
+                ? [internal, uplink, extra] : rows;
+              const saves = [];
+              showToast = () => {};
+              saveVmImmediately = (pid, idx) => saves.push({
+                policy: collectVmProxyConfig(pid, idx),
+                network: collectVmNetworkRows(pid, idx),
+              });
+
+              editor.value = ' lab ';
+              onVmProxyUplinkChange('proj', 0, editor);
+              assert(editor.value === 'vmbr2' && saves.length === 0, 'Reject an existing interface name');
+              editor.value = 'not a bridge';
+              onVmProxyUplinkChange('proj', 0, editor);
+              assert(editor.value === 'vmbr2' && saves.length === 0, 'Reject an invalid bridge name');
+              editor.value = ' vmbr10 ';
+              assert(collectVmProxyConfig('proj', 0).uplink_bridge === 'vmbr2', 'Ignore an unfinished bridge edit');
+              onVmProxyUplinkChange('proj', 0, editor);
+              assert(editor.value === 'vmbr10' && uplink.value === 'vmbr10' && uplink.disabled,
+                'Mirror and lock the new bridge on net1');
+              assert(saves.length === 1 && saves[0].policy.uplink_bridge === 'vmbr10' && saves[0].policy.router_node === 'n3',
+                'Save the new bridge with the existing gateway policy');
+              assert(saves[0].network.adaptors.join(',') === 'lab,vmbr10,extra' && saves[0].network.internetConnectedAdaptors.join(',') === 'vmbr10',
+                'Save net0 as internal and net1 as the sole Internet bridge');
+
+              const [internalRow, uplinkRow, extraRow] = rows;
+              let activeGateway = true;
+              const list = {
+                id: listId,
+                contains: row => rows.includes(row),
+                querySelector(selector) {
+                  if (selector === '[data-proxy-uplink]') return activeGateway ? uplinkRow : null;
+                  if (selector === '[data-network-dragging]') return rows.find(row => row.dataset.networkDragging);
+                  return rows.find(row => row.dataset.networkDrop);
+                },
+                insertBefore(row, before) {
+                  rows.splice(rows.indexOf(row), 1);
+                  rows.splice(before ? rows.indexOf(before) : rows.length, 0, row);
+                },
+              };
+              for (const row of rows) {
+                row.dataset = {};
+                row.parentElement = list;
+                row.closest = () => row;
+                row.removeAttribute = name => {
+                  if (name === 'data-network-dragging') delete row.dataset.networkDragging;
+                  if (name === 'data-network-drop') delete row.dataset.networkDrop;
+                };
+                row.getBoundingClientRect = () => ({ top: 0, height: 20 });
+                Object.defineProperty(row, 'nextElementSibling', { get: () => rows[rows.indexOf(row) + 1] || null });
+              }
+              const grip = { closest: () => uplinkRow, focus() {} };
+              const drag = { currentTarget: grip, target: internalRow, clientY: 2,
+                dataTransfer: { setData() {} }, preventDefault() {} };
+              onVmProxyNetworkDragStart(drag);
+              onVmProxyNetworkDragOver(list, drag);
+              assert(internalRow.dataset.networkDrop === 'before', 'Highlight the slot above the internal interface');
+              onVmProxyNetworkDrop(list, drag);
+              assert(!uplinkRow.dataset.networkDragging && !internalRow.dataset.networkDrop, 'Clear the drag indicators after dropping');
+              assert(saves[1].network.adaptors.join(',') === 'vmbr10,lab,extra' &&
+                saves[1].network.internetConnectedAdaptors.join(',') === 'vmbr10' && saves[1].policy.uplink_bridge === 'vmbr10',
+                'Dropping should save the new order and keep the Internet bridge and policy');
+              onVmProxyNetworkOrderKey({ key: 'ArrowDown', currentTarget: grip, preventDefault() {} });
+              assert(saves[2].network.adaptors.join(',') === 'lab,vmbr10,extra', 'Moving down with the keyboard should save the restored order');
+
+              const internalDrag = { ...drag, currentTarget: { closest: () => internalRow }, target: extraRow, clientY: 18 };
+              onVmProxyNetworkDragStart(internalDrag);
+              onVmProxyNetworkDragOver(list, internalDrag);
+              onVmProxyNetworkDrop(list, internalDrag);
+              assert(saves[3].network.adaptors.join(',') === 'vmbr10,extra,lab',
+                'Dragging an internal interface should reorder the internal NICs');
+              const dropOnUplink = { ...internalDrag, target: uplinkRow, clientY: 2 };
+              onVmProxyNetworkDragStart(dropOnUplink);
+              onVmProxyNetworkDragOver(list, dropOnUplink);
+              onVmProxyNetworkDrop(list, dropOnUplink);
+              assert(saves[4].network.adaptors.join(',') === 'lab,vmbr10,extra' &&
+                saves[4].network.internetConnectedAdaptors.join(',') === 'vmbr10',
+                'An internal row can drop beside the Internet row without changing its bridge');
+              activeGateway = false;
+              onVmProxyNetworkDragStart(internalDrag);
+              assert(!internalRow.dataset.networkDragging, 'Dragging is available only on gateway VMs');
             })();
             """
         )
