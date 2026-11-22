@@ -30,7 +30,11 @@
     if (!input) return;
     const names = Array.isArray(settings.sourceNames) ? settings.sourceNames : [];
     const key = selectionKey(type, names);
-    // Recall changes settings; an existing selection always takes precedence.
+    const currentFiles = Array.from(input.files || []);
+    if (selectionKey(type, sourceNames(currentFiles)) !== key) {
+      // A recalled run must use its own source, never an unrelated picker value.
+      input.value = '';
+    }
     if (!input.files?.length && pushSelections.has(key)) {
       try {
         const transfer = new DataTransfer();
@@ -109,10 +113,7 @@
       if (csvMode) { csvMode.checked = false; csvMode.dispatchEvent(new Event('change', { bubbles: true })); }
       // The mode-change handler clears the inactive picker, so cache both first.
       ['file', 'folder'].forEach(rememberPushSelection);
-      const preferredType = settings.selectionType === 'folder' ? 'folder' : 'file';
-      const currentType = ['file', 'folder'].find(type => document.getElementById(`lxc-push-type-${type}`)?.checked && pushInput(type)?.files?.length)
-        || ['file', 'folder'].find(type => pushInput(type)?.files?.length);
-      const type = currentType || preferredType;
+      const type = settings.selectionType === 'folder' ? 'folder' : 'file';
       const radio = document.getElementById(`lxc-push-type-${type}`);
       if (radio && !radio.checked) { radio.checked = true; radio.dispatchEvent(new Event('change', { bubbles: true })); }
       setValue('lxc-push-destination', settings.destination);

@@ -8,6 +8,7 @@ import threading
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Any
 from ..materials import normalize_material_links
+from ..proxy_policy import normalize_proxy_config
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
 DEFAULT_VALIDATION_COMMAND_TIMEOUT_SECONDS = 10
@@ -345,6 +346,7 @@ class VMConfig:
     validation_commands: List[Dict[str, Any]] = field(default_factory=list)
     internal_network_adaptors: Optional[List[str]] = None
     internet_connected_adaptors: Optional[List[str]] = None
+    proxy_config: Dict[str, Any] = field(default_factory=dict)
     # Advanced per-VM clone options
     use_linked_clone: Optional[bool] = None  # override project default
     clone_timeout_sec: Optional[int] = None  # override project timeout
@@ -876,6 +878,10 @@ class ProjectStore:
             base["start_commands"] = sanitize_start_command_steps(base.get("start_commands"))
             base["stored_commands"] = sanitize_start_command_steps(base.get("stored_commands"))
             base["validation_commands"] = sanitize_validation_commands(base.get("validation_commands"))
+            try:
+                base["proxy_config"] = normalize_proxy_config(base.get("proxy_config"))
+            except ValueError:
+                base["proxy_config"] = {}
             if base.get("vm_user") is not None:
                 base["vm_user"] = str(base["vm_user"])
             if base.get("vm_pass") is not None:
@@ -1090,7 +1096,7 @@ class ProjectStore:
             return self.upsert(project, preserve_row_tags=False)
 
     def update_vm_inventory(self, pid: str, statuses: list, screenshot_targets=None) -> Project:
-        """Merge inventory with screenshots saved by overlapping refreshes.
+        """Merge inventory with screenshots and sign-in times saved by overlapping refreshes.
 
         None means this request captured all displays; an empty set means no
         displays were requested. Match identity so reused VM IDs stay separate.
@@ -1103,9 +1109,27 @@ class ProjectStore:
                        detail.get('node'), detail.get('vmid')): detail
                       for entry in project.instance_statuses or []
                       for detail in entry.get('vm_details', [])}
+            previous_statuses = {int(entry.get('index', 0)): entry for entry in project.instance_statuses or []}
             keys = ('screenshot', 'screenshot_at', 'screenshot_error', 'screenshot_stale')
+            login_scope = ('accessforge_login_user', 'accessforge_login_cluster')
             for entry in statuses:
                 index = int(entry.get('index', 0))
+                previous = previous_statuses.get(index, {})
+                previous_login = previous.get('accessforge_last_login')
+                current_login = entry.get('accessforge_last_login')
+                same_scope = ('accessforge_login_cluster' not in entry
+                              or all(entry.get(key) == previous.get(key) for key in login_scope))
+                if previous_login and same_scope and previous_login > (current_login or 0):
+                    for key in (*login_scope, 'accessforge_last_login', 'accessforge_last_login_end'):
+                        entry[key] = previous.get(key)
+                elif previous_login and same_scope and previous_login == current_login:
+                    previous_end = previous.get('accessforge_last_login_end') or {}
+                    current_end = entry.get('accessforge_last_login_end') or {}
+                    if previous_end and (not current_end or
+                            (not previous_end['estimated'] and current_end['estimated']) or
+                            (previous_end['estimated'] == current_end['estimated']
+                             and previous_end['timestamp'] > current_end['timestamp'])):
+                        entry['accessforge_last_login_end'] = previous_end
                 for detail in entry.get('vm_details', []):
                     name = str(detail.get('name') or '').lower()
                     saved = latest.get((index, name, detail.get('node'), detail.get('vmid')), {})
@@ -1239,6 +1263,7 @@ class ProjectStore:
                         "validation_commands",
                         "internal_network_adaptors",
                         "internet_connected_adaptors",
+                        "proxy_config",
                         "use_linked_clone",
                         "clone_timeout_sec",
                         "storage_volume",
@@ -1299,6 +1324,7 @@ class ProjectStore:
                                            validation_commands=sanitize_validation_commands(getattr(vm, 'validation_commands', [])),
                                            internal_network_adaptors=vm.internal_network_adaptors,
                                            internet_connected_adaptors=vm.internet_connected_adaptors,
+                                           proxy_config=dict(getattr(vm, 'proxy_config', {}) or {}),
                                            use_linked_clone=vm.use_linked_clone,
                                            clone_timeout_sec=vm.clone_timeout_sec,
                                            storage_volume=vm.storage_volume,

@@ -64,11 +64,10 @@ selector. History is saved on the server for the signed-in user when a run start
 including failed attempts; cancelled waiting jobs are excluded. Repeating the same
 settings moves that entry to the top. Custom history restores the complete command
 and timeout, pull history restores the paths, and push history restores the
-destination, file/folder mode, owner, and permissions. Push recall retains matching
-selected files and can restore the last ten file/folder selections from the same
-open page. After a page reload, or if that selection is unavailable, choose the
-local files again. Recall keeps the current file or folder selection while restoring
-the saved destination and options. A small **(!)** marks files changed since the
+destination, file/folder mode, owner, and permissions. Push recall restores a
+matching file or folder selection from the same open page, replacing an unrelated
+selection. After a page reload, or if that selection is unavailable, choose the
+local files again. A small **(!)** marks files changed since the
 recalled run or no longer readable; hover for details. Files reported missing by
 the browser are removed from the selection.
 Recall never submits an action or changes the currently selected guests.
@@ -350,6 +349,14 @@ Updating materials preserves existing live transfer flags, human notes, scenario
 
 AccessForge combines links from visible VMs/LXCs in the same Scenario and renders them in a scrollable table to the left of the VM cards, stacking above them on narrow screens. Files in the same category share a vertically centered category cell. Scenario headings stay unchanged. Reload AccessForge after applying metadata. This editor configures links on VM/LXC templates; it does not introduce a separate project-level link store.
 
+## CORE gateway VMs
+
+In the new scenario wizard, select a QEMU template and mark it **CORE Gateway** in the Fetch step. Choose its Proxmox uplink bridge (default `vmbr0`) there. In the connection graph, link the gateway to an internal VM. SCE reserves `net0` for the internal connection and `net1` for the Internet uplink; the uplink connection and bridge cannot be edited while the gateway role is enabled. A client linked to the gateway cannot also be linked directly to the Internet node.
+
+Enter the CORE router node name or numeric ID in the gateway settings (`n3` in the included example). The gateway policy also stores the CORE XML path, external router interface, uplink gateway, internal source IPs/CIDRs, allowed destinations, and translations. **Selected addresses** permits listed destination IPs and ports. **Full IPv4 access** adds a default route and source NAT for only the listed internal sources, allowing their outbound IPv4 traffic to any destination and established replies. Choosing it disables and clears the allowed-destination list. Translated endpoints remain optional in either mode so a stable student-facing address can still reach an instance-specific backend port. See [the CORE proxy guide](scenarioforge-ctfd-grain-config/README.md) for entry formats. IPv6 remains blocked on the uplink. Client VMs still need a route toward the CORE router and usable DNS if they access hostnames.
+
+The same policy is editable in **Configuration** on the gateway VM. **Stage on proxy VMs** runs the generated per-instance command on its existing clones using the uploaded `/home/corevm/setup_llm_proxy-v2.sh`; **Copy command** provides the equivalent rendered Custom Command. Staging updates the XML on each guest and reports errors or skipped VMs. Stop and reload the updated XML in CORE, then start the scenario to activate the new routes, firewall and NAT rules. The gateway role requires a QEMU VM with an internal `net0` and a single fixed Internet-connected `net1`; disable the role before changing its uplink bridge.
+
 ## Per-VM console file transfer
 
 SCE-web manages upload/download policy through the project's existing Proxmox connection. It does not contact `cit_vm_accessor` or need a console URL or certificate configuration. Policies can be enabled or disabled while the console is unavailable or its global transfer switches are off.
@@ -406,7 +413,7 @@ same received text is copied again within the browser.
 
 AccessForge shows the remaining allowance in its clipboard panel. If either
 direction has a limit, both automatic-sharing switches are turned off and
-disabled. With a VM → client limit, use **Receive from VM** before **Copy from VM**;
+disabled. With a VM → client limit, use **Get VM text** before **Copy to clipboard**;
 guest clipboard changes alone do not spend characters. New settings and resets
 are picked up by open consoles. Upgrade both SCE-web and `CIT_vm_accessor` for
 these controls. They govern AccessForge SPICE traffic; direct Proxmox and native
@@ -575,6 +582,8 @@ The integration is one-way: SCE-web publishes account credentials, requests stat
 Administrator usernames default to `@pam` when no realm is provided, matching VM Manager: `jcacosta` becomes `jcacosta@pam`. Explicit realms such as `jcacosta@pve` or `jcacosta@ldap` are preserved. Existing saved bare usernames are normalized without discarding the saved password.
 
 For an authentication-related 502 on another AccessForge instance, check that instance's `/healthz` configuration output and its `PROXMOX_HOST`/`PROXMOX_PORT` environment values. `pve.example.edu` is the sample hostname, not a configured cluster. Recreate AccessForge's `proxclient` container after changing its `.env`. Its `VERIFY_SSL` controls the connection to Proxmox independently of SCE-web's **Verify SSL certificates** option for AccessForge. Known backend diagnostics are shown in SCE-web; unrecognized server errors keep the generic application/reverse-proxy guidance without exposing internal response bodies.
+
+In VM Manager, enable **Signed-in** in **Columns**. It shows **Active** for accounts with an active AccessForge dashboard or SPICE console session and shows the most recent session as a range such as `01h 02m - 00h 01m ago` after it ends. The end time is the recorded sign-out or, if check-ins stopped, the last browser check-in. Hover to see the recorded times. Older sessions with only a sign-in timestamp show that time. Click **Signed-in** to sort by session end time, with active sessions first and unknown end times last. The column updates on **Refresh**, when you return to VM Manager, and once a minute while it is visible. It uses the Proxmox login or API token used by VM Manager. Set the **AccessForge URL** in Connection Parameters if SCE-web lacks an existing destination for that Proxmox address. AccessForge checks for `Sys.Modify` on `/` and can verify a different node address against its cluster membership. If the column says **Update AccessForge**, update the AccessForge source and recreate its application container. After upgrading AccessForge, reload existing sessions to start presence tracking. Session ranges are captured for new sign-ins.
 
 Configuration → Connection Parameters shows separate URL and **API Port** inputs for CTFd, CTF-RPG, and AccessForge. AccessForge's row appears only when its plugin is enabled and uses your per-user/project connection settings. Changing its destination clears the saved password; open **Credential Checkouts → Connection** to authenticate to the new destination. Existing URLs containing a custom port are split automatically. CTF-RPG certificate verification is configured in its manager's Connection dialog.
 

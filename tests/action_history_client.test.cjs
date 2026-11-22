@@ -107,15 +107,16 @@ test('push recall retains matching selected files without requiring DataTransfer
   assert.match(elements['lxc-push-history-help'].textContent, /selection is ready/);
 });
 
-test('recall preserves current files and their mode even when the saved run used a folder', async () => {
+test('recall selects the saved mode and clears unrelated files when the saved folder is unavailable', async () => {
   const settings = { destination: '/recalled', selectionType: 'folder', sourceNames: ['old/a.txt'] };
   const elements = browser(async () => json([entry(settings)]), { canRestore: false });
   const files = [{ name: 'current.txt' }];
   elements['lxc-push-files'].files = files;
   await elements.lxcPushModal.fire('show.bs.modal');
   elements['lxc-push-history'].value = '1'; await elements['lxc-push-history'].fire('change');
-  assert.equal(elements['lxc-push-files'].files, files);
-  assert.equal(elements['lxc-push-type-file'].checked, true);
+  assert.equal(elements['lxc-push-files'].files.length, 0);
+  assert.equal(elements['lxc-push-folder'].files.length, 0);
+  assert.equal(elements['lxc-push-type-folder'].checked, true);
   assert.equal(elements['lxc-push-destination'].value, '/recalled');
 });
 
@@ -210,14 +211,27 @@ test('push recall restores earlier File objects across different selections and 
   assert.equal(elements['lxc-push-destination'].value, '/second');
 });
 
-test('recall keeps the current folder even when a history entry names another folder', async () => {
+test('push recall replaces a different current file with the saved source', async () => {
+  const settings = { destination: '/data', selectionType: 'file', sourceNames: ['old.txt'] };
+  const elements = browser(async () => json([entry(settings)]));
+  const oldFile = { name: 'old.txt' };
+  const newFile = { name: 'new.txt' };
+  elements['lxc-push-files'].files = [oldFile]; await elements['lxc-push-files'].fire('change');
+  elements['lxc-push-files'].files = [newFile]; await elements['lxc-push-files'].fire('change');
+  await elements.lxcPushModal.fire('show.bs.modal');
+  elements['lxc-push-history'].value = '1'; await elements['lxc-push-history'].fire('change');
+  assert.equal(elements['lxc-push-files'].files[0], oldFile);
+  assert.match(elements['lxc-push-history-help'].textContent, /selection is ready/);
+});
+
+test('recall clears a different current folder when the saved folder is unavailable', async () => {
   const settings = { destination: '/data', selectionType: 'folder', sourceNames: ['right/a.txt'] };
   const elements = browser(async () => json([entry(settings)]));
   elements['lxc-push-folder'].files = [{ name: 'a.txt', webkitRelativePath: 'wrong/a.txt' }];
   await elements.lxcPushModal.fire('show.bs.modal');
   elements['lxc-push-history'].value = '1'; await elements['lxc-push-history'].fire('change');
-  assert.equal(elements['lxc-push-folder'].files[0].webkitRelativePath, 'wrong/a.txt');
-  assert.match(elements['lxc-push-history-help'].textContent, /selection is ready/);
+  assert.equal(elements['lxc-push-folder'].files.length, 0);
+  assert.match(elements['lxc-push-history-help'].textContent, /Choose the original files/);
 });
 
 test('the last ten selections remain available and a new page cannot recall old File objects', async () => {

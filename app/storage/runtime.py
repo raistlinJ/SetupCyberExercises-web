@@ -1,8 +1,14 @@
+from contextlib import closing
 import json
 import os
+import sqlite3
 import tempfile
 import threading
+import time
 from typing import Any, Dict, Optional
+
+
+PROXY_RUN_HISTORY_LIMIT = 10
 
 
 class RuntimeStore:
@@ -18,6 +24,54 @@ class RuntimeStore:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
         self.db_path = os.path.join(self.data_dir, "runtime.json")
+
+    def _connect_proxy_history(self):
+        os.makedirs(self.data_dir, exist_ok=True)
+        db = sqlite3.connect(os.path.join(self.data_dir, "proxy_history.sqlite3"), timeout=30)
+        try:
+            db.execute("""CREATE TABLE IF NOT EXISTS proxy_history (
+                project_id TEXT NOT NULL, vm_name TEXT NOT NULL, policy TEXT NOT NULL,
+                PRIMARY KEY (project_id, vm_name)
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS proxy_policy_runs (
+                project_id TEXT NOT NULL, vm_name TEXT NOT NULL, runs TEXT NOT NULL,
+                PRIMARY KEY (project_id, vm_name)
+            )""")
+        except Exception:
+            db.close()
+            raise
+        return db
+
+    @staticmethod
+    def _read_proxy_run_history(db, project_id: str) -> dict:
+        rows = db.execute("SELECT vm_name, runs FROM proxy_policy_runs WHERE project_id = ?", (project_id,))
+        history = {name: json.loads(runs) for name, runs in rows}
+        # Older versions kept just one policy without a timestamp.
+        rows = db.execute("SELECT vm_name, policy FROM proxy_history WHERE project_id = ?", (project_id,))
+        for name, policy in rows:
+            if name not in history:
+                history[name] = [{"policy": json.loads(policy), "appliedAt": None}]
+        return history
+
+    def get_proxy_run_history(self, project_id: str) -> dict:
+        with closing(self._connect_proxy_history()) as db:
+            return self._read_proxy_run_history(db, project_id)
+
+    def save_applied_proxy_policies(self, project_id: str, policies: dict) -> None:
+        def comparable(policy):
+            return {key: sorted(set(value)) if isinstance(value, list) else value for key, value in policy.items()}
+
+        with closing(self._connect_proxy_history()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            history = self._read_proxy_run_history(db, project_id)
+            applied_at = int(time.time() * 1000)
+            for name, policy in policies.items():
+                signature = comparable(policy)
+                previous = [run for run in history.get(name, []) if comparable(run["policy"]) != signature]
+                runs = [{"policy": policy, "appliedAt": applied_at}, *previous][:PROXY_RUN_HISTORY_LIMIT]
+                db.execute("""INSERT INTO proxy_policy_runs (project_id, vm_name, runs) VALUES (?, ?, ?)
+                    ON CONFLICT (project_id, vm_name) DO UPDATE SET runs = excluded.runs""",
+                    (project_id, name, json.dumps(runs)))
 
     def _read_all(self) -> Dict[str, Any]:
         try:

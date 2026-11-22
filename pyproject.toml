@@ -60,7 +60,7 @@ Issues = "https://github.com/raistlinJ/SetupCyberExercises/issues"
 packages = ["app", "app.routes", "app.connectors", "app.storage", "app.static"]
 
 [tool.setuptools.package-data]
-app = ["static/**/*"]
+app = ["static/**/*", "guest_scripts/*.sh"]
 
 [tool.black]
 line-length = 120

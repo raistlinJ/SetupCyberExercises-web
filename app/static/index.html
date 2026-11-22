@@ -34,6 +34,12 @@
       margin-bottom: .25rem;
     }
 
+    .proxy-endpoints::placeholder {
+      color: var(--bs-secondary-color);
+      font-style: italic;
+      opacity: .85;
+    }
+
     .material-input-hidden {
       position: absolute;
       width: 1px;
@@ -1055,7 +1061,7 @@
   <script src="/static/js/queue_persistence.js?v=20260829a"></script>
   <script src="/static/js/checkout_state.js?v=20261107-neutral-wording"></script>
   <script src="/static/js/config_integrations.js?v=20261106-direct-local-types"></script>
-  <script src="/static/js/app.js?v=20261111-project-chooser"></script>
+  <script src="/static/js/app.js?v=20261121-fixed-proxy-ports"></script>
   <script src="/static/js/vm_materials.js?v=20261104-material-categories"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
@@ -1400,6 +1406,33 @@
                       <div class="wiz-vm-summary-label">Adapters</div>
                       <div id="wiz-vm-set-nets" class="wiz-vm-summary-value wiz-vm-summary-value--muted">–</div>
                     </div>
+                  </div>
+                  <div id="wiz-proxy-settings" class="d-none mt-3 border-top pt-2">
+                    <div class="fw-semibold small mb-2">CORE gateway policy</div>
+                    <label class="form-label small mb-1" for="wiz-proxy-router">CORE router node name or ID</label>
+                    <input id="wiz-proxy-router" class="form-control form-control-sm mb-2" data-proxy-field="router_node" placeholder="e.g. n3">
+                    <label class="form-label small mb-1" for="wiz-proxy-sources">Internal source IPs or CIDRs</label>
+                    <textarea id="wiz-proxy-sources" class="form-control form-control-sm mb-2" data-proxy-field="internal_sources" rows="2">13.0.0.101/32</textarea>
+                    <label class="form-label small mb-1" for="wiz-proxy-mode">Internet access</label>
+                    <select id="wiz-proxy-mode" class="form-select form-select-sm mb-2" data-proxy-field="mode">
+                      <option value="restricted">Selected addresses</option>
+                      <option value="full">Full outbound IPv4 access</option>
+                    </select>
+                    <label class="form-label small mb-1" id="wiz-proxy-addresses-label" for="wiz-proxy-addresses">Allowed destinations, one per line</label>
+                    <textarea id="wiz-proxy-addresses" class="form-control form-control-sm mb-2 proxy-endpoints" data-proxy-field="external_addresses" rows="2" placeholder="e.g. 192.0.2.24:443"></textarea>
+                    <div class="text-muted small mb-2" id="wiz-proxy-addresses-help">Enter allowed destinations here, or add a translated endpoint below.</div>
+                    <label class="form-label small mb-1" id="wiz-proxy-translations-label" for="wiz-proxy-translations">Translated endpoints, one per line</label>
+                    <textarea id="wiz-proxy-translations" class="form-control form-control-sm mb-2 proxy-endpoints" data-proxy-field="translations" rows="3" placeholder="e.g. 198.51.100.12:8080:203.0.113.25:8001"></textarea>
+                    <div class="text-muted small mb-2" id="wiz-proxy-translations-help">Use one client port and one backend port per mapping.</div>
+                    <details class="small"><summary>CORE file and uplink settings</summary>
+                      <label class="form-label small mb-1 mt-2" for="wiz-proxy-xml">Scenario XML path</label>
+                      <input id="wiz-proxy-xml" class="form-control form-control-sm mb-2" data-proxy-field="scenario_xml" value="/root/myscenario.xml">
+                      <label class="form-label small mb-1" for="wiz-proxy-interface">CORE external interface</label>
+                      <input id="wiz-proxy-interface" class="form-control form-control-sm mb-2" data-proxy-field="external_interface" value="eth1">
+                      <label class="form-label small mb-1" for="wiz-proxy-gateway">Uplink gateway IP</label>
+                      <input id="wiz-proxy-gateway" class="form-control form-control-sm mb-2" data-proxy-field="uplink_gateway" value="11.0.0.254">
+                      <div class="text-muted">Proxmox uplink: <strong id="wiz-proxy-bridge">vmbr0</strong> on net1 (fixed)</div>
+                    </details>
                   </div>
                 </div>
               </div>

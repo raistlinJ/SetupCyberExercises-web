@@ -16,9 +16,11 @@ let FILTER_IS_REGEX = false;
 let SELECTED_ROWS = new Set();
 let VM_ROW_TAGS = null;
 function vmRowTags() { return VM_ROW_TAGS ||= window.RowTags.create('vm'); }
-function vmRenderTaggedView() {
+function vmRenderCurrentTable() {
+  const focusSort = document.activeElement?.id === 'vm-sign-in-sort';
   if (vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []);
   else renderVmTable(PROJ);
+  if (focusSort) document.getElementById('vm-sign-in-sort')?.focus({preventScroll: true});
 }
 function vmInitRowTags() {
   vmRowTags().mount({
@@ -27,7 +29,7 @@ function vmInitRowTags() {
     notice: document.getElementById('vm-tag-notice'),
     getProjectIds: getActivePids,
     getSelectedKeys: () => [...SELECTED_ROWS].filter(key => getActivePids().includes(key.split('|')[0])),
-    onChange: vmRenderTaggedView,
+    onChange: vmRenderCurrentTable,
   });
 }
 let SORT_STATE = { key: 'index', dir: 'asc' };
@@ -316,8 +318,8 @@ function writeVmCols(pid, obj) { try { sessionStorage.setItem(vmColsKey(pid), JS
 // Lightweight HTTP helper (fallback if global http() not provided on this page)
 var http = (typeof window !== 'undefined' && typeof window.http === 'function')
   ? window.http
-  : (window.http = async function http(method, url, body) {
-    const opts = { method, headers: {}, credentials: 'same-origin' };
+  : (window.http = async function http(method, url, body, { headers = {} } = {}) {
+    const opts = { method, headers: { ...headers }, credentials: 'same-origin' };
     if (body instanceof FormData) {
       opts.body = body;
     } else if (body !== undefined) {
@@ -1017,7 +1019,7 @@ function vmApplyCheckoutSnapshot(pid, checkout) {
   const sources = new Set([PROJ, ...(ALL_PROJECTS || []), window.PROJ_CACHE?.[pid]]);
   for (const project of sources) if (project && canonicalPid(project.id) === canonicalPid(pid)) project.checkout = checkout;
   if (getActivePids().map(canonicalPid).includes(canonicalPid(pid))) {
-    vmRenderTaggedView();
+    vmRenderCurrentTable();
   }
 }
 
@@ -1577,7 +1579,7 @@ async function refreshVmView(opts) {
           const d2 = detailMap.get(vmName) || null;
           const rowStatus = hasAnyStatus ? (d2 ? 'created' : 'missing') : 'n/a';
           const user_access = (d2 && d2.user_access !== undefined && d2.user_access !== null) ? _coerceEnabled(d2.user_access, false) : null;
-          projectRows.push({ pid, project: project.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
+          projectRows.push({ pid, project: project.name, index: i, vmName, baseName, isProxy: vmIsProxyGateway(v), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access, uname, pword, status: rowStatus, detail: d2, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
         }
       }
       reportProjectProgress(pid, 100, 'Done', resultDetail);
@@ -1626,7 +1628,7 @@ async function refreshVmView(opts) {
       const inst = Number(p.instances || 0); const tag = String(p.tag || '').trim(); const vms = p.vms || []; const creds = p.credentials || [];
       for (let i = 1; i <= inst; i++) {
         const suffix = `${tag}${i}`; const cred = creds[i - 1] || {}; const uname = (cred.username ?? '').trim(); const pword = cred.password ?? '';
-        for (const v of vms) { const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; rows.push({ pid, project: p.name, index: i, vmName, baseName, viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: null, uname, pword, status: 'n/a', detail: null, instStatus: null }); }
+        for (const v of vms) { const baseName = String((v && v.name) || ''); const vmName = `${baseName}${suffix}`; rows.push({ pid, project: p.name, index: i, vmName, baseName, isProxy: vmIsProxyGateway(v), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: null, uname, pword, status: 'n/a', detail: null, instStatus: null }); }
       }
     }
   } catch { }
@@ -1643,6 +1645,7 @@ async function refreshVmView(opts) {
       (window.shell && shell.logDebug) ? shell.logDebug(`VM Manager: rendering ${vmCount} row(s) across ${projCount} project(s).`) : console.debug('VM Manager rows:', vmCount, 'projects:', projCount);
     } catch { }
     renderMergedVmTable(rows);
+    if (forceRefresh) window.LoginTime?.refresh?.();
     if (refreshErrors.length && note) {
       note.innerHTML += `<div class="alert alert-warning py-2 px-3 small" role="alert">Refresh incomplete. Showing the last saved inventory for affected projects; their current state could not be verified.<ul class="mb-0">${refreshErrors.map(error => `<li>${escHtml(error)}</li>`).join('')}</ul></div>`;
     }
@@ -1683,11 +1686,51 @@ function vmAgentStatusControl(pid, index, name, icon) {
   return `<span data-agent-indicator data-project-id="${escHtml(String(pid || ''))}" data-instance-index="${Number(index)}" data-guest-name="${escHtml(String(name || ''))}">${icon}</span>`;
 }
 
-function vmLastLoginCell(row) {
+function vmSignInData(row) {
   const username = String(row.uname || '').trim();
-  const userid = username.includes('@') ? username : `${username}@pve`;
+  const account = username && (username.includes('@') ? username : `${username}@pve`);
   const status = row.instStatus || {};
-  return LoginTime.cell(status.proxmox_login_user === userid ? status.proxmox_last_login : null);
+  const matches = status.accessforge_login_user === account;
+  return {
+    account,
+    saved: matches ? status.accessforge_last_login : null,
+    end: matches ? status.accessforge_last_login_end : null,
+  };
+}
+
+function vmCompareSignIns(a, b, projectId) {
+  const sortValue = row => {
+    const {account, saved, end} = vmSignInData(row);
+    return LoginTime.sessionSortValue(projectId ?? row.pid, account, saved, end);
+  };
+  const first = sortValue(a);
+  const second = sortValue(b);
+  if (first === second) return 0;
+  if (first === Infinity || second === 0) return -1;
+  if (second === Infinity || first === 0) return 1;
+  return SORT_STATE.dir === 'desc' ? second - first : first - second;
+}
+
+function vmSignInHeader() {
+  return `<th scope="col" aria-sort="${ariaSort('last_login')}"><button id="vm-sign-in-sort" type="button"
+    class="border-0 p-0 bg-transparent text-reset fw-bold" onclick="vmSortBy('last_login')"
+    title="Sort by AccessForge session end time">Signed-in${sortIcon('last_login')}</button></th>`;
+}
+
+function vmLastLoginCell(row, projectId = row.pid) {
+  const {account, saved, end} = vmSignInData(row);
+  const content = LoginTime.cell(saved, end?.timestamp, end?.estimated);
+  if (!account || !projectId) return content;
+  return `<span data-accessforge-project="${escHtml(projectId)}" data-accessforge-account="${escHtml(account)}" data-accessforge-saved="${LoginTime.isoTime(saved)}" data-accessforge-saved-end="${LoginTime.isoTime(end?.timestamp)}" data-accessforge-saved-estimate="${end?.estimated === true}">${content}</span>`;
+}
+
+function vmIsProxyGateway(vm) {
+  const policy = vm?.proxy_config;
+  return vm?.vm_type !== 'lxc' && !!policy && typeof policy === 'object' && Object.keys(policy).length > 0;
+}
+
+function vmProxyBadge(row) {
+  return row.isProxy ? '<span class="badge bg-info text-dark ms-1" title="Configured CORE gateway">Proxy</span>' : '';
 }
 
 function renderMergedVmTable(rows) {
@@ -1741,6 +1784,7 @@ function renderMergedVmTable(rows) {
     }
     const aTop = (groups.get(ka) || [])[0];
     const bTop = (groups.get(kb) || [])[0];
+    if (SORT_STATE.key === 'last_login') return vmCompareSignIns(aTop, bTop) || ia - ib;
     if (aTop && bTop) return compare(aTop, bTop);
     if (aTop) return -1;
     if (bTop) return 1;
@@ -1766,7 +1810,7 @@ function renderMergedVmTable(rows) {
     (VM_COLS.node ? '<th role="button" aria-sort="' + ariaSort('node') + '" onclick="vmSortBy(\'node\')">Node Name' + sortIcon('node') + '</th>' : '') +
     (VM_COLS.template ? '<th role="button" aria-sort="' + ariaSort('template') + '" onclick="vmSortBy(\'template\')">TemplateName/ID' + sortIcon('template') + '</th>' : '') +
     (VM_COLS.clipboard ? '<th>Clipboard</th>' : '') +
-    (VM_COLS.last_login ? '<th title="Latest successful Proxmox authentication in the retained cluster log; includes ticket and console verification, not guest OS logins">Last login</th>' : '') +
+    (VM_COLS.last_login ? vmSignInHeader() : '') +
     (VM_COLS.screenshot ? '<th>Screenshot</th>' : '') +
     (VM_COLS.nets ? '<th>Adaptors</th>' : '') +
     '</tr></thead><tbody>';
@@ -1893,10 +1937,11 @@ function renderMergedVmTable(rows) {
         const titleText = `User: ${r.vm_user || '(Not set)'}, Pass: ${r.vm_pass || '(Not set)'}${statusTag}`;
         credApplyIcon = ` <i class="bi bi-person-badge ${iconColor}" title="${escHtml(titleText)}"></i>`;
       }
+      const proxyBadge = vmProxyBadge(r);
       html += `<tr>` +
-        `<td><input type=\"checkbox\" class=\"row-chk\" data-key=\"${escHtml(key)}\" ${checked} />${!VM_COLS.name && !VM_COLS.cred ? vmCheckoutIcon(r.pid, r.uname) : ''}${VM_COLS.name ? '' : `<span class="row-tag-badges">${vmRowTags().badges(key)}</span>`}</td>` +
+        `<td><input type=\"checkbox\" class=\"row-chk\" data-key=\"${escHtml(key)}\" ${checked} />${!VM_COLS.name && !VM_COLS.cred ? vmCheckoutIcon(r.pid, r.uname) : ''}${VM_COLS.name ? '' : `${proxyBadge}<span class="row-tag-badges">${vmRowTags().badges(key)}</span>`}</td>` +
         (VM_COLS.project ? `<td><span class=\"badge bg-light text-dark\">${escHtml(r.project)}</span></td>` : '') +
-        (VM_COLS.name ? `<td>${vmGuestNameLink(r, (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(r.pid)) || (canonicalPid(PROJ?.id) === canonicalPid(r.pid) ? PROJ : null))}${credApplyIcon}${VM_COLS.cred ? '' : vmCheckoutIcon(r.pid, r.uname)}<span class="row-tag-badges">${vmRowTags().badges(key)}</span></td>` : '') +
+        (VM_COLS.name ? `<td>${vmGuestNameLink(r, (ALL_PROJECTS || []).find(p => canonicalPid(p.id) === canonicalPid(r.pid)) || (canonicalPid(PROJ?.id) === canonicalPid(r.pid) ? PROJ : null))}${proxyBadge}${credApplyIcon}${VM_COLS.cred ? '' : vmCheckoutIcon(r.pid, r.uname)}<span class="row-tag-badges">${vmRowTags().badges(key)}</span></td>` : '') +
         (VM_COLS.cred ? (first ? `<td class="font-monospace" rowspan="${rowspan}">` +
           `<div class="d-flex align-items-center">` +
           `<div class="flex-grow-1">${vmCheckoutIcon(r.pid, r.uname)}${credText}</div>` +
@@ -2205,6 +2250,7 @@ async function vmRefresh(opts) {
         } catch { }
         try { shell.step('Statuses stored & logged'); } catch { }
         renderVmTable(PROJ);
+        if (forceRefresh) window.LoginTime?.refresh?.();
       } else {
         try { (window.shell && shell.logInfo) ? shell.logInfo('VM Refresh: saved inventory for the original project') : console.log('VM Refresh: original project inventory updated'); } catch { }
       }
@@ -2520,7 +2566,7 @@ function renderVmTable(proj) {
       const key = `${projectKey}|${i}|${vmName}`;
       // Before first refresh, default to N/A; afterwards, show created/missing
       const rowStatus = hasAnyStatus ? (d ? 'created' : 'missing') : 'n/a';
-      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: (d && d.user_access !== undefined && d.user_access !== null) ? _coerceEnabled(d.user_access, false) : null, uname, pword, status: rowStatus, detail: d, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
+      rows.push({ key, index: i, vmName, baseName: String((v && v.name) || ''), isProxy: vmIsProxyGateway(v), viewable_to_user: _coerceEnabled(v && v.viewable_to_user, true), user_access: (d && d.user_access !== undefined && d.user_access !== null) ? _coerceEnabled(d.user_access, false) : null, uname, pword, status: rowStatus, detail: d, instStatus: st, vm_user: v.vm_user, vm_pass: v.vm_pass });
     }
   }
   // Apply filter
@@ -2611,6 +2657,7 @@ function renderVmTable(proj) {
     const bArr = groups.get(ib) || [];
     const aTop = aArr[0];
     const bTop = bArr[0];
+    if (SORT_STATE.key === 'last_login') return vmCompareSignIns(aTop, bTop, proj.id) || ia - ib;
     if (aTop && bTop) return compareRows(aTop, bTop);
     if (aTop) return -1;
     if (bTop) return 1;
@@ -2636,7 +2683,7 @@ function renderVmTable(proj) {
   if (VM_COLS.node) html += '<th role="button" aria-sort="' + ariaSort('node') + '" onclick="vmSortBy(\'node\')">Node Name' + sortIcon('node') + '</th>';
   if (VM_COLS.template) html += '<th role="button" aria-sort="' + ariaSort('template') + '" onclick="vmSortBy(\'template\')">TemplateName/ID' + sortIcon('template') + '</th>';
   if (VM_COLS.clipboard) html += '<th>Clipboard</th>';
-  if (VM_COLS.last_login) html += '<th title="Latest successful Proxmox authentication in the retained cluster log; includes ticket and console verification, not guest OS logins">Last login</th>';
+  if (VM_COLS.last_login) html += vmSignInHeader();
   if (VM_COLS.screenshot) html += '<th>Screenshot</th>';
   if (VM_COLS.nets) html += '<th>Adaptors</th>';
   html += '</tr></thead><tbody>';
@@ -2772,9 +2819,10 @@ function renderVmTable(proj) {
         const titleText = `User: ${r.vm_user || '(Not set)'}, Pass: ${r.vm_pass || '(Not set)'}${statusTag}`;
         credApplyIcon = ` <i class="bi bi-person-badge ${iconColor}" title="${escHtml(titleText)}"></i>`;
       }
+      const proxyBadge = vmProxyBadge(r);
       html += `<tr>` +
-        `<td><input type="checkbox" class="row-chk" data-key="${escHtml(r.key)}" ${checked} />${!VM_COLS.name && !VM_COLS.cred ? vmCheckoutIcon(PROJ?.id, r.uname, PROJ) : ''}${VM_COLS.name ? '' : `<span class="row-tag-badges">${vmRowTags().badges(r.key)}</span>`}</td>` +
-        (VM_COLS.name ? `<td>${vmGuestNameLink(r, PROJ)}${credApplyIcon}${VM_COLS.cred ? '' : vmCheckoutIcon(PROJ?.id, r.uname, PROJ)}<span class="row-tag-badges">${vmRowTags().badges(r.key)}</span></td>` : '') +
+        `<td><input type="checkbox" class="row-chk" data-key="${escHtml(r.key)}" ${checked} />${!VM_COLS.name && !VM_COLS.cred ? vmCheckoutIcon(PROJ?.id, r.uname, PROJ) : ''}${VM_COLS.name ? '' : `${proxyBadge}<span class="row-tag-badges">${vmRowTags().badges(r.key)}</span>`}</td>` +
+        (VM_COLS.name ? `<td>${vmGuestNameLink(r, PROJ)}${proxyBadge}${credApplyIcon}${VM_COLS.cred ? '' : vmCheckoutIcon(PROJ?.id, r.uname, PROJ)}<span class="row-tag-badges">${vmRowTags().badges(r.key)}</span></td>` : '') +
         (VM_COLS.cred ? (first ? `<td class=\"font-monospace\" rowspan=\"${rowspan}\">` +
           `<div class=\"d-flex align-items-center\">` +
           `<div class=\"flex-grow-1\">${vmCheckoutIcon(PROJ?.id, r.uname, PROJ)}${credText}</div>` +
@@ -2787,7 +2835,7 @@ function renderVmTable(proj) {
         (VM_COLS.node ? `<td>${nodeHtml}</td>` : '') +
         (VM_COLS.template ? `<td>${templateHtml}</td>` : '') +
         (VM_COLS.clipboard ? `<td>${vmClipboardCell(r, typeof PROJ === 'object' ? PROJ : null)}</td>` : '') +
-        (VM_COLS.last_login ? `<td>${vmLastLoginCell(r)}</td>` : '') +
+        (VM_COLS.last_login ? `<td>${vmLastLoginCell(r, proj.id)}</td>` : '') +
         (VM_COLS.screenshot ? `<td>${vmScreenshotCell(d)}</td>` : '') +
         (VM_COLS.nets ? `<td>${adaptorsCell}</td>` : '') +
         `</tr>`;
@@ -2827,10 +2875,14 @@ function vmSortBy(key) {
     SORT_STATE.dir = SORT_STATE.dir === 'asc' ? 'desc' : 'asc';
   } else {
     SORT_STATE.key = key;
-    SORT_STATE.dir = 'asc';
+    SORT_STATE.dir = key === 'last_login' ? 'desc' : 'asc';
   }
-  try { if (vmIsMulti && vmIsMulti()) renderMergedVmTable(window.__MERGED_ROWS__ || []); else renderVmTable(PROJ); } catch { renderVmTable(PROJ); }
+  try { vmRenderCurrentTable(); } catch { renderVmTable(PROJ); }
 }
+
+document.addEventListener('vm-sign-in-sort-changed', () => {
+  if (VM_COLS.last_login && SORT_STATE.key === 'last_login') vmRenderCurrentTable();
+});
 
 function badgeForStatus(name, value) {
   const label = { vm: 'VM' }[name] || name;
@@ -3685,13 +3737,22 @@ function updateRefreshState() {
   } catch { }
   // Enable/disable Actions toolbar groups depending on selection and login state
   try {
-    const scopedSelections = multiMode ? listSelectedEntries() : (PROJ ? listSelectedEntriesForPid(PROJ.id) : []);
+    const scopedSelections = getActionableSelections();
     const anySelected = scopedSelections.length > 0;
     const disable = !(loggedIn && anySelected);
     ['act-power', 'act-lifecycle', 'act-state-net', 'act-control', 'act-clipboard'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = disable;
     });
+    const proxyBtn = document.getElementById('act-proxy-restart');
+    if (proxyBtn) {
+      const proxyOnly = anySelected && scopedSelections.every(entry =>
+        findSelectedProxyVm(guestTransferProject(entry.pid), entry));
+      proxyBtn.disabled = disable || !proxyOnly;
+      proxyBtn.title = proxyOnly
+        ? 'Apply the saved CORE gateway policy and restart its matching CORE scenario'
+        : 'Select only proxy VMs to use this action';
+    }
     const usersBtn = document.getElementById('act-users');
     if (usersBtn) usersBtn.disabled = disable;
     const guestEntries = getSelectedGuestEntries();
@@ -6685,11 +6746,241 @@ function makeVmActionQueuePersist(action, options, projectId) {
   };
 }
 
-function vmSetActionStatus(message, kind = 'info') {
+function vmSetActionStatus(message, kind = 'info', viewResults) {
   const host = document.getElementById('vm-action-status');
   if (!host) return;
   host.textContent = message;
   host.className = `alert alert-${kind} py-2 px-3 small mb-2`;
+  if (viewResults) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm btn-outline-secondary ms-2';
+    button.textContent = 'View results';
+    button.onclick = viewResults;
+    host.appendChild(button);
+  }
+}
+
+function findSelectedProxyVm(project, entry) {
+  const baseName = deriveBaseVmName(project, entry.name, entry.index);
+  const vm = findVmConfigByBaseName(project, baseName) || findVmConfigByBaseName(project, entry.name);
+  return vmIsProxyGateway(vm) ? vm : null;
+}
+
+async function loadProxyRestartSettings(pid, targets) {
+  const response = await ServerQueue.nativeFetch(`/api/projects/${encodeURIComponent(pid)}/proxy-restart/preview`, {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targets }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !Array.isArray(data?.targets) || data.targets.length !== targets.length) {
+    throw new Error(data?.error || `Could not load proxy settings (HTTP ${response.status}).`);
+  }
+  return data.targets;
+}
+
+function proxyRunLabel(run, index) {
+  const when = run.appliedAt ? new Date(run.appliedAt).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit',
+  }) : 'Earlier saved run';
+  const { mode, translations, external_addresses } = run.policy;
+  const entries = translations.length ? translations : external_addresses;
+  let endpoint = entries[0] || '';
+  if (translations.length) {
+    const [client, port, backend, backendPort] = endpoint.split(':');
+    endpoint = `${client}:${port} → ${backend}:${backendPort}`;
+  }
+  if (entries.length > 1) endpoint += ` +${entries.length - 1}`;
+  const access = mode === 'full' ? 'Full IPv4' : 'Selected addresses';
+  return `${index + 1}. ${when} · ${access}${endpoint ? ` · ${endpoint}` : ''}`;
+}
+
+function promptProxyRestartSettings(groups) {
+  const modalEl = document.getElementById('proxyRestartModal');
+  const form = document.getElementById('proxy-restart-form');
+  const host = document.getElementById('proxy-restart-targets');
+  const template = document.getElementById('proxy-restart-target-template');
+  const error = document.getElementById('proxy-restart-error');
+  const apply = form.querySelector('button[type="submit"]');
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  const drafts = new Map();
+  host.replaceChildren();
+  error.classList.add('d-none');
+  apply.disabled = false;
+
+  let rowNumber = 0;
+  for (const [pid, { project, settings }] of groups) {
+    const rows = [];
+    for (const target of settings) {
+      const row = template.content.firstElementChild.cloneNode(true);
+      ++rowNumber;
+      row.querySelector('[data-proxy-name]').textContent = groups.size > 1
+        ? `${project.name || pid} / ${target.name}` : target.name;
+      row.querySelector('[data-proxy-uplink]').textContent = target.uplink;
+      const source = row.querySelector('[data-proxy-source]');
+      const issue = row.querySelector('[data-proxy-default-issue]');
+      const history = row.querySelector('[data-proxy-history]');
+      const runs = target.history || [];
+      runs.forEach((run, index) => history.add(new Option(proxyRunLabel(run, index), String(index))));
+      history.disabled = !runs.length;
+      if (history.disabled) history.title = 'No previous successful runs';
+      const fields = Object.fromEntries([...row.querySelectorAll('[name]')].map(field => [field.name, field]));
+      for (const [key, field] of Object.entries(fields)) {
+        field.id = `proxy-restart-${rowNumber}-${key}`;
+        row.querySelector(`[data-proxy-label="${key}"]`).htmlFor = field.id;
+      }
+      const syncMode = () => { fields.external_addresses.disabled = fields.mode.value === 'full'; };
+      const fill = (policy, sourceLabel, warning = '') => {
+        for (const [key, field] of Object.entries(fields)) {
+          field.value = Array.isArray(policy[key]) ? policy[key].join('\n') : policy[key];
+        }
+        syncMode();
+        source.textContent = sourceLabel;
+        issue.textContent = warning;
+        issue.classList.toggle('d-none', !issue.textContent);
+      };
+      const useDefaults = () => {
+        history.value = '';
+        fill(target.defaults, 'Configuration defaults', target.default_issue);
+      };
+      if (target.has_previous) fill(target.policy, 'Last successfully applied');
+      else useDefaults();
+      row.querySelector('[data-proxy-defaults]').onclick = useDefaults;
+      history.onchange = () => {
+        if (!history.value) return;
+        const index = Number(history.value);
+        fill(runs[index].policy, index === 0 ? 'Last successfully applied' : 'Previous successful run');
+      };
+      row.oninput = event => {
+        if (event.target === history) return;
+        history.value = '';
+        syncMode();
+        source.textContent = 'Edited for this VM';
+        issue.classList.add('d-none');
+      };
+      rows.push({ target, fields });
+      host.appendChild(row);
+    }
+    drafts.set(pid, rows);
+  }
+
+  return new Promise(resolve => {
+    let confirmed = null;
+    let closing = false;
+    const lines = field => field.value.split('\n').map(value => value.trim()).filter(Boolean);
+    // Require deliberate submission from the Apply button. Other VM Manager
+    // dialogs can use the page-wide Enter shortcut for their default action.
+    const stopEnterShortcut = event => {
+      if (event.key === 'Enter') event.stopPropagation();
+    };
+    modalEl.addEventListener('keydown', stopEnterShortcut);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      if (apply.disabled || event.submitter !== apply) return;
+      apply.disabled = true;
+      error.classList.add('d-none');
+      const changes = [...drafts].map(([pid, rows]) => [pid, rows.map(({ target, fields }) => ({
+        index: target.index, name: target.name,
+        policy: {
+          mode: fields.mode.value,
+          internal_sources: lines(fields.internal_sources),
+          external_addresses: fields.external_addresses.disabled ? [] : lines(fields.external_addresses),
+          translations: lines(fields.translations),
+        },
+      }))]);
+      try {
+        const validated = await Promise.all(changes.map(async ([pid, targets]) => {
+          const settings = await loadProxyRestartSettings(pid, targets);
+          return [pid, settings.map(({ index, name, policy }) => ({ index, name, policy }))];
+        }));
+        if (closing) return;
+        confirmed = new Map(validated);
+        modal.hide();
+      } catch (failure) {
+        if (closing) return;
+        error.textContent = failure.message;
+        error.classList.remove('d-none');
+        apply.disabled = false;
+      }
+    };
+    modalEl.addEventListener('hide.bs.modal', () => { closing = true; }, { once: true });
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      form.onsubmit = null;
+      modalEl.removeEventListener('keydown', stopEnterShortcut);
+      host.replaceChildren();
+      resolve(confirmed);
+    }, { once: true });
+    modal.show();
+  });
+}
+
+let proxyRestartSettingsOpen = false;
+
+async function configureAndRestartProxy() {
+  if (proxyRestartSettingsOpen) return;
+  const selected = getActionableSelections();
+  if (!selected.length) { alert('Select at least one CORE gateway VM.'); return; }
+  const groups = new Map();
+  for (const entry of selected) {
+    const project = guestTransferProject(entry.pid);
+    if (!findSelectedProxyVm(project, entry)) {
+      alert(`Selection includes a VM that is not a configured CORE gateway: ${entry.name}.`);
+      return;
+    }
+    const pid = canonicalPid(project.id);
+    if (!groups.has(pid)) groups.set(pid, { project, targets: [] });
+    groups.get(pid).targets.push({ index: entry.index, name: entry.name });
+  }
+  const label = 'Configure and Restart Proxy';
+  let confirmed;
+  proxyRestartSettingsOpen = true;
+  try {
+    await Promise.all([...groups].map(async ([pid, group]) => {
+      group.settings = await loadProxyRestartSettings(pid, group.targets);
+    }));
+    confirmed = await promptProxyRestartSettings(groups);
+  } catch (error) {
+    vmSetActionStatus(`Could not open proxy settings: ${error.message}`, 'danger');
+    return;
+  } finally {
+    proxyRestartSettingsOpen = false;
+  }
+  if (!confirmed) return;
+  const summary = { ran: [], skipped: [], errors: [], outputs_zips: [] };
+  vmSetActionStatus(`Preparing ${label}…`);
+  for (const [pid, targets] of confirmed) {
+    const { project } = groups.get(pid);
+    try {
+      const auth = await guestTransferAuthPayload(pid, targets);
+      const job = await ServerQueue.submit(label, [{
+        method: 'POST',
+        url: `/api/projects/${encodeURIComponent(pid)}/instances/actions/configure_restart_proxy`,
+        body: { ...auth, targets },
+      }], { projectId: pid });
+      vmSetActionStatus(`${label} submitted (job #${job.id}). Follow its progress in the Queue.`);
+      const state = await ServerQueue.wait(job);
+      const response = await ServerQueue.nativeFetch(`/api/queue/${job.id}/result`, { credentials: 'same-origin' });
+      const result = await response.json();
+      for (const key of ['ran', 'skipped', 'errors']) {
+        summary[key].push(...(Array.isArray(result[key]) ? result[key] : []));
+      }
+      if (result.outputs_zip) summary.outputs_zips.push(result.outputs_zip);
+      if (state.status === 'cancelled') {
+        summary.skipped.push({ name: project.name || pid, reason: 'Action cancelled' });
+        break;
+      }
+      if (!response.ok || (state.status === 'error' && !result.errors?.length)) {
+        throw new Error(result.error || state.errorMessage || `HTTP ${response.status}`);
+      }
+    } catch (error) {
+      summary.errors.push({ name: project.name || pid, reason: error.message });
+    }
+  }
+  emitActionLogs(label, summary);
+  const restarted = summary.ran.filter(vm => vm.cmds?.some(command => command.exitcode === 0)).length;
+  const complete = restarted === selected.length && !summary.errors.length && !summary.skipped.length;
+  vmSetActionStatus(`Proxy restart: ${restarted}/${selected.length} restarted.`, complete ? 'success' : 'warning',
+    () => showActionSummary('Proxy Restart', summary));
 }
 
 // Dispatch VM actions (queued wrapper)

@@ -1,0 +1,1 @@
+../app/guest_scripts/setup_llm_proxy-v2.sh

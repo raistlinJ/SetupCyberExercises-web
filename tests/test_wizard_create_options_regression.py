@@ -601,6 +601,120 @@ class WizardCreateOptionsRegressionTests(unittest.TestCase):
 
         self._run_node_regression(harness)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend wizard regression checks')
+    def test_core_gateway_reserves_net1_and_requires_internal_connection(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => { if (!condition) throw new Error(message); };
+              const groups = [];
+              document.createElementNS = (ns, tagName) => {
+                const el = {
+                  tagName, attributes: {}, children: [], listeners: {}, style: {}, textContent: '', innerHTML: '',
+                  setAttribute(name, value) { this.attributes[name] = String(value); },
+                  getAttribute(name) { return this.attributes[name] || ''; },
+                  appendChild(child) { this.children.push(child); return child; },
+                  addEventListener(type, handler) { this.listeners[type] = handler; },
+                };
+                if (tagName === 'g') groups.push(el);
+                return el;
+              };
+              const install = el => {
+                el.children = []; el.listeners = {};
+                el.appendChild = function(child) { this.children.push(child); return child; };
+                el.addEventListener = function(type, handler) { this.listeners[type] = handler; };
+                el.setAttribute = function(name, value) { this[name] = String(value); };
+                el.getAttribute = function(name) { return this[name] || ''; };
+              };
+              const svg = document.getElementById('wiz-net-canvas');
+              const links = document.getElementById('wiz-net-links');
+              const nodes = document.getElementById('wiz-net-nodes');
+              const drag = document.getElementById('wiz-drag-line');
+              const legend = document.getElementById('wiz-net-legend');
+              [svg, links, nodes, drag, legend].forEach(install);
+              svg.clientWidth = 720; svg.clientHeight = 560;
+              svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 720, height: 560 });
+              drag.style = {};
+              showToast = () => {};
+              const proxyPanel = document.getElementById('wiz-proxy-settings');
+              const mode = document.getElementById('wiz-proxy-mode');
+              const addresses = document.getElementById('wiz-proxy-addresses');
+              const translations = document.getElementById('wiz-proxy-translations');
+              mode.dataset.proxyField = 'mode';
+              addresses.dataset.proxyField = 'external_addresses';
+              translations.dataset.proxyField = 'translations';
+              proxyPanel.querySelectorAll = () => [mode, addresses, translations];
+              wizSelectedTemplates = [
+                { _wizId: 'proxy', vmid: 900, name: 'proxy', finalName: 'proxy',
+                  user_accessible: false, nets: [], internet_connected_adaptors: [],
+                  proxy_config: { ...defaultCoreProxyConfig(), router_node: 'n3',
+                    external_addresses: ['129.108.4.46:443'],
+                    translations: ['100.100.100.100:8080:129.108.156.63:11434-11436'] } },
+                { _wizId: 'client', vmid: 901, name: 'client', finalName: 'client',
+                  user_accessible: true, nets: [], internet_connected_adaptors: [], proxy_config: null },
+              ];
+              window.wizNetGraph.init(wizSelectedTemplates);
+              assert(groups.length >= 3, 'Proxy, client, and Internet nodes should render');
+              mode.value = 'full'; mode.onchange();
+              assert(addresses.disabled && addresses.value === '', 'Full mode must disable and clear the destination allowlist');
+              assert(document.getElementById('wiz-proxy-addresses-label').textContent.includes('none needed'),
+                'Wizard label should say that full access needs no allowed destinations');
+              assert(document.getElementById('wiz-proxy-translations-label').textContent.includes('optional'),
+                'Wizard label should say translations are optional');
+              assert(!translations.disabled && translations.value.includes('100.100.100.100'),
+                'Full mode must keep translations available');
+              assert(window.wizNetGraph.validateProxyTopology() === false, 'Proxy needs an internal NIC');
+              const proxy = groups[0], client = groups[1], internet = groups[2];
+              const coords = group => group.getAttribute('transform').match(/translate\\(([-0-9.]+),([-0-9.]+)\\)/);
+              const proxyCoords = coords(proxy), internetCoords = coords(internet);
+              client.listeners.mousedown({ preventDefault() {}, button: 0 });
+              svg.listeners.mouseup({ clientX: Number(proxyCoords[1]), clientY: Number(proxyCoords[2]) });
+              assert(window.wizNetGraph.validateProxyTopology() === true, 'Internal net0 plus uplink net1 is valid');
+              window.wizNetGraph.saveState();
+              assert(JSON.stringify(wizSelectedTemplates[0].nets) === JSON.stringify(['netA', 'vmbr0']),
+                'CORE gateway must keep internal net0 and fixed vmbr0 net1');
+              assert(JSON.stringify(wizSelectedTemplates[0].internet_connected_adaptors) === JSON.stringify(['vmbr0']),
+                'Only net1 should be Internet-connected');
+              client.listeners.mousedown({ preventDefault() {}, button: 0 });
+              svg.listeners.mouseup({ clientX: Number(internetCoords[1]), clientY: Number(internetCoords[2]) });
+              window.wizNetGraph.saveState();
+              assert(wizSelectedTemplates[1].internet_connected_adaptors.length === 0,
+                'Client linked to gateway must not gain a direct Internet NIC');
+            })();
+            """
+        )
+        self._run_node_regression(harness)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
+    def test_core_gateway_full_mode_disables_only_allowlist(self):
+        harness = textwrap.dedent(
+            """
+            (() => {
+              const assert = (condition, message) => { if (!condition) throw new Error(message); };
+              const prefix = 'vm-proj-0-proxy';
+              document.getElementById(prefix + '-enabled').checked = true;
+              document.getElementById(prefix + '-mode').value = 'full';
+              const addresses = document.getElementById(prefix + '-addresses');
+              const translations = document.getElementById(prefix + '-translations');
+              addresses.value = '129.108.4.46:443';
+              translations.value = '100.100.100.100:8080:129.108.156.63:11434-11436';
+              saveVmImmediately = () => {};
+              onVmProxyModeChange('proj', 0);
+              assert(addresses.disabled && addresses.value === '', 'Full mode clears and disables allowed destinations');
+              assert(document.getElementById(prefix + '-addresses-label').textContent.includes('none needed'),
+                'Configuration label should say that no allowed destination is required');
+              assert(document.getElementById(prefix + '-translations-label').textContent.includes('optional'),
+                'Configuration label should mark translations optional');
+              assert(!translations.disabled && translations.value.includes('100.100.100.100'),
+                'Full mode keeps translations editable');
+              const config = collectVmProxyConfig('proj', 0);
+              assert(config.external_addresses.length === 0 && config.translations.length === 1,
+                'Saved full policy should retain translations without a destination allowlist');
+            })();
+            """
+        )
+        self._run_node_regression(harness)
+
     @unittest.skipUnless(shutil.which('node'), 'Node.js is required for frontend config regression checks')
     def test_add_interface_internet_toggle_waits_for_input(self):
         harness = textwrap.dedent(

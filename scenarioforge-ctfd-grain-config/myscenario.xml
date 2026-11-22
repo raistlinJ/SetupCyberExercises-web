@@ -1,0 +1,278 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<scenario>
+  <networks>
+    <network id="1" name="ens18" icon="" canvas="1" type="RJ45">
+      <position x="117.0" y="231.0" lat="47.577070473719694" lon="-122.13074004603182" alt="2.0"/>
+    </network>
+    <network id="2" name="ens19" icon="" canvas="1" type="RJ45">
+      <position x="527.0" y="250.0" lat="47.57689776298782" lon="-122.12521540703449" alt="2.0"/>
+    </network>
+  </networks>
+  <devices>
+    <device id="4" name="n4" icon="" canvas="1" type="router" class="" image="" compose="" compose_name="">
+      <position x="322.0" y="55.0" lat="47.57867029341932" lon="-122.12797772653316" alt="2.0"/>
+      <services>
+        <service name="zebra"/>
+        <service name="OSPFv3"/>
+        <service name="OSPFv2"/>
+        <service name="IPForward"/>
+      </services>
+    </device>
+    <device id="5" name="n5" icon="" canvas="1" type="PC" class="" image="" compose="" compose_name="">
+      <position x="627.0" y="104.0" lat="47.5782248939813" lon="-122.1238679341083" alt="2.0"/>
+      <services>
+        <service name="DefaultRoute"/>
+      </services>
+    </device>
+    <device id="3" name="n3" icon="" canvas="1" type="router" class="" image="" compose="" compose_name="">
+      <position x="331.0" y="253.0" lat="47.576870492820184" lon="-122.12785645396981" alt="2.0"/>
+      <services>
+        <service name="zebra"/>
+        <service name="OSPFv3"/>
+        <service name="OSPFv2"/>
+        <service name="IPForward"/>
+      </services>
+    </device>
+  </devices>
+  <links>
+    <link node1="4" node2="5">
+      <iface1 id="1" name="eth1" mac="00:00:00:aa:00:04" ip4="10.0.1.1" ip4_mask="24" ip6="2001:0:0:1::1" ip6_mask="64"/>
+      <iface2 id="0" name="eth0" mac="00:00:00:aa:00:05" ip4="10.0.1.20" ip4_mask="24" ip6="2001:0:0:1::14" ip6_mask="64"/>
+      <options delay="0" bandwidth="0" loss="0.0" dup="0" jitter="0" unidirectional="0" buffer="0"/>
+    </link>
+    <link node1="1" node2="3">
+      <iface1 id="0" name="ens18"/>
+      <iface2 id="0" name="eth0" mac="00:00:00:aa:00:00" ip4="13.0.0.1" ip4_mask="24"/>
+      <options unidirectional="1"/>
+    </link>
+    <link node1="3" node2="1">
+      <iface1 id="0" name="eth0" mac="00:00:00:aa:00:00" ip4="13.0.0.1" ip4_mask="24"/>
+      <iface2 id="0" name="ens18"/>
+      <options delay="0" bandwidth="0" loss="0.0" dup="0" jitter="0" unidirectional="1" buffer="0"/>
+    </link>
+    <link node1="3" node2="2">
+      <iface1 id="1" name="eth1" mac="00:00:00:aa:00:44" ip4="11.0.0.1" ip4_mask="24"/>
+      <iface2 id="0" name="ens19"/>
+      <options delay="0" bandwidth="0" loss="0.0" dup="0" jitter="0" unidirectional="0" buffer="0"/>
+    </link>
+    <link node1="3" node2="4">
+      <iface1 id="2" name="eth2" mac="00:00:00:aa:00:01" ip4="10.0.3.1" ip4_mask="24" ip6="2001:0:0:3::1" ip6_mask="64"/>
+      <iface2 id="0" name="eth0" mac="00:00:00:aa:00:02" ip4="10.0.3.2" ip4_mask="24" ip6="2001:0:0:3::2" ip6_mask="64"/>
+      <options delay="0" bandwidth="0" loss="0.0" dup="0" jitter="0" unidirectional="0" buffer="0"/>
+    </link>
+  </links>
+  <service_configurations>
+    <service name="zebra" node="4">
+      <startup>
+        <command>bash quaggaboot.sh zebra</command>
+      </startup>
+      <shutdown>
+        <command>pkill -f zebra</command>
+      </shutdown>
+      <validate>
+        <command>pidof zebra</command>
+      </validate>
+      <directories>
+        <directory>/usr/local/etc/quagga</directory>
+        <directory>/var/run/quagga</directory>
+      </directories>
+      <files>
+        <file>/usr/local/etc/quagga/Quagga.conf</file>
+        <file>quaggaboot.sh</file>
+        <file>/usr/local/etc/quagga/vtysh.conf</file>
+      </files>
+      <executables>
+        <executable>zebra</executable>
+      </executables>
+    </service>
+    <service name="OSPFv3" node="4">
+      <shutdown>
+        <command>pkill -f ospf6d</command>
+      </shutdown>
+      <validate>
+        <command>pidof ospf6d</command>
+      </validate>
+      <dependencies>
+        <dependency>zebra</dependency>
+      </dependencies>
+    </service>
+    <service name="OSPFv2" node="4">
+      <shutdown>
+        <command>pkill -f ospfd</command>
+      </shutdown>
+      <validate>
+        <command>pidof ospfd</command>
+      </validate>
+      <dependencies>
+        <dependency>zebra</dependency>
+      </dependencies>
+    </service>
+    <service name="IPForward" node="4">
+      <startup>
+        <command>bash ipforward.sh</command>
+      </startup>
+      <files>
+        <file>ipforward.sh</file>
+      </files>
+      <executables>
+        <executable>sysctl</executable>
+      </executables>
+    </service>
+    <service name="DefaultRoute" node="5">
+      <startup>
+        <command>bash defaultroute.sh</command>
+      </startup>
+      <files>
+        <file>defaultroute.sh</file>
+      </files>
+      <executables>
+        <executable>ip</executable>
+      </executables>
+    </service>
+    <service name="zebra" node="3">
+      <startup>
+        <command>bash quaggaboot.sh zebra</command>
+      </startup>
+      <shutdown>
+        <command>pkill -f zebra</command>
+      </shutdown>
+      <validate>
+        <command>pidof zebra</command>
+      </validate>
+      <directories>
+        <directory>/usr/local/etc/quagga</directory>
+        <directory>/var/run/quagga</directory>
+      </directories>
+      <files>
+        <file>/usr/local/etc/quagga/Quagga.conf</file>
+        <file>quaggaboot.sh</file>
+        <file>/usr/local/etc/quagga/vtysh.conf</file>
+      </files>
+      <executables>
+        <executable>zebra</executable>
+      </executables>
+    </service>
+    <service name="OSPFv3" node="3">
+      <shutdown>
+        <command>pkill -f ospf6d</command>
+      </shutdown>
+      <validate>
+        <command>pidof ospf6d</command>
+      </validate>
+      <dependencies>
+        <dependency>zebra</dependency>
+      </dependencies>
+    </service>
+    <service name="OSPFv2" node="3">
+      <shutdown>
+        <command>pkill -f ospfd</command>
+      </shutdown>
+      <validate>
+        <command>pidof ospfd</command>
+      </validate>
+      <dependencies>
+        <dependency>zebra</dependency>
+      </dependencies>
+    </service>
+    <service name="IPForward" node="3">
+      <templates>
+        <template name="ipforward.sh"><![CDATA[#!/bin/sh
+<%text>
+sysctl -w net.ipv4.conf.all.forwarding=1
+sysctl -w net.ipv4.conf.default.forwarding=1
+sysctl -w net.ipv6.conf.all.forwarding=1
+sysctl -w net.ipv6.conf.default.forwarding=1
+for dir in /proc/sys/net/ipv4/conf/*; do
+    echo 1 > "$dir/forwarding"
+    echo 0 > "$dir/send_redirects"
+    echo 0 > "$dir/rp_filter"
+done
+for dir in /proc/sys/net/ipv6/conf/*; do
+    echo 1 > "$dir/forwarding"
+done
+</%text>
+# BEGIN SCE UPLINK ALLOWLIST
+<%text>
+set -eu
+command -v iptables >/dev/null
+command -v ip6tables >/dev/null
+ip link show dev eth1 >/dev/null
+iptables -w -N SCE_UPLINK_OUT 2>/dev/null || iptables -w -S SCE_UPLINK_OUT >/dev/null
+iptables -w -N SCE_UPLINK_IN 2>/dev/null || iptables -w -S SCE_UPLINK_IN >/dev/null
+iptables -w -t nat -N SCE_UPLINK_NAT 2>/dev/null || iptables -w -t nat -S SCE_UPLINK_NAT >/dev/null
+iptables -w -t nat -N SCE_UPLINK_DNAT 2>/dev/null || iptables -w -t nat -S SCE_UPLINK_DNAT >/dev/null
+iptables -w -I FORWARD 1 -i eth1 -m comment --comment sce-uplink-update -j DROP
+iptables -w -I FORWARD 1 -o eth1 -m comment --comment sce-uplink-update -j DROP
+ip6tables -w -I FORWARD 1 -i eth1 -j DROP
+ip6tables -w -I FORWARD 1 -o eth1 -j DROP
+iptables -w -F SCE_UPLINK_OUT
+iptables -w -F SCE_UPLINK_IN
+iptables -w -t nat -F SCE_UPLINK_NAT
+iptables -w -t nat -F SCE_UPLINK_DNAT
+iptables -w -A SCE_UPLINK_OUT -i eth1 -j DROP
+ip route replace 129.108.4.46/32 via 11.0.0.254 dev eth1
+ip route replace 129.108.156.63/32 via 11.0.0.254 dev eth1
+iptables -w -t nat -A SCE_UPLINK_DNAT ! -i eth1 -s 13.0.0.101/32 -d 100.100.100.100/32 -p tcp --dport 8080 -j DNAT --to-destination 129.108.156.63:11435
+iptables -w -A SCE_UPLINK_OUT -s 13.0.0.101/32 -d 129.108.156.63/32 -p tcp --dport 11435 -m conntrack --ctstate NEW,ESTABLISHED --ctdir ORIGINAL --ctorigsrc 13.0.0.101 --ctorigdst 100.100.100.100 --ctorigdstport 8080 -j ACCEPT
+iptables -w -A SCE_UPLINK_IN -s 129.108.156.63/32 -d 13.0.0.101/32 -p tcp --sport 11435 -m conntrack --ctstate ESTABLISHED --ctdir REPLY --ctorigsrc 13.0.0.101 --ctorigdst 100.100.100.100 --ctorigdstport 8080 -j ACCEPT
+iptables -w -t nat -A SCE_UPLINK_NAT -s 13.0.0.101/32 -d 129.108.156.63/32 -p tcp --dport 11435 -m conntrack --ctdir ORIGINAL --ctorigsrc 13.0.0.101 --ctorigdst 100.100.100.100 --ctorigdstport 8080 -j SNAT --to-source 11.0.0.68
+iptables -w -t nat -A SCE_UPLINK_DNAT ! -i eth1 -s 13.0.0.101/32 -d 100.100.100.101/32 -p tcp --dport 443 -j DNAT --to-destination 129.108.4.46:443
+iptables -w -A SCE_UPLINK_OUT -s 13.0.0.101/32 -d 129.108.4.46/32 -p tcp --dport 443 -m conntrack --ctstate NEW,ESTABLISHED --ctdir ORIGINAL --ctorigsrc 13.0.0.101 --ctorigdst 100.100.100.101 --ctorigdstport 443 -j ACCEPT
+iptables -w -A SCE_UPLINK_IN -s 129.108.4.46/32 -d 13.0.0.101/32 -p tcp --sport 443 -m conntrack --ctstate ESTABLISHED --ctdir REPLY --ctorigsrc 13.0.0.101 --ctorigdst 100.100.100.101 --ctorigdstport 443 -j ACCEPT
+iptables -w -t nat -A SCE_UPLINK_NAT -s 13.0.0.101/32 -d 129.108.4.46/32 -p tcp --dport 443 -m conntrack --ctdir ORIGINAL --ctorigsrc 13.0.0.101 --ctorigdst 100.100.100.101 --ctorigdstport 443 -j SNAT --to-source 11.0.0.68
+iptables -w -A SCE_UPLINK_OUT -j DROP
+iptables -w -A SCE_UPLINK_IN -j DROP
+while iptables -w -C FORWARD -o eth1 -j SCE_UPLINK_OUT 2>/dev/null; do iptables -w -D FORWARD -o eth1 -j SCE_UPLINK_OUT; done
+while iptables -w -C FORWARD -i eth1 -j SCE_UPLINK_IN 2>/dev/null; do iptables -w -D FORWARD -i eth1 -j SCE_UPLINK_IN; done
+iptables -w -I FORWARD 1 -o eth1 -j SCE_UPLINK_OUT
+iptables -w -I FORWARD 1 -i eth1 -j SCE_UPLINK_IN
+while iptables -w -t nat -C POSTROUTING -o eth1 -j SCE_UPLINK_NAT 2>/dev/null; do iptables -w -t nat -D POSTROUTING -o eth1 -j SCE_UPLINK_NAT; done
+iptables -w -t nat -I POSTROUTING 1 -o eth1 -j SCE_UPLINK_NAT
+while iptables -w -t nat -C PREROUTING -j SCE_UPLINK_DNAT 2>/dev/null; do iptables -w -t nat -D PREROUTING -j SCE_UPLINK_DNAT; done
+iptables -w -t nat -I PREROUTING 1 -j SCE_UPLINK_DNAT
+while iptables -w -C FORWARD -o eth1 -m comment --comment sce-uplink-update -j DROP 2>/dev/null; do iptables -w -D FORWARD -o eth1 -m comment --comment sce-uplink-update -j DROP; done
+while iptables -w -C FORWARD -i eth1 -m comment --comment sce-uplink-update -j DROP 2>/dev/null; do iptables -w -D FORWARD -i eth1 -m comment --comment sce-uplink-update -j DROP; done
+</%text>
+# END SCE UPLINK ALLOWLIST
+]]></template>
+      </templates>
+      <startup>
+        <command>bash ipforward.sh</command>
+      </startup>
+      <files>
+        <file>ipforward.sh</file>
+      </files>
+      <executables>
+        <executable>sysctl</executable>
+      </executables>
+    </service>
+  </service_configurations>
+  <session_origin lat="47.57917022705078" lon="-122.13231658935547" alt="2.0" scale="150.0"/>
+  <session_options>
+    <configuration name="controlnet" value=""/>
+    <configuration name="controlnet0" value=""/>
+    <configuration name="controlnet1" value=""/>
+    <configuration name="controlnet2" value=""/>
+    <configuration name="controlnet3" value=""/>
+    <configuration name="controlnet_updown_script" value=""/>
+    <configuration name="enablerj45" value="1"/>
+    <configuration name="preservedir" value="0"/>
+    <configuration name="enablesdt" value="0"/>
+    <configuration name="sdturl" value="tcp://127.0.0.1:50000/"/>
+    <configuration name="ovs" value="0"/>
+    <configuration name="platform_id_start" value="1"/>
+    <configuration name="nem_id_start" value="1"/>
+    <configuration name="link_enabled" value="1"/>
+    <configuration name="loss_threshold" value="30"/>
+    <configuration name="link_interval" value="1"/>
+    <configuration name="link_timeout" value="4"/>
+    <configuration name="mtu" value="0"/>
+    <configuration name="checksums" value="0"/>
+  </session_options>
+  <session_metadata>
+    <configuration name="shapes" value="[]"/>
+    <configuration name="edges" value="[]"/>
+    <configuration name="hidden" value="[]"/>
+    <configuration name="canvas" value="{&quot;gridlines&quot;: true, &quot;canvases&quot;: [{&quot;id&quot;: 1, &quot;wallpaper&quot;: null, &quot;wallpaper_style&quot;: 1, &quot;fit_image&quot;: false, &quot;dimensions&quot;: [1000, 750]}]}"/>
+  </session_metadata>
+</scenario>

@@ -111,6 +111,7 @@ test('failed saves retain the confirmed assignments and can be retried', async (
 for (const multi of [false, true]) {
   test(`VM ${multi ? 'merged' : 'single'} renderer filters tagged rows without changing selection`, async () => {
     const {run, elements} = harness();
+    run(read('vm_clipboard'));
     run(read('vm_manager'));
     await run(`(async () => {
       PROJ = {id:'one', name:'First', instances:2, tag:'-', vms:[{name:'web'}], credentials:[]};
@@ -257,7 +258,7 @@ for (const multi of [false,true]) {
   test(`VM ${multi?'merged':'single'} checkout icons sync without changing selection or VM inventory`,async()=>{
     const {context,run,elements}=harness();
     context.document.documentElement={dataset:{accessforgePlugin:'on'}};
-    run(read('checkout_state'));run(read('vm_manager'));
+    run(read('checkout_state'));run(read('vm_clipboard'));run(read('vm_manager'));
     run(`PROJ={id:'one',name:'First',instances:2,tag:'-',vms:[{name:'web'}],credentials:[{username:'alice'},{username:'bob'}],checkout:{accounts:{alice:{eligible:true},bob:{eligible:false}}}};
       ALL_PROJECTS=[PROJ];SELECTED_PIDS=${multi?"['one','two']":"['one']"};
       SELECTED_ROWS=new Set(['one|1|web-1']);
@@ -270,7 +271,7 @@ for (const multi of [false,true]) {
     html=elements.get('vm-table').innerHTML;
     assert.doesNotMatch(html,/credential-checkout-state/);
     assert.equal(run('SELECTED_ROWS.size'),1);assert.match(html,/web-1/);assert.match(html,/web-2/);
-    run("vmApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:true,login_disabled:true}}});VM_COLS.cred=false;VM_COLS.name=false;vmRenderTaggedView()");
+    run("vmApplyCheckoutSnapshot('one',{accounts:{alice:{eligible:true,login_disabled:true}}});VM_COLS.cred=false;VM_COLS.name=false;vmRenderCurrentTable()");
     assert.match(elements.get('vm-table').innerHTML,/Marked for checkout · AccessForge login disabled/);
   });
 }

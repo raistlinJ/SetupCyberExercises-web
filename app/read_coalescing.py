@@ -66,6 +66,7 @@ def coalesce_read(view):
         body = request.get_json(silent=True)
         identity = [request.method, request.full_path, dict(session),
                     request.headers.get('Authorization'), request.headers.get('X-API-Key'),
+                    request.headers.get('X-AccessForge-Connection'),
                     body if body is not None else request.get_data().hex()]
         key = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).digest()
 

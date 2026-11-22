@@ -28,6 +28,16 @@ function vmClipboardCell(row, project) {
   }).join('');
 }
 
+async function vmAccessForgeConnectionHeaders(pid) {
+  try {
+    const me = await AUTH.me(), owner = me?.user?.username || '__anonymous__';
+    const key = `toolhub.accessforge.session.${encodeURIComponent(owner)}.${encodeURIComponent(canonicalPid(pid))}`;
+    const temporary = JSON.parse(sessionStorage.getItem(key) || 'null');
+    if (temporary) return { 'X-AccessForge-Connection': encodeURIComponent(JSON.stringify(temporary)) };
+  } catch { }
+  return {};
+}
+
 async function vmLoadClipboardUsage(project, statuses) {
   const vmids = [...new Set((statuses || []).flatMap(status => status.vm_details || [])
     .filter(detail => detail.type !== 'lxc').map(detail => Number(detail.vmid)).filter(id => Number.isInteger(id) && id > 0))];
@@ -36,12 +46,7 @@ async function vmLoadClipboardUsage(project, statuses) {
   const revision = (VM_CLIPBOARD_REQUESTS.get(pid) || 0) + 1;
   VM_CLIPBOARD_REQUESTS.set(pid, revision);
   try {
-    const headers = {'Content-Type': 'application/json'};
-    try {
-      const me = await AUTH.me(), owner = me?.user?.username || '__anonymous__';
-      const temporary = JSON.parse(sessionStorage.getItem(`toolhub.accessforge.session.${encodeURIComponent(owner)}.${encodeURIComponent(pid)}`) || 'null');
-      if (temporary) headers['X-AccessForge-Connection'] = encodeURIComponent(JSON.stringify(temporary));
-    } catch { }
+    const headers = {'Content-Type': 'application/json', ...await vmAccessForgeConnectionHeaders(pid)};
     const transport = window.ServerQueue?.nativeFetch || fetch;
     const usage = {};
     for (let offset = 0; offset < vmids.length; offset += 500) {

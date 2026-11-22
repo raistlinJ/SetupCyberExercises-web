@@ -52,15 +52,78 @@ DeployForge is a Dockerized web UI for configuring CTF/scenario “Projects” a
 - Run Proxmox actions (create/refresh/restore, VM manager UI)
 - Manage CTFd settings and challenge visibility (with token-first auth)
 
+Startup, stored, validation, and custom guest commands support [per-instance template variables](docs/command-variables.md), with an optional rendering switch, a command preview, and variable help.
+
+QEMU guest commands use Windows PowerShell on Windows VMs and `/bin/sh -lc` on
+Linux VMs. Command execution reads the OS reported by the guest agent, falling
+back to the VM's **OS Type** in Proxmox when that lookup is unavailable. Keep
+that setting correct for older or restricted agents. Windows commands accept PowerShell syntax,
+such as `Get-Service` or `Get-Content 'C:\Lab\status.txt'`. For Command Prompt
+syntax, use `cmd.exe /c 'echo %COMPUTERNAME%'`. Linux commands such as `systemctl`
+need Windows equivalents in Windows templates. The readiness check uses the
+guest agent's own ping and does not require a guest shell or network utility.
+Windows execution tries PowerShell's full path under `C:\Windows\System32`
+and searches the agent's PATH if that executable is missing. Launch errors name
+the executable that failed. After updating the source in a Docker deployment,
+rebuild the running app with `docker compose up --build -d app`.
+
 Queued actions run on the server in submission order. Once an upload or action
 has been accepted, switching pages, refreshing, closing the tab, or signing out
 does not stop it. The Queue dock reconnects to your running, waiting, and recent
 completed actions on every manager page. Complete VM, guest-transfer, wizard,
 and CTFd bulk plans are submitted together, including their follow-up steps.
+The dock keeps waiting/running items in submission order and completed history
+newest first. Queued/start timestamps stay attached to their job; individual
+polls do not move rows. Persisted revisions reject stale responses, and cached
+responses are disabled. Unchanged polls do not redraw the dock; progress updates
+preserve its scroll position and expanded results. Refreshing the page only
+reconnects to existing work and does not resubmit it.
+
+Export and import progress shows the current step, overall and step percentages,
+file counts, and bytes processed in the progress dialog and Queue. Uploads and
+VM backup transfers report measured bytes; ZIP creation and extraction count
+uncompressed data as it is processed. Configuration-only exports and imports
+use the same background progress flow as jobs that include VM backups.
+
+Validation waits for all selected guest checks, including slower checks and
+timeouts. When the run finishes, its returned results update the VM table and
+the active filter together, before the completion summary appears. The separate
+inventory refresh can finish later; older refreshes and delayed validation
+responses cannot replace results from a newer completed run.
+
+Navigation and background inventory, CTFd, and CTF-RPG reads run outside the
+action queue, so they can finish while a submitted action is running. Identical
+overlapping reads share work within a browser page and within each server
+process, scoped to the same session, credentials, and request. Results are not
+cached after a read finishes, and mutations separate reads so subsequent
+refreshes get fresh state. Leaving a page aborts its background reads without
+cancelling accepted actions. Hidden tabs pause queue snapshot polling.
+Queue polls load lightweight job state and reuse summaries by persisted revision;
+retained archives are loaded for a new completed revision or an explicit result
+request. Mutating actions continue to run in submission order across users.
+
+Push, Pull, and Custom Command dialogs each have a **History — last 10 runs**
+selector. History is saved on the server for the signed-in user when a run starts,
+including failed attempts; cancelled waiting jobs are excluded. Repeating the same
+settings moves that entry to the top. Custom history restores the complete command
+and timeout, pull history restores the paths, and push history restores the
+destination, file/folder mode, owner, and permissions. Push recall restores a
+matching file or folder selection from the same open page, replacing an unrelated
+selection. After a page reload, or if that selection is unavailable, choose the
+local files again. A small **(!)** marks files changed since the
+recalled run or no longer readable; hover for details. Files reported missing by
+the browser are removed from the selection.
+Recall never submits an action or changes the currently selected guests.
+Connection credentials, target lists, and uploaded file contents are not stored
+in recall history. Existing completed jobs are not backfilled, and clearing the
+Queue's completed list leaves recall history available.
 
 The queue stores job metadata in `DATA_DIR/action_queue.sqlite3` and streams
 queued uploads to `DATA_DIR/queue_uploads` without loading whole files into RAM.
-Keep the upload directory alongside the database on persistent storage, with
+Queued pulls retain ZIPs in `DATA_DIR/queue_outputs` and return download links,
+keeping archive bytes out of SQLite and JSON results. Downloads remain available
+under **Queue → View results**, including when navigating away from VM Manager.
+Keep both directories alongside the database on persistent storage, with
 enough free space for queued files and transfer archives. The push dialog shows
 upload progress and stays open until the server accepts the job. No separate
 worker service is required. WSGI workers share the scheduler through SQLite. Cancellation removes
@@ -77,12 +140,61 @@ host and reuses it for that host's selected LXC containers and Linux QEMU VMs.
 Guest copies run in parallel, including guests on the same host, up to the
 project's Max Jobs setting. The host upload completes once before copying starts. The Queue shows the current upload/download byte percentage and
 transferred size, separately from the batch count. Archive preparation and
-extraction show indeterminate progress. LXC downloads temporarily stage an
+extraction show indeterminate progress. Pull batches use at most four workers
+and at most two simultaneous QEMU pulls per node, also respecting Max Jobs.
+QEMU downloads start with 1 MiB reads and retry transient proxy/connection failures
+at the same offset up to four attempts, reducing requests to 256 KiB as needed.
+Retry backoff remains cancellable. LXC downloads temporarily stage an
 archive in the guest so the download size is known, then remove it. Staged archives are removed when the batch finishes. QEMU host-side
 copies require `python3`, `qm`, a working guest agent, and root/sudo access on
-the Proxmox host. Without an SSH password, QEMU retains the separate per-guest
-API transfer. The host-side QEMU copy uses bounded stdin chunks below the
-[Proxmox CLI's 1 MiB limit](https://lists.proxmox.com/pipermail/pve-devel/2020-February/041977.html).
+the Proxmox host. The app stages a private temporary Python helper and launches
+it with a short SSH command, then removes the helper. It avoids passing the full
+program inline through SSH and sudo. With host SSH access, a QEMU copy holds one guest-agent socket
+connection and one guest file handle open for the whole archive. Bounded file-write
+frames carry the bytes without starting a guest shell or polling a command for each
+chunk. This works without guest networking, guest SSH, or additional guest packages.
+The socket is released before `qm` extracts the archive. Uploads to the same VM are
+serialized on the host; copies to different guests still obey Max Jobs. The temporary
+guest archive is cleaned up on success, with cleanup attempted on cancellation or failure. If the guest-agent
+file commands are unavailable during preflight, the Queue shows compatible mode
+and uses the former bounded-stdin transport. Failed or partial streaming writes are
+reported as errors, not retried through another transport. Without a Proxmox SSH
+password, QEMU retains the separate per-guest API transfer.
+Disconnected SSH clients are discarded from the batch pool so one lost connection
+does not immediately fail later guests. A missing SSH exit status leaves the
+affected transfer's completion unknown; it is not automatically replayed.
+
+In **Push to Guests**, enable **Map files to VMIDs using CSV** to copy files
+already on the DeployForge server or each selected guest's Proxmox host. CSV columns are
+`vmid,source-path-on-host,destination-path-in-guest,username`; the fourth column
+(username) and header are optional. Columns after the fourth are ignored. For example:
+
+```csv
+vmid,source,destination,username,notes
+101,/srv/configs/first.json,/etc/scenario/config.json,alice,ignored
+102,/srv/configs/second.json,/opt/scenario/settings.json,bob,ignored
+```
+
+Both paths must be absolute. A destination ending in `/` is a directory: the
+source filename is appended, and the preview shows the resulting full path.
+Otherwise the destination specifies the full filename, allowing files to be renamed.
+**Read source files from** defaults to **DeployForge server (this host)**. Choose
+**Proxmox host running each guest** when sources are on the Proxmox nodes.
+No local file selection or browser upload is needed. VMIDs must match selected
+guests. Guests absent from the CSV receive no files. Existing guest files are
+overwritten and missing destination directories are created. The Advanced owner
+and file permissions apply to all rows. This mode requires Proxmox SSH credentials
+for both source locations. Reading sources on Proxmox also requires `python3`
+there; QEMU requires a working guest agent.
+Choosing a CSV automatically previews every row alongside the VM's assigned
+username (the VM table's Credentials column), guest name, project, and Proxmox
+node. The optional CSV username appears separately for comparison; differences
+are highlighted and do not affect the transfer. Row errors and duplicate entries
+are shown before pushing. The preview refreshes when reopening the modal, and
+**Refresh preview** updates it against the current selection. This checks the
+mapping; host source files are read when the queued push runs.
+CSV mappings persist with queued actions across page reloads. History recalls
+regular upload settings; select the CSV again to repeat its mapping.
 
 ## Quick start (Docker)
 
@@ -103,6 +215,8 @@ Notes:
 - TLS certs are generated by the `certs` service (set `CERT_DNS` if needed).
 - When this stack runs on the same Proxmox host it manages, Proxmox API URLs that use `localhost` or `127.0.0.1` are rewritten inside the container to `host.docker.internal`, and Compose injects the required `host-gateway` mapping.
 - The Docker deployment uses a 180-second upstream timeout so large VM inventories have more time to refresh before the reverse proxy gives up.
+- VM refresh checks live VM state in parallel, including guests on the same node. Reads reuse one connection per worker and respect the project's maximum concurrent jobs setting, capped at eight workers per refresh stage. Selected-only refresh checks live state and config only for the selected guests.
+- Refresh progress shows node scans, live VM state checks, guest configurations, pools and access controls, instance summaries, optional screenshots, and saving. Each batch reports completed/total counts and the latest guest or node; unavailable reads are counted. Details appear below the progress bar, with elapsed time during live polling. Multi-project refresh includes the project name and combines progress across projects.
 
 ## Quick start (local dev)
 
@@ -181,7 +295,7 @@ Security Notes:
 ## Using the CTFd Manager & Challenges popup
 
 1) Open the app and select a project, then click the "CTFd" tab.
-2) Click "Authenticate to CTFd" and paste an Admin/Teacher API token; Save and let it validate.
+2) Click "Authenticate to CTFd" and enter an Admin/Teacher username and password; save and let it validate.
 3) From the CTFd dropdown, choose "Challenges" to open the popup.
 4) In the popup:
 - Use the text filter to search across name/category, solves, points, visibility, team/user names, and counts.
@@ -193,7 +307,18 @@ Security Notes:
 
 Notes:
 - Sort, filter text, and the Include Hidden / Regex / Detailed Solves toggles are remembered per project for this browser session.
-- If you lack permissions, the popup will show hints; ensure the token has sufficient role.
+- If you lack permissions, the popup will show hints; use an account with sufficient permissions.
+
+The **Users Can Clear Submissions** switch in CTFd Manager controls the custom
+CTFd fork's `allow_solve_retraction` setting and requires a CTFd admin account.
+After deploying the updated fork, authenticate and refresh to enable the switch.
+The feature defaults to off. When enabled, participants can choose **Retract solve**
+on a solved challenge; in team mode, a teammate can retract the shared solve.
+This removes the correct submission and its points. Failed attempts, hint purchases,
+and awards remain. The Manager leaves the switch disabled if the connected CTFd
+build does not advertise the setting. It applies to the focused project/server.
+
+The manager's **Notifications** tab saves browser audio and speech settings per project. The first successful refresh establishes a silent baseline; later refreshes detect leaderboard changes, the first observed score, and category first solves. Enable auto refresh to monitor these changes continuously. Periodic announcements use their own timer and do not fetch new CTFd data. Notifications play one at a time; use a template's Preview button to check playback in your browser.
 
 ## Screenshots
 
@@ -225,6 +350,11 @@ Tip: Replace the placeholder SVGs with real screenshots (keep filenames). PNGs w
 
 ## Orchestrator access
 
+This feature is disabled by default. Add `ORCHESTRATION_PERMISSIONS_ENABLE=1` to
+the project's `.env`, restart the app, and refresh VM Manager to enable it. When
+the flag is absent or off, both orchestration controls are hidden and the API
+rejects enrollment changes. The same startup flag is passed through Docker Compose.
+
 In VM Manager, select rows and use **Users & Access → Enable orchestration access
 (dangerous)** to enroll their existing PVE users in `caf-orchestration` and `caf-maintainers` (including application update/rollback access). A matching
 **Disable orchestration access** operation removes enrollment. Both require an
@@ -235,6 +365,40 @@ Enrollment is user-level, not restricted to the selected rows. Orchestrator 0.6+
 limits each user to their PVE-visible VMs and private results. SCE does not assign
 ScenarioForge/CoreVM/participant roles or change VM ACLs. See [setup, scope, revocation and tests](docs/orchestration-access.md).
 
+
+## VM/LXC materials links
+
+In **Configuration**, expand a VM or LXC card and click **Manage** under **Materials**, alongside the stored/validation command controls. The modal supports adding, editing and removing title/URL pairs, plus an optional **Material Category** (blank uses **Misc**). Only absolute HTTP/HTTPS links are accepted; links can point to web instructions, PDFs or hosted downloads. File uploads are not part of this editor.
+
+**Save** persists these defaults in the VM/LXC configuration without contacting Proxmox. To apply them to existing instances, select the VMs in **VM Manager** and choose **Users & Access → Set Metadata**. This writes credentials and materials together, including the configured links and material category. New clones also receive these settings.
+
+The resulting Proxmox Notes contain a single `AccessForge` object:
+
+```json
+{
+  "AccessForge": {
+    "file_upload": false,
+    "file_download": false,
+    "Material Category": "Network Fundamentals",
+    "materials": [
+      {"title": "Project instructions", "url": "https://example.com/projects/networking"},
+      {"title": "Reference PDF", "url": "https://example.edu/files/reference.pdf"}
+    ]
+  }
+}
+```
+
+Updating materials preserves existing live transfer flags, human notes, scenario metadata and credentials. Changing transfer flags preserves materials and categories. Removing all links publishes an empty `materials` list; clearing the category publishes `Material Category: Misc`. Materials survive save/reload, VM rename, and project export/import. Existing project-level uploaded files in SCE-web's Materials panel are separate and unchanged.
+
+AccessForge combines links from visible VMs/LXCs in the same Scenario and renders them in a scrollable table to the left of the VM cards, stacking above them on narrow screens. Files in the same category share a vertically centered category cell. Scenario headings stay unchanged. Reload AccessForge after applying metadata. This editor configures links on VM/LXC templates; it does not introduce a separate project-level link store.
+
+## CORE gateway VMs
+
+In the new scenario wizard, select a QEMU template and mark it **CORE Gateway** in the Fetch step. Choose its Proxmox uplink bridge (default `vmbr0`) there. In the connection graph, link the gateway to an internal VM. SCE reserves `net0` for the internal connection and `net1` for the Internet uplink; the uplink connection and bridge cannot be edited while the gateway role is enabled. A client linked to the gateway cannot also be linked directly to the Internet node.
+
+Enter the CORE router node name or numeric ID in the gateway settings (`n3` in the included example). The gateway policy also stores the CORE XML path, external router interface, uplink gateway, internal source IPs/CIDRs, allowed destinations, and translations. **Selected addresses** permits listed destination IPs and ports. **Full IPv4 access** adds a default route and source NAT for only the listed internal sources, allowing their outbound IPv4 traffic to any destination and established replies. Choosing it disables and clears the allowed-destination list. Translated endpoints remain optional in either mode so a stable student-facing address can still reach an instance-specific backend port. See [the CORE proxy guide](scenarioforge-ctfd-grain-config/README.md) for entry formats. IPv6 remains blocked on the uplink. Client VMs still need a route toward the CORE router and usable DNS if they access hostnames.
+
+The same policy is editable in **Configuration** on the gateway VM. **Stage on proxy VMs** runs the generated per-instance command on its existing clones using the uploaded `/home/corevm/setup_llm_proxy-v2.sh`; **Copy command** provides the equivalent rendered Custom Command. Staging updates the XML on each guest and reports errors or skipped VMs. Stop and reload the updated XML in CORE, then start the scenario to activate the new routes, firewall and NAT rules. The gateway role requires a QEMU VM with an internal `net0` and a single fixed Internet-connected `net1`; disable the role before changing its uplink bridge.
 
 ## Per-VM console file transfer
 
@@ -253,7 +417,7 @@ docker compose up --build -d proxclient
 
 In **Configuration**, QEMU VM templates marked **User-Accessible** show **Upload** and **Download** checkboxes. Administrators can save these defaults and synchronize them to all existing instance VMs of that template using the active Proxmox credentials or project API token. Failed synchronization is reported; verify live policy in VM Manager after resolving it. New clones receive explicit defaults, and applying scenario notes reapplies them. Unchecking User-Accessible clears both defaults and revokes transfer policy when access is synchronized.
 
-In **VM Manager**, ↑ and ↓ next to the glasses indicate upload/download policy (green enabled, gray disabled). Before live inventory is refreshed, these reflect template configuration; after refresh they reflect each VM's Notes. The operations dropdown provides separate enable/disable actions for each direction, including multi-project selections. These actions modify only selected VM instances, preserve the other direction and template defaults, and refresh the inventory.
+In **VM Manager**, ↑ and ↓ next to the glasses indicate upload/download policy (green enabled, gray disabled). Before live inventory is refreshed, these reflect template configuration; after refresh they reflect each VM's Notes. Use **Clipboard Access → Configure file transfer** to manage both directions for the selected VMs, including multi-project selections.
 
 Policies are stored as a separate JSON object in Proxmox VM Notes:
 
@@ -264,6 +428,57 @@ Policies are stored as a separate JSON object in Proxmox VM Notes:
 Human notes, scenario metadata and credentials are preserved. Updates use the Proxmox configuration digest when available so concurrent edits are rejected instead of overwritten. Only authorized administrators should edit these policies or have Proxmox VM-note write access.
 
 `cit_vm_accessor` enforces the policy on the server: downloads check it before each chunk; SPICE uploads are inspected by the bridge and checked at transfer start and during transfer. Missing or unreadable policy denies transfers. Existing VMs without policy remain disabled until configured. Reconnect an already-open console after enabling a previously disabled upload policy. SPICE and QEMU guest agents are still required for their respective directions, and download users still need the Proxmox guest-agent file-read privilege. This does not grant new Proxmox privileges or govern clipboard text and external clients.
+
+### Clipboard access and character allowances
+
+In **VM Manager → Clipboard Access → Configure text copy**, manage clipboard
+access and optional character limits for **client → VM** and **VM → client**.
+Each VM and direction has its own allowance, shared across logins and console sessions.
+Changing an allowance or disabling/re-enabling access preserves its usage.
+**Reset clipboard character counts** starts fresh counts in both directions for
+the selected VMs, preserving their access settings and allowances. Multi-project
+selections use the same queued workflow as other VM actions.
+
+The **Clipboard** column shows characters used and the allowance for both directions. Refresh loads usage
+through the project's AccessForge administrator connection; configure this in
+the AccessForge plugin's **Connection** dialog. The connection must point to the
+same Proxmox address as the project. Missing or unavailable usage is shown as
+`n/a`, never as zero. Account checkout itself can remain disabled.
+
+Policies and reset identifiers live in the VM's existing `AccessForge` Notes
+object. AccessForge enforces them in its SPICE bridge and stores counts in
+`clipboard_usage.sqlite3` under its persistent data directory. Keep that directory
+across container restarts and share it between workers serving the same console
+deployment. Clipboard text is not stored in the usage database. Unicode code
+points are counted; an over-limit selection is rejected in full without spending
+characters. A transfer counts when text crosses the VM boundary, not when the
+same received text is copied again within the browser.
+
+AccessForge shows the remaining allowance in its clipboard panel. If either
+direction has a limit, both automatic-sharing switches are turned off and
+disabled. With a VM → client limit, use **Get VM text** before **Copy to clipboard**;
+guest clipboard changes alone do not spend characters. New settings and resets
+are picked up by open consoles. Upgrade both SCE-web and `CIT_vm_accessor` for
+these controls. They govern AccessForge SPICE traffic; direct Proxmox and native
+console connections use their own controls.
+
+## CTF platform plugins
+
+CTFd and CTF-RPG are built-in plugins. Both are enabled by default so existing
+projects continue to work. Copy [`.env.example`](.env.example) to `.env` for all
+available plugin switches, including agent and AccessForge. To disable either integration, put these settings in
+the project-root `.env` and restart DeployForge:
+
+```dotenv
+CTFD_PLUGIN_ENABLE=0
+CTFRPG_PLUGIN_ENABLE=1
+```
+
+Use `1` to enable and `0` to disable either plugin. Explicit environment
+variables override `.env`; Docker Compose passes both settings to the app.
+Disabling a plugin hides its manager, Configuration fields, and wizard controls,
+and its integration routes and manager pages return 404. Stored project settings
+and credentials are retained for re-enabling later.
 
 ## Optional agent plugin
 
@@ -280,15 +495,33 @@ AGENT_PLUGIN_ENABLE=1 docker compose up -d --build app
 ```
 
 Select existing QEMU VMs or LXC containers in VM Manager, then choose
-**Commands → agent**. Configure the HTTP/HTTPS OpenAI-compatible base URL, API key
+**Commands → Plugins → agent** (Plugins is a section in the dropdown). Configure the HTTP/HTTPS OpenAI-compatible base URL, API key
 (if needed), certificate verification, and model; **Fetch** discovers models via
-`/models`, or you can enter a model ID manually. The endpoint must support
-`/chat/completions` function tools. URLs without a path get `/v1`; explicit gateway
+`/models` and shows the returned IDs in an **Available models** selector. You can
+also enter a model ID manually. **Use provider max** uses reported limits, or the
+published OpenAI specifications for GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra, GPT-6
+Sol and GPT-6 Luna. Unknown model limits remain available for manual entry.
+For OpenAI API keys, use
+`https://api.openai.com/v1`; the agent uses `/responses` for tool calling, including
+GPT-6.1 Sol. Other OpenAI-compatible endpoints use `/chat/completions` function
+tools. OpenAI reasoning models use their default temperature. OpenAI errors
+include the provider message and rejected parameter, with the API key redacted.
+URLs without a path get `/v1`; explicit gateway
 paths are preserved. Endpoints are reached from the app server (in Docker, use
 `host.docker.internal` for a service on the host).
 
-The dialog includes context window, turn limit, command timeout, LLM request
-timeout, response token limit, and optional temperature. The endpoint is an
+Choose **Per guest** for a separate conversation and rubric for each selected
+guest, or **Across selected guests** for one conversation spanning the whole
+selection, even across projects. In the shared mode, every command or transfer
+names one selected guest. The agent can compare observations, reuse findings,
+answer informational questions, and perform requested changes. It returns an
+overall answer plus an outcome for each guest. The turn limit applies to the
+whole shared conversation, so larger selections may need more turns and context.
+
+The dialog separates connection and run settings under **Configuration** from
+the prompt, assignment and attachments under **Prompt & assignment**. It includes
+context window, turn limit, command timeout, LLM request timeout, response token
+limit, and optional temperature. The endpoint is an
 HTTP/HTTPS URL, validated for both Fetch and Run. Form settings, prompts and
 assignment Markdown are remembered in the browser when you run or close the
 dialog. The API key is remembered for the browser tab, including page reloads.
@@ -304,36 +537,119 @@ scripts/reference files (25 MiB total, unique filenames) for the agent to push.
 For example:
 
 > Grade the attached assignment. Verify x.py, y.py, and z.md are in
-> /home/student/assignment. Run the required tests. If files are missing, search
-> /home/student and /tmp quickly and report their actual locations. Do not modify
-> student submissions. Return the assignment rubric with scores, evidence, and
+> /home/user/assignment. Run the required tests. If files are missing, search
+> /home/user and /tmp quickly and report their actual locations. Do not modify
+> submitted work. Return the assignment rubric with scores, evidence, and
 > feedback for every criterion.
 
-Each guest gets an independent conversation. Tools run commands in that guest,
-push an attached file or generated text to an absolute path, and pull files or
-folders. QEMU requires a working guest agent; LXC uses the existing Proxmox SSH
-connection and requires its password. Existing guest transfer policies and the
-application's local/remote run-mode restrictions apply. Shell commands execute
-with the existing guest execution privileges. During grading, the agent is
-instructed to inspect and test without repairing submissions unless requested.
+In Per guest mode, each guest gets an independent conversation. Both modes can
+run commands in a selected guest, push an attached file or generated text to an
+absolute path, and pull files or folders from absolute guest paths. Ask for a
+pull in the prompt; no separate agent option is needed. The model receives
+bounded text previews, while complete pulled files are retained in the run's
+downloadable ZIP. QEMU requires a working guest agent; LXC uses the existing
+Proxmox SSH connection and requires its password. Existing guest transfer
+policies and the application's local/remote run-mode restrictions apply. Shell
+commands execute with the existing guest execution privileges. During grading,
+the agent is instructed to inspect and test without repairing submissions unless
+requested.
 
-Rubrics include criterion, pass/fail/unknown status, score, maximum score,
+When the plugin is enabled, Configuration → Advanced includes **Max parallel
+agents** for each project. It defaults to 1 and accepts whole numbers from 1 to 5.
+Per guest runs process up to that many selected guests at once, with separate
+transcripts and report folders; projects in a queued run are still processed in
+queue order. Across selected guests uses one conversation and dispatches guest
+tools one at a time. Advanced job limits must be positive, and delay fields cannot be
+negative (zero delay is allowed).
+
+In Per guest mode, rubrics include criterion, pass/fail/unknown status, score, maximum score,
 evidence, and feedback. Unknown checks and exhausted turn budgets mark the report
-incomplete; a failing student criterion remains a completed grading result.
-A final model turn is reserved for rubric submission after the configured limit.
+incomplete; a failing submission criterion remains a completed grading result.
+A final model turn is reserved for the rubric or shared result after the configured limit.
 Context budgeting conservatively estimates tokens and drops entire older tool
 rounds when necessary; full evidence remains in the transcript. Large assignments
 may require a larger context window. Pulled text previews are bounded.
+The response-token limit scales with the selected context window; it has no fixed
+16,384-token cap. For example, a 65,536-token context accepts a 32,768-token response
+limit. The conversation and tools must still fit in the remaining context budget.
+Context is editable without a fixed model ceiling. **Fetch** discovers context
+and output limits from model metadata, with read-only runtime discovery for
+LM Studio, Ollama and llama.cpp. Loaded context takes precedence over the model's
+advertised maximum. **Use provider max** selects the discovered context and
+refreshes it when the queued run starts; reported output limits are also checked.
+The form remembers this choice. If the endpoint does not report a usable limit,
+enter the context configured in your runtime manually. The initial 16,384 value
+is a form default, not a discovered model limit. Selecting a larger budget does
+not reload or change the server's model configuration.
 
-Runs use the server queue, continue after page navigation, and can be cancelled
-from the dialog or Queue. Cancellation is checked between calls; in-flight calls
-finish or time out first. **Download reports & files** provides Markdown and JSON
-rubrics and a subdirectory for each guest using the same name as Pull:
+Runs stay in the server queue when you close the dialog or navigate away. The
+**Run agent** button submits the job, closes the setup dialog when accepted, and
+automatically opens its live transcript. Reopen that window from the queue item's
+**Live transcript** or **Transcript** button. The
+guest's robot icon flashes while its agent run is queued or running; click it to
+open a live transcript filtered to that guest. Queue also offers **Live transcript**.
+The viewer shows prompts, streamed model responses, reasoning fields returned by
+the endpoint, and tool calls/results as readable text. Closing the viewer leaves the run active.
+Transcript events are saved on the server and replayed when you reopen the viewer
+or reload the page. Endpoints returning ordinary JSON responses are also supported,
+with each response displayed when it arrives.
+
+Runs can be cancelled from the dialog, transcript viewer, or Queue. Cancellation
+is checked between calls and streamed chunks; a running command or stalled request
+may finish or time out first. When a run finishes, its results open in the
+Queue dock under **Completed → View results**. The agent setup dialog is for run
+configuration; results, transcripts and downloads remain in the completed queue
+item, including after navigation or a reload. In Per guest mode, **Download report & files** provides
+plain text, Markdown and JSON rubrics and a subdirectory for each guest using the same name as Pull:
 `<guest-name>-<vmid>_<username>` (username omitted when unavailable). Each guest
-folder contains `rubric.md`, `report.json`, `transcript.json`, and `output.log`.
+folder contains `report.txt`, `rubric.md`, `report.json`, `transcript.json`, `events.json` (live
+transcript events), and `output.log`. The root contains `results.html`, a standalone
+HTML results page with scores, evidence, feedback and links to the extracted files,
+alongside `reports.txt`, `rubrics.md` and `rubrics.json`.
 Full pulled evidence is included directly under `pulled/01/`, `pulled/02/`, etc.,
 preserving its guest paths without requiring a nested ZIP extraction. Cancelled
-and unresolved guests also receive their own report/log folders. After navigating
-away, reopen **agent → Previous runs → Load reports** to view and download a
-retained run. Queue's **View results** log retains the rubric and tool evidence; the raw
+and unresolved guests also receive their own report/log folders. Across selected
+guests instead includes `summary.md`, `shared_transcript.json`, `shared_events.json`,
+`reports.md`, `reports.json`, and per-guest `report.md` files grouped by project. Open Queue's
+completed item to view or download a retained run; **Transcript**, **View full log**
+and **Download log** retain the conversation and tool evidence. The raw
 result (including the ZIP) is available at `/api/queue/<id>/result` for the owner.
+
+
+## AccessForge credential checkout plugin
+
+Set `ACCESSFORGE_PLUGIN_ENABLE=1` in SCE-web's `.env` and recreate the app container to enable **Credential Checkouts** alongside CTFd and CTF-RPG. It defaults to `0`. Disabled plugins hide their navigation and reject their page, script, and API routes. The checkbox in VM Manager's Columns menu also hides when the plugin is off.
+
+The integration is one-way: SCE-web publishes account credentials, requests status, and sends explicit login-management operations to AccessForge. **AccessForge stores checkout policy and owns email verification, reservations, and persistence.** SCE-web administrators can update the policy through the AccessForge tab. Released accounts have their logins disabled without automatic password changes. Account checkout and recovery continue when SCE-web is offline. AccessForge never calls SCE-web. There is no shared service token or SCE-web checkout service.
+
+Administrator usernames default to `@pam` when no realm is provided, matching VM Manager: `jcacosta` becomes `jcacosta@pam`. Explicit realms such as `jcacosta@pve` or `jcacosta@ldap` are preserved. Existing saved bare usernames are normalized without discarding the saved password.
+
+For an authentication-related 502 on another AccessForge instance, check that instance's `/healthz` configuration output and its `PROXMOX_HOST`/`PROXMOX_PORT` environment values. `pve.example.edu` is the sample hostname, not a configured cluster. Recreate AccessForge's `proxclient` container after changing its `.env`. Its `VERIFY_SSL` controls the connection to Proxmox independently of SCE-web's **Verify SSL certificates** option for AccessForge. Known backend diagnostics are shown in SCE-web; unrecognized server errors keep the generic application/reverse-proxy guidance without exposing internal response bodies.
+
+In VM Manager, enable **Signed-in** in **Columns**. It shows **Active** for accounts with an active AccessForge dashboard or SPICE console session and shows the most recent session as a range such as `01h 02m - 00h 01m ago` after it ends. The end time is the recorded sign-out or, if check-ins stopped, the last browser check-in. Hover to see the recorded times. Older sessions with only a sign-in timestamp show that time. Click **Signed-in** to sort by session end time, with active sessions first and unknown end times last. The column updates on **Refresh**, when you return to VM Manager, and once a minute while it is visible. It uses the Proxmox login or API token used by VM Manager. Set the **AccessForge URL** in Connection Parameters if SCE-web lacks an existing destination for that Proxmox address. AccessForge checks for `Sys.Modify` on `/` and can verify a different node address against its cluster membership. If the column says **Update AccessForge**, update the AccessForge source and recreate its application container. After upgrading AccessForge, reload existing sessions to start presence tracking. Session ranges are captured for new sign-ins.
+
+Configuration → Connection Parameters shows separate URL and **API Port** inputs for CTFd, CTF-RPG, and AccessForge. AccessForge's row appears only when its plugin is enabled and uses your per-user/project connection settings. Changing its destination clears the saved password; open **Credential Checkouts → Connection** to authenticate to the new destination. Existing URLs containing a custom port are split automatically. CTF-RPG certificate verification is configured in its manager's Connection dialog.
+
+With the AccessForge plugin enabled, the Configuration **Credentials** card includes per-row selection checkboxes and **Select all credentials**. In the credential mode combobox, choose **On-demand (checkout)** or **Permanent** to save the selected credential types locally without an AccessForge connection. On-Demand accounts appear in Credential Checkouts immediately, even while disconnected. Their status is **Unknown** until a successful refresh; missing accounts remain listed as **Not synced**, and registered accounts without remote checkout eligibility show **Not enabled**. Use **Credential Checkouts → Accounts → Enable** to publish selected On-Demand credentials and enable their AccessForge access and remote checkout eligibility. Changing type in Configuration does not modify remote eligibility, assignments, or logins; use **AccessForge Checkouts → Mark Permanent** to stop remote checkouts for an already published account. A leading status icon in each credential row shows its cached publication/checkout state; hover or focus the icon for details, including the assigned name/email. Disabled AccessForge access remains disabled until explicitly enabled through Credential Checkouts. Project secrets, email verification, and the pool's overall checkout policy remain managed in AccessForge.
+
+1. On AccessForge, set `ENABLE_ACCOUNT_CHECKOUT=true` and a strong, stable `FLASK_SECRET_KEY`. Preserve its `data/` directory (or `CHECKOUT_DATA_DIR`). Restart/recreate AccessForge after changing environment variables.
+2. Provision and synchronize the project's accounts in Proxmox. In SCE-web's **Credential Checkouts** tab, select the project and configure its AccessForge URL and administrator username/password. Use an account with `Sys.Modify` on `/` in AccessForge's configured Proxmox cluster. Check **Save credentials**, then **Save**, to keep credentials encrypted on the SCE-web server for your user and project across browser sessions; existing saved connections restore the checkbox as checked. If unchecked, credentials stay only in the current browser tab's session, survive a page reload, and are supplied with each operation. Saving unchecked removes any previously saved password from SCE-web and requires entering it again when switching from a server-saved connection. URL, username, TLS preference, and cached status remain available. Passwords are excluded from ordinary project payloads, connection responses, and exports. HTTPS certificate verification is on by default; plain HTTP is accepted only for loopback development URLs.
+3. In **Configuration → Credentials**, select saved accounts by checkbox and choose **On-demand (checkout)**. This saves the type locally. In **Credential Checkouts**, select those accounts and choose **Accounts → Enable** to copy their credentials into a namespaced pool, enable their AccessForge access, and make them eligible for checkout. It does not change the remote project secret or verification settings. Select only accounts provisioned in the cluster configured by the destination AccessForge server.
+4. Choose **Checkout settings** in Credential Checkouts to set or replace the project secret (8–256 characters), enable account checkout, and choose whether email verification is required. Leave the secret blank to keep the current value; the existing secret is never returned. Settings load fresh from AccessForge, and saving bypasses the persistent browser queue. You can also use **Manage in AccessForge** for the same policy controls, manual assignment, and removal of unassigned accounts. Signed-in users can also use **Relinquish account** there, confirm the work-loss warning, and release their account and sign out without resetting VM contents. Release disables AccessForge access and leaves the Proxmox login and password unchanged. Users visit the destination AccessForge `/checkout` page.
+5. Use **Connection → Save** to configure the administrator connection and **Refresh** to update assignment emails. The toolbar matches the other managers: filters on the left, then Connection, Refresh, Auto, and Columns. **Auto** defaults to Off; choosing an interval explicitly enables periodic status requests for the selected project. Refresh pauses during account operations and while the connection dialog is open. Accounts marked for checkout show a small icon in VM Manager, CTFd Manager, and CTF-RPG Manager, with assignment and disabled status on hover. Permanent accounts have no checkout icon. The Credential Checkouts tab lists only marked accounts, including marked accounts whose logins are disabled or checked out. AccessForge is the ground truth for remote status: refreshing Credential Checkouts replaces remote assignments and login state across all managers and Configuration, while retaining explicit local credential types. Locally marked accounts missing remotely remain listed as **Not synced**, and failed refreshes preserve the previous status. Existing cached marks are migrated automatically. AccessForge refreshes and checkout operations notify other open Configuration, VM Manager, CTFd Manager, CTF-RPG Manager, and Credential Checkouts tabs. Those tabs read the updated local SCE-web snapshot without requesting AccessForge again, and catch up when shown again. Configuration icons update in place without replacing edited credential fields. Manual AccessForge **Refresh** opens a summary listing synced accounts, marked/unmarked state, account assignment, login status, and changes since the previous snapshot, including checkout/relinquishment history. Unchanged accounts are listed too. Auto refresh stays silent, and failed or superseded refreshes do not show a success summary. The checkout tab displays **Name**, **Checked out**, **Checkout IP**, and **Relinquished**, along with when status was last requested. Name is searchable and can be hidden through Columns. Names come from the required Name field on AccessForge’s checkout page; older nameless assignments gain a name when recovered. Release clears the current name and email while AccessForge keeps the name in its audit history. Checkout and relinquishment details remain after release; timestamps are displayed in the browser’s local time. The recorded IP is the peer/client address reported by the configured trusted ingress, not a guaranteed device identity. An unreachable AccessForge leaves the previous snapshot intact and reports the request failure.
+
+Administrators can select credential rows and choose **Accounts → Relinquish** in either application. Users can relinquish their own checked-out account from AccessForge. Relinquishment clears the assignment, signs the user out, revokes AccessForge sessions/SPICE connections, and disables AccessForge access until an administrator chooses Enable. It does not change the Proxmox login, password, or VM contents. Failed local releases preserve assignments and are reported per account. To prepare an account for reuse, save its desired password in Configuration, apply it through **VM Manager → Users & Access → Set Credentials to Current List**, then choose **Accounts → Enable** in Credential Checkouts. Enabled On-Demand accounts display **Available (awaiting checkout)**; AccessForge sign-in remains blocked until an email is assigned. **Accounts → Disable** blocks AccessForge access for unassigned accounts; assigned accounts must be relinquished first.
+
+Account checkout and relinquishment require no `CHECKOUT_PROXMOX_API_TOKEN`; older settings are ignored by updated AccessForge servers. Proxmox accounts remain enabled. Restrict direct Proxmox UI/API access using your firewall. Update/reload the AccessForge Nginx configuration too: its raw `/proxmox/` and `/api2/` paths must require a valid AccessForge session, so they cannot bypass checkout restrictions. Existing upstream tickets and open external/noVNC connections may remain valid until expiration/disconnection. Administrator authentication still validates `Sys.Modify` on `/`. Checkout operations do not modify Proxmox user accounts. Refresh is pull-only.
+
+Published account passwords are encrypted at rest and project secrets are hashed. Administrator passwords are not saved in AccessForge for account login management. Status requests return no passwords or tokens. Credential updates replace only unassigned accounts, and a Proxmox username can belong to only one published pool per AccessForge instance.
+
+Email delivery is configured on **AccessForge**, using `CHECKOUT_SMTP_HOST`, `CHECKOUT_SMTP_PORT`, `CHECKOUT_SMTP_FROM`, `CHECKOUT_SMTP_USER`, `CHECKOUT_SMTP_PASSWORD`, and `CHECKOUT_SMTP_SSL`. Default transport is STARTTLS on port 587; implicit TLS uses `CHECKOUT_SMTP_SSL=1` and port 465. SMTP is unnecessary when an AccessForge administrator turns off verification. Missing SMTP configuration fails closed when verification is required.
+
+**Checkout settings** in both applications also includes per-project **Allowed email formats** (wildcards such as `*@utep.edu`; `*` matches any text and `?` one character), **Allowed checkout IP networks** (IPv4/IPv6 CIDRs), an **Active checkouts per subnet** limit, separate IPv4/IPv6 subnet prefix lengths, and **Global delay / Subnet delay (seconds)**. Enter one email pattern or CIDR per line; any matching entry is allowed, and blank lists allow all. A limit or delay of `0` disables it. Global delay covers all account checkouts in that project; subnet delay uses the configured prefixes, as does the active-assignment limit. Defaults are unrestricted, with `/24` IPv4 and `/64` IPv6 grouping. Delays can be up to seven days. AccessForge persists and enforces the policy, including atomic checks at assignment and after email verification, and returns it on status refresh. SCE-web validates and forwards the policy without enforcing a separate copy. Relinquishment frees an active-assignment slot but does not erase cooldown history. Recovery does not consume quota or restart delays, but must still satisfy allowed email/network rules. Administrator manual assignments bypass checkout restrictions. Source IPs use AccessForge's trusted-proxy configuration; IP-based restrictions reject requests whose source address cannot be determined.
+
+All Credential Checkouts account actions, Connection Save, Refresh, and Checkout settings use direct requests, bypassing the durable job queue. After each Accounts action, SCE-web refreshes live status and opens a per-account summary with Success, Error, or Unconfirmed results and the refreshed AccessForge state. Refresh failures are shown separately, and Auto pauses while the summary is open. Missing action results are never reported as successful. Checkout settings saves also trigger a live refresh. Actions render and broadcast the returned live AccessForge state; Connection Save validates the administrator and immediately reads current status. Initial page loads and Configuration credential-type edits remain local. Configuration saves credentials and credential types directly to SCE-web project endpoints, bypassing the operation queue without sending AccessForge credentials or checking remote status. Local save failures are labeled as SCE-web errors. Enable uses the dedicated enable_accounts action when AccessForge advertises it. Instances using the existing API are also supported: SCE-web publishes the selected credentials, skips login changes for active accounts, re-enables only logins reported disabled, and enables checkout for confirmed successful On-Demand accounts. Assigned or release-pending accounts are rejected, failed logins are not made eligible, and unrelated available accounts are preserved. The account_setup feature flag is not required, and Enable never disables an active login as a workaround.
+
+SCE-web connection credentials, cached status, and project-scoped local credential types live in `DATA_DIR/accessforge_connections.sqlite3`; preserve its source ID so publishing continues to target the same remote pools. If the previous SCE-web checkout database exists, first publication preserves selected accounts' existing email assignments, once per account. The old database is left intact; set a new project secret and availability policy in AccessForge after publishing. Old `SCE_CHECKOUT_URL`, `SCE_CHECKOUT_TOKEN`, and `CHECKOUT_SERVICE_TOKEN` settings are no longer used. Connection details, remote status snapshots, and account assignments are not included in project exports.
+
+For a self-signed AccessForge HTTPS certificate, uncheck **Verify SSL certificates** in **Connection**, or install a certificate trusted by the SCE-web server. Browser certificate acceptance does not affect server-side requests. AccessForge's own `VERIFY_SSL` setting controls its Proxmox connection and does not change SCE-web's TLS verification. Connection errors distinguish TLS, timeouts, unreachable hosts, redirects, and server failures. A Proxmox/PAM account needs `Sys.Modify` on `/` for checkout administration; Linux sudo access alone is insufficient.

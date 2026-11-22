@@ -222,6 +222,14 @@ class ProxmoxClient:
             self._session.headers.update({"CSRFPreventionToken": csrf})
         return self._session
 
+    def accessforge_sign_in_headers(self) -> Dict[str, str]:
+        if self.token:
+            return {'Authorization': f'PVEAPIToken={self.token}'}
+        if not self.username or not self.password:
+            return {}
+        ticket = self._ensure_session().cookies.get('PVEAuthCookie')
+        return {'X-AccessForge-Proxmox-Ticket': ticket} if ticket else {}
+
     def _install_request_fallback(self, session: requests.Session) -> None:
         if getattr(session, "_sce_proxmox_dns_fallback_installed", False):
             return
@@ -259,30 +267,6 @@ class ProxmoxClient:
             raise RuntimeError(f"Proxmox error {resp.status_code}: {resp.text}")
         data = resp.json()
         return data.get("data", [])
-
-    def last_user_authentications(self) -> Dict[str, float]:
-        """Latest successful authentication events visible in the retained cluster log."""
-        session = self._ensure_session()
-        response = session.get(f"{self.base_url.rstrip('/')}/api2/json/cluster/log",
-                               params={"max": 1000}, timeout=20)
-        response.raise_for_status()
-        entries = response.json().get("data", [])
-        latest = {}
-        for entry in entries if isinstance(entries, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            match = re.fullmatch(r"successful auth for user '([^']+)'", str(entry.get("msg") or "").strip())
-            if not match:
-                continue
-            try:
-                timestamp = float(entry.get("time"))
-            except (TypeError, ValueError):
-                continue
-            if not 0 < timestamp < float("inf"):
-                continue
-            user = match.group(1)
-            latest[user] = max(latest.get(user, 0), timestamp)
-        return latest
 
     def list_qemu_vms(self, node: str) -> List[Dict[str, Any]]:
         s = self._ensure_session()

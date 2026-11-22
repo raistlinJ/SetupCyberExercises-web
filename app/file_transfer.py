@@ -57,7 +57,9 @@ def _unique_keys(pairs):
     return obj
 
 
-def read_accessforge_metadata(description):
+def read_accessforge_metadata(description, *, default=None):
+    if description is None:
+        return default
     if not isinstance(description, str):
         return None
     decoder = json.JSONDecoder(object_pairs_hook=_unique_keys)
@@ -78,6 +80,8 @@ def read_accessforge_metadata(description):
         if isinstance(obj, dict) and "AccessForge" in obj:
             policies.append(obj["AccessForge"])
         cursor = start + length
+    if not policies:
+        return default
     if len(policies) != 1 or not isinstance(policies[0], dict):
         return None
     return policies[0]

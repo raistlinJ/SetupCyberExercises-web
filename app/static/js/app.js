@@ -432,8 +432,8 @@ function updateStoredCommandsCache(pid, vmName, steps, idxHint) {
 }
 
 // Basic HTTP helper (restored after refactor removed it inadvertently)
-async function http(method, url, body, { signal, direct = false } = {}) {
-  const opts = { method, headers: {}, credentials: 'same-origin' };
+async function http(method, url, body, { signal, direct = false, headers = {} } = {}) {
+  const opts = { method, headers: { ...headers }, credentials: 'same-origin' };
   if (signal) opts.signal = signal;
   if (body instanceof FormData) {
     opts.body = body;
@@ -2823,6 +2823,14 @@ let wizSelectedTemplates = [];
 let wizTemplateCreds = {};
 let wizActiveTemplateCredsVmid = '';
 
+function defaultCoreProxyConfig() {
+  return {
+    router_node: '', scenario_xml: '/root/myscenario.xml', external_interface: 'eth1',
+    uplink_bridge: 'vmbr0', uplink_gateway: '11.0.0.254',
+    internal_sources: ['13.0.0.101/32'], mode: 'restricted', external_addresses: [], translations: []
+  };
+}
+
 function wizardGetTemplateCreds(vmid) {
   const key = String(vmid || '').trim();
   if (!key) return { username: '', password: '' };
@@ -3191,7 +3199,7 @@ window.checkWizCsvFile = async function() {
 
   function allocateAdapter() {
     // Find the lowest free adapter suffix.
-    const usedNums = new Set(adapters.map(a => getAdapterOrdinal(a)).filter(n => n >= 0));
+    const usedNums = new Set(adapters.filter(a => !a.internet_connected).map(a => getAdapterOrdinal(a)).filter(n => n >= 0));
     let n = 0;
     while (usedNums.has(n)) n++;
     adapterCounter = n + 1;
@@ -3209,7 +3217,7 @@ window.checkWizCsvFile = async function() {
     if (!stillUsed) {
       adapters = adapters.filter(a => a.name !== adapterName);
       // Reset counter to lowest free suffix so next alloc reuses the gap.
-      const usedNums = new Set(adapters.map(a => getAdapterOrdinal(a)).filter(n => n >= 0));
+      const usedNums = new Set(adapters.filter(a => !a.internet_connected).map(a => getAdapterOrdinal(a)).filter(n => n >= 0));
       let n = 0;
       while (usedNums.has(n)) n++;
       adapterCounter = n;
@@ -3235,6 +3243,7 @@ window.checkWizCsvFile = async function() {
     const next = String(newName || '').trim();
     if (!oldName || !next) return false;
     if (oldName === next) return true;
+    if (links.some(link => link.proxy_uplink && link.adapter === oldName)) return false;
     const existing = findAdapter(next);
     if (existing && existing.name !== oldName) return false;
     const adapter = findAdapter(oldName);
@@ -3318,6 +3327,9 @@ window.checkWizCsvFile = async function() {
     const adapterMeta = findAdapter(linkObj.adapter) || {};
     const internetConnected = isInternetLink(linkObj) || !!adapterMeta.internet_connected;
     const internetLocked = isInternetLink(linkObj);
+    const proxyUplinkLocked = !!linkObj.proxy_uplink;
+    const proxyInternalLocked = !internetLocked && nodes.some(node => node.proxy_config &&
+      (node.id === linkObj.a || node.id === linkObj.b));
     const svgRect = svgEl.getBoundingClientRect();
     const px = svgRect.left + svgMx;
     const py = svgRect.top + svgMy;
@@ -3333,21 +3345,22 @@ window.checkWizCsvFile = async function() {
         Adapter: <code>${linkObj.adapter}</code>
       </div>
       <div class="form-check form-switch mb-2" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-container="body" title="${escHtml(INTERNET_TOGGLE_TOOLTIP)}">
-        <input class="form-check-input" type="checkbox" role="switch" id="wiz-pop-internet" ${internetConnected ? 'checked' : ''} ${internetLocked ? 'disabled' : ''}>
+        <input class="form-check-input" type="checkbox" role="switch" id="wiz-pop-internet" ${internetConnected ? 'checked' : ''} ${internetLocked || proxyInternalLocked ? 'disabled' : ''}>
         <label class="form-check-label small" for="wiz-pop-internet">Internet-connected</label>
       </div>
       <div class="input-group input-group-sm mb-2">
         <span class="input-group-text">Interface</span>
-        <input type="text" class="form-control" id="wiz-pop-iface" value="${escHtml(linkObj.adapter)}">
-        <button class="btn btn-outline-primary" id="wiz-pop-apply" type="button">Apply</button>
+        <input type="text" class="form-control" id="wiz-pop-iface" value="${escHtml(linkObj.adapter)}" ${proxyUplinkLocked ? 'disabled' : ''}>
+        <button class="btn btn-outline-primary" id="wiz-pop-apply" type="button" ${proxyUplinkLocked ? 'disabled' : ''}>Apply</button>
       </div>
-      <button class="btn btn-sm btn-danger w-100" id="wiz-pop-del" type="button"><i class="bi bi-trash me-1"></i>Delete</button>`;
+      <button class="btn btn-sm btn-danger w-100" id="wiz-pop-del" type="button" ${proxyUplinkLocked ? 'disabled' : ''}><i class="bi bi-trash me-1"></i>Delete</button>
+      ${proxyUplinkLocked ? '<div class="small text-muted mt-2">The CORE gateway uplink is fixed on net1.</div>' : ''}`;
     const internetInput = div.querySelector('#wiz-pop-internet');
     const ifaceInput = div.querySelector('#wiz-pop-iface');
     const applyBtn = div.querySelector('#wiz-pop-apply');
     const applyAdapterSettings = () => {
       const adapter = findAdapter(linkObj.adapter) || adapterMeta;
-      const checked = internetLocked || !!(internetInput && internetInput.checked);
+      const checked = internetLocked || (!proxyInternalLocked && !!(internetInput && internetInput.checked));
       const rawName = String(ifaceInput && ifaceInput.value || '').trim();
       if (checked) {
         if (!isWizardInterfaceName(rawName)) {
@@ -3391,6 +3404,10 @@ window.checkWizCsvFile = async function() {
   }
 
   function showIfacePopover(linkObj, isA, portX, portY) {
+    if (linkObj.proxy_uplink) {
+      try { showToast('The CORE gateway uplink is fixed on net1.', 'info'); } catch { }
+      return;
+    }
     dismissPopover();
     if (svgEl) svgEl.style.pointerEvents = 'none';
     const nodeId  = isA ? linkObj.a : linkObj.b;
@@ -3420,6 +3437,10 @@ window.checkWizCsvFile = async function() {
       const val = parseInt(div.querySelector('#wiz-iface-inp').value);
       if (isNaN(val) || val < 0) return;
       const nodeId = isA ? linkObj.a : linkObj.b;
+      if (val === 1 && nodes.some(node => node.id === nodeId && node.proxy_config)) {
+        try { showToast('net1 is reserved for the CORE gateway uplink.', 'warning'); } catch { }
+        return;
+      }
       const oldVal = isA ? linkObj.ifaceA : linkObj.ifaceB;
       if (val === oldVal) { dismissPopover(); return; }
       // Find any other link on this node that already uses the target number → swap
@@ -3622,6 +3643,53 @@ window.checkWizCsvFile = async function() {
         netsDiv.textContent = '–';
       }
     }
+    const proxyPanel = document.getElementById('wiz-proxy-settings');
+    if (proxyPanel) {
+      const config = selectedNode.proxy_config;
+      proxyPanel.classList.toggle('d-none', !config);
+      if (config) {
+        const values = { ...defaultCoreProxyConfig(), ...config };
+        const syncProxyMode = () => {
+          const addresses = document.getElementById('wiz-proxy-addresses');
+          const full = config.mode === 'full';
+          const addressLabel = document.getElementById('wiz-proxy-addresses-label');
+          const addressHelp = document.getElementById('wiz-proxy-addresses-help');
+          const translationLabel = document.getElementById('wiz-proxy-translations-label');
+          const translationHelp = document.getElementById('wiz-proxy-translations-help');
+          if (addresses) {
+            addresses.disabled = full;
+            if (full) addresses.value = '';
+          }
+          if (full) config.external_addresses = [];
+          if (addressLabel) addressLabel.textContent = full
+            ? 'Allowed destinations — none needed for full access'
+            : 'Allowed destinations, one per line';
+          if (addressHelp) addressHelp.textContent = full
+            ? 'Leave this blank. Full outbound IPv4 access allows any destination.'
+            : 'Enter allowed destinations here, or add a translated endpoint below.';
+          if (translationLabel) translationLabel.textContent = full
+            ? 'Translated endpoints — optional'
+            : 'Translated endpoints, one per line';
+          if (translationHelp) translationHelp.textContent = full
+            ? 'Optional for ordinary Internet access. Use one client port and one backend port per mapping.'
+            : 'Use one client port and one backend port per mapping.';
+        };
+        proxyPanel.querySelectorAll('[data-proxy-field]').forEach(input => {
+          const key = input.dataset.proxyField;
+          input.value = Array.isArray(values[key]) ? values[key].join('\n') : (values[key] || '');
+          input.oninput = () => {
+            selectedNode.proxy_config[key] = ['internal_sources', 'external_addresses', 'translations'].includes(key)
+              ? input.value.split('\n').map(value => value.trim()).filter(Boolean)
+              : input.value.trim();
+            if (key === 'mode') syncProxyMode();
+          };
+          if (key === 'mode') input.onchange = input.oninput;
+        });
+        syncProxyMode();
+        const bridge = document.getElementById('wiz-proxy-bridge');
+        if (bridge) bridge.textContent = values.uplink_bridge;
+      }
+    }
   }
 
   function init(templates) {
@@ -3650,6 +3718,7 @@ window.checkWizCsvFile = async function() {
         name: t.name,
         finalName: t.finalName || t.name,
         user_accessible: t.user_accessible !== false,
+        proxy_config: t.proxy_config || null,
         x: Math.round(cx + r * Math.cos(angle)),
         y: Math.round(cy + r * Math.sin(angle)),
         el: null
@@ -3666,6 +3735,15 @@ window.checkWizCsvFile = async function() {
       y: (NODE_H / 2) + 34,
       el: null
     });
+    const proxyNode = nodes.find(node => node.proxy_config);
+    if (proxyNode) {
+      selectedNode = proxyNode;
+      const adapter = getOrCreateInternetAdapter();
+      const bridge = proxyNode.proxy_config.uplink_bridge || INTERNET_DEFAULT_IFACE;
+      adapter.name = bridge;
+      links.push({ id: Date.now() + Math.random(), a: proxyNode.id, b: INTERNET_NODE_ID,
+        adapter: bridge, color: adapter.color, ifaceA: 1, ifaceB: null, proxy_uplink: true });
+    }
 
     // SVG mouse events
     svgEl.addEventListener('mousemove', onMouseMove);
@@ -3704,6 +3782,25 @@ window.checkWizCsvFile = async function() {
     if (target) {
       const internetLink = isInternetNode(dragSrc) || isInternetNode(target);
       const vmEndpoint = internetLink ? (isInternetNode(dragSrc) ? target : dragSrc) : null;
+      const proxyEndpoint = !internetLink && (dragSrc.proxy_config ? dragSrc : (target.proxy_config ? target : null));
+      const clientEndpoint = proxyEndpoint ? (proxyEndpoint.id === dragSrc.id ? target : dragSrc) : null;
+      if (proxyEndpoint && links.some(link => isInternetLink(link) && getInternetLinkVmId(link) === clientEndpoint.id)) {
+        try { showToast('Remove the client’s direct Internet connection before linking it to the CORE gateway.', 'warning'); } catch { }
+        dragSrc = null;
+        return;
+      }
+      if (internetLink && vmEndpoint && links.some(link =>
+          !isInternetLink(link) && (link.a === vmEndpoint.id || link.b === vmEndpoint.id) &&
+          nodes.some(node => node.proxy_config && (node.id === link.a || node.id === link.b)))) {
+        try { showToast('This VM already reaches the Internet through the CORE gateway.', 'warning'); } catch { }
+        dragSrc = null;
+        return;
+      }
+      if (internetLink && vmEndpoint && vmEndpoint.proxy_config) {
+        try { showToast('The CORE gateway uplink is fixed on net1.', 'info'); } catch { }
+        dragSrc = null;
+        return;
+      }
       if (internetLink && links.some(l => isInternetLink(l) && getInternetLinkVmId(l) === vmEndpoint.id)) {
         try { showToast('This VM is already connected to the Internet node.', 'info'); } catch { }
         dragSrc = null;
@@ -3727,6 +3824,7 @@ window.checkWizCsvFile = async function() {
       if (!t) continue;
       t.finalName = n.finalName || n.name;
       t.user_accessible = n.user_accessible;
+      t.proxy_config = n.proxy_config || null;
       // Build nets list sorted by assigned iface number
       const ifaceMap = {};
       for (const l of links) {
@@ -3742,7 +3840,25 @@ window.checkWizCsvFile = async function() {
     }
   }
 
-  window.wizNetGraph = { init, saveState, restore };
+  function validateProxyTopology() {
+    const proxy = nodes.find(node => node.proxy_config);
+    if (!proxy) return true;
+    const attached = links.filter(link => link.a === proxy.id || link.b === proxy.id);
+    const uplink = attached.find(link => link.proxy_uplink && isInternetLink(link));
+    const internalAtZero = attached.some(link => !isInternetLink(link) &&
+      (link.a === proxy.id ? link.ifaceA === 0 : link.ifaceB === 0));
+    if (!uplink || attached.length < 2 || uplink.ifaceA !== 1 || !internalAtZero) {
+      try { showToast('Connect the CORE gateway to an internal VM; its fixed Internet uplink uses net1.', 'warning'); } catch { }
+      return false;
+    }
+    if (!String(proxy.proxy_config.router_node || '').trim()) {
+      try { showToast('Enter the CORE router node name or ID.', 'warning'); } catch { }
+      return false;
+    }
+    return true;
+  }
+
+  window.wizNetGraph = { init, saveState, restore, validateProxyTopology };
   window.wizVmSettingsClear = () => { selectedNode = null; updateSettingsPanel(); renderNodes(); };
 
   // Rename all adapter basenames (e.g. "net" -> "lab"), preserving their alphabetic suffix.
@@ -4035,6 +4151,7 @@ window.wizardNext = async function() {
         node: String(t?.node || ''),
         vmid: Number(t?.vmid || 0),
         name: String(t?.name || ''),
+        type: String(t?.type || 'qemu'),
         bridges: Array.isArray(t?.bridges) ? t.bridges.map(b => String(b || '')) : [],
         qemu_agent_enabled: !!t?.qemu_agent_enabled,
       }));
@@ -4073,6 +4190,7 @@ window.wizardNext = async function() {
                      <th class="text-center" style="width:120px;" title="Whether QEMU Guest Agent is enabled on the template">QEMU Agent</th>
                      <th class="text-center" style="width:120px;">Creds</th>
                      <th class="text-center" style="width:150px; cursor:help;" title="These VMs will be directly accessible by participants">Make User Accessible</th>
+                     <th class="text-center" style="width:120px;" title="Use this template as the CORE gateway VM">CORE Gateway</th>
                    </tr>
                  </thead>
                  <tbody id="wiz-tpl-tbody"></tbody>
@@ -4109,14 +4227,33 @@ window.wizardNext = async function() {
                       title="Mark VMs from this template as user-accessible"
                       style="visibility:hidden;">
                   </td>
+                  <td class="text-center align-middle">
+                    <input class="form-check-input" type="radio" name="wiz-proxy-template" value="${t.vmid}"
+                      id="wiz-tpl-proxy-${t.vmid}" title="Reserve net1 as this VM’s fixed Internet uplink" style="visibility:hidden;" ${t.type === 'lxc' ? 'disabled' : ''}>
+                    <input class="form-control form-control-sm mt-1" type="text" id="wiz-tpl-proxy-bridge-${t.vmid}"
+                      value="vmbr0" title="Proxmox bridge for the fixed net1 uplink" aria-label="CORE gateway uplink bridge" disabled>
+                  </td>
                 `;
                 // Wire selection checkbox to show/hide the user-accessible checkbox
                 const selChk = row.querySelector(`#wiz-tpl-chk-${t.vmid}`);
                 const accChk = row.querySelector(`#wiz-tpl-acc-${t.vmid}`);
+                const proxyRadio = row.querySelector(`#wiz-tpl-proxy-${t.vmid}`);
+                const proxyBridge = row.querySelector(`#wiz-tpl-proxy-bridge-${t.vmid}`);
                 const credsBtn = row.querySelector('[data-wiz-template-creds]');
                 selChk.addEventListener('change', () => {
                   accChk.style.visibility = selChk.checked ? '' : 'hidden';
+                  if (proxyRadio) {
+                    proxyRadio.style.visibility = selChk.checked && !proxyRadio.disabled ? '' : 'hidden';
+                    if (!selChk.checked) proxyRadio.checked = false;
+                    if (proxyBridge) proxyBridge.disabled = !proxyRadio.checked;
+                  }
                   if (credsBtn) credsBtn.classList.toggle('d-none', !selChk.checked);
+                });
+                if (proxyRadio) proxyRadio.addEventListener('change', () => {
+                  document.querySelectorAll('input[id^="wiz-tpl-proxy-bridge-"]').forEach(input => {
+                    const vmid = input.id.replace('wiz-tpl-proxy-bridge-', '');
+                    input.disabled = !document.getElementById(`wiz-tpl-proxy-${vmid}`)?.checked;
+                  });
                 });
                 if (credsBtn) {
                   credsBtn.addEventListener('click', () => {
@@ -4151,17 +4288,23 @@ window.wizardNext = async function() {
      chks.forEach(c => {
        const vmid = c.value;
        const accEl = document.getElementById('wiz-tpl-acc-' + vmid);
+       const proxyEl = document.getElementById('wiz-tpl-proxy-' + vmid);
+       const proxyBridge = document.getElementById('wiz-tpl-proxy-bridge-' + vmid);
+       const proxyConfig = proxyEl && proxyEl.checked ? defaultCoreProxyConfig() : null;
+       if (proxyConfig) proxyConfig.uplink_bridge = proxyBridge?.value?.trim() || 'vmbr0';
        const creds = wizardGetTemplateCreds(vmid);
        wizSelectedTemplates.push({
         _wizId: Date.now() + Math.random(),
          vmid,
+         vm_type: wizFetchedTemplates.find(t => String(t.vmid) === String(vmid))?.type || 'qemu',
          name: c.getAttribute('data-name'),
          finalName: c.getAttribute('data-name'),
          user_accessible: accEl ? accEl.checked : true,
          vm_user: creds.username,
          vm_pass: creds.password,
          nets: [],
-         internet_connected_adaptors: []
+         internet_connected_adaptors: [],
+         proxy_config: proxyConfig
        });
      });
      
@@ -4180,9 +4323,9 @@ window.wizardNext = async function() {
      if (window.wizNetGraph) {
        // Only fully re-init if the template selection changed
        const prevIds = (window._wizNetGraphTemplateIds || []).join(',');
-       const newIds  = wizSelectedTemplates.map(t => t.vmid).join(',');
+       const newIds  = wizSelectedTemplates.map(t => `${t.vmid}:${!!t.proxy_config}`).join(',');
        if (prevIds !== newIds) {
-         window._wizNetGraphTemplateIds = wizSelectedTemplates.map(t => t.vmid);
+         window._wizNetGraphTemplateIds = wizSelectedTemplates.map(t => `${t.vmid}:${!!t.proxy_config}`);
          window.wizNetGraph.init(wizSelectedTemplates);
        } else {
          window.wizNetGraph.restore();
@@ -4194,6 +4337,7 @@ window.wizardNext = async function() {
   // Step 4 -> 5 (Save graph state into wizSelectedTemplates)
   if (currentWizardStep === 4) {
      if (window.wizNetGraph) window.wizNetGraph.saveState();
+     if (window.wizNetGraph && !window.wizNetGraph.validateProxyTopology()) return;
      return wizardGotoStep(5);
   }
 
@@ -4978,11 +5122,13 @@ window.submitProjectCreation = async function(mode) {
       payload.vms = wizSelectedTemplates.map(t => ({
         name: t.finalName,
         vmid: t.vmid,
+        vm_type: t.vm_type || 'qemu',
         viewable_to_user: t.user_accessible,
         vm_user: t.vm_user || null,
         vm_pass: t.vm_pass || null,
         internal_network_adaptors: Array.isArray(t.nets) && t.nets.length > 0 ? t.nets : [],
-        internet_connected_adaptors: Array.isArray(t.internet_connected_adaptors) && t.internet_connected_adaptors.length > 0 ? t.internet_connected_adaptors : []
+        internet_connected_adaptors: Array.isArray(t.internet_connected_adaptors) && t.internet_connected_adaptors.length > 0 ? t.internet_connected_adaptors : [],
+        proxy_config: t.proxy_config || {}
       }));
     }
     
@@ -5313,6 +5459,92 @@ function collectVmNetworkRows(pid, idx) {
   return { adaptors, internetConnectedAdaptors };
 }
 
+function collectVmProxyConfig(pid, idx) {
+  const prefix = `vm-${pid}-${idx}-proxy`;
+  if (!document.getElementById(`${prefix}-enabled`)?.checked) return {};
+  const value = key => document.getElementById(`${prefix}-${key}`)?.value?.trim() || '';
+  return {
+    router_node: value('router'), scenario_xml: value('xml'), external_interface: value('interface'),
+    uplink_bridge: value('bridge'), uplink_gateway: value('gateway'), mode: value('mode'),
+    internal_sources: value('sources').split('\n').map(item => item.trim()).filter(Boolean),
+    external_addresses: value('mode') === 'full' ? [] : value('addresses').split('\n').map(item => item.trim()).filter(Boolean),
+    translations: value('translations').split('\n').map(item => item.trim()).filter(Boolean)
+  };
+}
+
+function onVmProxyModeChange(pid, idx) {
+  const prefix = `vm-${pid}-${idx}-proxy`;
+  const full = document.getElementById(`${prefix}-mode`)?.value === 'full';
+  const addresses = document.getElementById(`${prefix}-addresses`);
+  if (addresses) {
+    addresses.disabled = full;
+    if (full) addresses.value = '';
+  }
+  const addressLabel = document.getElementById(`${prefix}-addresses-label`);
+  const addressHelp = document.getElementById(`${prefix}-addresses-help`);
+  const translationLabel = document.getElementById(`${prefix}-translations-label`);
+  const translationHelp = document.getElementById(`${prefix}-translations-help`);
+  if (addressLabel) addressLabel.textContent = full
+    ? 'Allowed destinations — none needed for full access'
+    : 'Allowed destinations, one per line';
+  if (addressHelp) addressHelp.textContent = full
+    ? 'Leave this blank. Full outbound IPv4 access allows any destination.'
+    : 'Enter allowed destinations here or use the Translated endpoints field.';
+  if (translationLabel) translationLabel.textContent = full
+    ? 'Translated endpoints — optional'
+    : 'Translated endpoints, one per line';
+  if (translationHelp) translationHelp.textContent = full
+    ? 'Optional for ordinary Internet access. Use one client port and one backend port per mapping.'
+    : 'Use one client port and one backend port per mapping.';
+  saveVmImmediately(pid, idx);
+}
+
+function toggleVmProxy(pid, idx) {
+  const prefix = `vm-${pid}-${idx}-proxy`;
+  const toggle = document.getElementById(`${prefix}-enabled`);
+  const fields = document.getElementById(`${prefix}-fields`);
+  const list = document.getElementById(`vm-${pid}-${idx}-nets-list`);
+  if (!toggle || !list) return;
+  if (toggle.checked) {
+    const rows = Array.from(list.querySelectorAll('li'));
+    if (!rows.length || rows[0].querySelector('[data-net-internet]')?.checked) {
+      toggle.checked = false;
+      showToast('Add an internal interface as net0 before enabling the CORE gateway.', 'warning');
+      return;
+    }
+    const bridgeInput = document.getElementById(`${prefix}-bridge`);
+    const existingUplink = rows[1]?.querySelector('[data-net-internet]')?.checked
+      ? rows[1].querySelector('input.form-control')?.value?.trim() : '';
+    const bridge = existingUplink || bridgeInput?.value || 'vmbr0';
+    if (bridgeInput) bridgeInput.value = bridge;
+    if (rows.length > 1 && (rows[1].querySelector('input.form-control')?.value !== bridge || !rows[1].querySelector('[data-net-internet]')?.checked)) {
+      toggle.checked = false;
+      showToast(`Set net1 to the Internet bridge ${bridge} before enabling the CORE gateway.`, 'warning');
+      return;
+    }
+    if (rows.length === 1) {
+      list.insertAdjacentHTML('beforeend', listItemTemplate(list.id, bridge, 1, { internetConnected: true, locked: true }));
+    } else {
+      rows[1].dataset.proxyUplink = 'true';
+      rows[1].querySelectorAll('input, button').forEach(control => { control.disabled = true; });
+    }
+  } else {
+    const locked = list.querySelector('[data-proxy-uplink]');
+    if (locked) {
+      locked.removeAttribute('data-proxy-uplink');
+      locked.querySelectorAll('input, button').forEach(control => { control.disabled = false; });
+    }
+  }
+  if (fields) fields.classList.toggle('d-none', !toggle.checked);
+  updateVmNetworkCacheFromDom(pid, idx);
+  if (toggle.checked && !document.getElementById(`${prefix}-router`)?.value?.trim()) {
+    document.getElementById(`${prefix}-router`)?.focus();
+    showToast('Enter the CORE router node name or ID to save this gateway.', 'info');
+  } else {
+    saveVmImmediately(pid, idx);
+  }
+}
+
 function updateVmNetworkCacheFromDom(pid, idx, vmName) {
   try {
     if (!window.PROJ_CACHE || !window.PROJ_CACHE[pid] || !Array.isArray(window.PROJ_CACHE[pid].vms)) return;
@@ -5561,6 +5793,8 @@ async function autoSaveVm(pid, idx) {
   const storedCommands = stepsToServerPayload(storedSteps);
   const validationCommands = validationCommandsToServerPayload(getValidationCommandsFromDom(pid, idx));
   const networkRows = collectVmNetworkRows(pid, idx);
+  const proxyConfig = collectVmProxyConfig(pid, idx);
+  const existingVm = (window.PROJ_CACHE?.[pid]?.vms || []).find(vm => vm && vm.name === name);
   if (userEl && userEl.value.trim() !== '') {
     vm_user = userEl.value.trim();
   }
@@ -5578,7 +5812,8 @@ async function autoSaveVm(pid, idx) {
     stored_commands: storedCommands,
     validation_commands: validationCommands,
     internal_network_adaptors: networkRows.adaptors,
-    internet_connected_adaptors: networkRows.internetConnectedAdaptors
+    internet_connected_adaptors: networkRows.internetConnectedAdaptors,
+    ...(Object.keys(proxyConfig).length || isCoreProxyVm(existingVm) ? { proxy_config: proxyConfig } : {})
   };
   try {
     await saveVM(pid, name, payload, { silent: true, rethrow: true });
@@ -5596,6 +5831,7 @@ async function autoSaveVm(pid, idx) {
             validation_commands: payload.validation_commands,
             internal_network_adaptors: payload.internal_network_adaptors,
             internet_connected_adaptors: payload.internet_connected_adaptors,
+            ...(Object.prototype.hasOwnProperty.call(payload, 'proxy_config') ? { proxy_config: payload.proxy_config } : {}),
             vm_user: payload.vm_user,
             vm_pass: payload.vm_pass
           };
@@ -5610,9 +5846,11 @@ async function autoSaveVm(pid, idx) {
         el.className = 'small text-muted';
       }
     }, 1600);
+    return true;
   } catch (e) {
     setVmStatus(pid, idx, 'Save failed', 'text-danger');
     try { console.error('Auto-save VM failed', pid, name, e); } catch { }
+    return false;
   }
 }
 
@@ -6811,6 +7049,10 @@ function renderProjectCard(p) {
             <label class="form-check"><input class="form-check-input" type="checkbox" ${v.file_upload ? 'checked' : ''} onchange="saveVM('${p.id}','${escHtml(v.name)}', {file_upload: this.checked})"> Upload</label>
             <label class="form-check"><input class="form-check-input" type="checkbox" ${v.file_download ? 'checked' : ''} onchange="saveVM('${p.id}','${escHtml(v.name)}', {file_download: this.checked})"> Download</label>
           </div>` : ''}
+          <label class="form-check small mb-0" title="Configure this QEMU VM as a CORE gateway with a fixed Internet uplink on net1">
+            <input class="form-check-input" type="checkbox" id="vm-${p.id}-${i}-proxy-enabled" ${isCoreProxyVm(v) ? 'checked' : ''}
+              onchange="toggleVmProxy('${p.id}',${i})" ${v.vm_type === 'lxc' ? 'disabled' : ''}> CORE Gateway
+          </label>
           <button class="btn btn-sm btn-outline-danger" onclick="removeVM('${p.id}','${escHtml(v.name)}')">Remove</button>
         </div>
       </div>
@@ -6890,6 +7132,37 @@ function renderProjectCard(p) {
             <div id="vm-${p.id}-${i}-materials-summary" class="small text-muted">${Array.isArray(v.materials) ? v.materials.length : 0} links · ${escHtml(v.material_category || 'Misc')}</div>
           </div>
         </div>
+    <div class="col-12 ${isCoreProxyVm(v) ? '' : 'd-none'}" id="vm-${p.id}-${i}-proxy-fields">
+      <div class="border rounded p-2 mt-2">
+        <div class="fw-bold mb-2">CORE gateway policy</div>
+        <div class="row g-2">
+          <div class="col-md-3"><label class="form-label small">CORE router node name or ID</label>
+            <input id="vm-${p.id}-${i}-proxy-router" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.router_node || '')}" placeholder="e.g. n3" onchange="saveVmImmediately('${p.id}',${i})"></div>
+          <div class="col-md-3"><label class="form-label small">CORE scenario XML</label>
+            <input id="vm-${p.id}-${i}-proxy-xml" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.scenario_xml || '/root/myscenario.xml')}" onchange="saveVmImmediately('${p.id}',${i})"></div>
+          <div class="col-md-2"><label class="form-label small">CORE external interface</label>
+            <input id="vm-${p.id}-${i}-proxy-interface" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.external_interface || 'eth1')}" onchange="saveVmImmediately('${p.id}',${i})"></div>
+          <div class="col-md-2"><label class="form-label small">Uplink gateway</label>
+            <input id="vm-${p.id}-${i}-proxy-gateway" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.uplink_gateway || '11.0.0.254')}" onchange="saveVmImmediately('${p.id}',${i})"></div>
+          <div class="col-md-2"><label class="form-label small">Fixed Proxmox uplink</label>
+            <input id="vm-${p.id}-${i}-proxy-bridge" class="form-control form-control-sm" value="${escHtml(v.proxy_config?.uplink_bridge || 'vmbr0')}" readonly></div>
+          <div class="col-md-6 col-xl-3"><label class="form-label small">Access mode</label>
+            <select id="vm-${p.id}-${i}-proxy-mode" class="form-select form-select-sm" onchange="onVmProxyModeChange('${p.id}',${i})">
+              <option value="restricted" ${v.proxy_config?.mode !== 'full' ? 'selected' : ''}>Selected addresses</option>
+              <option value="full" ${v.proxy_config?.mode === 'full' ? 'selected' : ''}>Full outbound IPv4 access</option>
+            </select></div>
+          <div class="col-md-6 col-xl-3"><label class="form-label small">Internal source IPs or CIDRs, one per line</label>
+            <textarea id="vm-${p.id}-${i}-proxy-sources" class="form-control form-control-sm" rows="3" onchange="saveVmImmediately('${p.id}',${i})">${escHtml((v.proxy_config?.internal_sources || ['13.0.0.101/32']).join('\n'))}</textarea></div>
+          <div class="col-md-6 col-xl-3"><label class="form-label small" id="vm-${p.id}-${i}-proxy-addresses-label" for="vm-${p.id}-${i}-proxy-addresses">${v.proxy_config?.mode === 'full' ? 'Allowed destinations — none needed for full access' : 'Allowed destinations, one per line'}</label>
+            <textarea id="vm-${p.id}-${i}-proxy-addresses" class="form-control form-control-sm proxy-endpoints" rows="3" placeholder="e.g. 192.0.2.24:443" ${v.proxy_config?.mode === 'full' ? 'disabled' : ''} onchange="saveVmImmediately('${p.id}',${i})">${v.proxy_config?.mode === 'full' ? '' : escHtml((v.proxy_config?.external_addresses || []).join('\n'))}</textarea>
+            <div class="form-text" id="vm-${p.id}-${i}-proxy-addresses-help">${v.proxy_config?.mode === 'full' ? 'Leave this blank. Full outbound IPv4 access allows any destination.' : 'Enter allowed destinations here or use the Translated endpoints field.'}</div></div>
+          <div class="col-md-6 col-xl-3"><label class="form-label small" id="vm-${p.id}-${i}-proxy-translations-label" for="vm-${p.id}-${i}-proxy-translations">${v.proxy_config?.mode === 'full' ? 'Translated endpoints — optional' : 'Translated endpoints, one per line'}</label>
+            <textarea id="vm-${p.id}-${i}-proxy-translations" class="form-control form-control-sm proxy-endpoints" rows="3" placeholder="e.g. 198.51.100.12:8080:203.0.113.25:8001" onchange="saveVmImmediately('${p.id}',${i})">${escHtml((v.proxy_config?.translations || []).join('\n'))}</textarea>
+            <div class="form-text" id="vm-${p.id}-${i}-proxy-translations-help">${v.proxy_config?.mode === 'full' ? 'Optional for ordinary Internet access. ' : ''}Use one client port and one backend port per mapping.</div></div>
+        </div>
+        <div class="small text-muted mt-2">To apply the saved policy, select the proxy VMs and choose <strong>VM Manager → State &amp; Network → Configure and Restart Proxy</strong>.</div>
+      </div>
+    </div>
     <div class="col-md-4">
           <label class="form-label">Network Interfaces</label>
           <div class="d-flex gap-2 mb-2 align-items-center flex-wrap">
@@ -6903,7 +7176,10 @@ function renderProjectCard(p) {
           <ul class="list-group list-group-sm" id="vm-${p.id}-${i}-nets-list">
             ${(function () {
       const internetSet = getInternetConnectedAdaptors(v);
-      return (v.internal_network_adaptors || v.internal_network_adapters || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx, { internetConnected: internetSet.has(String(c || '').trim()) })).join('');
+      return (v.internal_network_adaptors || v.internal_network_adapters || []).map((c, idx) => listItemTemplate(`vm-${p.id}-${i}-nets-list`, c, idx, {
+        internetConnected: internetSet.has(String(c || '').trim()),
+        locked: isCoreProxyVm(v) && idx === 1 && c === v.proxy_config?.uplink_bridge
+      })).join('');
     })()}
           </ul>
         </div>
@@ -7899,6 +8175,10 @@ function getInternetConnectedAdaptors(vm) {
   return new Set((Array.isArray(raw) ? raw : []).map(item => String(item || '').trim()).filter(Boolean));
 }
 
+function isCoreProxyVm(vm) {
+  return !!(vm && vm.proxy_config && typeof vm.proxy_config === 'object' && Object.keys(vm.proxy_config).length);
+}
+
 function formatPreviewAdaptor(vm, adaptor, suffix) {
   const value = String(adaptor || '').trim();
   if (!value) return '';
@@ -7935,16 +8215,18 @@ function listItemTemplate(listId, value, idx, options = {}) {
   const safe = escHtml(value ?? '');
   const isNetList = String(listId).includes('-nets-list');
   const internetChecked = options && options.internetConnected ? ' checked' : '';
+  const locked = !!(options && options.locked);
+  const disabled = locked ? ' disabled' : '';
   const internetTitle = escHtml(INTERNET_TOGGLE_TOOLTIP);
   const internetControl = isNetList ? `
     <div class="form-check form-switch mb-0 me-2 flex-shrink-0" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-container="body" title="${internetTitle}">
-      <input class="form-check-input" type="checkbox" role="switch" data-net-internet${internetChecked} onchange="onListItemEdit('${listId}', this)">
+      <input class="form-check-input" type="checkbox" role="switch" data-net-internet${internetChecked}${disabled} onchange="onListItemEdit('${listId}', this)">
       <label class="form-check-label small">Internet</label>
     </div>` : '';
-  return `<li class="list-group-item d-flex align-items-center justify-content-between" data-index="${idx}">
-    <input class="form-control form-control-sm me-2" value="${safe}" oninput="onListItemEdit('${listId}', this)"/>
+  return `<li class="list-group-item d-flex align-items-center justify-content-between" data-index="${idx}" ${locked ? 'data-proxy-uplink="true"' : ''}>
+    <input class="form-control form-control-sm me-2" value="${safe}" ${disabled} oninput="onListItemEdit('${listId}', this)"/>
     ${internetControl}
-    <button class="btn btn-sm btn-outline-danger" onclick="removeListItem('${listId}', this)">Remove</button>
+    <button class="btn btn-sm btn-outline-danger" ${disabled} onclick="removeListItem('${listId}', this)">Remove</button>
   </li>`;
 }
 
@@ -7984,6 +8266,15 @@ function removeListItem(listId, btnEl) {
   const isNetworkList = listIdText.includes('-nets-list');
   try {
     const li = btnEl && (btnEl.closest ? btnEl.closest('li') : null);
+    if (li && li.hasAttribute('data-proxy-uplink')) return;
+    if (li && String(listId).includes('-nets-list')) {
+      const m = String(listId).match(/^vm-(.+)-(\d+)-nets-list$/);
+      const enabled = m && document.getElementById(`vm-${m[1]}-${m[2]}-proxy-enabled`)?.checked;
+      if (enabled && li === li.parentElement?.firstElementChild) {
+        showToast('The CORE gateway needs its internal net0 interface.', 'warning');
+        return;
+      }
+    }
     if (li) li.remove();
   } catch { }
   try {

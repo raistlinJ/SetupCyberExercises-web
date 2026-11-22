@@ -13,11 +13,17 @@ import requests
 from flask import Blueprint, current_app, jsonify, request
 
 from .storage.secrets import encrypt_str, decrypt_str
+from .storage.projects import ProjectStore
+from .connectors.proxmox import ProxmoxClient
 
 
 class AccessForgeError(Exception):
-    def __init__(self,message,status=400):
+    def __init__(self,message,status=400,code=None):
         self.message,self.status=message,status
+        self.code=code
+
+
+SIGN_IN_LOOKUP_PATH = '/api/admin/sign-ins/latest'
 
 
 CHECKOUT_POLICY_DEFAULTS = {
@@ -265,10 +271,142 @@ def validate_connection(data,previous=None):
     return {'url':url,'username':username,'password':password,'verify_ssl':verify}
 
 
+def temporary_connection():
+    encoded = request.headers.get('X-AccessForge-Connection')
+    if encoded is None:
+        return None
+    if len(encoded) > 16384:
+        raise AccessForgeError('Connection credentials are too large.', 413)
+    try:
+        data = json.loads(unquote(encoded))
+    except (ValueError, TypeError):
+        raise AccessForgeError('Invalid browser-session connection credentials.') from None
+    if not isinstance(data, dict):
+        raise AccessForgeError('Invalid browser-session connection credentials.')
+    return validate_connection(data)
+
+
+def connection(pid):
+    store = ConnectionStore()
+    row = store.get(_owner(), pid)
+    if not row:
+        raise AccessForgeError('Configure an AccessForge administrator connection first.', 409)
+    temporary = temporary_connection()
+    if temporary:
+        if temporary['url'] != row['url']:
+            raise AccessForgeError('The AccessForge URL changed. Open Connection and save credentials for the new URL.', 409)
+        return store, row, temporary
+    if not row['password_enc']:
+        raise AccessForgeError('Enter AccessForge credentials in Connection for this browser session.', 409)
+    return store, row, {'url': row['url'], 'username': admin_username(row['username']),
+                        'password': decrypt_str(current_app.secret_key, row['password_enc']),
+                        'verify_ssl': bool(row['verify_ssl'])}
+
+
+def verify_cluster(result, expected_host, expected_port):
+    cluster = result.get('cluster')
+    if isinstance(cluster, dict):
+        host = str(cluster.get('host') or '').strip('[]').lower().rstrip('.')
+        if host == expected_host and str(cluster.get('port')) == str(expected_port):
+            return
+    raise AccessForgeError('AccessForge is configured for a different Proxmox address. Use the same cluster address in both connections.', 409)
+
+
+def sign_in_destination(pid, host, port):
+    store = ConnectionStore()
+    owner = _owner()
+    row = store.get(owner, pid)
+    if row and row['url']:
+        return connection_url(row['url']), bool(row['verify_ssl'])
+
+    # Reuse the destination and TLS setting from connections on the same
+    # Proxmox address. Credentials remain scoped to the current refresh.
+    with store.connect() as db:
+        rows = db.execute("SELECT pid, url, verify_ssl FROM connections WHERE owner=? AND url<>''", (owner,)).fetchall()
+    projects = ProjectStore(current_app.config['DATA_DIR'])
+    destinations = {}
+    for other_pid, url, verify_ssl in rows:
+        other = projects.get(other_pid)
+        if other:
+            try:
+                target = urlsplit(other.proxmox_url or '')
+                if ((target.hostname or '').lower().rstrip('.') == host and
+                        int(other.proxmox_api_port or target.port or 8006) == port):
+                    url = connection_url(url)
+                    # Verify the certificate if settings for the same URL disagree.
+                    destinations[url] = destinations.get(url, False) or bool(verify_ssl)
+            except (AccessForgeError, ValueError):
+                continue
+    if len(destinations) == 1:
+        return next(iter(destinations.items()))
+    raise AccessForgeError('Set the AccessForge URL in the project’s Connection Parameters to find its sign-in server.',
+                           409, code='accessforge_url_required')
+
+
+def sign_in_connection(pid, host, port, proxmox_client):
+    url, verify_ssl = sign_in_destination(pid, host, port)
+    try:
+        headers = proxmox_client.accessforge_sign_in_headers()
+    except (requests.RequestException, ValueError, RuntimeError):
+        raise AccessForgeError('Could not use the Proxmox credentials for sign-in status. Sign in to Proxmox again.',
+                               409, code='proxmox_login_required') from None
+    if not headers:
+        raise AccessForgeError('Sign in to Proxmox in VM Manager to load AccessForge sign-in status.',
+                               409, code='proxmox_login_required')
+    return {'url': url, 'verify_ssl': verify_ssl, 'proxmox_headers': headers}
+
+
+def latest_accessforge_sign_ins(pid, usernames, host, port, proxmox_client):
+    latest = {}
+    ends = {}
+    snapshot = {'latest': latest, 'ends': ends, 'observed_at': None, 'active': []}
+    if not usernames or not current_app.config.get('ACCESSFORGE_PLUGIN_ENABLE'):
+        return snapshot
+    if current_app.config.get('AUTH_ENABLE'):
+        user = current_app.current_user()
+        if not user or 'admin' not in {str(role).lower() for role in user.get('roles', [])}:
+            return snapshot
+    config = sign_in_connection(pid, host, port, proxmox_client)
+    active = set()
+    for offset in range(0, len(usernames), 5000):
+        batch = usernames[offset:offset + 5000]
+        result = remote(config, 'POST', SIGN_IN_LOOKUP_PATH, {
+            'usernames': batch, 'cluster': {'host': host, 'port': port},
+        })
+        verify_cluster(result, host, port)
+        timestamps = result.get('latest')
+        if not isinstance(timestamps, dict):
+            raise AccessForgeError('Invalid AccessForge sign-in response.', 502)
+        observation = result.get('observed_at')
+        valid_observation = type(observation) in (int, float) and 0 < observation < float('inf')
+        if valid_observation:
+            snapshot['observed_at'] = observation
+        reported_active = result.get('active')
+        if isinstance(reported_active, list):
+            active.update({name for name in reported_active if isinstance(name, str)}.intersection(batch))
+        reported_ends = result.get('ends')
+        if not isinstance(reported_ends, dict):
+            reported_ends = {}
+        for name in batch:
+            timestamp = timestamps.get(name)
+            if type(timestamp) in (int, float) and 0 < timestamp < float('inf'):
+                latest[name] = timestamp
+                end = reported_ends.get(name)
+                if isinstance(end, dict):
+                    end_time, estimated = end.get('timestamp'), end.get('estimated')
+                    if (valid_observation and type(end_time) in (int, float) and type(estimated) is bool
+                            and timestamp <= end_time <= observation):
+                        ends[name] = {'timestamp': end_time, 'estimated': estimated}
+    snapshot['active'] = sorted(active)
+    return snapshot
+
+
 def remote(connection,method,path,data=None):
     try:
-        response=requests.request(method,connection['url']+path,auth=(connection['username'],connection['password']),
-                                  json=data,verify=connection['verify_ssl'],timeout=(5,45),allow_redirects=False)
+        headers = connection.get('proxmox_headers')
+        authentication = {'headers': headers} if headers else {'auth': (connection['username'], connection['password'])}
+        response=requests.request(method,connection['url']+path,json=data,verify=connection['verify_ssl'],
+                                  timeout=(5,45),allow_redirects=False,**authentication)
     except requests.exceptions.SSLError:
         message=('AccessForge TLS certificate verification failed. For a self-signed certificate, uncheck Verify SSL certificates in Connection, or install a trusted certificate.'
                  if connection['verify_ssl'] else 'Could not establish TLS with AccessForge. Check its HTTPS URL, port, and TLS configuration.')
@@ -279,6 +417,8 @@ def remote(connection,method,path,data=None):
         raise AccessForgeError('Could not connect to AccessForge. Check the hostname, port, and network access from the SCE-web server.',502) from None
     except requests.RequestException:
         raise AccessForgeError('Could not reach AccessForge. Check its URL and TLS configuration.',502) from None
+    if path == SIGN_IN_LOOKUP_PATH and response.status_code == 404:
+        raise AccessForgeError('The running AccessForge server does not have the sign-in API. Update AccessForge and restart its application container.', 501)
     if response.status_code in (401,403):
         try:
             rejected=response.json()
@@ -287,6 +427,9 @@ def remote(connection,method,path,data=None):
             reason=None
         if not isinstance(reason,str):
             reason=None
+        if (path == SIGN_IN_LOOKUP_PATH and headers and reason in
+                {'Sign in with an administrator account.', 'An AccessForge administrator account is required.'}):
+            raise AccessForgeError('Update AccessForge and restart its application container to use the Proxmox login from Refresh.', 501)
         # Only translate known API messages; never relay arbitrary upstream bodies.
         reasons={
             'Administrator authentication failed.':'Proxmox rejected the administrator login. Check the password and AccessForge’s configured PROXMOX_HOST. Usernames without a realm use @pam; include @realm to use a different realm.',
@@ -295,6 +438,8 @@ def remote(connection,method,path,data=None):
             'Administrator session expired. Sign in again.':'Proxmox accepted the login but rejected the administrator ticket when checking permissions. Check AccessForge’s configured cluster and Proxmox authentication logs.',
             'An AccessForge administrator account is required.':'Enter an administrator username and password in Connection. Usernames without a realm use @pam.',
             'Sign in with an administrator account.':'AccessForge did not receive administrator credentials. Save the connection again; if it persists, check that the reverse proxy forwards the Authorization header.',
+            'The Proxmox credentials used for Refresh were rejected by AccessForge’s cluster.':'AccessForge’s cluster rejected the Proxmox credentials used for Refresh. Check that both connections target the same cluster.',
+            'The Proxmox credentials used for Refresh need Sys.Modify on / to view sign-in status.':'The Proxmox credentials used for Refresh need Sys.Modify on / to view AccessForge sign-in status.',
         }
         fallback=('AccessForge rejected administrator authentication. Check the Proxmox username, password, and configured cluster; usernames without a realm use @pam.'
                   if response.status_code==401 else 'AccessForge denied checkout administration. Check that the Proxmox account has Sys.Modify on / in the configured cluster.')
@@ -367,7 +512,10 @@ def register_accessforge_plugin(app):
 
     @bp.errorhandler(AccessForgeError)
     def error(exc):
-        return jsonify(error=exc.message),exc.status
+        result = {'error': exc.message}
+        if exc.code:
+            result['code'] = exc.code
+        return jsonify(result), exc.status
 
     @bp.after_request
     def private(response):
@@ -388,34 +536,6 @@ def register_accessforge_plugin(app):
             raise AccessForgeError('A JSON object is required.')
         return data
 
-    def connection(pid):
-        store=ConnectionStore()
-        row=store.get(_owner(),pid)
-        if not row:
-            raise AccessForgeError('Configure an AccessForge administrator connection first.',409)
-        temporary=temporary_connection()
-        if temporary:
-            if temporary['url']!=row['url']:
-                raise AccessForgeError('The AccessForge URL changed. Open Connection and save credentials for the new URL.',409)
-            return store,row,temporary
-        if not row['password_enc']:
-            raise AccessForgeError('Enter AccessForge credentials in Connection for this browser session.',409)
-        return store,row,{'url':row['url'],'username':admin_username(row['username']),'password':decrypt_str(app.secret_key,row['password_enc']),'verify_ssl':bool(row['verify_ssl'])}
-
-    def temporary_connection():
-        encoded=request.headers.get('X-AccessForge-Connection')
-        if encoded is None:
-            return None
-        if len(encoded)>16384:
-            raise AccessForgeError('Connection credentials are too large.',413)
-        try:
-            data=json.loads(unquote(encoded))
-        except (ValueError,TypeError):
-            raise AccessForgeError('Invalid browser-session connection credentials.') from None
-        if not isinstance(data,dict):
-            raise AccessForgeError('Invalid browser-session connection credentials.')
-        return validate_connection(data)
-
     @bp.post('/api/projects/<pid>/accessforge/clipboard/usage')
     @_secure_route(required_roles=['admin'])
     def clipboard_usage(pid):
@@ -426,13 +546,34 @@ def register_accessforge_plugin(app):
             raise AccessForgeError('Provide 1 to 500 VM IDs.')
         _,_,config=connection(pid)
         result=remote(config,'GET','/api/admin/clipboard/usage?vmids='+','.join(map(str,dict.fromkeys(vmids))))
-        cluster=result.get('cluster') or {}
         expected=urlsplit(selected.proxmox_url or '')
-        host=str(cluster.get('host') or '').strip('[]').lower().rstrip('.')
         port=int(getattr(selected,'proxmox_api_port',None) or expected.port or 8006)
-        if host!=(expected.hostname or '').lower().rstrip('.') or int(cluster.get('port') or 0)!=port:
-            raise AccessForgeError('AccessForge is configured for a different Proxmox address. Use the same cluster address in both connections.',409)
+        verify_cluster(result, (expected.hostname or '').lower().rstrip('.'), port)
         return jsonify(usage=result.get('usage') or {})
+
+    @bp.route('/api/projects/<pid>/accessforge/sign-ins/latest', methods=['GET', 'POST'])
+    @_secure_route(required_roles=['admin'])
+    def latest_sign_ins(pid):
+        selected = project(pid)
+        usernames = sorted({canonical_username(name) for credential in (selected.credentials or [])[:selected.instances]
+                            if (name := str(credential.get('username') or '').strip())})
+        expected = urlsplit(selected.proxmox_url or '')
+        host = (expected.hostname or '').lower().rstrip('.')
+        port = int(selected.proxmox_api_port or expected.port or 8006)
+        credentials = body() if request.method == 'POST' else {}
+        username, password = credentials.get('username'), credentials.get('password')
+        if request.method == 'POST' and (not isinstance(username, str) or not 1 <= len(username) <= 128
+                                        or not isinstance(password, str) or not 1 <= len(password) <= 1024):
+            raise AccessForgeError('Provide the Proxmox username and password used in VM Manager.')
+        address = f'[{host}]' if ':' in host else host
+        proxmox = ProxmoxClient(base_url=f'{expected.scheme or "https"}://{address}:{port}',
+                                token=selected.proxmox_api_token or None, username=username, password=password,
+                                verify=selected.proxmox_verify_ssl)
+        try:
+            snapshot = latest_accessforge_sign_ins(pid, usernames, host, port, proxmox)
+        finally:
+            proxmox.close()
+        return jsonify(snapshot)
 
     @bp.route('/api/projects/<pid>/accessforge/connection',methods=['GET','POST','PATCH','DELETE'])
     @_secure_route(required_roles=['admin'])

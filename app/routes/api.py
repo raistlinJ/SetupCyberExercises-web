@@ -16,6 +16,7 @@ import shutil
 import secrets
 import string
 import logging
+import sqlite3
 import copy
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -59,6 +60,10 @@ from ..read_coalescing import coalesce_read, invalidate_reads_for_write
 from ..file_transfer import config_policy, write_policy, read_policy, read_accessforge_metadata
 from ..clipboard_policy import parse_clipboard_policy, validate_clipboard_update
 from ..materials import config_materials, normalize_material_links
+from ..proxy_policy import (
+    editable_proxy_policy, normalize_proxy_config, proxy_restart_policy, proxy_setup_command,
+    proxy_setup_script, validate_default_proxy_translations, validate_proxy_vm,
+)
 
 api_bp = Blueprint("api", __name__)
 LOG = logging.getLogger(__name__)
@@ -2599,14 +2604,30 @@ def instances_refresh_vm(pid: str):
             pass
         return nets
 
-    # Cluster log access is optional and must not prevent normal inventory refreshes.
+    credentials = list(getattr(proj, 'credentials', []) or [])[:instances]
+    users_by_index = {
+        index: _norm_userid(credential.get('username'))
+        for index, credential in enumerate(credentials, 1) if isinstance(credential, dict)
+    }
+    # A sign-in lookup is optional and must not prevent normal inventory refreshes.
     include_last_login = data.get('includeLastLogin') is True
-    last_authentications = {}
+    last_sign_ins = {}
+    last_sign_in_ends = {}
+    login_cluster = None
     if include_last_login:
+        from ..account_checkout import AccessForgeError, latest_accessforge_sign_ins
+
         try:
-            last_authentications = client.last_user_authentications()
-        except Exception:
-            pass
+            expected_cluster = urlsplit(base_url)
+            host = (expected_cluster.hostname or '').lower().rstrip('.')
+            port = expected_cluster.port or int(getattr(proj, 'proxmox_api_port', 8006) or 8006)
+            login_cluster = f'{host}:{port}'
+            indices = {index for index, _ in selected} if selected is not None else users_by_index
+            usernames = sorted({users_by_index.get(index) for index in indices} - {None, ''})
+            sign_ins = latest_accessforge_sign_ins(pid, usernames, host, port, client)
+            last_sign_ins, last_sign_in_ends = sign_ins['latest'], sign_ins['ends']
+        except (AccessForgeError, OSError, sqlite3.Error, ValueError) as exc:
+            LOG.debug('AccessForge sign-in lookup unavailable for project %s (%s)', pid, type(exc).__name__)
 
     # Update statuses
     current = { int((e or {}).get('index', 0)): e for e in (proj.instance_statuses or []) }
@@ -2628,21 +2649,13 @@ def instances_refresh_vm(pid: str):
         previous_details = {str(d.get('name') or '').lower(): d for d in entry.get('vm_details', [])}
 
         # Pre-compute per-instance userid/poolid for access reporting
-        userid = None
-        poolid = None
-        try:
-            creds = list(getattr(proj, 'credentials', []) or [])
-            urec = creds[i-1] if i-1 < len(creds) else None
-            uname = (urec or {}).get('username') or ''
-            if uname:
-                userid = _norm_userid(uname)
-                poolid = _poolid_from_uname(uname)
-        except Exception:
-            userid = None
-            poolid = None
+        userid = users_by_index.get(i) or None
+        poolid = _poolid_from_uname(userid) if userid else None
         if include_last_login:
-            entry['proxmox_login_user'] = userid
-            entry['proxmox_last_login'] = last_authentications.get(userid)
+            entry['accessforge_login_user'] = userid
+            entry['accessforge_login_cluster'] = login_cluster
+            entry['accessforge_last_login'] = last_sign_ins.get(userid)
+            entry['accessforge_last_login_end'] = last_sign_in_ends.get(userid)
         # Mark created if all expected VM names exist; partial -> pending
         count = 0
         found_details = []
@@ -2749,7 +2762,7 @@ def instances_refresh_vm(pid: str):
                     'qemu_agent_validation_state': 'unknown',
                     'lock': str(cfg.get('lock') or '').strip() if isinstance(cfg, dict) else '',
                     'description': str(cfg.get('description') or '').strip() if isinstance(cfg, dict) else '',
-                    'clipboard_policy': parse_clipboard_policy(read_accessforge_metadata(cfg.get('description'))) if isinstance(cfg, dict) and cfg else None,
+                    'clipboard_policy': parse_clipboard_policy(read_accessforge_metadata(cfg.get('description'), default={})) if isinstance(cfg, dict) and cfg else None,
                     'file_transfer_policy': read_policy(cfg.get('description')) if isinstance(cfg, dict) and cfg else None,
                     'pool': pool_val,
                     # Effective access for the instance user (credential username)
@@ -11081,15 +11094,84 @@ def instances_run_startup_cmds(pid: str):
     return jsonify(response_payload)
 
 
+def _selected_proxy_targets(proj, targets):
+    if not isinstance(targets, list) or not targets:
+        raise ValueError('Select at least one CORE gateway VM')
+    vm_configs = {vm.name: vm for vm in proj.vms}
+    seen = set()
+    for target in targets:
+        record = _normalize_project_target(proj, target)
+        if not record or not record['known_config'] or not 1 <= record['index'] <= min(proj.instances, 253):
+            raise ValueError('Select proxy VM rows with an instance index between 1 and 253')
+        index, name = record['index'], record['generated_name']
+        key = (index, name)
+        if key in seen:
+            raise ValueError(f'{name}: select this VM only once')
+        seen.add(key)
+        try:
+            defaults = validate_proxy_vm(vm_configs[record['base_name']])
+            if not defaults:
+                raise ValueError('This VM is not a configured CORE gateway')
+        except ValueError as exc:
+            raise ValueError(f'{name}: {exc}') from exc
+        yield index, name, defaults, target.get('policy')
+
+
+@api_bp.route("/projects/<pid>/proxy-restart/preview", methods=["POST"])
+@_secure_route()
+def preview_proxy_restart(pid):
+    proj = _store().get(pid)
+    if not proj:
+        return jsonify(error='Project not found'), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error='Provide the selected proxy VMs'), 400
+    history = _runtime_store().get_proxy_run_history(pid)
+    results = []
+    try:
+        for index, name, defaults, override in _selected_proxy_targets(proj, body.get('targets')):
+            default_issue = ''
+            try:
+                resolved_defaults = proxy_restart_policy(defaults, None, index)
+            except ValueError as exc:
+                resolved_defaults, default_issue = defaults, str(exc)
+            runs = history.get(name, [])
+            if override is not None:
+                try:
+                    policy = proxy_restart_policy(defaults, override, index)
+                    proxy_setup_command(policy)
+                except ValueError as exc:
+                    raise ValueError(f'{name}: {exc}') from exc
+            else:
+                policy = runs[0]['policy'] if runs else resolved_defaults
+            results.append({
+                'index': index, 'name': name, 'defaults': editable_proxy_policy(resolved_defaults),
+                'policy': editable_proxy_policy(policy), 'has_previous': bool(runs), 'history': runs,
+                'default_issue': default_issue, 'uplink': f"{defaults['router_node']} / {defaults['external_interface']} · 11.0.0.{index}",
+            })
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(targets=results)
+
+
+@api_bp.route("/projects/<pid>/instances/actions/configure_restart_proxy", methods=["POST"])
+@_secure_route()
+def configure_restart_proxy(pid):
+    return instances_run_stored_cmds(pid, restart_proxy=True)
+
+
 @api_bp.route("/projects/<pid>/instances/actions/run_stored_cmds", methods=["POST"])
-def instances_run_stored_cmds(pid: str):
-    _start_job(pid, 'run_stored_cmds')
+def instances_run_stored_cmds(pid: str, restart_proxy: bool = False):
+    if not restart_proxy:
+        _start_job(pid, 'run_stored_cmds')
     s = _store()
     proj = s.get(pid)
     if not proj:
         return jsonify({"error": "Project not found"}), 404
     body = request.get_json(force=True) or {}
     custom_command = body.get('customCommand')
+    if restart_proxy and (custom_command is not None or body.get('validateOnly')):
+        return jsonify({'error': 'Configure and Restart Proxy uses the saved gateway policy'}), 400
     if custom_command is not None:
         if not isinstance(custom_command, str) or not custom_command.strip():
             return jsonify({'error': 'Custom command must be a non-empty string'}), 400
@@ -11254,6 +11336,29 @@ def instances_run_stored_cmds(pid: str):
         return jsonify({"error": "Missing Proxmox URL and credentials (username/password or API token)"}), 400
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "No targets provided"}), 400
+    proxy_commands = {}
+    if restart_proxy:
+        proxy_targets = []
+        proxy_policies = {}
+        try:
+            for index, name, defaults, override in _selected_proxy_targets(proj, targets):
+                if override is None:
+                    raise ValueError(f'{name}: reload VM Manager and review the proxy settings before restarting.')
+                try:
+                    policy = proxy_restart_policy(defaults, override, index)
+                    proxy_commands[index, name] = proxy_setup_command(policy, restart_core=True, script_from_stdin=True)
+                except ValueError as exc:
+                    raise ValueError(f'{name}: {exc}') from exc
+                proxy_policies[index, name] = editable_proxy_policy(policy)
+                proxy_targets.append({'index': index, 'name': name})
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        targets = proxy_targets
+        try:
+            proxy_script = proxy_setup_script()
+        except OSError:
+            return jsonify({'error': 'The server is missing the bundled CORE gateway setup script'}), 503
+        _start_job(pid, 'configure_restart_proxy')
     raw_commands = body.get('commands')
     selected_commands: List[str] = []
 
@@ -11272,7 +11377,7 @@ def instances_run_stored_cmds(pid: str):
     if validate_only:
         selected_commands = []
         override_lookup = {}
-    if custom_command is not None:
+    if custom_command is not None or restart_proxy:
         selected_commands = []
         override_lookup = {}
     selected_commands_filter: Optional[Set[str]] = set(selected_commands) if selected_commands else None
@@ -11636,6 +11741,12 @@ def instances_run_stored_cmds(pid: str):
             pass
         vcfg = next((v for v in (proj.vms or []) if getattr(v, 'name', '') == base), None)
         steps = sanitize_start_command_steps(getattr(vcfg, 'stored_commands', [])) if vcfg else []
+        if restart_proxy:
+            if m['type'] != 'qemu':
+                errors.append({'index': m['index'], 'name': m['name'], 'reason': 'CORE gateways must be QEMU VMs'})
+                return ran, skipped, errors, zip_entries
+            command = proxy_commands[m['index'], m['name']]
+            steps = sanitize_start_command_steps([{'commands': [{'command': command, 'timeout_seconds': 600}]}])
         if custom_command is not None:
             steps = sanitize_start_command_steps([{'commands': [{'command': custom_command, 'timeout_seconds': custom_timeout, 'render_template_variables': custom_render}]}])
         validation_commands = _extract_validation_commands(vcfg)
@@ -11799,7 +11910,11 @@ def instances_run_stored_cmds(pid: str):
                 with command_slots:
                     if _is_cancelled(pid):
                         raise RuntimeError('cancelled')
-                    res = _execute_instance_command(proj, base_url, password, client, m, command_text, timeout_value)
+                    if restart_proxy:
+                        res = client.agent_exec(node=m['node'], vmid=m['vmid'], command=command_text,
+                                                input_data=proxy_script, timeout=timeout_value)
+                    else:
+                        res = _execute_instance_command(proj, base_url, password, client, m, command_text, timeout_value)
                 exitcode = res.get('exitcode', 1)
                 out = res.get('stdout', '') or ''
                 err = res.get('stderr', '') or ''
@@ -12279,6 +12394,15 @@ def instances_run_stored_cmds(pid: str):
                 skipped.extend(local_skipped)
                 errors.extend(local_errors)
                 zip_entries.extend(local_zip_entries)
+    if restart_proxy:
+        applied = {vm['name']: proxy_policies[vm['index'], vm['name']] for vm in ran
+                   if any(cmd.get('exitcode') == 0 for cmd in vm['cmds'])}
+        if applied:
+            try:
+                runtime_store.save_applied_proxy_policies(pid, applied)
+            except (OSError, sqlite3.Error):
+                LOG.exception('Could not save proxy restart history for project %s', pid)
+                errors.append({'reason': 'CORE restarted, but last used proxy settings could not be saved.'})
     for result in ran + errors:
         result['username'] = _instance_username(proj, result.get('index'))
     for entry in zip_entries:
@@ -14364,6 +14488,18 @@ def create_project():
     errs = _validate_project_fields(data)
     if errs:
         return jsonify({"errors": errs}), 400
+    if current_app.config.get('AUTH_ENABLE') and isinstance(data.get("vms"), list) and any(
+            isinstance(vm, dict) and vm.get("proxy_config") for vm in data["vms"]):
+        user = getattr(current_app, 'current_user', lambda: None)() or {}
+        if 'admin' not in {str(role).lower() for role in user.get('roles', [])}:
+            return jsonify({"error": "Only administrators can configure CORE gateway VMs."}), 403
+    if isinstance(data.get("vms"), list):
+        try:
+            for vm in data["vms"]:
+                if isinstance(vm, dict) and vm.get("proxy_config"):
+                    vm["proxy_config"] = validate_default_proxy_translations(validate_proxy_vm(vm))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
     project = Project(id=pid, name=name)
     for key in [
     "proxmox_url", "proxmox_api_port", "proxmox_ssh_port", "proxmox_node", "proxmox_api_token", "proxmox_verify_ssl",
@@ -14419,6 +14555,27 @@ def update_project(pid: str):
     errs = _validate_project_fields(data)
     if errs:
         return jsonify({"errors": errs}), 400
+    if current_app.config.get('AUTH_ENABLE') and isinstance(data.get("vms"), list) and any(
+            isinstance(vm, dict) and (vm.get("proxy_config") or any(
+                item.name == vm.get("name") and getattr(item, "proxy_config", None) for item in proj.vms))
+            for vm in data["vms"]):
+        user = getattr(current_app, 'current_user', lambda: None)() or {}
+        if 'admin' not in {str(role).lower() for role in user.get('roles', [])}:
+            return jsonify({"error": "Only administrators can configure CORE gateway VMs."}), 403
+    if isinstance(data.get("vms"), list):
+        try:
+            for vm in data["vms"]:
+                if isinstance(vm, dict) and vm.get("proxy_config"):
+                    prior = next((item for item in proj.vms if item.name == vm.get("name")), None)
+                    if prior and getattr(prior, "proxy_config", None):
+                        old_bridge = normalize_proxy_config(prior.proxy_config)["uplink_bridge"]
+                        new_bridge = normalize_proxy_config(vm["proxy_config"])["uplink_bridge"]
+                        if old_bridge != new_bridge:
+                            raise ValueError("Disable the CORE gateway role before changing its fixed uplink bridge")
+                    previous = normalize_proxy_config(prior.proxy_config) if prior else {}
+                    vm["proxy_config"] = validate_default_proxy_translations(validate_proxy_vm(vm), previous)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
     # Merge only explicit fields into the latest project when saving.
     fields = {}
     for key in [
@@ -17000,6 +17157,23 @@ def remove_vm(pid: str, name: str):
         return jsonify({"error": "Project not found"}), 404
 
 
+@api_bp.route("/projects/<pid>/vms/<name>/proxy-command", methods=["GET"])
+@_secure_route()
+def get_proxy_command(pid: str, name: str):
+    project = _store().get(pid)
+    vm = next((v for v in (project.vms if project else []) if v.name == name), None)
+    if vm is None:
+        return jsonify({"error": "VM not found"}), 404
+    try:
+        config = validate_proxy_vm(vm)
+        if not config:
+            raise ValueError("This VM is not configured as a CORE gateway")
+        restart_core = request.args.get("restart") == "1"
+        return jsonify({"command": proxy_setup_command(config, restart_core=restart_core), "render_template_variables": True})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @api_bp.route("/projects/<pid>/vms/<name>", methods=["PATCH"])
 @_secure_route()
 def update_vm(pid: str, name: str):
@@ -17014,11 +17188,12 @@ def update_vm(pid: str, name: str):
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
     policy_change = any(key in data for key in ("file_upload", "file_download"))
-    if policy_change or "viewable_to_user" in data:
+    proxy_change = "proxy_config" in data
+    if policy_change or proxy_change or "viewable_to_user" in data:
         if current_app.config.get('AUTH_ENABLE'):
             user = getattr(current_app, 'current_user', lambda: None)() or {}
             if 'admin' not in {str(role).lower() for role in user.get('roles', [])}:
-                return jsonify(error="Only administrators can change VM transfer policy or accessibility."), 403
+                return jsonify(error="Only administrators can change VM transfer policy, accessibility, or CORE gateway policy."), 403
     if policy_change:
         for direction in ("upload", "download"):
             key = "file_" + direction
@@ -17078,6 +17253,28 @@ def update_vm(pid: str, name: str):
         if val not in ["qemu", "lxc"]:
             val = "qemu"
         data["vm_type"] = val
+    if "proxy_config" in data:
+        try:
+            data["proxy_config"] = normalize_proxy_config(data["proxy_config"])
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    if any(key in data for key in ("proxy_config", "internal_network_adaptors", "internet_connected_adaptors", "vm_type")):
+        project = _store().get(pid)
+        current_vm = next((v for v in (project.vms if project else []) if v.name == name), None)
+        if current_vm is None:
+            return jsonify({"error": "VM not found"}), 404
+        prospective = asdict(current_vm)
+        prospective.update(data)
+        try:
+            old_proxy = normalize_proxy_config(getattr(current_vm, "proxy_config", {}))
+            new_proxy = normalize_proxy_config(prospective.get("proxy_config"))
+            if old_proxy and new_proxy and old_proxy["uplink_bridge"] != new_proxy["uplink_bridge"]:
+                raise ValueError("Disable the CORE gateway role before changing its fixed uplink bridge")
+            validate_proxy_vm(prospective)
+            if "proxy_config" in data:
+                data["proxy_config"] = validate_default_proxy_translations(new_proxy, old_proxy)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
     try:
         # Only update fields explicitly provided in the payload to avoid accidental clearing
         fields = {}
@@ -17103,6 +17300,8 @@ def update_vm(pid: str, name: str):
             fields["internal_network_adaptors"] = data.get("internal_network_adaptors")
         if "internet_connected_adaptors" in data:
             fields["internet_connected_adaptors"] = data.get("internet_connected_adaptors")
+        if "proxy_config" in data:
+            fields["proxy_config"] = data.get("proxy_config")
         if "vm_user" in data:
             fields["vm_user"] = data.get("vm_user")
         if "vm_pass" in data:
@@ -18520,9 +18719,9 @@ def _sync_accessforge_metadata(pid, materials_only=False, clipboard_only=False):
             elif requested:
                 # Preserve the other direction from this VM's current policy, not template defaults.
                 if clipboard_only:
-                    policy = read_accessforge_metadata(config.get('description'))
+                    policy = read_accessforge_metadata(config.get('description'), default={})
                     if policy is None:
-                        policy = {'clipboard_to_vm': False, 'clipboard_from_vm': False}
+                        raise ValueError('Repair malformed AccessForge policy JSON in VM Notes before changing clipboard settings')
                 else:
                     policy = read_policy(config.get('description'))
                 if clipboard_only and not policy.get('clipboard_id'):
