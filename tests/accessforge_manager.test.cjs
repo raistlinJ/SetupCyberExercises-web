@@ -19,6 +19,7 @@ async function harness({connected = true, storage = new Map(), user = 'admin', t
       this.classList = {add: name => this.classes.add(name), remove: name => this.classes.delete(name),
         toggle: (name, on) => { on ? this.classes.add(name) : this.classes.delete(name); }};
     }
+    checkValidity() { return true; }
     addEventListener(name, fn) { this.listeners[name] = fn; }
     setAttribute(name, value) { this[name] = value; }
     async fire(name = 'click') { return this.listeners[name]?.({target: this, preventDefault() {}}); }
@@ -308,7 +309,8 @@ test('all checkout actions use direct requests and immediately render the live A
   assert.deepEqual(direct.slice(-2).map(call=>call.url.split('/').at(-1)),['connection','status']);
   assert.match(h.el('af-status').textContent,/Connected as root@pam\. Status updated/);
   await h.el('af-refresh').fire();await h.el('af-checkout-settings').fire();
-  await h.el('af-checkout-form').fire('submit');
+  h.el('af-checkout-verify').checked=true;
+  await h.el('af-checkout-save').fire();
   assert.deepEqual(direct.slice(-2).map(call=>call.url.split('/').at(-1)),['settings','status']);
   assert.equal(direct.at(-2).options.method,'PATCH');
   for(const call of direct)assert.equal(call.options.cache,'no-store');
@@ -608,6 +610,7 @@ test('email settings can be edited before publishing and saved separately from t
   await h.el('af-checkout-settings').fire();
   assert.equal(h.el('af-checkout-form').hidden, true);
   await h.el('af-email-tab').fire('shown.bs.tab');
+  assert.equal(h.el('af-email-form').hidden, false);
   assert.equal(h.el('af-email-host').value, settings.host);
   assert.equal(h.el('af-email-password').value, '');
   assert.equal(h.el('af-email-password-entry').hidden, true);
@@ -626,5 +629,77 @@ test('email settings can be edited before publishing and saved separately from t
   const saved = JSON.parse(patches[0].options.body);
   assert.equal(saved.sender, 'updated@example.org');
   assert.ok(!('password' in saved));
-  assert.equal(h.el('af-email-feedback').textContent, 'Email settings saved.');
+  assert.equal(h.el('af-status').textContent, 'Settings saved.');
+});
+
+test('configured SMTP on older AccessForge shows its status until settings can be read', async () => {
+  const h = await harness();
+  const policy = {...h.snapshot('a'), smtp_configured:true};
+  const error = 'Update AccessForge to manage checkout email settings.';
+  h.override(url => {
+    if (url.endsWith('/status')) return response({checkout:policy});
+    if (url.endsWith('/email-settings')) return response({error}, false);
+  });
+  await h.el('af-checkout-settings').fire();
+  await h.el('af-email-tab').fire('shown.bs.tab');
+  assert.equal(h.el('af-email-form').hidden, true);
+  assert.equal(h.el('af-checkout-save').disabled, true);
+  assert.match(h.el('af-email-feedback').textContent, /SMTP is configured.*Update AccessForge/);
+});
+
+test('Test asks for a recipient and sends the draft without saving or exposing the stored password', async () => {
+  const h = await harness();
+  const saved = {host:'mail.example.org', port:587, sender:'lab@example.org', ssl:false, username:'lab', password_set:true};
+  h.override(url => url.endsWith('/email-settings/test') ? response({sent:true}) :
+    url.endsWith('/email-settings') ? response(saved) : null);
+  await h.el('af-checkout-settings').fire();
+  await h.el('af-email-tab').fire('shown.bs.tab');
+  h.el('af-email-form').reportValidity = () => true;
+  h.el('af-email-recipient').focus = () => {};
+  h.el('af-email-sender').value = 'draft@example.org';
+  await h.el('af-email-test').fire();
+  assert.equal(h.el('af-email-test-form').hidden, false);
+  assert.ok(!h.calls.some(call => call.url.endsWith('/email-settings/test')));
+  h.el('af-email-recipient').value = 'recipient@example.org';
+  await h.el('af-email-test-form').fire('submit');
+  const request = h.calls.find(call => call.url.endsWith('/email-settings/test'));
+  const {recipient, settings} = JSON.parse(request.options.body);
+  assert.equal(recipient, 'recipient@example.org');
+  assert.equal(settings.sender, 'draft@example.org');
+  assert.ok(!('password' in settings));
+  assert.ok(!h.calls.some(call => call.options.method === 'PATCH'));
+  assert.equal(h.el('af-email-test-form').hidden, true);
+  assert.match(h.el('af-email-feedback').textContent, /SMTP server accepted the test email for recipient@example.org/);
+});
+
+test('shared Save keeps both drafts, reports partial failure, and closes after a successful retry', async () => {
+  const h = await harness();
+  const policy = {...h.snapshot('a'), id:'pool', enabled:false, verify_email:false};
+  const mail = {host:'smtp.example.org', port:587, sender:'lab@example.org', ssl:false, username:'', password_set:false};
+  let rejectProject = true, closed = 0;
+  h.window.bootstrap = {Dropdown:{getInstance:()=>null}, Modal:{
+    getOrCreateInstance:()=>({show(){}}), getInstance:()=>({hide(){closed++;}}),
+  }};
+  h.override((url, options) => {
+    if (url.endsWith('/status')) return response({checkout:policy});
+    if (url.endsWith('/email-settings')) {
+      if (options.method === 'PATCH') Object.assign(mail, JSON.parse(options.body));
+      return response(mail);
+    }
+    if (url.endsWith('/settings')) return rejectProject ? response({error:'Could not save policy'}, false) : response({checkout:policy});
+  });
+  await h.el('af-checkout-settings').fire();
+  h.el('af-checkout-verify').checked = true;
+  await h.el('af-email-tab').fire('shown.bs.tab');
+  h.el('af-email-sender').value = 'updated@example.org';
+  await h.el('af-checkout-save').fire();
+  assert.equal(closed, 0);
+  assert.match(h.el('af-checkout-feedback').textContent, /Email settings saved.*Could not save policy/);
+  rejectProject = false;
+  await h.el('af-checkout-save').fire();
+  const writes = h.calls.filter(call => call.options.method === 'PATCH');
+  assert.deepEqual(writes.map(call => call.url.split('/').pop()), ['email-settings','settings','settings']);
+  assert.equal(JSON.parse(writes[2].options.body).verify_email, true);
+  assert.equal(mail.sender, 'updated@example.org');
+  assert.equal(closed, 1);
 });

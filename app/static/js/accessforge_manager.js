@@ -55,7 +55,8 @@
     const unavailable=!pid||busy||loading;
     for(const id of ['af-refresh','af-accounts-button','af-disable-logins','af-reenable-logins','af-relinquish','af-checkout-settings'])el(id).disabled=unavailable||!connected;
     for(const id of ['af-connection-button','af-save-connection','af-disconnect'])el(id).disabled=unavailable;
-    for(const id of ['af-checkout-save','af-checkout-secret','af-checkout-verify'])el(id).disabled=unavailable||!connected;
+    el('af-checkout-save').disabled = unavailable || !connected || emailPending || (el('af-checkout-form').hidden && !emailLoaded);
+    for(const id of ['af-checkout-secret','af-checkout-verify'])el(id).disabled=unavailable||!connected;
     const secretLength=el('af-checkout-secret').value.length;
     const canEnable=snapshot.secret_set===true||secretLength>=8&&secretLength<=256;
     const enableCheckout=el('af-checkout-enabled');
@@ -219,14 +220,19 @@
   },{connection:true}));
   el('af-refresh').addEventListener('click',()=>run((project,revision)=>refresh(project,revision,{summary:true})));
   let emailRevision = 0;
-  let emailLoaded = false;
+  let emailLoaded = false, emailPending = false;
+  let initialEmail, initialProject;
   function emailControls(ready) {
     el('af-email-fields').disabled = !ready;
-    el('af-email-save').disabled = !ready;
+    el('af-email-test').disabled = !ready;
+    el('af-email-send').disabled = !ready;
   }
   function clearEmailSettings() {
     ++emailRevision;
     emailLoaded = false;
+    emailPending = false;
+    closeEmailPrompt();
+    el('af-email-form').hidden = true;
     emailControls(false);
     for (const key of ['host', 'port', 'username', 'sender', 'password'])
       el('af-email-' + key).value = '';
@@ -243,19 +249,15 @@
     el('af-email-password-actions').hidden = !data.password_set;
     el('af-email-password-action').value = data.password_set ? 'keep' : 'replace';
     updateEmailPasswordEntry();
+    initialEmail = JSON.stringify(readEmailSettings());
     emailLoaded = true;
+    el('af-email-form').hidden = false;
     emailControls(true);
   }
-  el('af-project-tab').addEventListener('shown.bs.tab', () => {
-    el('af-email-save').hidden = true;
-    el('af-checkout-save').hidden = el('af-checkout-form').hidden;
-    el('af-checkout-feedback').hidden = false;
-  });
   el('af-email-tab').addEventListener('shown.bs.tab', async () => {
-    el('af-email-save').hidden = false;
-    el('af-checkout-save').hidden = true;
-    el('af-checkout-feedback').hidden = true;
-    if (emailLoaded) return;
+    if (emailLoaded || emailPending) return;
+    emailPending = true;
+    updateControls();
     const project = pid, versionAtOpen = version, revision = ++emailRevision;
     el('af-email-feedback').textContent = 'Loading email settings…';
     try {
@@ -264,8 +266,14 @@
       fillEmailSettings(data);
       el('af-email-feedback').textContent = '';
     } catch (error) {
-      if (current(project, versionAtOpen) && revision === emailRevision)
-        el('af-email-feedback').textContent = error.message;
+      if (!current(project, versionAtOpen) || revision !== emailRevision) return;
+      const status = snapshot.smtp_configured === true ? 'AccessForge reports that SMTP is configured. ' : '';
+      el('af-email-feedback').textContent = status + 'Could not load the email settings. ' + error.message;
+    } finally {
+      if (current(project, versionAtOpen) && revision === emailRevision) {
+        emailPending = false;
+        updateControls();
+      }
     }
   });
   function updateEmailPasswordEntry() {
@@ -277,10 +285,7 @@
     if (!editing) input.value = '';
   }
   el('af-email-password-action').addEventListener('change', updateEmailPasswordEntry);
-  el('af-email-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    if (!emailLoaded || el('af-email-save').disabled) return;
-    const project = pid, versionAtSave = version, revision = ++emailRevision;
+  function readEmailSettings() {
     const payload = {
       host: el('af-email-host').value.trim(), port: Number(el('af-email-port').value),
       sender: el('af-email-sender').value.trim(), username: el('af-email-username').value.trim(),
@@ -290,18 +295,43 @@
     if (action === 'remove') payload.password = '';
     else if (action === 'replace' && el('af-email-password').value)
       payload.password = el('af-email-password').value;
+    return payload;
+  }
+  function closeEmailPrompt() {
+    el('af-email-test-form').hidden = true;
+    el('af-email-test').setAttribute('aria-expanded', 'false');
+    el('af-email-recipient').value = '';
+  }
+  el('af-email-test').addEventListener('click', () => {
+    if (!el('af-email-form').reportValidity()) return;
+    el('af-email-test-form').hidden = false;
+    el('af-email-test').setAttribute('aria-expanded', 'true');
+    el('af-email-recipient').focus();
+  });
+  el('af-email-test-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!emailLoaded || el('af-email-send').disabled || !el('af-email-form').reportValidity()) return;
+    const project = pid, versionAtSend = version, revision = ++emailRevision;
+    const recipient = el('af-email-recipient').value.trim();
     emailControls(false);
-    el('af-email-feedback').textContent = 'Saving email settings…';
+    emailPending = true;
+    updateControls();
+    el('af-email-feedback').textContent = 'Sending test email…';
     try {
-      const data = await api(project, 'email-settings', 'PATCH', payload);
-      if (!current(project, versionAtSave) || revision !== emailRevision) return;
-      fillEmailSettings(data);
-      el('af-checkout-policy-note').textContent = 'Email verification uses AccessForge’s configured mail server.';
-      el('af-email-feedback').textContent = 'Email settings saved.';
+      const result = await api(project, 'email-settings/test', 'POST', {recipient, settings:readEmailSettings()});
+      if (result.sent !== true) throw new Error('AccessForge did not confirm sending the test email.');
+      if (!current(project, versionAtSend) || revision !== emailRevision) return;
+      closeEmailPrompt();
+      el('af-email-feedback').textContent = 'SMTP server accepted the test email for ' + recipient + '.';
     } catch (error) {
-      if (!current(project, versionAtSave) || revision !== emailRevision) return;
-      emailControls(true);
-      el('af-email-feedback').textContent = error.message;
+      if (current(project, versionAtSend) && revision === emailRevision)
+        el('af-email-feedback').textContent = error.message;
+    } finally {
+      if (current(project, versionAtSend) && revision === emailRevision) {
+        emailPending = false;
+        emailControls(true);
+        updateControls();
+      }
     }
   });
   el('af-checkout-settings').addEventListener('click',()=>run(async(project,revision)=>{
@@ -311,27 +341,77 @@
     const unpublished = snapshot.published === false || !snapshot.id;
     el('af-unpublished-note').hidden = !unpublished;
     el('af-checkout-form').hidden = unpublished;
-    el('af-checkout-save').hidden = unpublished;
-    el('af-checkout-feedback').hidden = false;
-    el('af-email-save').hidden = true;
     window.bootstrap?.Tab?.getOrCreateInstance(el('af-project-tab')).show();
     el('af-checkout-enabled').checked=!!snapshot.enabled;el('af-checkout-verify').checked=snapshot.verify_email!==false;el('af-checkout-secret').value='';
     renderPolicy(snapshot.policy);
+    initialProject = JSON.stringify(readProjectSettings());
     el('af-checkout-secret-state').textContent=snapshot.secret_set?'A project secret is set. Leave this field blank to keep it.':'Set a project secret of 8–256 characters before enabling account checkout.';
     el('af-checkout-secret').placeholder=snapshot.secret_set?'Leave blank to keep the current secret':'Set a project secret (8+ characters)';
     el('af-checkout-policy-note').textContent=snapshot.smtp_configured?'Email verification uses AccessForge’s configured mail server.':'Email verification requires SMTP configuration on AccessForge. Turn verification off if it is not needed.';
     checkoutMessage('');message('');window.bootstrap?.Modal.getOrCreateInstance(el('af-checkout-modal'))?.show();
   }));
-  el('af-checkout-form').addEventListener('submit',event=>{event.preventDefault();return run(async(project,revision)=>{
-    if(el('af-checkout-enabled').checked&&snapshot.secret_set!==true&&el('af-checkout-secret').value.length<8)throw new Error('Set a project secret of at least 8 characters before enabling account checkout.');
-    checkoutMessage('Saving checkout settings…');
-    const data=await api(project,'settings','PATCH',{enabled:el('af-checkout-enabled').checked,verify_email:el('af-checkout-verify').checked,secret:el('af-checkout-secret').value,policy:readPolicy()});
-    if(!current(project,revision))return;
-    el('af-checkout-secret').value='';setSnapshot(data.checkout);render();
-    try{const live=await api(project,'status');if(!current(project,revision))return;setSnapshot(live.checkout);render();}
-    catch(error){throw new Error(`Checkout settings saved, but status refresh failed: ${error.message}`);}
-    hideCheckoutSettings();message('Checkout settings saved.');
-  },{settings:true});});
+  function readProjectSettings() {
+    return {
+      enabled: el('af-checkout-enabled').checked, verify_email: el('af-checkout-verify').checked,
+      secret: el('af-checkout-secret').value, policy: readPolicy(),
+    };
+  }
+  function validateTab(formId, tabId) {
+    const form = el(formId);
+    if (form.checkValidity()) return true;
+    window.bootstrap?.Tab?.getOrCreateInstance(el(tabId)).show();
+    form.reportValidity();
+    return false;
+  }
+  function saveSettings(event) {
+    event.preventDefault();
+    if (el('af-checkout-save').disabled) return;
+    const projectSettings = readProjectSettings();
+    const emailSettings = emailLoaded ? readEmailSettings() : null;
+    const saveProject = !el('af-checkout-form').hidden && JSON.stringify(projectSettings) !== initialProject;
+    const saveEmail = emailLoaded && (JSON.stringify(emailSettings) !== initialEmail ||
+      (el('af-email-password-action').value === 'replace' && !el('af-email-password-actions').hidden));
+    if (saveProject && !validateTab('af-checkout-form', 'af-project-tab')) return;
+    if (saveEmail && !validateTab('af-email-form', 'af-email-tab')) return;
+    return run(async (project, revision) => {
+      checkoutMessage('Saving settings…');
+      el('af-settings-body').inert = true;
+      let emailSaved = false;
+      try {
+        if (saveEmail) {
+          const data = await api(project, 'email-settings', 'PATCH', emailSettings);
+          if (!current(project, revision)) return;
+          fillEmailSettings(data);
+          emailSaved = true;
+        }
+        if (saveProject) {
+          const data = await api(project, 'settings', 'PATCH', projectSettings);
+          if (!current(project, revision)) return;
+          el('af-checkout-secret').value = '';
+          initialProject = JSON.stringify(readProjectSettings());
+          setSnapshot(data.checkout);
+          render();
+        }
+      } catch (error) {
+        throw new Error((emailSaved ? 'Email settings saved. Project checkout settings could not be saved. ' : '') + error.message);
+      } finally {
+        el('af-settings-body').inert = false;
+      }
+      hideCheckoutSettings();
+      message('Settings saved.');
+      if (saveProject || (saveEmail && !el('af-checkout-form').hidden)) {
+        try {
+          const live = await api(project, 'status');
+          if (current(project, revision)) { setSnapshot(live.checkout); render(); }
+        } catch (error) {
+          if (current(project, revision)) message('Settings saved. Status refresh failed: ' + error.message, true);
+        }
+      }
+    }, {settings:true});
+  }
+  el('af-checkout-save').addEventListener('click', saveSettings);
+  el('af-checkout-form').addEventListener('submit', saveSettings);
+  el('af-email-form').addEventListener('submit', saveSettings);
   for(const [id,operation,confirmation,progress,success] of [
     ['af-reenable-logins','reenable-logins','Enable the selected accounts for checkout? Apply any password changes through VM Manager first. Existing checkout policy still applies.','Enabling selected accounts…','Selected accounts enabled.'],
     ['af-relinquish','relinquish-accounts','Relinquish the selected accounts? Users will be signed out and their AccessForge access will be disabled until enabled again.','Relinquishing selected accounts…','Selected accounts relinquished. Their AccessForge access remains disabled.'],

@@ -417,6 +417,8 @@ def remote(connection,method,path,data=None):
         raise AccessForgeError('Could not connect to AccessForge. Check the hostname, port, and network access from the SCE-web server.',502) from None
     except requests.RequestException:
         raise AccessForgeError('Could not reach AccessForge. Check its URL and TLS configuration.',502) from None
+    if path == '/api/admin/checkouts/email-settings/test' and response.status_code == 404:
+        raise AccessForgeError('This AccessForge server needs the test email update. No email was sent.', 501)
     if path == '/api/admin/checkouts/email-settings' and response.status_code == 404:
         raise AccessForgeError('Update AccessForge to manage checkout email settings.', 501)
     if path == SIGN_IN_LOOKUP_PATH and response.status_code == 404:
@@ -456,6 +458,7 @@ def remote(connection,method,path,data=None):
             reason=None
         # Relay only known application diagnostics; never arbitrary upstream pages or exception details.
         known_errors={
+            'Could not send email. Check the SMTP connection and credentials.',
             "AccessForge could not verify the configured Proxmox API's TLS certificate. Check VERIFY_SSL and the Proxmox certificate trust on AccessForge.",
             'AccessForge could not establish TLS with the configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, and its TLS configuration.',
             'AccessForge timed out contacting its configured Proxmox API. Check PROXMOX_HOST, PROXMOX_PORT, and network access from the AccessForge container.',
@@ -794,6 +797,16 @@ def register_accessforge_plugin(app):
         if any(key not in result for key in fields):
             raise AccessForgeError('AccessForge returned incomplete email settings.', 502)
         return jsonify({key: result[key] for key in fields})
+
+    @bp.post('/api/projects/<pid>/accessforge/email-settings/test')
+    @_secure_route(required_roles=['admin'])
+    def test_checkout_email(pid):
+        project(pid)
+        _, _, config = connection(pid)
+        result = remote(config, 'POST', '/api/admin/checkouts/email-settings/test', body())
+        if result.get('sent') is not True:
+            raise AccessForgeError('AccessForge did not confirm sending the test email.', 502)
+        return jsonify(sent=True)
 
     @bp.patch('/api/projects/<pid>/accessforge/settings')
     @_secure_route(required_roles=['admin'])

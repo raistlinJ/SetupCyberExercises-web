@@ -889,3 +889,16 @@ def test_email_settings_proxy_hides_password_and_requires_admin(checkout):
             assert result.status_code == 200 and result.json == {**settings, 'password_set':True}
         assert remote.call_args.args[1].endswith('/api/admin/checkouts/email-settings')
         assert remote.call_args.kwargs['json']['password'] == 'replacement'
+
+
+def test_mail_probe_forwards_only_for_admin_and_requires_send_confirmation(checkout):
+    app, admin, _ = checkout
+    route = '/api/projects/lab/accessforge/email-settings/test'
+    assert app.test_client().post(route, json={}).status_code == 401
+    connect(admin)
+    payload = {'recipient':'recipient@example.org', 'settings':{'sender':'draft@example.org'}}
+    with patch('app.account_checkout.requests.request', side_effect=[reply({'sent':True}), reply({})]) as remote:
+        assert admin.post(route, json=payload).json == {'sent':True}
+        assert remote.call_args.args[1].endswith('/api/admin/checkouts/email-settings/test')
+        assert remote.call_args.kwargs['json'] == payload
+        assert admin.post(route, json=payload).status_code == 502
