@@ -585,6 +585,25 @@ def test_blank_secret_preserves_existing_secret_and_missing_pool_requires_publis
     assert result.status_code==409 and 'Accounts → Enable' in result.get_json()['error']
 
 
+def test_enabling_checkout_requires_a_saved_or_new_project_secret(checkout):
+    _,admin,_=checkout;connect(admin)
+    no_secret={**snapshot(), 'enabled':False, 'secret_set':False}
+    with patch('app.account_checkout.requests.request',return_value=reply(no_secret)) as remote:
+        result=admin.patch('/api/projects/lab/accessforge/settings',json={'enabled':True,'secret':''})
+    assert result.status_code==400 and 'Set a project secret' in result.json['error']
+    assert [call.args[0] for call in remote.call_args_list]==['GET']
+
+    with patch('app.account_checkout.requests.request',side_effect=[reply(snapshot()),reply(snapshot())]) as remote:
+        result=admin.patch('/api/projects/lab/accessforge/settings',json={'enabled':True})
+    assert result.status_code==200
+    assert [call.args[0] for call in remote.call_args_list]==['GET','PATCH']
+
+    with patch('app.account_checkout.requests.request',return_value=reply(snapshot())) as remote:
+        result=admin.patch('/api/projects/lab/accessforge/settings',json={'enabled':True,'secret':'new-secret'})
+    assert result.status_code==200
+    assert [call.args[0] for call in remote.call_args_list]==['PATCH']
+
+
 @pytest.mark.parametrize('data',[{'secret':'short'},{'secret':'x'*257},{'secret':None},{'enabled':'true'},{'verify_email':1}])
 def test_invalid_checkout_settings_cannot_reach_accessforge(checkout,data):
     _,admin,_=checkout;connect(admin)
@@ -857,3 +876,16 @@ def test_remote_awaiting_checkout_state_is_preserved_and_synced(checkout):
     assert state['sync_status']=='synced'
     cached=admin.get('/api/projects/lab/accessforge/accounts').json['checkout']['accounts']['student01']
     assert cached['awaiting_checkout'] and cached['login_disabled']
+
+
+def test_email_settings_proxy_hides_password_and_requires_admin(checkout):
+    app, admin, _ = checkout
+    connect(admin)
+    route = '/api/projects/lab/accessforge/email-settings'
+    assert app.test_client().get(route).status_code == 401
+    settings = dict(host='smtp.example', port=587, sender='lab@example.org', username='lab', ssl=False)
+    with patch('app.account_checkout.requests.request', return_value=reply({**settings, 'password_set':True, 'password':'private'})) as remote:
+        for result in (admin.get(route), admin.patch(route, json={**settings, 'password':'replacement'})):
+            assert result.status_code == 200 and result.json == {**settings, 'password_set':True}
+        assert remote.call_args.args[1].endswith('/api/admin/checkouts/email-settings')
+        assert remote.call_args.kwargs['json']['password'] == 'replacement'

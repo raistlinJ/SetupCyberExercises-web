@@ -55,7 +55,12 @@
     const unavailable=!pid||busy||loading;
     for(const id of ['af-refresh','af-accounts-button','af-disable-logins','af-reenable-logins','af-relinquish','af-checkout-settings'])el(id).disabled=unavailable||!connected;
     for(const id of ['af-connection-button','af-save-connection','af-disconnect'])el(id).disabled=unavailable;
-    for(const id of ['af-checkout-save','af-checkout-secret','af-checkout-enabled','af-checkout-verify'])el(id).disabled=unavailable||!connected;
+    for(const id of ['af-checkout-save','af-checkout-secret','af-checkout-verify'])el(id).disabled=unavailable||!connected;
+    const secretLength=el('af-checkout-secret').value.length;
+    const canEnable=snapshot.secret_set===true||secretLength>=8&&secretLength<=256;
+    const enableCheckout=el('af-checkout-enabled');
+    enableCheckout.disabled=unavailable||!connected||!canEnable;
+    if(!canEnable)enableCheckout.checked=false;
     el('af-auto-interval').disabled=!pid||loading;
     el('af-refresh-wrapper').title=connected?'Refresh account status from AccessForge.':'Please authenticate to AccessForge first.';
     const seconds=Number(el('af-auto-interval').value);
@@ -72,10 +77,16 @@
     },seconds*1000);
     updateControls();
   }
-  function status(state){return !state||state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':state.releasing?'Release pending':state.awaiting_checkout?'Available (awaiting checkout)':state.login_disabled?'Disabled':state.email?'Checked out':state.eligible?'Available':'Checkout off';}
+  function status(state){return !state||state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':state.releasing?'Release pending':state.login_disabled&&!state.awaiting_checkout?'Disabled':state.email?'Checked out':snapshot.enabled===false&&state.eligible?'Checkout off (project setting)':state.awaiting_checkout?'Available (awaiting checkout)':state.eligible?'Available':'Checkout off';}
   function syncLabel(state){return !state?'Removed':state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':'Synced';}
   function stamp(value){return value?new Date(value*1000).toLocaleString():'—';}
   function render(){
+    const checkoutState=el('af-checkout-state');
+    checkoutState.hidden=!pid||typeof snapshot.enabled!=='boolean';
+    if(!checkoutState.hidden){
+      checkoutState.className=`alert ${snapshot.enabled?'alert-success':'alert-warning'} py-2 small mb-3`;
+      checkoutState.textContent=snapshot.enabled?'Project checkout is on. Enabled accounts can be checked out according to the checkout policy.':'Project checkout is off. Enabled accounts cannot be checked out. Turn on “Enable account checkout for this project” in Checkout settings.';
+    }
     const marked=new Set(accounts.filter(account=>snapshot.accounts?.[account.username]?.eligible).map(account=>account.username));
     selected=new Set([...selected].filter(username=>marked.has(username)));
     const filter=el('af-filter').value;let match=text=>text.toLowerCase().includes(filter.toLowerCase()),invalid=false;
@@ -207,10 +218,103 @@
     hideConnection();await load();message('Disconnected. Published accounts remain in AccessForge.');
   },{connection:true}));
   el('af-refresh').addEventListener('click',()=>run((project,revision)=>refresh(project,revision,{summary:true})));
+  let emailRevision = 0;
+  let emailLoaded = false;
+  function emailControls(ready) {
+    el('af-email-fields').disabled = !ready;
+    el('af-email-save').disabled = !ready;
+  }
+  function clearEmailSettings() {
+    ++emailRevision;
+    emailLoaded = false;
+    emailControls(false);
+    for (const key of ['host', 'port', 'username', 'sender', 'password'])
+      el('af-email-' + key).value = '';
+    el('af-email-password-actions').hidden = true;
+    el('af-email-password-entry').hidden = true;
+    el('af-email-password').disabled = true;
+    el('af-email-feedback').textContent = '';
+  }
+  function fillEmailSettings(data) {
+    for (const key of ['host', 'port', 'sender', 'username'])
+      el('af-email-' + key).value = data[key];
+    el('af-email-tls').value = data.ssl ? 'ssl' : 'starttls';
+    el('af-email-password').value = '';
+    el('af-email-password-actions').hidden = !data.password_set;
+    el('af-email-password-action').value = data.password_set ? 'keep' : 'replace';
+    updateEmailPasswordEntry();
+    emailLoaded = true;
+    emailControls(true);
+  }
+  el('af-project-tab').addEventListener('shown.bs.tab', () => {
+    el('af-email-save').hidden = true;
+    el('af-checkout-save').hidden = el('af-checkout-form').hidden;
+    el('af-checkout-feedback').hidden = false;
+  });
+  el('af-email-tab').addEventListener('shown.bs.tab', async () => {
+    el('af-email-save').hidden = false;
+    el('af-checkout-save').hidden = true;
+    el('af-checkout-feedback').hidden = true;
+    if (emailLoaded) return;
+    const project = pid, versionAtOpen = version, revision = ++emailRevision;
+    el('af-email-feedback').textContent = 'Loading email settings…';
+    try {
+      const data = await api(project, 'email-settings');
+      if (!current(project, versionAtOpen) || revision !== emailRevision) return;
+      fillEmailSettings(data);
+      el('af-email-feedback').textContent = '';
+    } catch (error) {
+      if (current(project, versionAtOpen) && revision === emailRevision)
+        el('af-email-feedback').textContent = error.message;
+    }
+  });
+  function updateEmailPasswordEntry() {
+    const editing = el('af-email-password-action').value === 'replace';
+    const input = el('af-email-password');
+    el('af-email-password-entry').hidden = !editing;
+    input.disabled = !editing;
+    input.required = editing && !el('af-email-password-actions').hidden;
+    if (!editing) input.value = '';
+  }
+  el('af-email-password-action').addEventListener('change', updateEmailPasswordEntry);
+  el('af-email-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!emailLoaded || el('af-email-save').disabled) return;
+    const project = pid, versionAtSave = version, revision = ++emailRevision;
+    const payload = {
+      host: el('af-email-host').value.trim(), port: Number(el('af-email-port').value),
+      sender: el('af-email-sender').value.trim(), username: el('af-email-username').value.trim(),
+      ssl: el('af-email-tls').value === 'ssl',
+    };
+    const action = el('af-email-password-action').value;
+    if (action === 'remove') payload.password = '';
+    else if (action === 'replace' && el('af-email-password').value)
+      payload.password = el('af-email-password').value;
+    emailControls(false);
+    el('af-email-feedback').textContent = 'Saving email settings…';
+    try {
+      const data = await api(project, 'email-settings', 'PATCH', payload);
+      if (!current(project, versionAtSave) || revision !== emailRevision) return;
+      fillEmailSettings(data);
+      el('af-checkout-policy-note').textContent = 'Email verification uses AccessForge’s configured mail server.';
+      el('af-email-feedback').textContent = 'Email settings saved.';
+    } catch (error) {
+      if (!current(project, versionAtSave) || revision !== emailRevision) return;
+      emailControls(true);
+      el('af-email-feedback').textContent = error.message;
+    }
+  });
   el('af-checkout-settings').addEventListener('click',()=>run(async(project,revision)=>{
     message('Loading checkout settings…');const data=await api(project,'status');if(!current(project,revision))return;
     setSnapshot(data.checkout);render();
-    if(snapshot.published===false||!snapshot.id)throw new Error('Use Accounts → Enable to publish at least one account before configuring checkout settings.');
+    clearEmailSettings();
+    const unpublished = snapshot.published === false || !snapshot.id;
+    el('af-unpublished-note').hidden = !unpublished;
+    el('af-checkout-form').hidden = unpublished;
+    el('af-checkout-save').hidden = unpublished;
+    el('af-checkout-feedback').hidden = false;
+    el('af-email-save').hidden = true;
+    window.bootstrap?.Tab?.getOrCreateInstance(el('af-project-tab')).show();
     el('af-checkout-enabled').checked=!!snapshot.enabled;el('af-checkout-verify').checked=snapshot.verify_email!==false;el('af-checkout-secret').value='';
     renderPolicy(snapshot.policy);
     el('af-checkout-secret-state').textContent=snapshot.secret_set?'A project secret is set. Leave this field blank to keep it.':'Set a project secret of 8–256 characters before enabling account checkout.';
@@ -219,6 +323,7 @@
     checkoutMessage('');message('');window.bootstrap?.Modal.getOrCreateInstance(el('af-checkout-modal'))?.show();
   }));
   el('af-checkout-form').addEventListener('submit',event=>{event.preventDefault();return run(async(project,revision)=>{
+    if(el('af-checkout-enabled').checked&&snapshot.secret_set!==true&&el('af-checkout-secret').value.length<8)throw new Error('Set a project secret of at least 8 characters before enabling account checkout.');
     checkoutMessage('Saving checkout settings…');
     const data=await api(project,'settings','PATCH',{enabled:el('af-checkout-enabled').checked,verify_email:el('af-checkout-verify').checked,secret:el('af-checkout-secret').value,policy:readPolicy()});
     if(!current(project,revision))return;
@@ -248,7 +353,7 @@
     const results=payload.usernames.map(username=>{const row=returned.get(canonical(username));return {username,success:row?.success===true?true:row?.success===false||operationError?false:null,error:row?.error||operationError||(!row?'AccessForge did not return a result for this account.':'')};});
     render();
     const failures=results.filter(row=>row.success!==true);
-    const text=operationError||(failures.length?failures.map(row=>`${row.username}: ${row.error||'Operation not confirmed.'}`).join(' '):success);
+    const text=operationError||(failures.length?failures.map(row=>`${row.username}: ${row.error||'Operation not confirmed.'}`).join(' '):success+(operation==='reenable-logins'&&snapshot.enabled===false?' Project checkout is off; turn it on in Checkout settings to allow checkouts.':''));
     message(text+(refreshError?` Status refresh failed: ${refreshError}`:''),!!operationError||!!failures.length||!!refreshError);
     showOperationSummary(operation==='reenable-logins'?'Enable':operation==='disable-logins'?'Disable':'Relinquish',results,refreshError);
   }));
@@ -265,7 +370,8 @@
   el('af-operation-summary').addEventListener('show.bs.modal',()=>{dialogOpen=true;updateControls();});
   el('af-operation-summary').addEventListener('hidden.bs.modal',()=>{dialogOpen=false;updateControls();});
   el('af-checkout-modal').addEventListener('show.bs.modal',()=>{dialogOpen=true;checkoutMessage('');updateControls();});
-  el('af-checkout-modal').addEventListener('hidden.bs.modal',()=>{dialogOpen=false;el('af-checkout-secret').value='';updateControls();});
+  el('af-checkout-modal').addEventListener('hidden.bs.modal',()=>{dialogOpen=false;clearEmailSettings();el('af-checkout-secret').value='';updateControls();});
+  el('af-checkout-secret').addEventListener('input',updateControls);
   el('af-show-password').addEventListener('click',()=>{
     const show=el('af-password').type==='password';el('af-password').type=show?'text':'password';
     el('af-show-password').setAttribute('aria-pressed',String(show));el('af-show-password').setAttribute('aria-label',show?'Hide password':'Show password');el('af-show-password').title=show?'Hide password':'Show password';

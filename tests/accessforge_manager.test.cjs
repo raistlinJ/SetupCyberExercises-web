@@ -249,6 +249,44 @@ test('checkout settings load fresh policy, pause Auto, and send the secret witho
   assert.ok(!h.calls.some(call=>call.url.endsWith('/settings')));
 });
 
+test('project checkout state stays distinct from enabled account status', async () => {
+  const h = await harness();
+  const off = {...h.snapshot('a'), id:'pool', enabled:false, accounts:{'student-a':{eligible:true,sync_status:'synced',login_disabled:false}}};
+  h.override(url => url.endsWith('/status') ? response({checkout:off}) : null);
+  await h.el('af-refresh').fire();
+  assert.equal(h.el('af-checkout-state').hidden, false);
+  assert.match(h.el('af-checkout-state').textContent, /Project checkout is off.*Enabled accounts cannot be checked out/);
+  assert.match(h.el('af-accounts').innerHTML, /Checkout off \(project setting\)/);
+  h.el('af-select-all').checked=true; await h.el('af-select-all').fire('change');
+  await h.el('af-reenable-logins').fire();
+  assert.match(h.el('af-status').textContent, /Project checkout is off/);
+  const on = {...off, enabled:true};
+  h.pushCheckout('a', on);
+  assert.match(h.el('af-checkout-state').textContent, /Project checkout is on/);
+  assert.match(h.el('af-accounts').innerHTML, /Available/);
+});
+
+test('project checkout cannot be selected until a valid new secret is entered', async () => {
+  const h=await harness(), policy={...h.snapshot('a'),id:'pool',enabled:false,secret_set:false};
+  h.override(url=>url.endsWith('/status')?response({checkout:policy}):null);
+  await h.el('af-checkout-settings').fire();
+  assert.equal(h.el('af-checkout-enabled').disabled,true);
+  h.el('af-checkout-secret').value='short';await h.el('af-checkout-secret').fire('input');
+  assert.equal(h.el('af-checkout-enabled').disabled,true);
+  h.el('af-checkout-secret').value='new-secret';await h.el('af-checkout-secret').fire('input');
+  assert.equal(h.el('af-checkout-enabled').disabled,false);
+  h.el('af-checkout-enabled').checked=true;
+  h.el('af-checkout-secret').value='';await h.el('af-checkout-secret').fire('input');
+  assert.equal(h.el('af-checkout-enabled').disabled,true);
+  assert.equal(h.el('af-checkout-enabled').checked,false);
+  h.el('af-checkout-secret').value='new-secret';await h.el('af-checkout-secret').fire('input');
+  h.el('af-checkout-enabled').checked=true;
+  await h.el('af-checkout-form').fire('submit');
+  const saved=h.calls.find(call=>call.url.endsWith('/settings'));
+  assert.equal(JSON.parse(saved.options.body).enabled,true);
+  assert.equal(JSON.parse(saved.options.body).secret,'new-secret');
+});
+
 test('all checkout actions use direct requests and immediately render the live AccessForge response',async()=>{
   const h=await harness(),direct=[],before=h.calls.length;
   let live={...h.snapshot('a'),id:'pool',enabled:true,verify_email:false,secret_set:true,smtp_configured:true,
@@ -561,4 +599,32 @@ test('awaiting checkout stays available while AccessForge login is gated',async(
   await h.el('af-refresh').fire();
   assert.match(h.el('af-accounts').innerHTML,/>Disabled<\/td>/);
   assert.match(h.el('af-refresh-results').innerHTML,/Awaiting checkout: Yes → No/);
+});
+
+test('email settings can be edited before publishing and saved separately from the pool', async () => {
+  const h = await harness();
+  const settings = {host:'smtp.example', port:587, sender:'lab@example.org', ssl:false, username:'sender', password_set:true};
+  h.override(url => url.endsWith('/email-settings') ? response(settings) : null);
+  await h.el('af-checkout-settings').fire();
+  assert.equal(h.el('af-checkout-form').hidden, true);
+  await h.el('af-email-tab').fire('shown.bs.tab');
+  assert.equal(h.el('af-email-host').value, settings.host);
+  assert.equal(h.el('af-email-password').value, '');
+  assert.equal(h.el('af-email-password-entry').hidden, true);
+  const action = h.el('af-email-password-action');
+  action.value = 'replace'; await action.fire('change');
+  assert.equal(h.el('af-email-password-entry').hidden, false);
+  h.el('af-email-password').value = 'discarded-replacement';
+  action.value = 'keep'; await action.fire('change');
+  assert.equal(h.el('af-email-password').value, '');
+  assert.equal(h.el('af-email-password-entry').hidden, true);
+  h.el('af-email-sender').value = 'updated@example.org';
+  await h.el('af-email-form').fire('submit');
+  const patches = h.calls.filter(call => call.options.method === 'PATCH');
+  assert.equal(patches.length, 1);
+  assert.ok(patches[0].url.endsWith('/email-settings'));
+  const saved = JSON.parse(patches[0].options.body);
+  assert.equal(saved.sender, 'updated@example.org');
+  assert.ok(!('password' in saved));
+  assert.equal(h.el('af-email-feedback').textContent, 'Email settings saved.');
 });

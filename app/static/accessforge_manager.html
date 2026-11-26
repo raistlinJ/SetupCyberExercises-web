@@ -82,6 +82,7 @@
   <a id="af-admin-link" class="btn btn-sm btn-outline-primary d-none" target="_blank" rel="noopener noreferrer">Manage in AccessForge</a>
   <a id="af-student-link" class="btn btn-sm btn-outline-secondary d-none" target="_blank" rel="noopener noreferrer">Checkout page</a>
 </div>
+<div id="af-checkout-state" class="alert py-2 small mb-3" role="status" hidden></div>
 <p id="af-project" class="fw-semibold mb-1">Select a project.</p>
 <div id="af-status" role="status" aria-live="polite" class="small mb-2"></div>
 <p id="af-snapshot" class="small text-muted">No status requested.</p>
@@ -111,10 +112,19 @@
   </div>
 </form></div></div></div>
 <div class="modal fade" id="af-checkout-modal" tabindex="-1" aria-labelledby="af-checkout-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
-<form id="af-checkout-form" class="d-flex flex-column overflow-hidden">
+
   <div class="modal-header"><h5 id="af-checkout-title" class="modal-title">Checkout settings</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
   <div class="modal-body">
-    <div class="form-check mb-3"><input id="af-checkout-enabled" class="form-check-input" type="checkbox"><label for="af-checkout-enabled" class="form-check-label">Enable account checkout</label></div>
+    <div class="nav nav-tabs mb-3" role="tablist" aria-label="Checkout settings">
+      <button type="button" class="nav-link active" id="af-project-tab" data-bs-toggle="tab" data-bs-target="#af-project-pane" role="tab" aria-controls="af-project-pane" aria-selected="true">Project checkout</button>
+      <button type="button" class="nav-link" id="af-email-tab" data-bs-toggle="tab" data-bs-target="#af-email-pane" role="tab" aria-controls="af-email-pane" aria-selected="false">Email settings</button>
+    </div>
+    <div class="tab-content">
+    <div class="tab-pane active" id="af-project-pane" role="tabpanel" aria-labelledby="af-project-tab">
+    <p id="af-unpublished-note" hidden>Use Accounts → Enable to publish an account before configuring project checkout.</p>
+    <form id="af-checkout-form">
+    <div class="form-check mb-1"><input id="af-checkout-enabled" class="form-check-input" type="checkbox"><label for="af-checkout-enabled" class="form-check-label">Enable account checkout for this project</label></div>
+    <p class="form-text mb-3">Accounts can be enabled individually, but students cannot check them out until this project setting is on.</p>
     <div class="form-check mb-3"><input id="af-checkout-verify" class="form-check-input" type="checkbox"><label for="af-checkout-verify" class="form-check-label">Require email verification</label></div>
     <label for="af-checkout-secret" class="form-label">Project secret</label>
     <input id="af-checkout-secret" type="password" class="form-control" autocomplete="new-password" minlength="8" maxlength="256" placeholder="Set a project secret (8+ characters)">
@@ -137,13 +147,40 @@
       <p class="form-text mb-0 mt-3">Limits and delays apply to new account checkouts in this project. 0 means no limit or delay. Global delay covers all networks in this project. Recovering an assignment does not use another slot or restart delays, but must meet the email and allowed-network rules. Administrator assignments bypass these restrictions.</p>
     </fieldset>
     <p id="af-checkout-policy-note" class="small text-muted mb-0"></p>
+    </form></div>
+    <div class="tab-pane" id="af-email-pane" role="tabpanel" aria-labelledby="af-email-tab">
+      <p>These settings control verification emails for all projects on this AccessForge server.</p>
+      <form id="af-email-form"><fieldset id="af-email-fields" class="row g-3" disabled>
+        <div class="col-sm-8"><label for="af-email-host" class="form-label">SMTP host</label><input id="af-email-host" class="form-control" required></div>
+        <div class="col-sm-4"><label for="af-email-port" class="form-label">Port</label><input id="af-email-port" class="form-control" type="number" min="1" max="65535" required></div>
+        <div class="col-sm-6"><label for="af-email-sender" class="form-label">Sender address</label><input id="af-email-sender" type="email" class="form-control" required></div>
+        <div class="col-sm-6"><label for="af-email-tls" class="form-label">Connection security</label><select id="af-email-tls" class="form-select"><option value="starttls">STARTTLS</option><option value="ssl">Implicit TLS</option></select></div>
+        <div class="col-sm-6"><label for="af-email-username" class="form-label">SMTP username</label><input id="af-email-username" class="form-control"></div>
+        <div class="col-sm-6">
+          <div id="af-email-password-actions" hidden>
+            <label for="af-email-password-action" class="form-label">Saved SMTP password</label>
+            <select id="af-email-password-action" class="form-select">
+              <option value="keep">Keep saved password</option>
+              <option value="replace">Replace password</option>
+              <option value="remove">Remove saved password</option>
+            </select>
+          </div>
+          <div id="af-email-password-entry" hidden>
+            <label for="af-email-password" class="form-label">New SMTP password</label>
+            <input id="af-email-password" type="password" class="form-control" autocomplete="new-password" disabled>
+          </div>
+        </div>
+      </fieldset></form>
+      <div id="af-email-feedback" role="status" class="small mt-2"></div>
+    </div></div>
   </div>
   <div class="modal-footer">
     <div id="af-checkout-feedback" class="me-auto small" role="status" aria-live="polite"></div>
     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hide</button>
-    <button id="af-checkout-save" type="submit" class="btn btn-primary">Save checkout settings</button>
+    <button id="af-checkout-save" form="af-checkout-form" type="submit" class="btn btn-primary">Save checkout settings</button>
+    <button id="af-email-save" form="af-email-form" type="submit" class="btn btn-primary" hidden disabled>Save email settings</button>
   </div>
-</form></div></div></div>
+</div></div></div>
 <div class="modal fade" id="af-refresh-summary" tabindex="-1" aria-labelledby="af-refresh-summary-title" aria-hidden="true"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
   <div class="modal-header"><h5 id="af-refresh-summary-title" class="modal-title">AccessForge refresh summary</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
   <div class="modal-body">
@@ -167,6 +204,6 @@
 <script src="/static/js/shell.js?v=20261111-project-chooser"></script>
 <script src="/static/js/creds.js"></script>
 <script src="/static/js/row_tags.js?v=20261106-accessforge-tags"></script>
-<script src="/static/js/checkout_state.js?v=20261107-neutral-wording"></script>
-<script src="/static/js/accessforge_manager.js?v=20261107-neutral-wording"></script>
+<script src="/static/js/checkout_state.js?v=20261126-checkout-state"></script>
+<script src="/static/js/accessforge_manager.js?v=20261126-saved-mail-password"></script>
 </body></html>

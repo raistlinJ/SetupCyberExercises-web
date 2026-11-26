@@ -417,6 +417,8 @@ def remote(connection,method,path,data=None):
         raise AccessForgeError('Could not connect to AccessForge. Check the hostname, port, and network access from the SCE-web server.',502) from None
     except requests.RequestException:
         raise AccessForgeError('Could not reach AccessForge. Check its URL and TLS configuration.',502) from None
+    if path == '/api/admin/checkouts/email-settings' and response.status_code == 404:
+        raise AccessForgeError('Update AccessForge to manage checkout email settings.', 501)
     if path == SIGN_IN_LOOKUP_PATH and response.status_code == 404:
         raise AccessForgeError('The running AccessForge server does not have the sign-in API. Update AccessForge and restart its application container.', 501)
     if response.status_code in (401,403):
@@ -781,6 +783,18 @@ def register_accessforge_plugin(app):
             results=[{**row,'success':row.get('released') is True} for row in results]
         return jsonify(checkout=checkout_summary(selected),results=results)
 
+    @bp.route('/api/projects/<pid>/accessforge/email-settings', methods=['GET', 'PATCH'])
+    @_secure_route(required_roles=['admin'])
+    def email_settings(pid):
+        project(pid)
+        _, _, config = connection(pid)
+        payload = body() if request.method == 'PATCH' else None
+        result = remote(config, request.method, '/api/admin/checkouts/email-settings', payload)
+        fields = ('host', 'port', 'sender', 'username', 'ssl', 'password_set')
+        if any(key not in result for key in fields):
+            raise AccessForgeError('AccessForge returned incomplete email settings.', 502)
+        return jsonify({key: result[key] for key in fields})
+
     @bp.patch('/api/projects/<pid>/accessforge/settings')
     @_secure_route(required_roles=['admin'])
     def checkout_settings(pid):
@@ -804,6 +818,10 @@ def register_accessforge_plugin(app):
         if not payload:
             raise AccessForgeError('Provide checkout settings to save.')
         try:
+            if payload.get('enabled') is True and 'secret' not in payload:
+                current=remote(config,'GET','/api/admin/checkouts/pools/'+store.pool_id(pid))
+                if current.get('secret_set') is not True:
+                    raise AccessForgeError('Set a project secret before enabling account checkout.')
             result=remote(config,'PATCH','/api/admin/checkouts/pools/'+store.pool_id(pid),payload)
         except AccessForgeError as exc:
             if exc.status==404 and exc.message=='Checkout pool not found.':

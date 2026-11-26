@@ -81,3 +81,15 @@ test('awaiting checkout icons indicate availability and explain the disabled log
   assert.match(api.icon(state,'alice'),/text-danger/);
   assert.match(api.icon(state,'alice'),/AccessForge login disabled/);
 });
+
+test('enabled accounts do not appear available while project checkout is off',()=>{
+  const {api}=harness();
+  const checkout={enabled:false,accounts:{alice:{eligible:true,sync_status:'synced',login_disabled:false},bob:{eligible:true,sync_status:'synced',login_disabled:true,awaiting_checkout:true}}};
+  for(const username of ['alice','bob']){
+    assert.match(api.label(checkout,username),/Project checkout is off/);
+    assert.match(api.icon(checkout,username),/text-warning/);
+  }
+  checkout.enabled=true;
+  assert.match(api.label(checkout,'alice'),/Available according to checkout policy/);
+  assert.match(api.label(checkout,'bob'),/Available · AccessForge login requires checkout/);
+});
