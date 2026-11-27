@@ -703,3 +703,27 @@ test('shared Save keeps both drafts, reports partial failure, and closes after a
   assert.equal(mail.sender, 'updated@example.org');
   assert.equal(closed, 1);
 });
+
+test('a row opens only its own history, escapes names, and discards results after a project switch', async () => {
+  const h = await harness();
+  const table = h.el('af-accounts');
+  assert.match(table.innerHTML, /data-history-user="student-a"/);
+  for (const count of [0, 8]) {
+    h.pushCheckout('a', {accounts:{'student-a':{eligible:true, history_count:count}}});
+    assert.ok(table.innerHTML.includes('>View history (' + count + ')</button>'));
+  }
+  const click = () => table.listeners.click({target:{closest:()=>({dataset:{historyUser:'student-a'}})}});
+  const history = [{name:'Test <user>',email:'test@example.org',checked_out_at:123}];
+  h.override(url => url.endsWith('/accounts/student-a/history') ? response({history}) : null);
+  await click();
+  assert.match(h.el('af-history-entries').innerHTML, /Test &lt;user&gt;/);
+  assert.ok(table.innerHTML.includes('>View history (1)</button>'));
+  const pending = deferred();
+  h.override(url => url.endsWith('/history') ? pending.promise : null);
+  const request = click();
+  await h.select('b');
+  pending.resolve(response({history}));
+  await request;
+  assert.equal(h.el('af-history-table').hidden, true);
+  assert.equal(h.el('af-history-entries').innerHTML, '');
+});

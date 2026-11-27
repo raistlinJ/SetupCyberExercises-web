@@ -178,6 +178,9 @@ def safe_summary(data):
         if not isinstance(username,str) or len(username)>128 or not isinstance(state,dict):
             raise AccessForgeError('Invalid AccessForge account status.',502)
         clean['accounts'][username]={key:state[key] for key in fields if key in state}
+        count = state.get('history_count')
+        if type(count) is int and 0 <= count <= 8:
+            clean['accounts'][username]['history_count'] = count
     return clean
 
 
@@ -417,6 +420,8 @@ def remote(connection,method,path,data=None):
         raise AccessForgeError('Could not connect to AccessForge. Check the hostname, port, and network access from the SCE-web server.',502) from None
     except requests.RequestException:
         raise AccessForgeError('Could not reach AccessForge. Check its URL and TLS configuration.',502) from None
+    if path.endswith('/history') and response.status_code == 404 and not response.headers.get('Content-Type', '').startswith('application/json'):
+        raise AccessForgeError('Update AccessForge to view checkout history.', 501)
     if path == '/api/admin/checkouts/email-settings/test' and response.status_code == 404:
         raise AccessForgeError('This AccessForge server needs the test email update. No email was sent.', 501)
     if path == '/api/admin/checkouts/email-settings' and response.status_code == 404:
@@ -785,6 +790,21 @@ def register_accessforge_plugin(app):
         if operation=='relinquish-accounts':
             results=[{**row,'success':row.get('released') is True} for row in results]
         return jsonify(checkout=checkout_summary(selected),results=results)
+
+    @bp.get('/api/projects/<pid>/accessforge/accounts/<username>/history')
+    @_secure_route(required_roles=['admin'])
+    def account_history(pid, username):
+        selected = project(pid)
+        if not any(account.get('username') == username for account in selected.credentials or []):
+            raise AccessForgeError('Unknown project account.', 404)
+        store, _, config = connection(pid)
+        path = f'/api/admin/checkouts/pools/{store.pool_id(pid)}/accounts/{quote(canonical_username(username), safe="")}/history'
+        result = remote(config, 'GET', path)
+        entries = result.get('history')
+        if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries[:8]):
+            raise AccessForgeError('AccessForge returned invalid checkout history.', 502)
+        fields = ('email', 'name', 'checked_out_at', 'checkout_ip', 'relinquished_at')
+        return jsonify(history=[{field: entry.get(field) for field in fields} for entry in entries[:8]])
 
     @bp.route('/api/projects/<pid>/accessforge/email-settings', methods=['GET', 'PATCH'])
     @_secure_route(required_roles=['admin'])

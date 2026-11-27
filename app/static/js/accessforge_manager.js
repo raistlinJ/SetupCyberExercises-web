@@ -1,7 +1,7 @@
 (function(){
   const el=id=>document.getElementById(id);
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const columnIds=['username','status','name','email','checked_out_at','checkout_ip','relinquished_at'];
+  const columnIds=['username','status','name','email','checked_out_at','checkout_ip','relinquished_at','history'];
   const rowTags=window.RowTags.create('accessforge');
   const tagKey=username=>JSON.stringify([pid,username]);
   const intervals=[0,15,30,60,300];
@@ -81,6 +81,10 @@
   function status(state){return !state||state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':state.releasing?'Release pending':state.login_disabled&&!state.awaiting_checkout?'Disabled':state.email?'Checked out':snapshot.enabled===false&&state.eligible?'Checkout off (project setting)':state.awaiting_checkout?'Available (awaiting checkout)':state.eligible?'Available':'Checkout off';}
   function syncLabel(state){return !state?'Removed':state.sync_status==='unknown'?'Unknown':state.sync_status==='not_synced'?'Not synced':state.sync_status==='not_enabled'?'Not enabled':'Synced';}
   function stamp(value){return value?new Date(value*1000).toLocaleString():'—';}
+  function historyButton(username, count) {
+    const suffix = Number.isInteger(count) ? ` (${count})` : '';
+    return `<button type="button" class="btn btn-sm btn-outline-secondary" data-history-user="${esc(username)}" aria-label="View checkout history for ${esc(username)}${suffix}" ${connected ? '' : 'disabled'}>View history${suffix}</button>`;
+  }
   function render(){
     const checkoutState=el('af-checkout-state');
     checkoutState.hidden=!pid||typeof snapshot.enabled!=='boolean';
@@ -99,7 +103,7 @@
       return marked.has(a.username)&&rowTags.matches(tagKey(a.username))&&(!el('af-filter-selected').checked||selected.has(a.username))&&match([a.username,status(state),state?.name,state?.email,state?.checkout_ip,stamp(state?.checked_out_at||state?.assigned_at),stamp(state?.relinquished_at)].join(' '));
     }).map(a=>{
       const state=snapshot.accounts?.[a.username],badges=`<span class="row-tag-badges">${rowTags.badges(tagKey(a.username))}</span>`;
-      return `<tr><td><input type="checkbox" class="form-check-input af-account" data-user="${esc(a.username)}" aria-label="Select ${esc(a.username)}" ${selected.has(a.username)?'checked':''}>${columns.username===false?badges:''}</td>${cell('username',esc(a.username)+badges)}${cell('status',status(state)+(state?.password_rotated?'<div class="small text-muted">Legacy password differs; reset before re-enabling</div>':''))}${cell('name',esc(state?.name||'—'))}${cell('email',esc(state?.email||'—'))}${cell('checked_out_at',esc(stamp(state?.checked_out_at||state?.assigned_at)))}${cell('checkout_ip',esc(state?.checkout_ip||'—'))}${cell('relinquished_at',esc(stamp(state?.relinquished_at)))}</tr>`;
+      return `<tr><td><input type="checkbox" class="form-check-input af-account" data-user="${esc(a.username)}" aria-label="Select ${esc(a.username)}" ${selected.has(a.username)?'checked':''}>${columns.username===false?badges:''}</td>${cell('username',esc(a.username)+badges)}${cell('status',status(state)+(state?.password_rotated?'<div class="small text-muted">Legacy password differs; reset before re-enabling</div>':''))}${cell('name',esc(state?.name||'—'))}${cell('email',esc(state?.email||'—'))}${cell('checked_out_at',esc(stamp(state?.checked_out_at||state?.assigned_at)))}${cell('checkout_ip',esc(state?.checkout_ip||'—'))}${cell('relinquished_at',esc(stamp(state?.relinquished_at)))}${cell('history',historyButton(a.username,state?.history_count))}</tr>`;
     }).join('')||`<tr><td colspan="${1+columnIds.filter(id=>columns[id]!==false).length}" class="text-muted">No matching checkout accounts. Select On-demand (checkout) in Configuration to add accounts.</td></tr>`;
     el('af-accounts').querySelectorAll('.af-account').forEach(box=>box.addEventListener('change',()=>{box.checked?selected.add(box.dataset.user):selected.delete(box.dataset.user);render();}));
     const boxes=[...el('af-accounts').querySelectorAll('.af-account')];
@@ -110,6 +114,43 @@
     rowTags.refreshControls();
     el('af-snapshot').textContent=snapshot.checked_at?`Last refresh: ${new Date(snapshot.checked_at*1000).toLocaleString()}. Use Refresh to update this snapshot.`:'Showing locally marked accounts. AccessForge status is Unknown until refreshed.';
   }
+  let historyRevision = 0;
+  function clearHistory() {
+    ++historyRevision;
+    el('af-history-entries').innerHTML = '';
+    el('af-history-status').textContent = '';
+    el('af-history-table').hidden = true;
+    el('af-history-title').textContent = 'Checkout history';
+  }
+  el('af-accounts').addEventListener('click', async event => {
+    const username = event.target.closest('[data-history-user]')?.dataset.historyUser;
+    if (!username || !connected) return;
+    clearHistory();
+    const project = pid, projectVersion = version, requestId = historyRevision;
+    el('af-history-title').textContent = 'Checkout history for ' + username;
+    el('af-history-status').textContent = 'Loading checkout history…';
+    window.bootstrap?.Modal.getOrCreateInstance(el('af-history-modal')).show();
+    try {
+      const data = await api(project, 'accounts/' + encodeURIComponent(username) + '/history');
+      if (!current(project, projectVersion) || requestId !== historyRevision) return;
+      const entries = data.history.slice(0, 8);
+      const account = snapshot.accounts?.[username];
+      if (account && account.history_count !== entries.length) {
+        account.history_count = entries.length;
+        render();
+      }
+      el('af-history-status').textContent = entries.length ? 'Most recent checkouts, newest first (up to 8).' : 'No checkouts recorded.';
+      el('af-history-entries').innerHTML = entries.map(entry => {
+        const values = [entry.name, entry.email, stamp(entry.checked_out_at), entry.checkout_ip, stamp(entry.relinquished_at)];
+        return '<tr>' + values.map(value => '<td>' + esc(value || '—') + '</td>').join('') + '</tr>';
+      }).join('');
+      el('af-history-table').hidden = !entries.length;
+    } catch (error) {
+      if (current(project, projectVersion) && requestId === historyRevision)
+        el('af-history-status').textContent = error.message;
+    }
+  });
+  el('af-history-modal').addEventListener('hide.bs.modal', clearHistory);
   function setSnapshot(value){snapshot=value||{};window.CheckoutState?.publish(pid,snapshot);}
   function hideConnection(){window.bootstrap?.Modal.getInstance(el('af-connection'))?.hide();}
   function hideCheckoutSettings(){window.bootstrap?.Modal.getInstance(el('af-checkout-modal'))?.hide();}
@@ -119,6 +160,8 @@
   }
   async function load(){
     const project=window.shell?.getCurrentProjectId()||'';pid=project;const revision=++version;
+    clearHistory();
+    window.bootstrap?.Modal.getInstance(el('af-history-modal'))?.hide();
     loading=true;connected=false;selected.clear();accounts=[];snapshot={};clearPassword();hideConnection();hideCheckoutSettings();window.bootstrap?.Modal.getInstance(el('af-refresh-summary'))?.hide();el('af-refresh-results').innerHTML='';el('af-refresh-totals').textContent='';el('af-refresh-project').textContent='';el('af-checkout-secret').value='';checkoutMessage('');
     window.bootstrap?.Modal.getInstance(el('af-operation-summary'))?.hide();el('af-operation-results').innerHTML='';el('af-operation-totals').textContent='';el('af-operation-refresh').textContent='';
     el('af-save-creds').checked=false;

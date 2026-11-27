@@ -119,12 +119,15 @@ def test_publish_sends_selected_saved_credentials_and_no_policy(checkout):
 
 def test_status_is_explicit_and_cached_project_reads_do_not_connect(checkout):
     app,admin,_=checkout;connect(admin)
-    with patch('app.account_checkout.requests.request',return_value=reply(snapshot())) as remote:
+    live = snapshot()
+    live['accounts']['student01@pve']['history_count'] = 4
+    with patch('app.account_checkout.requests.request',return_value=reply(live)) as remote:
         response=admin.get('/api/projects/lab/accessforge/status')
     assert response.status_code==200 and remote.call_args.args[0]=='GET'
     with patch('app.account_checkout.requests.request',side_effect=AssertionError('No implicit network')):
         data=admin.get('/api/projects').get_json()['projects'][0]
         assert data['checkout']['accounts']['student01']['email']=='one@example.edu'
+        assert data['checkout']['accounts']['student01']['history_count'] == 4
         assert data['checkout']['checked_at']
         assert admin.get('/api/projects/lab/accessforge/accounts').status_code==200
     assert 'checkout' not in app.test_client().get('/api/projects').get_json()['projects'][0]
@@ -902,3 +905,18 @@ def test_mail_probe_forwards_only_for_admin_and_requires_send_confirmation(check
         assert remote.call_args.args[1].endswith('/api/admin/checkouts/email-settings/test')
         assert remote.call_args.kwargs['json'] == payload
         assert admin.post(route, json=payload).status_code == 502
+
+
+def test_recent_history_is_scoped_to_saved_accounts_and_filters_remote_fields(checkout):
+    app, admin, _ = checkout
+    connect(admin)
+    route = '/api/projects/lab/accessforge/accounts/'
+    assert app.test_client().get(route + 'student01/history').status_code == 401
+    entries = [{'email':f'{i}@example.org','password':'private'} for i in range(9)]
+    with patch('app.account_checkout.requests.request', return_value=reply({'history':entries})) as remote:
+        assert admin.get(route + 'unknown/history').status_code == 404
+        remote.assert_not_called()
+        result = admin.get(route + 'student01/history')
+        assert remote.call_args.args[1].endswith('/accounts/student01%40pve/history')
+    assert result.status_code == 200 and len(result.json['history']) == 8
+    assert 'private' not in result.text
